@@ -26,7 +26,7 @@ only their bundled static resources and do not download or execute Node.
 The Foojay resolver 1.0.0 supplies missing Eclipse Temurin compilation
 toolchains through the Gradle cache:
 
-- Java 21 compiles the IDEA 253–261 lane.
+- Java 21 compiles the verified IDEA 253 lane.
 - Java 25 compiles the IDEA 262 lane.
 
 `verifyHostToolchains` checks the actual compiler launcher metadata. These

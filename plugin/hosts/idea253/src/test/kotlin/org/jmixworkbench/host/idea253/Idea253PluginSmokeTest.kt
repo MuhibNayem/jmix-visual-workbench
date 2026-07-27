@@ -18,7 +18,7 @@ class Idea253PluginSmokeTest {
 
         assertTrue(descriptor.contains("<id>org.jmixworkbench</id>"))
         assertTrue(descriptor.contains("<name>Jmix Visual Workbench</name>"))
-        assertTrue(Regex("""<idea-version[^>]+since-build="253"[^>]+until-build="261\.\*"""").containsMatchIn(descriptor))
+        assertTrue(Regex("""<idea-version[^>]+since-build="253"[^>]+until-build="253\.\*"""").containsMatchIn(descriptor))
         assertTrue(descriptor.contains("<depends>com.intellij.modules.platform</depends>"))
         assertTrue(descriptor.contains("<depends>com.intellij.modules.java</depends>"))
         assertFalse(descriptor.contains("<depends>com.intellij.modules.jcef</depends>"))

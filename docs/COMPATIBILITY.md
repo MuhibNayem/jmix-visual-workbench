@@ -8,11 +8,13 @@ application. One does not imply the other.
 
 | Artifact | Descriptor range | Host JVM floor | Automated evidence |
 | --- | --- | --- | --- |
-| `jmix-visual-workbench-1.0.0-idea253.zip` | IU builds 253–261.* | JBR/Java 21 | Compiles and packages against exact IDEA Ultimate 2025.3; Plugin Verifier passed IU-253.28294.334 |
+| `jmix-visual-workbench-1.0.0-idea253.zip` | IU build 253.* | JBR/Java 21 | Compiles and packages against exact IDEA Ultimate 2025.3; Plugin Verifier passed IU-253.28294.334 |
 | `jmix-visual-workbench-1.0.0-idea262.zip` | IU build 262.* | JBR/Java 25 | Compiles and packages against exact IDEA Ultimate 2026.2 with explicit JCEF modules; Plugin Verifier passed IU-262.8665.258 |
 
-The 253 descriptor range covers IntelliJ branches 253 through 261 on the
+The 253 descriptor range covers only the verified IntelliJ 253 branch on the
 JBR/Java 21 host line. The 262 descriptor is a separate JBR/Java 25 artifact.
+Intermediate branches remain unsupported until each has exact compile,
+Plugin Verifier, and installation evidence.
 Both ZIPs contain the same plugin ID/version and frontend input digest.
 
 Automated compilation, smoke, package-content, and Plugin Verifier checks are

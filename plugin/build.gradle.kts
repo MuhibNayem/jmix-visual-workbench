@@ -169,7 +169,7 @@ tasks.register("verifyHostBuildDefinitions") {
         check("pluginVerifier()" in idea253Build)
         check("current()" in idea253Build)
         check("sinceBuild.set(\"253\")" in idea253Build)
-        check("untilBuild.set(\"261.*\")" in idea253Build)
+        check("untilBuild.set(\"253.*\")" in idea253Build)
         check("<depends>com.intellij.modules.jcef</depends>" !in idea253Descriptor)
 
         check("JavaLanguageVersion.of(25)" in idea262Build)

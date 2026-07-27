@@ -172,7 +172,7 @@ intellijPlatform {
         version.set(sharedProperty("pluginVersion"))
         ideaVersion {
             sinceBuild.set("253")
-            untilBuild.set("261.*")
+            untilBuild.set("253.*")
         }
     }
     pluginVerification {

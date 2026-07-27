@@ -147,7 +147,7 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         requireContains(descriptor, "<name>Jmix Visual Workbench</name>", archive);
         if ("idea253".equals(lane)) {
             requireContains(descriptor, "since-build=\"253\"", archive);
-            requireContains(descriptor, "until-build=\"261.*\"", archive);
+            requireContains(descriptor, "until-build=\"253.*\"", archive);
         } else {
             requireContains(descriptor, "since-build=\"262\"", archive);
             requireContains(descriptor, "until-build=\"262.*\"", archive);

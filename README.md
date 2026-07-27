@@ -12,7 +12,7 @@ endorsed by Haulmont.**
 This repository is early and non-certified. It contains a React/TypeScript
 workbench, a Kotlin IntelliJ plugin shell, in-memory models, and draft
 string-based generators. The checked-in wrapper now builds and verifies
-separate IDEA 253–261 and IDEA 262 plugin artifacts with a project-local Node
+separate verified IDEA 253 and IDEA 262 plugin artifacts with a project-local Node
 24.18.0 toolchain. The current generator and bridge paths remain prototypes:
 they do not safely parse, preview, merge, validate, atomically apply, or undo
 changes to an existing project.
