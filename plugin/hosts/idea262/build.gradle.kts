@@ -11,6 +11,8 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.io.File
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.HexFormat
 import java.util.zip.ZipFile
@@ -41,6 +43,28 @@ fun fingerprintWebInputs(inputRoot: File, inputFiles: Set<File>): String {
             digest.update(0)
         }
     return HexFormat.of().formatHex(digest.digest())
+}
+
+fun verifyBundledResources(bundleDirectory: File, index: File) {
+    val normalizedBundle = bundleDirectory.toPath().toAbsolutePath().normalize()
+    val realBundle = normalizedBundle.toRealPath()
+    Regex("""(?:src|href)="(?:\./)?([^"#?]+)""")
+        .findAll(index.readText())
+        .map { it.groupValues[1] }
+        .filterNot { it.contains("://") || it.startsWith("data:") }
+        .forEach { resource ->
+            val resourcePath = Path.of(resource)
+            val candidate = normalizedBundle.resolve(resourcePath).normalize()
+            check(
+                !resourcePath.isAbsolute &&
+                    '\\' !in resource &&
+                    candidate.startsWith(normalizedBundle) &&
+                    Files.isRegularFile(candidate) &&
+                    candidate.toRealPath().startsWith(realBundle),
+            ) {
+                "Invalid or missing bundled resource: $resource"
+            }
+        }
 }
 
 group = sharedProperty("pluginGroup").get()
@@ -203,6 +227,7 @@ val verifyWebBundle = tasks.register("verifyWebBundle") {
         check(recordedDigest == currentDigest) {
             "Generated web resources are stale: $recordedDigest != $currentDigest"
         }
+        verifyBundledResources(webBundleDirectory.asFile, index)
     }
 }
 

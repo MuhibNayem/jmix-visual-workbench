@@ -70,9 +70,30 @@ public abstract class VerifyWebBundleTask extends DefaultTask implements Verific
             if (resource.contains("://") || resource.startsWith("data:")) {
                 continue;
             }
-            if (!Files.isRegularFile(bundleDirectory.resolve(resource).normalize())) {
-                throw new IllegalStateException("Generated web bundle references missing resource: " + resource);
-            }
+            validateResource(bundleDirectory, resource);
+        }
+    }
+
+    static void validateResource(Path bundleDirectory, String resource) {
+        Path normalizedBundle = bundleDirectory.toAbsolutePath().normalize();
+        if (resource.indexOf('\\') >= 0) {
+            throw new IllegalStateException("Invalid bundled resource path: " + resource);
+        }
+        Path resourcePath = Path.of(resource);
+        Path candidate = normalizedBundle.resolve(resourcePath).normalize();
+        if (resourcePath.isAbsolute()
+                || !candidate.startsWith(normalizedBundle)
+                || !Files.isRegularFile(candidate)
+                || !realPathIsContained(normalizedBundle, candidate)) {
+            throw new IllegalStateException("Invalid or missing bundled resource: " + resource);
+        }
+    }
+
+    private static boolean realPathIsContained(Path bundleDirectory, Path candidate) {
+        try {
+            return candidate.toRealPath().startsWith(bundleDirectory.toRealPath());
+        } catch (IOException ignored) {
+            return false;
         }
     }
 
