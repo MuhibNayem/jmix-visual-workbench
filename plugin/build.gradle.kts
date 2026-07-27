@@ -2,6 +2,9 @@ import com.github.gradle.node.npm.task.NpmTask
 import org.jmixworkbench.build.AssembleWebBundleTask
 import org.jmixworkbench.build.VerifyPluginZipContentsTask
 import org.jmixworkbench.build.VerifyWebBundleTask
+import java.io.File
+import java.security.MessageDigest
+import java.util.HexFormat
 
 plugins {
     base
@@ -15,6 +18,16 @@ val webUiDirectory = layout.projectDirectory.dir("../webui")
 val stagedWebUiDirectory = layout.buildDirectory.dir("webui-dist")
 val generatedWebBundleDirectory = layout.buildDirectory.dir("generated-resources/webui")
 val hostMetadataDirectory = layout.buildDirectory.dir("host-metadata")
+val dependencyIntegrityDirectory = layout.buildDirectory.dir("dependency-integrity")
+val npmLockHashSnapshot = dependencyIntegrityDirectory.map { it.file("npm-lock.sha256") }
+val lockHashSnapshot = dependencyIntegrityDirectory.map { it.file("gradle-locks.properties") }
+val dependencyLockFiles = files(
+    layout.projectDirectory.file("hosts/idea253/gradle/dependency-locks/gradle.lockfile"),
+    layout.projectDirectory.file("hosts/idea262/gradle/dependency-locks/gradle.lockfile"),
+)
+
+fun sha256(file: File): String =
+    HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(file.readBytes()))
 
 val webUiInputs = files(
     webUiDirectory.file("package.json"),
@@ -45,8 +58,23 @@ node {
     enableTaskRules.set(false)
 }
 
+val snapshotNpmLockHash = tasks.register("snapshotNpmLockHash") {
+    description = "Captures package-lock.json before npm ci so drift is detectable."
+    val packageLock = webUiDirectory.file("package-lock.json")
+    inputs.file(packageLock)
+    outputs.file(npmLockHashSnapshot)
+    doLast {
+        val lockFile = packageLock.asFile
+        check(lockFile.isFile) { "webui/package-lock.json is required." }
+        val output = npmLockHashSnapshot.get().asFile
+        output.parentFile.mkdirs()
+        output.writeText(sha256(lockFile) + "\n")
+    }
+}
+
 val npmCi = tasks.register<NpmTask>("npmCi") {
     description = "Installs the locked UI dependency graph with the downloaded Node runtime."
+    dependsOn(snapshotNpmLockHash)
     npmCommand.set(listOf("ci"))
     args.set(emptyList())
     workingDir.set(webUiDirectory.asFile)
@@ -159,6 +187,170 @@ tasks.register("verifyHostBuildDefinitions") {
     }
 }
 
+val snapshotLockHashes = tasks.register("snapshotLockHashes") {
+    description = "Records SHA-256 values for the two reviewed host dependency lock files."
+    inputs.files(dependencyLockFiles)
+    outputs.file(lockHashSnapshot)
+    doLast {
+        val missing = dependencyLockFiles.files.filterNot(File::isFile)
+        check(missing.isEmpty()) { "Dependency lock files are missing: $missing" }
+        val output = lockHashSnapshot.get().asFile
+        output.parentFile.mkdirs()
+        output.writeText(
+            dependencyLockFiles.files
+                .sortedBy { it.relativeTo(layout.projectDirectory.asFile).invariantSeparatorsPath }
+                .joinToString(separator = "\n", postfix = "\n") { lockFile ->
+                    val relativePath = lockFile.relativeTo(layout.projectDirectory.asFile).invariantSeparatorsPath
+                    "$relativePath=${sha256(lockFile)}"
+                },
+        )
+    }
+}
+
+val verifyLockedConfigurations = tasks.register("verifyLockedConfigurations") {
+    description = "Resolves only runtimeClasspath and testRuntimeClasspath in both host builds."
+    dependsOn(
+        snapshotLockHashes,
+        gradle.includedBuild("idea253").task(":verifyLockedConfigurations"),
+        gradle.includedBuild("idea262").task(":verifyLockedConfigurations"),
+    )
+}
+
+tasks.register("compareLockHashes") {
+    description = "Proves read-only locked resolution did not rewrite either host lock file."
+    dependsOn(verifyLockedConfigurations)
+    inputs.file(lockHashSnapshot)
+    inputs.files(dependencyLockFiles)
+    doLast {
+        val recorded = lockHashSnapshot.get().asFile.readLines()
+            .filter(String::isNotBlank)
+            .associate { line -> line.substringBefore("=") to line.substringAfter("=") }
+        dependencyLockFiles.files.forEach { lockFile ->
+            val relativePath = lockFile.relativeTo(layout.projectDirectory.asFile).invariantSeparatorsPath
+            check(recorded[relativePath] == sha256(lockFile)) {
+                "Dependency lock changed during read-only resolution: $relativePath"
+            }
+        }
+    }
+}
+
+val verifyDependencyIntegrity = tasks.register("verifyDependencyIntegrity") {
+    description = "Enforces wrapper, npm, Gradle lock, repository, and CI verification policy."
+    dependsOn(npmCi, verifyLockedConfigurations)
+    inputs.files(
+        layout.projectDirectory.file("gradle/wrapper/gradle-wrapper.properties"),
+        layout.projectDirectory.file("gradle/wrapper/gradle-wrapper.jar"),
+        layout.projectDirectory.file("gradle/verification-metadata.xml"),
+        layout.projectDirectory.file("gradle/libs.versions.toml"),
+        webUiDirectory.file("package.json"),
+        webUiDirectory.file("package-lock.json"),
+        layout.projectDirectory.file("settings.gradle.kts"),
+        layout.projectDirectory.file("hosts/idea253/settings.gradle.kts"),
+        layout.projectDirectory.file("hosts/idea262/settings.gradle.kts"),
+    )
+    inputs.files(dependencyLockFiles)
+    inputs.files(
+        fileTree(layout.projectDirectory.dir("hosts")) {
+            include("**/*.gradle.kts")
+        },
+        fileTree(layout.projectDirectory.dir("../.github")) {
+            include("**/*.yml", "**/*.yaml")
+        },
+    )
+    doLast {
+        val wrapperProperties = file("gradle/wrapper/gradle-wrapper.properties")
+        val wrapperJar = file("gradle/wrapper/gradle-wrapper.jar")
+        val verificationMetadata = file("gradle/verification-metadata.xml")
+        val packageLock = webUiDirectory.file("package-lock.json").asFile
+        val expectedWrapperJarSha256 = "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+
+        check(wrapperProperties.isFile) { "Gradle wrapper properties are missing." }
+        check(
+            Regex("""^distributionSha256Sum=[0-9a-f]{64}$""", RegexOption.MULTILINE)
+                .containsMatchIn(wrapperProperties.readText()),
+        ) {
+            "gradle-wrapper.properties must pin distributionSha256Sum."
+        }
+        check(wrapperJar.isFile) { "Gradle wrapper JAR is missing." }
+        check(sha256(wrapperJar) == expectedWrapperJarSha256) {
+            "Gradle wrapper JAR checksum mismatch."
+        }
+        check(packageLock.isFile) { "webui/package-lock.json is required." }
+        check(packageLock.readText().contains(""""lockfileVersion": 3""")) {
+            "webui/package-lock.json must remain npm lockfile version 3."
+        }
+        check(npmLockHashSnapshot.get().asFile.readText().trim() == sha256(packageLock)) {
+            "npm ci changed webui/package-lock.json; package and lock declarations drifted."
+        }
+        check(verificationMetadata.isFile) { "gradle/verification-metadata.xml is required." }
+        val verificationText = verificationMetadata.readText()
+        check("<sha256 value=" in verificationText) {
+            "Gradle verification metadata must contain reviewed SHA-256 checksums."
+        }
+        check("<verify-signatures>false</verify-signatures>" in verificationText) {
+            "Signature verification must remain disabled unless trusted publisher keys are reviewed."
+        }
+
+        val versionCatalog = file("gradle/libs.versions.toml").readText()
+        val catalogVersions = Regex("""(?m)^[a-zA-Z0-9_.-]+\s*=\s*"([^"]+)"$""")
+            .findAll(versionCatalog.substringBefore("[libraries]"))
+            .map { it.groupValues[1] }
+        catalogVersions.forEach { declaredVersion ->
+            check(
+                !declaredVersion.contains("+") &&
+                    !declaredVersion.contains("SNAPSHOT", ignoreCase = true) &&
+                    !declaredVersion.startsWith("latest.", ignoreCase = true) &&
+                    !declaredVersion.contains("[") &&
+                    !declaredVersion.contains("("),
+            ) {
+                "Dynamic or changing version is forbidden: $declaredVersion"
+            }
+        }
+
+        val buildDeclarations = fileTree(layout.projectDirectory) {
+            include("**/*.gradle.kts", "**/*.toml")
+            exclude("build/**", "hosts/**/build/**")
+        }.files.joinToString("\n") { it.readText() }
+        check(!Regex("""(?i)(isChanging|changing)\s*=\s*true""").containsMatchIn(buildDeclarations)) {
+            "Changing Gradle dependencies are forbidden."
+        }
+        check(!Regex("""version\s+["'](?:latest\.[^"']+|[^"']*\+|[^"']*-SNAPSHOT)["']""", RegexOption.IGNORE_CASE)
+            .containsMatchIn(buildDeclarations)) {
+            "Dynamic Gradle plugin/dependency versions are forbidden."
+        }
+
+        val rootSettings = file("settings.gradle.kts").readText()
+        check("gradlePluginPortal()" in rootSettings && "mavenCentral()" in rootSettings)
+        check(!Regex("""maven\s*\{\s*url""").containsMatchIn(rootSettings)) {
+            "Undocumented aggregate repositories are forbidden."
+        }
+        listOf("idea253", "idea262").forEach { lane ->
+            val settings = file("hosts/$lane/settings.gradle.kts").readText()
+            check("gradlePluginPortal()" in settings && "mavenCentral()" in settings)
+            check("defaultRepositories()" in settings)
+            check("RepositoriesMode.FAIL_ON_PROJECT_REPOS" in settings)
+            check(!Regex("""maven\s*\{\s*url""").containsMatchIn(settings)) {
+                "Undocumented $lane repositories are forbidden."
+            }
+        }
+
+        val workflowDirectory = file("../.github/workflows")
+        if (workflowDirectory.isDirectory) {
+            workflowDirectory.walkTopDown()
+                .filter { it.isFile && it.extension in setOf("yml", "yaml") }
+                .forEach { workflow ->
+                    val text = workflow.readText()
+                    check(
+                        !Regex("""--dependency-verification(?:=|\s+)(?:off|lenient)""", RegexOption.IGNORE_CASE)
+                            .containsMatchIn(text),
+                    ) {
+                        "CI must not bypass strict dependency verification: $workflow"
+                    }
+                }
+        }
+    }
+}
+
 tasks.register("compileHostKotlin") {
     description = "Compiles the canonical Kotlin sources against both host lanes."
     dependsOn(
@@ -226,6 +418,7 @@ tasks.register("phase1FastCheck") {
         verifyWebBundle,
         "verifyHostBuildDefinitions",
         "verifyHostToolchains",
+        verifyDependencyIntegrity,
     )
 }
 

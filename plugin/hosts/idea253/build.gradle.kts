@@ -1,4 +1,6 @@
 import org.gradle.api.file.DuplicatesStrategy
+import org.gradle.api.artifacts.ExternalModuleDependency
+import org.gradle.api.artifacts.dsl.LockMode
 import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.api.tasks.testing.Test
 import org.gradle.jvm.toolchain.JavaLanguageVersion
@@ -110,6 +112,55 @@ dependencies {
             intellijIdeaUltimate("2025.3")
         }
         pluginVerifier()
+    }
+}
+
+val lockedConfigurationNames = setOf("runtimeClasspath", "testRuntimeClasspath")
+
+configurations.matching { it.name in lockedConfigurationNames }.configureEach {
+    resolutionStrategy.activateDependencyLocking()
+}
+
+dependencyLocking {
+    lockMode = LockMode.STRICT
+    lockFile = file("$projectDir/gradle/dependency-locks/gradle.lockfile")
+}
+
+tasks.register("verifyLockedConfigurations") {
+    description = "Resolves only the standard idea253 runtime configurations under strict lock state."
+    notCompatibleWithConfigurationCache("Resolves and inspects the explicitly locked configurations.")
+    inputs.file(layout.projectDirectory.file("gradle/dependency-locks/gradle.lockfile"))
+    doLast {
+        val lockFile = layout.projectDirectory.file("gradle/dependency-locks/gradle.lockfile").asFile
+        check(lockFile.isFile) { "idea253 dependency lock state is missing: $lockFile" }
+        val lockState = lockFile.readText()
+
+        lockedConfigurationNames.sorted().forEach { configurationName ->
+            val configuration = configurations.getByName(configurationName)
+            check(configuration.isCanBeResolved) {
+                "idea253 $configurationName must remain resolvable."
+            }
+            configuration.allDependencies.withType(ExternalModuleDependency::class.java).forEach { dependency ->
+                val version = dependency.version.orEmpty()
+                check(!dependency.isChanging) {
+                    "idea253 $configurationName contains changing dependency ${dependency.group}:${dependency.name}:$version"
+                }
+                check(
+                    version.isEmpty() ||
+                        (!version.contains("+") &&
+                            !version.contains("SNAPSHOT", ignoreCase = true) &&
+                            !version.startsWith("latest.", ignoreCase = true) &&
+                            !version.contains("[") &&
+                            !version.contains("(")),
+                ) {
+                    "idea253 $configurationName contains dynamic dependency ${dependency.group}:${dependency.name}:$version"
+                }
+            }
+            configuration.incoming.resolutionResult.allComponents.toList()
+            check(configurationName in lockState) {
+                "idea253 lock state has no entry for $configurationName."
+            }
+        }
     }
 }
 
