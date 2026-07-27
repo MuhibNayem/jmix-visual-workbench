@@ -36,13 +36,13 @@ The current repository cannot satisfy Phase 1:
 
 ### 1. Checked-in, pinned entry point
 
-Use a complete Gradle 9.x wrapper compatible with IntelliJ Platform Gradle Plugin 2.18.0. Pin the distribution URL and SHA-256 checksum in `gradle-wrapper.properties`. Contributors should run only the wrapper; global Gradle is not part of the supported build contract.
+Use a complete Gradle 9.5.1 wrapper compatible with IntelliJ Platform Gradle Plugin 2.18.0 and the selected Kotlin Gradle Plugin lanes. Gradle 9.6.1 is outside the documented fully supported range of Kotlin Gradle Plugin 2.4.0, so it is not the supported intersection for this phase. Pin the distribution URL and SHA-256 checksum in `gradle-wrapper.properties`. Contributors should run only the wrapper; global Gradle is not part of the supported build contract.
 
 Keep wrapper and build caches outside release artifacts. A clean checkout should be able to resolve its toolchains and dependencies with network access, then build reproducibly from pinned inputs.
 
 ### 2. Two host distributions
 
-Use a Gradle multi-project build with shared source plus thin host modules:
+Use an aggregate Gradle build plus two isolated included builds with shared canonical source. Both included builds use Kotlin Gradle Plugin 2.4.0, the supported Kotlin/Gradle 9.5 intersection. The idea253 compiler is constrained to Kotlin language/API 2.2 and JVM 21 so shared code cannot call Kotlin 2.4-only runtime APIs unavailable on the older host. Isolation still keeps IntelliJ Platform dependencies, descriptors, tasks, and toolchains independent:
 
 ```text
 plugin/
@@ -53,16 +53,18 @@ plugin/
     wrapper/
   hosts/
     idea253/
+      settings.gradle.kts          # isolated KGP/plugin classpath
       build.gradle.kts
       src/main/resources/META-INF/plugin.xml
     idea262/
+      settings.gradle.kts          # isolated KGP/plugin classpath
       build.gradle.kts
       src/main/resources/META-INF/plugin.xml
   src/main/kotlin/                 # shared plugin implementation for Phase 1
   src/main/resources/              # shared original assets/resources
 ```
 
-Each host module compiles/packages the shared sources against its own IntelliJ dependency and plugin descriptor:
+Each included host build compiles/packages the shared sources against its own IntelliJ dependency and plugin descriptor. The root aggregate references included-build task providers and applies neither Kotlin/IntelliJ plugin:
 
 - The 253 lane declares `since-build=253`, `until-build=261.*`, targets JVM 21, depends on platform and Java modules, and checks `JBCefApp.isSupported()` at runtime.
 - The 262 lane declares `since-build=262`, initially `until-build=262.*`, targets JVM 25, and declares the explicit JCEF dependency required by 2026.2.
@@ -95,7 +97,7 @@ The wrapper requires a documented bootstrap JDK compatible with Gradle. Compilat
 - JVM 21 for the 253–261 lane.
 - JVM 25 for the 262 lane.
 
-Configure a trusted toolchain resolver only if automatic JDK provisioning is required; pin vendor/version selection and document network/offline behavior. Do not silently substitute the host developer's current JDK for a lane's compiler target.
+Apply `org.gradle.toolchains.foojay-resolver-convention` 1.0.0 in both included-build settings and request Java language versions 21 and 25 with an explicit vendor policy. Auto-provision missing toolchains into Gradle's cache, document network/offline behavior, and assert each compilation task uses the intended launcher. Do not silently substitute the host developer's current JDK for a lane's compiler target.
 
 Target-project Java support is separate metadata for later phases. Phase 1 documents the planned matrix but does not yet inspect or mutate Jmix project code.
 
@@ -142,7 +144,7 @@ Minimum Phase 1 commands:
 5. Plugin descriptor validation for both lanes.
 6. Plugin ZIP assembly for both lanes.
 7. ZIP content assertion: production `webui/index.html`, hashed assets, build manifest, original icon, license/notice files, and no Node/npm caches or source maps unless intentionally included.
-8. Plugin Verifier for each lane against its minimum advertised IDE.
+8. Lane-specific Plugin Verifier for idea253 against IntelliJ 2025.3 and idea262 against IntelliJ 2026.2, wired into the aggregate full gate.
 9. Installed-plugin or test-framework smoke test that creates the tool-window factory, proves packaged resources resolve, and exercises the non-JCEF fallback.
 10. Clean rebuild comparison for stable artifact contents after normalizing unavoidable ZIP timestamps/metadata, or an explicit documented reproducibility report if byte identity is not yet achieved.
 
@@ -205,7 +207,7 @@ Every Phase 1 task must add or update a check at the same time as the production
 Recommended plans:
 
 1. **Identity and policy boundary** — original name/ID/package/assets, license, disclaimer, clean-room, contribution, and security documents.
-2. **Self-sustaining build** — complete wrapper, multi-project host lanes, pinned toolchains, Gradle-provisioned Node, same-revision frontend resource pipeline.
+2. **Self-sustaining build** — complete wrapper, isolated included host builds, pinned/auto-provisioned JDK 21/25 toolchains, Gradle-provisioned Node, same-revision frontend resource pipeline.
 3. **Build correctness** — resolve source compile blockers required for packaging, add smoke/package/ZIP assertions, dependency locks and verification.
 4. **Compatibility verification and documentation** — build both ZIPs, run Plugin Verifier/smoke gates, document prerequisites/artifacts/host-versus-target-Java matrix.
 

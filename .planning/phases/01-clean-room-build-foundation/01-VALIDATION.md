@@ -33,14 +33,14 @@ created: 2026-07-27
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 01-01-01 | 01 | 1 | PROD-04 | T1-IP | Product ID, name, packages, assets, and descriptors no longer claim to be Studio/Clone | policy/static | `./gradlew verifyProductIdentity` | ❌ W0 | ⬜ pending |
-| 01-01-02 | 01 | 1 | PROD-05 | T1-IP | Required clean-room, provenance, trademark, security, and contribution policies are present | policy/static | `./gradlew verifyPolicyDocuments` | ❌ W0 | ⬜ pending |
-| 01-02-01 | 02 | 1 | PROD-01 | T1-BUILD | Complete wrapper builds without global Gradle or Node and uses explicit lane toolchains | build integration | `./gradlew verifyWrapper phase1FastCheck` | ❌ W0 | ⬜ pending |
-| 01-02-02 | 02 | 1 | PROD-03 | T1-STALE | UI is built from declared inputs by project-local Node and stale/missing assets block packaging | build integration | `./gradlew verifyWebBundle` | ❌ W0 | ⬜ pending |
-| 01-03-01 | 03 | 2 | PROD-02 | T1-HOST | Both host descriptors compile/package for their exact build/JBR/JCEF contracts | platform integration | `./gradlew buildHostPlugins validateHostDescriptors` | ❌ W0 | ⬜ pending |
-| 01-03-02 | 03 | 2 | PROD-02 | T1-LOAD | Packaged resources resolve and the workbench has a tested JCEF-unavailable fallback | IntelliJ smoke | `./gradlew hostSmokeTest` | ❌ W0 | ⬜ pending |
-| 01-04-01 | 04 | 3 | PROD-06 | T1-SUPPLY | Wrapper and dependencies are pinned/verified and dynamic versions are rejected | supply-chain/static | `./gradlew verifyDependencyIntegrity` | ❌ W0 | ⬜ pending |
-| 01-04-02 | 04 | 3 | PROD-01, PROD-02, PROD-03 | T1-PACKAGE | Clean aggregate build emits both ZIPs with only expected same-revision resources | package/full | `./gradlew clean phase1Check` | ❌ W0 | ⬜ pending |
+| 01-01-01 | 01 | 1 | PROD-05 | T1-IP | Required clean-room, provenance, trademark, security, and contribution policies are present | policy/static | task-local file/grep command | ✅ direct | ⬜ pending |
+| 01-01-02 | 01 | 1 | PROD-04 | T1-IP | Product ID, name, packages, assets, and descriptors no longer claim to be Studio/Clone | policy/static | task-local namespace/descriptor command | ✅ direct | ⬜ pending |
+| 01-02-01 | 02 | 2 | PROD-01 | T1-BUILD | Complete wrapper builds without global Gradle/Node and pins supported Gradle/Kotlin inputs | build integration | wrapper/checksum/version command | ✅ direct | ⬜ pending |
+| 01-02-02 | 02 | 2 | PROD-03 | T1-STALE | UI is built by project-local Node; JDK 21/25 toolchains provision and stale assets block | build integration | `./gradlew verifyWebBundle verifyHostToolchains phase1FastCheck` | ❌ W0 | ⬜ pending |
+| 01-03-01 | 03 | 3 | PROD-02 | T1-HOST | Both host descriptors compile for exact build/JBR/JCEF contracts | platform integration | `./gradlew compileHostKotlin testShared hostSmokeTest` | ❌ W0 | ⬜ pending |
+| 01-03-02 | 03 | 3 | PROD-02, PROD-03 | T1-LOAD | ZIP resources resolve and Plugin Verifier passes minimum advertised IDEs | IntelliJ/package | `./gradlew buildHostPlugins verifyHostPlugins verifyPluginZipContents` | ❌ W0 | ⬜ pending |
+| 01-04-01 | 04 | 4 | PROD-06 | T1-SUPPLY | Wrapper/dependencies are pinned/verified and lock verification is read-only | supply-chain/static | `./gradlew verifyLockedConfigurations verifyDependencyIntegrity` | ❌ W0 | ⬜ pending |
+| 01-04-02 | 04 | 4 | PROD-01, PROD-02, PROD-03 | T1-PACKAGE | Clean aggregate gate emits and verifies both same-revision ZIPs | package/full | `./gradlew clean phase1Check` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -49,7 +49,7 @@ created: 2026-07-27
 - [ ] Complete Gradle wrapper and pinned wrapper checksum.
 - [ ] Root/host build structure and `phase1FastCheck` / `phase1Check` lifecycle tasks.
 - [ ] JUnit 5 and IntelliJ Platform test dependencies for both host lanes.
-- [ ] Product identity/policy static verification tasks.
+- [ ] Product identity/policy task-local assertions.
 - [ ] Build-owned frontend bundle task using pinned downloaded Node and `npm ci`.
 - [ ] Frontend input/build manifest and stale/missing negative assertions.
 - [ ] Host descriptor and ZIP content verification.
@@ -74,4 +74,4 @@ created: 2026-07-27
 - [ ] Both exact host lanes pass the full gate
 - [ ] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** pending manual installation
