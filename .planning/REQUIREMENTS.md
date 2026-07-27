@@ -12,7 +12,7 @@
 - [x] **PROD-03**: Every plugin build creates and includes a production web bundle from the same source revision, fails if the bundle is missing or stale, and produces an installed plugin that requires no Node runtime.
 - [x] **PROD-04**: Users see an original product name, original assets, an explicit license, and a clear “compatible with Jmix; not affiliated with or endorsed by Haulmont” disclaimer.
 - [x] **PROD-05**: Contributors work under documented clean-room, source-provenance, trademark, security, and contribution rules that prohibit proprietary Studio materials and license circumvention.
-- [ ] **PROD-06**: Release dependencies are pinned, locked where supported, and verified against recorded checksums or equivalent integrity metadata.
+- [x] **PROD-06**: Release dependencies are pinned, locked where supported, and verified against recorded checksums or equivalent integrity metadata.
 - [ ] **PROD-07**: Every release candidate produces checksums, JVM-and-frontend SBOMs, provenance metadata, and signature-verification results for each immutable plugin ZIP.
 - [ ] **PROD-08**: Plugin Verifier and installed-plugin smoke tests pass on every advertised IntelliJ host before that host appears in release documentation.
 
@@ -158,7 +158,7 @@
 | PROD-03 | Phase 1 | Complete |
 | PROD-04 | Phase 1 | Complete |
 | PROD-05 | Phase 1 | Complete |
-| PROD-06 | Phase 1 | Pending |
+| PROD-06 | Phase 1 | Complete |
 | PROD-07 | Phase 8 | Pending |
 | PROD-08 | Phase 8 | Pending |
 | COMP-01 | Phase 2 | Pending |
