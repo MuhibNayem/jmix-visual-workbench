@@ -48,6 +48,7 @@ The detailed evidence and clean-room boundary are recorded in `JMIX_STUDIO_ASSES
 ### Active
 
 - [ ] Produce a reproducible, installable IntelliJ plugin build on a supported JDK/Gradle/IntelliJ baseline.
+- [ ] Make the build self-sustaining: the checked-in Gradle wrapper provisions a pinned project-local Node toolchain when absent, builds the web UI, and packages it so plugin users require no Node installation.
 - [ ] Support existing enterprise Jmix solutions through explicit, testable compatibility adapters: full read/write workflows for certified Jmix 2.x and 3.x ranges and their officially supported Java versions from Java 17 through the latest tested JDK, safe read-only diagnostics for recognized-but-uncertified combinations, and separately gated legacy migration assistance.
 - [ ] Discover and index real single-module, multi-module, composite, Java, Kotlin, mixed-language, customized, and add-on-heavy Jmix projects without unsafe defaults.
 - [ ] Parse existing Java/Kotlin, XML, properties, Gradle, and Liquibase artifacts into a semantic project model.
@@ -84,6 +85,7 @@ The detailed evidence and clean-room boundary are recorded in `JMIX_STUDIO_ASSES
 ## Enterprise Success Criteria
 
 - A new contributor can clone the repository and produce a verified plugin artifact with documented prerequisites and no manual file repair.
+- A contributor or CI worker without a global Node installation can build through the Gradle wrapper, while an installed plugin runs entirely from bundled assets and never downloads or launches Node.
 - The plugin installs and starts on every supported IntelliJ baseline and correctly identifies supported and unsupported Jmix projects.
 - Opening an existing customized enterprise solution is always non-mutating; unsupported constructs remain visible and preserved, while write operations are enabled only where the compatibility matrix and project analysis prove them safe.
 - Representative fixtures include Java, Kotlin, multi-module, composite, multiple-data-store, add-on-heavy, custom-component, hand-formatted, and long-lived upgraded projects—not only newly generated samples.
@@ -99,7 +101,7 @@ The detailed evidence and clean-room boundary are recorded in `JMIX_STUDIO_ASSES
 
 - **Platform:** IntelliJ IDEA 2025.3+ is the minimum product family baseline for current Jmix 3 tooling; compatibility must be verified rather than claimed.
 - **Jmix and target Java versions:** Jmix 2.x, Jmix 3.x, Jmix 1.x, and CUBA-era solutions differ materially. Certified read/write support must be declared per adapter, exact target-project JDK, and fixture matrix. Initial target cells are Jmix 2.8 on Java 17/21 and Jmix 3.0 on Java 21/25; future JDKs remain read-only until officially compatible and certified. The plugin runtime itself follows the IntelliJ host JBR and is not forced to Java 17.
-- **Technology:** Kotlin for plugin services, React/TypeScript for the JCEF UI, and Gradle for plugin builds remain the starting architecture unless evidence justifies a change.
+- **Technology:** Kotlin for plugin services, React/TypeScript for the JCEF UI, and Gradle for plugin builds remain the starting architecture unless evidence justifies a change. Node is a pinned build tool provisioned under the project/Gradle cache, not an end-user runtime prerequisite or a machine-global installation.
 - **Security:** JCEF content is untrusted input. Bridge commands must be allowlisted and validated independently of the UI.
 - **Data integrity:** No direct string-based overwrite of existing structured project files is acceptable for enterprise release.
 - **Legal:** The project must remain an independent compatible workbench and must not use proprietary implementation materials.

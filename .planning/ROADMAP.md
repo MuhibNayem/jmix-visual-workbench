@@ -28,8 +28,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Nothing (first phase)
 **Requirements**: PROD-01, PROD-02, PROD-03, PROD-04, PROD-05, PROD-06
 **Success Criteria** (what must be TRUE):
-  1. A contributor can clone the repository and build every initial plugin lane with checked-in wrappers and documented JDK and Node prerequisites.
-  2. Each produced ZIP contains the production web bundle from the same source revision, and a stale or missing bundle fails the build.
+  1. A contributor or CI worker can clone the repository and build every initial plugin lane through checked-in wrappers; a pinned project-local Node distribution is provisioned automatically when no global Node exists.
+  2. Each produced ZIP contains the production web bundle from the same source revision, a stale or missing bundle fails the build, and installed plugins require no Node runtime.
   3. A developer can install each ZIP into its advertised IntelliJ lane and open the workbench without class-loading, JCEF, or missing-resource errors.
   4. The installed product and repository use an original identity, license, trademark disclaimer, and contribution/provenance rules, while build dependencies are pinned and integrity-verified.
 **Plans**: TBD

@@ -43,6 +43,7 @@ Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
 - [Phase 1]: Establish original identity and a real dual-lane, same-revision build before feature work.
+- [Phase 1]: The Gradle build provisions pinned project-local Node tooling when absent; installed plugins are self-contained and have no Node runtime prerequisite.
 - [Phase 2]: Broad existing-project discovery is non-mutating; recognized, legacy, ambiguous, stale, untrusted, and uncertified profiles remain diagnostic/read-only.
 - [Phase 3]: All project writes flow through one typed plan, validation, atomic apply, recovery, and Undo/Redo coordinator.
 - [Phases 4-7]: Compatibility is certified per exact feature/profile cell and expanded only with fixture evidence.
