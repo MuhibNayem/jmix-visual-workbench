@@ -290,6 +290,18 @@ val verifyDependencyIntegrity = tasks.register("verifyDependencyIntegrity") {
         check("<verify-signatures>false</verify-signatures>" in verificationText) {
             "Signature verification must remain disabled unless trusted publisher keys are reviewed."
         }
+        val ciWorkflow = file("../.github/workflows/ci.yml").readText()
+        if (Regex("""runs-on:\s*ubuntu-""").containsMatchIn(ciWorkflow)) {
+            mapOf(
+                "idea-2025.3.tar.gz" to "13f4174ba16c1cef04871cb261433536d002586c269a809392c20ee3f94959f5",
+                "idea-2026.2.tar.gz" to "a8055cadef1a6eed4558f8bc9bd591c3a4939f4c8c34560fdf58ab4d2a5c783d",
+                "node-24.18.0-linux-x64.tar.gz" to "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
+            ).forEach { (artifact, checksum) ->
+                check("name=\"$artifact\"" in verificationText && "value=\"$checksum\"" in verificationText) {
+                    "Strict Ubuntu CI requires reviewed verification metadata for $artifact."
+                }
+            }
+        }
 
         val versionCatalog = file("gradle/libs.versions.toml").readText()
         val catalogVersions = Regex("""(?m)^[a-zA-Z0-9_.-]+\s*=\s*"([^"]+)"$""")

@@ -12,8 +12,10 @@ SBOM-backed, provenance-attested public release process planned for Phase 8.
 - The idea253 and idea262 `runtimeClasspath` and `testRuntimeClasspath`
   configurations use strict checked-in lock state.
 - `plugin/gradle/verification-metadata.xml` records reviewed SHA-256 values for
-  Gradle-resolved build inputs. The exact IDEA DMG hashes come from JetBrains'
-  published SHA-256 sidecars. Strict verification is mandatory in CI.
+  Gradle-resolved build inputs. Exact macOS ARM64 DMGs and Linux x64 IDEA
+  archives use JetBrains' published SHA-256 sidecars; the Linux x64 Node archive
+  uses the Node.js signed `SHASUMS256.txt`. Strict verification is mandatory in
+  Ubuntu CI.
 - npm uses lockfile v3 and `npm ci`; the build fails if that command changes
   `package-lock.json`.
 - CI actions use immutable full commit SHAs with readable version comments.

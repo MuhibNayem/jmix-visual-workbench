@@ -16,7 +16,8 @@ concurrency:
 jobs:
   phase1:
     name: Wrapper-only dual-lane gate
-    runs-on: ubuntu-latest
+    # Linux x64 artifacts are checksum-reviewed in verification-metadata.xml.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
 
     steps:
