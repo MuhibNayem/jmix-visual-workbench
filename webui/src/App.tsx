@@ -19,7 +19,7 @@ const tabs: { id: ActiveTab; label: string; icon: string }[] = [
 ]
 
 export default function App() {
-  const { activeTab, setActiveTab, setProjectConfig, addToast } = useStore()
+  const { activeTab, setActiveTab, setProjectConfig } = useStore()
 
   useEffect(() => {
     bridge.getProjectConfig().then((config) => {
