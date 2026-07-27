@@ -11,10 +11,11 @@ endorsed by Haulmont.**
 
 This repository is early and non-certified. It contains a React/TypeScript
 workbench, a Kotlin IntelliJ plugin shell, in-memory models, and draft
-string-based generators. The frontend can be built, but the checked-in plugin
-build is not yet reproducible on the supported IntelliJ baseline. The current
-generator and bridge paths are prototypes: they do not safely parse, preview,
-merge, validate, atomically apply, or undo changes to an existing project.
+string-based generators. The checked-in wrapper now builds and verifies
+separate IDEA 253–261 and IDEA 262 plugin artifacts with a project-local Node
+24.18.0 toolchain. The current generator and bridge paths remain prototypes:
+they do not safely parse, preview, merge, validate, atomically apply, or undo
+changes to an existing project.
 
 Do not run the current mutation paths against a valuable repository. The
 verified findings and planned remediation are in
@@ -61,20 +62,28 @@ The target architecture replaces direct writes with a typed privilege boundary,
 semantic project index, version-aware adapters, immutable change plans,
 structured editors, validation, atomic application, and exact rollback/undo.
 
-## Building the prototype
+## Build and compatibility evidence
 
-The frontend currently requires a local Node.js installation:
+Use only the checked-in wrapper; global Gradle and Node installations are not
+part of the build:
 
-```bash
-cd webui
-npm ci
-npm run build
+```text
+cd plugin
+./gradlew clean phase1Check --dependency-verification=strict
 ```
 
-The IntelliJ plugin build is currently blocked by an incomplete Gradle wrapper,
-obsolete platform/build configuration, and known source defects. Commands that
-claim to produce an installable plugin are intentionally not documented until
-the self-sustaining dual-host build is implemented and verified.
+Gradle downloads a project-local Node 24.18.0 runtime, runs the locked frontend
+build, provisions Java 21 and Java 25 compiler toolchains, builds both
+lane-suffixed ZIPs, runs smoke/tests and Plugin Verifier, and inspects packaged
+contents. Manual installation into the two minimum IDEs remains pending.
+
+- [Exact build prerequisites, commands, artifacts, and offline behavior](docs/BUILDING.md)
+- [IntelliJ host and target-project compatibility matrices](docs/COMPATIBILITY.md)
+- [Dependency, checksum, CI, and future signing/SBOM policy](docs/RELEASE-INTEGRITY.md)
+
+Java 17, Java 21, and Java 25 target-project cells are future fixture
+certification targets. Repository mutation remains non-certified and disabled
+for valuable repositories; this build work does not enable it.
 
 ## Project policies
 

@@ -49,7 +49,8 @@ version = sharedProperty("pluginVersion").get()
 val webUiDirectory = layout.projectDirectory.dir("../../../webui")
 val webBundleDirectory = layout.projectDirectory.dir("../../build/generated-resources/webui")
 val hostMetadataFile = layout.projectDirectory.file("../../build/host-metadata/idea253.json")
-val localIdeaPath = providers.gradleProperty("localIdeaPath")
+val localIdeaPath = providers.gradleProperty("localIdea253Path")
+    .orElse(providers.gradleProperty("localIdeaPath"))
 val verifiedLocalIdeaPath = localIdeaPath.map { path ->
     val buildFile = file(path).resolve("Resources/build.txt")
     check(buildFile.isFile) { "localIdeaPath has no Resources/build.txt: $path" }

@@ -401,7 +401,6 @@ tasks.register("verifyHostPlugins") {
 
 tasks.register<VerifyPluginZipContentsTask>("verifyPluginZipContents") {
     description = "Inspects both plugin ZIPs for required resources, shared provenance, and forbidden build caches."
-    dependsOn("assembleHostPlugins")
     archives.from(
         layout.projectDirectory.file(
             "hosts/idea253/build/distributions/jmix-visual-workbench-${project.version}-idea253.zip",
@@ -411,6 +410,35 @@ tasks.register<VerifyPluginZipContentsTask>("verifyPluginZipContents") {
         ),
     )
 }
+
+fun nestedGradleArguments(vararg requestedTasks: String): List<String> = buildList {
+    addAll(requestedTasks)
+    addAll(
+        listOf(
+            "--dependency-verification=strict",
+            "--no-daemon",
+            "--no-configuration-cache",
+            "--stacktrace",
+        ),
+    )
+    if (gradle.startParameter.isOffline) {
+        add("--offline")
+    }
+    gradle.startParameter.projectProperties
+        .filterKeys { it in setOf("localIdeaPath", "localIdea253Path", "localIdea262Path") }
+        .toSortedMap()
+        .forEach { (name, value) -> add("-P$name=$value") }
+}
+
+fun hostGateArguments(host: String): List<String> = nestedGradleArguments(
+    ":$host:clean",
+    ":$host:compileKotlin",
+    ":$host:test",
+    ":$host:hostSmokeTest",
+    ":$host:buildPlugin",
+    ":$host:verifyPlugin",
+    ":$host:verifyNoBundledKotlinRuntime",
+)
 
 tasks.register("phase1FastCheck") {
     description = "Runs the fast Phase 1 build, UI-freshness, and toolchain contract checks."
@@ -422,15 +450,35 @@ tasks.register("phase1FastCheck") {
     )
 }
 
+val phase1RootGate = tasks.register<Exec>("phase1RootGate") {
+    description = "Runs root web, integrity, and toolchain checks after the outer clean completes."
+    mustRunAfter("clean")
+    workingDir(layout.projectDirectory)
+    executable(layout.projectDirectory.file("gradlew").asFile)
+    args(nestedGradleArguments("phase1FastCheck"))
+}
+
+val phase1Idea253Gate = tasks.register<Exec>("phase1Idea253Gate") {
+    description = "Runs the IDEA 253 host gate after root-owned web resources are verified."
+    dependsOn(phase1RootGate)
+    workingDir(layout.projectDirectory)
+    executable(layout.projectDirectory.file("gradlew").asFile)
+    args(hostGateArguments("idea253"))
+}
+
+val phase1Idea262Gate = tasks.register<Exec>("phase1Idea262Gate") {
+    description = "Runs the IDEA 262 host gate after the IDEA 253 lane completes."
+    dependsOn(phase1Idea253Gate)
+    workingDir(layout.projectDirectory)
+    executable(layout.projectDirectory.file("gradlew").asFile)
+    args(hostGateArguments("idea262"))
+}
+
+val verifyPluginZipContents = tasks.named("verifyPluginZipContents") {
+    dependsOn(phase1Idea262Gate)
+}
+
 tasks.register("phase1Check") {
     description = "Runs all currently available Phase 1 build checks."
-    dependsOn(
-        "phase1FastCheck",
-        "compileHostKotlin",
-        "testShared",
-        "hostSmokeTest",
-        "buildHostPlugins",
-        "verifyHostPlugins",
-        "verifyPluginZipContents",
-    )
+    dependsOn(verifyPluginZipContents)
 }

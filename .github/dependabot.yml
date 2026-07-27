@@ -1,0 +1,31 @@
+version: 2
+
+# Dependabot opens review-only pull requests. This repository has no automatic
+# merge or release path for dependency updates.
+updates:
+  - package-ecosystem: gradle
+    directory: /plugin
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - gradle
+
+  - package-ecosystem: npm
+    directory: /webui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - npm
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
