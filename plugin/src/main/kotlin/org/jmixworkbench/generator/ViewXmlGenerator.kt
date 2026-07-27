@@ -185,7 +185,7 @@ object ViewXmlGenerator {
 
             // DataGrid columns
             if (component.type == ComponentType.DATA_GRID || component.type == ComponentType.TREE_DATA_GRID) {
-                generateDataGridContent(this, component, view)
+                generateDataGridContents(this, component, view)
             }
 
             // Generic filter
@@ -223,7 +223,7 @@ object ViewXmlGenerator {
     ) {
         // Columns
         if (component.columns.isNotEmpty()) {
-            child("columns") {
+            parent.child("columns") {
                 component.columns.forEach { col ->
                     child("column") {
                         attr("property", col.property)
