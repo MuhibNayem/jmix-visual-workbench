@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-07-27T18:37:12.728Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-07-27T19:04:34.504Z"
 last_activity: 2026-07-27
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
-  percent: 25
+  completed_plans: 2
+  percent: 50
 ---
 
 # Project State
@@ -26,30 +26,30 @@ See: .planning/PROJECT.md (updated 2026-07-27)
 ## Current Position
 
 Phase: 01 (Clean-Room Build Foundation) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-07-27
 
-Progress: [███░░░░░░░] 25%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 1
-- Average duration: 7 min
-- Total execution time: 0.1 hours
+- Total plans completed: 2
+- Average duration: 14 min
+- Total execution time: 0.5 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 1 | 7 min | 7 min |
+| 01 | 2 | 27 min | 14 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01 (7 min)
-- Trend: Initial plan
+- Last 5 plans: 01-01 (7 min), 01-02 (20 min)
+- Trend: Build-foundation work includes first-time toolchain resolution
 
 *Updated after each plan completion*
 
@@ -68,6 +68,9 @@ Recent decisions affecting current work:
 - [Phases 2-7]: Target-project support spans Java 17 through the latest JDK officially supported by the detected Jmix line; initial write cells are Jmix 2.8 on Java 17/21 and Jmix 3.0 on Java 21/25, while unproven future combinations remain read-only.
 - [Phase 01]: Use Jmix Visual Workbench with plugin ID org.jmixworkbench.intellij and Kotlin namespace org.jmixworkbench.
 - [Phase 01]: Treat all existing generators and mutation paths as non-certified prototypes; identity work does not enable mutation.
+- [Phase 01]: Keep the aggregate build free of Kotlin and IntelliJ plugins; delegate exact host contracts to isolated included builds.
+- [Phase 01]: Allow project repositories only at the aggregate root for Node plugin 7.1.0 while host builds retain strict repository control.
+- [Phase 01]: Provision Eclipse Temurin Java 21 and 25 through Foojay for deterministic host compiler launchers.
 
 ### Pending Todos
 
@@ -80,6 +83,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-27T18:37:12.725Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-07-27T19:04:34.496Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
