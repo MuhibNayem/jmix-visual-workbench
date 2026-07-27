@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>org.jmixworkbench.intellij</id>
+    <id>org.jmixworkbench</id>
     <name>Jmix Visual Workbench</name>
     <version>1.0.0</version>
     <vendor>Jmix Visual Workbench contributors</vendor>

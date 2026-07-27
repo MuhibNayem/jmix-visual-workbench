@@ -1,8 +1,10 @@
 import com.github.gradle.node.npm.task.NpmTask
 import org.jmixworkbench.build.AssembleWebBundleTask
+import org.jmixworkbench.build.VerifyPluginZipContentsTask
 import org.jmixworkbench.build.VerifyWebBundleTask
 
 plugins {
+    base
     alias(libs.plugins.node)
 }
 
@@ -134,6 +136,10 @@ tasks.register("verifyHostBuildDefinitions") {
         check("JavaLanguageVersion.of(21)" in idea253Build)
         check("KotlinVersion.KOTLIN_2_2" in idea253Build)
         check("JvmTarget.JVM_21" in idea253Build)
+        check("intellijIdeaUltimate(\"2025.3\")" in idea253Build)
+        check("buildNumber.startsWith(\"IU-253.\")" in idea253Build)
+        check("pluginVerifier()" in idea253Build)
+        check("current()" in idea253Build)
         check("sinceBuild.set(\"253\")" in idea253Build)
         check("untilBuild.set(\"261.*\")" in idea253Build)
         check("<depends>com.intellij.modules.jcef</depends>" !in idea253Descriptor)
@@ -141,9 +147,14 @@ tasks.register("verifyHostBuildDefinitions") {
         check("JavaLanguageVersion.of(25)" in idea262Build)
         check("KotlinVersion.KOTLIN_2_4" in idea262Build)
         check("JvmTarget.JVM_25" in idea262Build)
+        check("intellijIdeaUltimate(\"2026.2\")" in idea262Build)
+        check("buildNumber.startsWith(\"IU-262.\")" in idea262Build)
+        check("pluginVerifier()" in idea262Build)
+        check("current()" in idea262Build)
         check("sinceBuild.set(\"262\")" in idea262Build)
         check("untilBuild.set(\"262.*\")" in idea262Build)
-        check("bundledPlugin(\"intellij.platform.ui.jcef\")" in idea262Build)
+        check("bundledModule(\"intellij.libraries.jcef\")" in idea262Build)
+        check("bundledModule(\"intellij.platform.ui.jcef\")" in idea262Build)
         check("<depends>com.intellij.modules.jcef</depends>" in idea262Descriptor)
     }
 }
@@ -161,6 +172,14 @@ tasks.register("testShared") {
     dependsOn(
         gradle.includedBuild("idea253").task(":test"),
         gradle.includedBuild("idea262").task(":test"),
+    )
+}
+
+tasks.register("hostSmokeTest") {
+    description = "Runs non-mutating descriptor, packaged-resource, and fallback smoke tests in both host lanes."
+    dependsOn(
+        gradle.includedBuild("idea253").task(":hostSmokeTest"),
+        gradle.includedBuild("idea262").task(":hostSmokeTest"),
     )
 }
 
@@ -188,6 +207,19 @@ tasks.register("verifyHostPlugins") {
     )
 }
 
+tasks.register<VerifyPluginZipContentsTask>("verifyPluginZipContents") {
+    description = "Inspects both plugin ZIPs for required resources, shared provenance, and forbidden build caches."
+    dependsOn("assembleHostPlugins")
+    archives.from(
+        layout.projectDirectory.file(
+            "hosts/idea253/build/distributions/jmix-visual-workbench-${project.version}-idea253.zip",
+        ),
+        layout.projectDirectory.file(
+            "hosts/idea262/build/distributions/jmix-visual-workbench-${project.version}-idea262.zip",
+        ),
+    )
+}
+
 tasks.register("phase1FastCheck") {
     description = "Runs the fast Phase 1 build, UI-freshness, and toolchain contract checks."
     dependsOn(
@@ -203,5 +235,9 @@ tasks.register("phase1Check") {
         "phase1FastCheck",
         "compileHostKotlin",
         "testShared",
+        "hostSmokeTest",
+        "buildHostPlugins",
+        "verifyHostPlugins",
+        "verifyPluginZipContents",
     )
 }

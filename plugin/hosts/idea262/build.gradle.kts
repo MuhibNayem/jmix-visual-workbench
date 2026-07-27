@@ -1,5 +1,6 @@
 import org.gradle.api.file.DuplicatesStrategy
 import org.gradle.api.tasks.compile.JavaCompile
+import org.gradle.api.tasks.testing.Test
 import org.gradle.jvm.toolchain.JavaLanguageVersion
 import org.gradle.jvm.toolchain.JvmVendorSpec
 import org.gradle.language.jvm.tasks.ProcessResources
@@ -46,6 +47,16 @@ version = sharedProperty("pluginVersion").get()
 val webUiDirectory = layout.projectDirectory.dir("../../../webui")
 val webBundleDirectory = layout.projectDirectory.dir("../../build/generated-resources/webui")
 val hostMetadataFile = layout.projectDirectory.file("../../build/host-metadata/idea262.json")
+val localIdeaPath = providers.gradleProperty("localIdeaPath")
+val verifiedLocalIdeaPath = localIdeaPath.map { path ->
+    val buildFile = file(path).resolve("Resources/build.txt")
+    check(buildFile.isFile) { "localIdeaPath has no Resources/build.txt: $path" }
+    val buildNumber = buildFile.readText().trim()
+    check(buildNumber.startsWith("IU-262.")) {
+        "idea262 localIdeaPath must target an IU-262 build, found: $buildNumber"
+    }
+    path
+}
 val webUiInputs = files(
     webUiDirectory.file("package.json"),
     webUiDirectory.file("package-lock.json"),
@@ -83,14 +94,24 @@ sourceSets {
         kotlin.srcDir("../../src/main/kotlin")
         resources.setSrcDirs(listOf("src/main/resources"))
     }
+    test {
+        kotlin.srcDir("../../src/test/kotlin")
+    }
 }
 
 dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
+    testImplementation(kotlin("test"))
+    testRuntimeOnly("junit:junit:4.13.2")
     intellijPlatform {
-        intellijIdea("2026.2")
-        bundledPlugin("com.intellij.java")
-        bundledPlugin("intellij.platform.ui.jcef")
+        if (localIdeaPath.isPresent) {
+            local(verifiedLocalIdeaPath)
+        } else {
+            intellijIdeaUltimate("2026.2")
+        }
+        bundledModule("intellij.libraries.jcef")
+        bundledModule("intellij.platform.ui.jcef")
+        pluginVerifier()
     }
 }
 
@@ -102,6 +123,11 @@ intellijPlatform {
         ideaVersion {
             sinceBuild.set("262")
             untilBuild.set("262.*")
+        }
+    }
+    pluginVerification {
+        ides {
+            current()
         }
     }
 }
@@ -135,6 +161,8 @@ tasks.named<ProcessResources>("processResources") {
         exclude("META-INF/plugin.xml")
     }
     from(layout.projectDirectory.dir("../../build/generated-resources"))
+    from(layout.projectDirectory.file("../../../LICENSE"))
+    from(layout.projectDirectory.file("../../../NOTICE"))
 }
 
 tasks.named("buildPlugin") {
@@ -143,6 +171,8 @@ tasks.named("buildPlugin") {
 
 tasks.named<Zip>("buildPlugin") {
     archiveFileName.set("jmix-visual-workbench-${project.version}-idea262.zip")
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }
 
 tasks.withType<JavaCompile>().configureEach {
@@ -155,6 +185,16 @@ tasks.withType<KotlinCompile>().configureEach {
         apiVersion.set(KotlinVersion.KOTLIN_2_4)
         jvmTarget.set(JvmTarget.JVM_25)
     }
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
+}
+
+tasks.register("hostSmokeTest") {
+    description = "Runs idea262 descriptor and packaged-resource smoke tests."
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    dependsOn(tasks.named("test"))
 }
 
 val compilerLauncher = javaToolchains.launcherFor {

@@ -1,0 +1,241 @@
+package org.jmixworkbench.build;
+
+import org.gradle.api.DefaultTask;
+import org.gradle.api.file.ConfigurableFileCollection;
+import org.gradle.api.tasks.InputFiles;
+import org.gradle.api.tasks.PathSensitive;
+import org.gradle.api.tasks.PathSensitivity;
+import org.gradle.api.tasks.TaskAction;
+import org.gradle.api.tasks.VerificationTask;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipInputStream;
+
+public abstract class VerifyPluginZipContentsTask extends DefaultTask implements VerificationTask {
+    private static final Pattern ASSET_PATTERN =
+            Pattern.compile("(?:src|href)=\"(?:\\./)?([^\"#?]+)");
+    private static final Pattern DIGEST_PATTERN =
+            Pattern.compile("\"inputSha256\"\\s*:\\s*\"([0-9a-f]{64})\"");
+    private static final Pattern HASHED_ASSET_PATTERN =
+            Pattern.compile("assets/[^/]+-[A-Za-z0-9_-]{6,}\\.(?:js|css)");
+    private static final List<String> FORBIDDEN_PATH_PARTS = List.of(
+            "node_modules",
+            "/.npm/",
+            "/nodejs/",
+            "/bin/node",
+            "node.exe"
+    );
+    private static final List<String> FORBIDDEN_CONTENT = List.of(
+            "com.jmixstudio",
+            "Jmix Studio Clone",
+            "/Users/",
+            "\\Users\\"
+    );
+
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    public abstract ConfigurableFileCollection getArchives();
+
+    @TaskAction
+    public void verify() throws Exception {
+        List<Path> archives = getArchives().getFiles().stream()
+                .map(file -> file.toPath().toAbsolutePath().normalize())
+                .sorted()
+                .toList();
+        if (archives.size() != 2) {
+            throw new IllegalStateException("Expected exactly two host plugin ZIPs, found: " + archives);
+        }
+
+        Map<String, String> inputDigests = new LinkedHashMap<>();
+        for (Path archive : archives) {
+            if (!Files.isRegularFile(archive)) {
+                throw new IllegalStateException("Plugin distribution is missing: " + archive);
+            }
+            String lane = archive.getFileName().toString().contains("idea253") ? "idea253"
+                    : archive.getFileName().toString().contains("idea262") ? "idea262"
+                    : null;
+            if (lane == null) {
+                throw new IllegalStateException("Plugin ZIP has no deterministic lane suffix: " + archive);
+            }
+            inputDigests.put(lane, inspectArchive(archive, lane));
+            getLogger().lifecycle("{} {} SHA-256 {}", lane, archive, sha256(Files.readAllBytes(archive)));
+        }
+
+        if (!inputDigests.keySet().equals(java.util.Set.of("idea253", "idea262"))) {
+            throw new IllegalStateException("Expected one idea253 and one idea262 ZIP: " + inputDigests.keySet());
+        }
+        if (inputDigests.values().stream().distinct().count() != 1) {
+            throw new IllegalStateException("Host ZIPs contain different web input digests: " + inputDigests);
+        }
+        getLogger().lifecycle("Both host ZIPs contain web input SHA-256 {}", inputDigests.values().iterator().next());
+    }
+
+    private String inspectArchive(Path archive, String lane) throws Exception {
+        List<String> pluginJars = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(archive.toFile())) {
+            var entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                inspectPath(entry.getName(), archive);
+                if (!entry.isDirectory() && entry.getName().endsWith(".jar")) {
+                    pluginJars.add(entry.getName());
+                }
+            }
+            if (pluginJars.isEmpty()) {
+                throw new IllegalStateException(archive + " contains no plugin JAR");
+            }
+
+            for (String pluginJar : pluginJars) {
+                byte[] bytes = zip.getInputStream(zip.getEntry(pluginJar)).readAllBytes();
+                Map<String, byte[]> contents = readNestedArchive(bytes, archive + "!/" + pluginJar, archive);
+                if (contents.containsKey("META-INF/plugin.xml")) {
+                    return inspectPluginJar(contents, archive, lane);
+                }
+            }
+        }
+        throw new IllegalStateException(archive + " has no plugin JAR containing META-INF/plugin.xml");
+    }
+
+    private Map<String, byte[]> readNestedArchive(
+            byte[] bytes,
+            String displayName,
+            Path outerArchive
+    ) throws IOException {
+        Map<String, byte[]> contents = new LinkedHashMap<>();
+        try (ZipInputStream input = new ZipInputStream(new ByteArrayInputStream(bytes))) {
+            ZipEntry entry;
+            while ((entry = input.getNextEntry()) != null) {
+                inspectPath(entry.getName(), outerArchive);
+                if (!entry.isDirectory()) {
+                    ByteArrayOutputStream output = new ByteArrayOutputStream();
+                    input.transferTo(output);
+                    byte[] entryBytes = output.toByteArray();
+                    inspectContent(entry.getName(), entryBytes, displayName);
+                    contents.put(entry.getName(), entryBytes);
+                }
+            }
+        }
+        return contents;
+    }
+
+    private String inspectPluginJar(Map<String, byte[]> contents, Path archive, String lane) {
+        requireEntry(contents, "META-INF/plugin.xml", archive);
+        requireEntry(contents, "webui/index.html", archive);
+        requireEntry(contents, "webui/build-info.json", archive);
+        requireEntry(contents, "icons/workbench.svg", archive);
+        requireEntry(contents, "LICENSE", archive);
+        requireEntry(contents, "NOTICE", archive);
+
+        String descriptor = text(contents.get("META-INF/plugin.xml"));
+        requireContains(descriptor, "<id>org.jmixworkbench</id>", archive);
+        requireContains(descriptor, "<name>Jmix Visual Workbench</name>", archive);
+        if ("idea253".equals(lane)) {
+            requireContains(descriptor, "since-build=\"253\"", archive);
+            requireContains(descriptor, "until-build=\"261.*\"", archive);
+        } else {
+            requireContains(descriptor, "since-build=\"262\"", archive);
+            requireContains(descriptor, "until-build=\"262.*\"", archive);
+            requireContains(descriptor, "<depends>com.intellij.modules.jcef</depends>", archive);
+        }
+
+        String index = text(contents.get("webui/index.html"));
+        Matcher assets = ASSET_PATTERN.matcher(index);
+        int referencedAssets = 0;
+        while (assets.find()) {
+            String relativePath = assets.group(1);
+            if (relativePath.contains("://") || relativePath.startsWith("data:")) {
+                continue;
+            }
+            requireEntry(contents, "webui/" + relativePath, archive);
+            if (relativePath.startsWith("assets/")) {
+                if (!HASHED_ASSET_PATTERN.matcher(relativePath).matches()) {
+                    throw new IllegalStateException(
+                            archive + " webui/index.html references an unhashed asset: " + relativePath
+                    );
+                }
+                referencedAssets++;
+            }
+        }
+        if (referencedAssets == 0) {
+            throw new IllegalStateException(archive + " webui/index.html references no hashed assets");
+        }
+
+        String buildInfo = text(contents.get("webui/build-info.json"));
+        Matcher digest = DIGEST_PATTERN.matcher(buildInfo);
+        if (!digest.find()) {
+            throw new IllegalStateException(archive + " build-info.json has no valid inputSha256");
+        }
+        return digest.group(1);
+    }
+
+    private void inspectPath(String entryName, Path archive) {
+        String normalized = "/" + entryName.replace('\\', '/').toLowerCase(Locale.ROOT);
+        if (normalized.endsWith(".map")) {
+            throw new IllegalStateException(archive + " contains an unapproved source map: " + entryName);
+        }
+        for (String forbidden : FORBIDDEN_PATH_PARTS) {
+            if (normalized.contains(forbidden.toLowerCase(Locale.ROOT))) {
+                throw new IllegalStateException(archive + " contains forbidden Node/npm cache content: " + entryName);
+            }
+        }
+    }
+
+    private void inspectContent(String entryName, byte[] bytes, String archive) {
+        String content = new String(bytes, StandardCharsets.ISO_8859_1);
+        for (String forbidden : FORBIDDEN_CONTENT) {
+            if (content.contains(forbidden)) {
+                throw new IllegalStateException(
+                        archive + "!/" + entryName + " contains forbidden content: " + forbidden
+                );
+            }
+        }
+    }
+
+    private void requireEntry(Map<String, byte[]> contents, String entry, Path archive) {
+        if (!contents.containsKey(entry)) {
+            throw new IllegalStateException(archive + " plugin JAR is missing " + entry);
+        }
+    }
+
+    private void requireContains(String value, String expected, Path archive) {
+        if (!value.contains(expected)) {
+            throw new IllegalStateException(archive + " descriptor is missing " + expected);
+        }
+    }
+
+    private String text(byte[] bytes) {
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private String sha256(byte[] bytes) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+    }
+
+    @Override
+    public boolean getIgnoreFailures() {
+        return false;
+    }
+
+    @Override
+    public void setIgnoreFailures(boolean ignoreFailures) {
+        if (ignoreFailures) {
+            throw new IllegalArgumentException("Plugin ZIP verification cannot ignore failures");
+        }
+    }
+}
