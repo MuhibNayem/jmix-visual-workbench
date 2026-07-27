@@ -21,8 +21,8 @@
 - [ ] **COMP-01**: A developer can view the exact detected IntelliJ, Jmix, JDK, Gradle DSL, build topology, language, add-on, data-store, trust, and import-health profile for the open project.
 - [ ] **COMP-02**: The backend returns an operation-specific compatibility state and reason: certified read/write, certified read-only, recognized diagnostic, or unsupported.
 - [ ] **COMP-03**: A project receives write capability only when its exact operation/profile cell is present in the reviewed compatibility registry with passing fixture evidence.
-- [ ] **COMP-04**: Certified Jmix 2.8.x fixtures can complete the v1 entity/data and CRUD workflows using adapter-specific source and configuration rules.
-- [ ] **COMP-05**: Certified Jmix 3.0.x fixtures can complete the v1 entity/data and CRUD workflows using adapter-specific source and configuration rules.
+- [ ] **COMP-04**: Certified Jmix 2.8.x fixtures on Java 17 and Java 21 can complete the v1 entity/data and CRUD workflows using adapter-specific source and configuration rules.
+- [ ] **COMP-05**: Certified Jmix 3.0.x fixtures on Java 21 and Java 25 can complete the v1 entity/data and CRUD workflows using adapter-specific source and configuration rules.
 - [ ] **COMP-06**: Recognized earlier Jmix 2.x, Jmix 1.x, CUBA-era, future, ambiguous, stale, untrusted, or uncertified projects remain useful for diagnostics and navigation but cannot be mutated.
 - [ ] **COMP-07**: Users can see why a requested option is unavailable for their exact profile and what tested profile or migration path would make it available.
 - [ ] **COMP-08**: Release compatibility tables are generated from the same registry that authorizes backend operations, so documentation cannot claim unsupported write coverage.
@@ -99,7 +99,7 @@
 - [ ] **ENT-03**: Fixture coverage includes single-module, multi-project, composite/included-build, multi-repository, add-on-heavy, multiple-data-store, private/unavailable dependency, offline, stale-import, and failed-import profiles.
 - [ ] **ENT-04**: Every certified write cell proves non-mutating open, byte-identical no-op, minimal golden diff, parse/reparse, compile/integration checks, idempotence, stale blocking, failure rollback, and exact Undo/Redo.
 - [ ] **ENT-05**: Installed plugin ZIP scenarios exercise project import, indexes, workbench loading, JCEF protocol, plan review, Apply, Undo/Redo, and diagnostics on every advertised IntelliJ host.
-- [ ] **ENT-06**: Pull request, nightly, and release-candidate CI matrices enforce progressively broader Jmix, IDE, JDK, operating-system, filesystem, database, topology, add-on, and adversarial coverage.
+- [ ] **ENT-06**: Pull request, nightly, and release-candidate CI matrices enforce progressively broader Jmix, IDE, target-project JDK coverage from Java 17 through the latest officially compatible and tested release, operating-system, filesystem, database, topology, add-on, and adversarial coverage.
 - [ ] **ENT-07**: Representative enterprise-scale fixtures meet published budgets for startup impact, initial/incremental indexing, event-dispatch-thread blocking, interaction latency, memory, cache size, payload size, and disposal/leaks.
 - [ ] **ENT-08**: A compatibility regression automatically blocks or downgrades the affected operation/profile cell instead of leaving a permissive support claim in place.
 - [ ] **ENT-09**: Sanitized customer-derived fixtures enter the laboratory only with permission, anonymization, provenance, retention, access-control, and license review.

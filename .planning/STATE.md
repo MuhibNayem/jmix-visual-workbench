@@ -46,6 +46,7 @@ Recent decisions affecting current work:
 - [Phase 2]: Broad existing-project discovery is non-mutating; recognized, legacy, ambiguous, stale, untrusted, and uncertified profiles remain diagnostic/read-only.
 - [Phase 3]: All project writes flow through one typed plan, validation, atomic apply, recovery, and Undo/Redo coordinator.
 - [Phases 4-7]: Compatibility is certified per exact feature/profile cell and expanded only with fixture evidence.
+- [Phases 2-7]: Target-project support spans Java 17 through the latest JDK officially supported by the detected Jmix line; initial write cells are Jmix 2.8 on Java 17/21 and Jmix 3.0 on Java 21/25, while unproven future combinations remain read-only.
 
 ### Pending Todos
 

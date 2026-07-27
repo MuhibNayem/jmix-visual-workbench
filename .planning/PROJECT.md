@@ -48,7 +48,7 @@ The detailed evidence and clean-room boundary are recorded in `JMIX_STUDIO_ASSES
 ### Active
 
 - [ ] Produce a reproducible, installable IntelliJ plugin build on a supported JDK/Gradle/IntelliJ baseline.
-- [ ] Support existing enterprise Jmix solutions through explicit, testable compatibility adapters: full read/write workflows for certified Jmix 2.x and 3.x ranges, safe read-only diagnostics for recognized-but-uncertified versions, and separately gated legacy migration assistance.
+- [ ] Support existing enterprise Jmix solutions through explicit, testable compatibility adapters: full read/write workflows for certified Jmix 2.x and 3.x ranges and their officially supported Java versions from Java 17 through the latest tested JDK, safe read-only diagnostics for recognized-but-uncertified combinations, and separately gated legacy migration assistance.
 - [ ] Discover and index real single-module, multi-module, composite, Java, Kotlin, mixed-language, customized, and add-on-heavy Jmix projects without unsafe defaults.
 - [ ] Parse existing Java/Kotlin, XML, properties, Gradle, and Liquibase artifacts into a semantic project model.
 - [ ] Generate and round-trip entities, enums, DTOs, associations, IDs, views, controllers, menus, messages, roles, fetch plans, repositories, and migrations.
@@ -59,7 +59,7 @@ The detailed evidence and clean-room boundary are recorded in `JMIX_STUDIO_ASSES
 - [ ] Validate generated source and configuration with parser/golden tests and representative Jmix fixture projects.
 - [ ] Ship CI release gates for unit, integration, UI, plugin verifier, compatibility, security, dependency, and artifact integrity checks.
 - [ ] Provide enterprise-quality diagnostics, auditability, accessibility, performance budgets, documentation, and migration guidance.
-- [ ] Publish a fixture-backed compatibility matrix covering Jmix versions, IntelliJ versions/editions, Java/Gradle baselines, languages, build layouts, databases, data stores, add-ons, and supported read/write workflows.
+- [ ] Publish a fixture-backed compatibility matrix covering Jmix versions, IntelliJ versions/editions, target-project Java versions from 17 through the latest officially compatible JDK, Gradle baselines, languages, build layouts, databases, data stores, add-ons, and supported read/write workflows.
 - [ ] Establish an original product identity, explicit license, trademark disclaimer, contribution policy, and secure release process.
 
 ### Out of Scope
@@ -98,7 +98,7 @@ The detailed evidence and clean-room boundary are recorded in `JMIX_STUDIO_ASSES
 ## Constraints
 
 - **Platform:** IntelliJ IDEA 2025.3+ is the minimum product family baseline for current Jmix 3 tooling; compatibility must be verified rather than claimed.
-- **Jmix versions:** Jmix 2.x, Jmix 3.x, Jmix 1.x, and CUBA-era solutions differ materially. Certified read/write support must be declared per adapter and fixture matrix; legacy migration is isolated from normal editing.
+- **Jmix and target Java versions:** Jmix 2.x, Jmix 3.x, Jmix 1.x, and CUBA-era solutions differ materially. Certified read/write support must be declared per adapter, exact target-project JDK, and fixture matrix. Initial target cells are Jmix 2.8 on Java 17/21 and Jmix 3.0 on Java 21/25; future JDKs remain read-only until officially compatible and certified. The plugin runtime itself follows the IntelliJ host JBR and is not forced to Java 17.
 - **Technology:** Kotlin for plugin services, React/TypeScript for the JCEF UI, and Gradle for plugin builds remain the starting architecture unless evidence justifies a change.
 - **Security:** JCEF content is untrusted input. Bridge commands must be allowlisted and validated independently of the UI.
 - **Data integrity:** No direct string-based overwrite of existing structured project files is acceptable for enterprise release.

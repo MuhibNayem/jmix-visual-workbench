@@ -77,7 +77,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Phase 4
 **Requirements**: COMP-04, COMP-05, CRUD-01, CRUD-02, CRUD-03, CRUD-04, CRUD-05, CRUD-06, CRUD-07, CRUD-08
 **Success Criteria** (what must be TRUE):
-  1. Exact advertised Jmix 2.8.x and 3.0.x fixture cells can complete the v1 entity/data and CRUD workflows using their adapter-specific rules.
+  1. Exact advertised Jmix 2.8.x/Java 17 or 21 and Jmix 3.0.x/Java 21 or 25 fixture cells can complete the v1 entity/data and CRUD workflows using their adapter-specific rules.
   2. From an indexed entity, developers can plan bounded list/detail views and reopen the linked descriptor and controller as one semantic structure without changing either file merely by viewing it.
   3. Supported view edits preserve unknown/custom XML, namespaces, comments, add-on components, controller code, imports, annotations, and formatting, while palette choices and generated APIs come from the selected adapter and detected catalog.
   4. Developers can edit supported fetch plans and owned menu items with provenance, while cycles, unresolved references, and duplicate identifiers block Apply with source-linked diagnostics.
@@ -106,7 +106,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. The compatibility laboratory covers pinned fresh, upgraded, customized, malformed, adversarial, and recognized-read-only fixtures across declared languages, DSLs, source layouts, topologies, add-ons, stores, dependency health, and offline states.
   2. Every certified write cell proves non-mutating open, byte-identical no-op, minimal golden diff, parse/reparse, compile/integration behavior, idempotence, stale blocking, failure rollback, and exact Undo/Redo.
   3. Installed plugin ZIP scenarios exercise import, indexing, workbench loading, JCEF, plan review, Apply, Undo/Redo, and diagnostics on every advertised IntelliJ host.
-  4. Pull-request, nightly, and release-candidate matrices enforce progressively broader coverage, and any regression automatically blocks or downgrades only the affected operation/profile cell.
+  4. Pull-request, nightly, and release-candidate matrices enforce progressively broader Jmix, IntelliJ, and target-project JDK coverage from Java 17 through the latest officially compatible tested release, and any regression automatically blocks or downgrades only the affected operation/profile cell.
   5. Permissioned, anonymized customer-derived and representative enterprise-scale fixtures meet published startup, indexing, EDT, interaction, memory, cache, payload, and disposal/leak budgets with recorded provenance and retention controls.
 **Plans**: TBD
 
