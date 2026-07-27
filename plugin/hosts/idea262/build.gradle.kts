@@ -268,10 +268,20 @@ tasks.withType<Test>().configureEach {
     useJUnitPlatform()
 }
 
-tasks.register("hostSmokeTest") {
-    description = "Runs idea262 descriptor and packaged-resource smoke tests."
-    group = LifecycleBasePlugin.VERIFICATION_GROUP
-    dependsOn(tasks.named("test"))
+tasks.named<Test>("test") {
+    filter {
+        excludeTestsMatching("org.jmixworkbench.toolwindow.WorkbenchToolWindowFactoryIntegrationTest")
+    }
+}
+
+val hostSmokeTest by intellijPlatformTesting.testIde.registering {
+    task {
+        description = "Runs the focused idea262 real factory startup and lifecycle integration tests."
+        group = LifecycleBasePlugin.VERIFICATION_GROUP
+        filter {
+            includeTestsMatching("org.jmixworkbench.toolwindow.WorkbenchToolWindowFactoryIntegrationTest")
+        }
+    }
 }
 
 val compilerLauncher = javaToolchains.launcherFor {

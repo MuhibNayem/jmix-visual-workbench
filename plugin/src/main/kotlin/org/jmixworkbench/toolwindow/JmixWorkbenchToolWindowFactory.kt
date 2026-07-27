@@ -5,6 +5,7 @@ import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
+import com.intellij.ui.content.Content
 import com.intellij.ui.content.ContentFactory
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
@@ -113,6 +114,83 @@ internal class WorkbenchBrowserLifecycle(
     }
 }
 
+internal interface WorkbenchEmbeddedBrowser {
+    val component: JComponent
+
+    fun loadUrl(url: String)
+
+    fun dispose()
+}
+
+internal fun interface WorkbenchProjectBridge {
+    fun dispose()
+}
+
+internal interface WorkbenchToolWindowRuntime {
+    fun isJcefSupported(): Boolean
+
+    fun developmentModeEnabled(): Boolean
+
+    fun developmentUrl(): String?
+
+    fun resource(path: String): URL?
+
+    fun createBrowser(): WorkbenchEmbeddedBrowser
+
+    fun createProjectBridge(project: Project, browser: WorkbenchEmbeddedBrowser): WorkbenchProjectBridge
+
+    fun createContent(component: JComponent, displayName: String): Content
+}
+
+private class IntelliJEmbeddedBrowser(
+    val delegate: JBCefBrowser = JBCefBrowser(),
+) : WorkbenchEmbeddedBrowser {
+    override val component: JComponent
+        get() = delegate.component
+
+    override fun loadUrl(url: String) {
+        delegate.loadURL(url)
+    }
+
+    override fun dispose() {
+        delegate.dispose()
+    }
+}
+
+private class IntelliJProjectBridge(
+    private val delegate: JcefBridge,
+) : WorkbenchProjectBridge {
+    override fun dispose() {
+        delegate.dispose()
+    }
+}
+
+internal object IntelliJWorkbenchToolWindowRuntime : WorkbenchToolWindowRuntime {
+    override fun isJcefSupported(): Boolean = JBCefApp.isSupported()
+
+    override fun developmentModeEnabled(): Boolean =
+        System.getProperty("jmixworkbench.dev.enabled").toBoolean()
+
+    override fun developmentUrl(): String? = System.getProperty("jmixworkbench.dev.url")
+
+    override fun resource(path: String): URL? =
+        JmixWorkbenchToolWindowFactory::class.java.getResource(path)
+
+    override fun createBrowser(): WorkbenchEmbeddedBrowser = IntelliJEmbeddedBrowser()
+
+    override fun createProjectBridge(
+        project: Project,
+        browser: WorkbenchEmbeddedBrowser,
+    ): WorkbenchProjectBridge {
+        val intellijBrowser = browser as? IntelliJEmbeddedBrowser
+            ?: error("The IntelliJ runtime requires an IntelliJ-backed browser")
+        return IntelliJProjectBridge(JcefBridge(project, intellijBrowser.delegate))
+    }
+
+    override fun createContent(component: JComponent, displayName: String): Content =
+        ContentFactory.getInstance().createContent(component, displayName, false)
+}
+
 internal object WorkbenchFallbackPanel {
     fun jcefUnavailable(): JComponent = diagnostic(
         JCEF_UNAVAILABLE_CODE,
@@ -144,14 +222,23 @@ internal object WorkbenchFallbackPanel {
  * Creates the Jmix Visual Workbench tool window with an embedded JCEF browser
  * running the React-based visual designer UI.
  */
-class JmixWorkbenchToolWindowFactory : ToolWindowFactory, DumbAware {
+class JmixWorkbenchToolWindowFactory private constructor(
+    private val runtime: WorkbenchToolWindowRuntime,
+) : ToolWindowFactory, DumbAware {
+
+    constructor() : this(IntelliJWorkbenchToolWindowRuntime)
+
+    internal companion object {
+        fun createForTests(runtime: WorkbenchToolWindowRuntime): JmixWorkbenchToolWindowFactory =
+            JmixWorkbenchToolWindowFactory(runtime)
+    }
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val startupPlan = WorkbenchToolWindowStartup.plan(
-            JBCefApp.isSupported(),
-            System.getProperty("jmixworkbench.dev.enabled").toBoolean(),
-            System.getProperty("jmixworkbench.dev.url"),
-            javaClass::getResource,
+            runtime.isJcefSupported(),
+            runtime.developmentModeEnabled(),
+            runtime.developmentUrl(),
+            runtime::resource,
         )
         when (startupPlan) {
             WorkbenchStartupPlan.JcefUnavailable -> {
@@ -175,15 +262,15 @@ class JmixWorkbenchToolWindowFactory : ToolWindowFactory, DumbAware {
         toolWindow: ToolWindow,
         ui: ResolvedWorkbenchUi,
     ) {
-        val browser = JBCefBrowser()
+        val browser = runtime.createBrowser()
         val bridge = if (ui.bridgeAccess == WorkbenchBridgeAccess.PACKAGED_PROJECT) {
-            JcefBridge(project, browser)
+            runtime.createProjectBridge(project, browser)
         } else {
             null
         }
-        browser.loadURL(ui.url)
+        browser.loadUrl(ui.url)
 
-        val content = ContentFactory.getInstance().createContent(browser.component, "Designer", false)
+        val content = runtime.createContent(browser.component, "Designer")
         content.setDisposer(
             WorkbenchBrowserLifecycle(
                 disposeBridge = { bridge?.dispose() },
@@ -194,7 +281,7 @@ class JmixWorkbenchToolWindowFactory : ToolWindowFactory, DumbAware {
     }
 
     private fun addFallbackContent(toolWindow: ToolWindow, panel: JComponent) {
-        val content = ContentFactory.getInstance().createContent(panel, "Error", false)
+        val content = runtime.createContent(panel, "Error")
         toolWindow.contentManager.addContent(content)
     }
 

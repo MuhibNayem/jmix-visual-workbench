@@ -380,7 +380,7 @@ tasks.register("testShared") {
 }
 
 tasks.register("hostSmokeTest") {
-    description = "Runs non-mutating descriptor, packaged-resource, and fallback smoke tests in both host lanes."
+    description = "Runs focused factory startup, content attachment, and lifecycle integration tests in both host lanes."
     dependsOn(
         gradle.includedBuild("idea253").task(":hostSmokeTest"),
         gradle.includedBuild("idea262").task(":hostSmokeTest"),
