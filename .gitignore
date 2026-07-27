@@ -1,0 +1,18 @@
+# Gradle
+plugin/.gradle/
+plugin/build/
+plugin/out/
+
+# Node
+webui/node_modules/
+webui/dist/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# OS
+Thumbs.db
