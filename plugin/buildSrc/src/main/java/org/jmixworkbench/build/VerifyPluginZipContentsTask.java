@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -46,6 +47,19 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
             "Jmix Studio Clone",
             "/Users/",
             "\\Users\\"
+    );
+    private static final Map<String, Pattern> CREDENTIAL_PATTERNS = Map.of(
+            "private key", Pattern.compile("-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----"),
+            "AWS access key", Pattern.compile("\\bAKIA[0-9A-Z]{16}\\b"),
+            "GitHub token", Pattern.compile("\\bgh[pousr]_[A-Za-z0-9]{36,}\\b"),
+            "assigned credential", Pattern.compile(
+                    "(?i)\\b(?:password|passwd|api[_-]?key|secret|token)\\s*[:=]\\s*[\"'][^\"'\\s]{8,}[\"']"
+            )
+    );
+    private static final java.util.Set<String> CREDENTIAL_SCAN_ALLOWLIST = java.util.Set.of();
+    private static final java.util.Set<String> TEXT_EXTENSIONS = java.util.Set.of(
+            "css", "gradle", "html", "java", "js", "json", "kts", "md", "mf",
+            "properties", "svg", "text", "txt", "xml", "yaml", "yml"
     );
 
     @InputFiles
@@ -86,42 +100,50 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         getLogger().lifecycle("Both host ZIPs contain web input SHA-256 {}", inputDigests.values().iterator().next());
     }
 
-    private String inspectArchive(Path archive, String lane) throws Exception {
-        List<String> pluginJars = new ArrayList<>();
+    static String inspectArchive(Path archive, String lane) throws Exception {
+        List<Map<String, byte[]>> pluginJars = new ArrayList<>();
         try (ZipFile zip = new ZipFile(archive.toFile())) {
             var entries = zip.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
-                inspectPath(entry.getName(), archive);
-                if (!entry.isDirectory() && entry.getName().endsWith(".jar")) {
-                    pluginJars.add(entry.getName());
+                inspectPath(entry.getName(), archive.toString());
+                if (entry.isDirectory()) {
+                    continue;
+                }
+                byte[] entryBytes = zip.getInputStream(entry).readAllBytes();
+                if (entry.getName().toLowerCase(Locale.ROOT).endsWith(".jar")) {
+                    Map<String, byte[]> contents = readNestedArchive(
+                            entryBytes,
+                            archive + "!/" + entry.getName()
+                    );
+                    if (contents.containsKey("META-INF/plugin.xml")) {
+                        pluginJars.add(contents);
+                    }
+                } else {
+                    inspectContent(entry.getName(), entryBytes, archive.toString());
                 }
             }
             if (pluginJars.isEmpty()) {
-                throw new IllegalStateException(archive + " contains no plugin JAR");
+                throw new IllegalStateException(archive + " has no plugin JAR containing META-INF/plugin.xml");
             }
-
-            for (String pluginJar : pluginJars) {
-                byte[] bytes = zip.getInputStream(zip.getEntry(pluginJar)).readAllBytes();
-                Map<String, byte[]> contents = readNestedArchive(bytes, archive + "!/" + pluginJar, archive);
-                if (contents.containsKey("META-INF/plugin.xml")) {
-                    return inspectPluginJar(contents, archive, lane);
-                }
+            if (pluginJars.size() != 1) {
+                throw new IllegalStateException(
+                        archive + " must contain exactly one main plugin JAR, found " + pluginJars.size()
+                );
             }
+            return inspectPluginJar(pluginJars.get(0), archive, lane);
         }
-        throw new IllegalStateException(archive + " has no plugin JAR containing META-INF/plugin.xml");
     }
 
-    private Map<String, byte[]> readNestedArchive(
+    private static Map<String, byte[]> readNestedArchive(
             byte[] bytes,
-            String displayName,
-            Path outerArchive
+            String displayName
     ) throws IOException {
         Map<String, byte[]> contents = new LinkedHashMap<>();
         try (ZipInputStream input = new ZipInputStream(new ByteArrayInputStream(bytes))) {
             ZipEntry entry;
             while ((entry = input.getNextEntry()) != null) {
-                inspectPath(entry.getName(), outerArchive);
+                inspectPath(entry.getName(), displayName);
                 if (!entry.isDirectory()) {
                     ByteArrayOutputStream output = new ByteArrayOutputStream();
                     input.transferTo(output);
@@ -134,7 +156,7 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         return contents;
     }
 
-    private String inspectPluginJar(Map<String, byte[]> contents, Path archive, String lane) {
+    private static String inspectPluginJar(Map<String, byte[]> contents, Path archive, String lane) {
         requireEntry(contents, "META-INF/plugin.xml", archive);
         requireEntry(contents, "webui/index.html", archive);
         requireEntry(contents, "webui/build-info.json", archive);
@@ -184,7 +206,28 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         return digest.group(1);
     }
 
-    private void inspectPath(String entryName, Path archive) {
+    static void inspectPath(String entryName, String archive) {
+        if (entryName.isBlank() || entryName.indexOf('\0') >= 0 || entryName.indexOf('\\') >= 0) {
+            throw new IllegalStateException(archive + " contains an invalid archive entry path: " + entryName);
+        }
+        Path entryPath;
+        try {
+            entryPath = Paths.get(entryName);
+        } catch (RuntimeException exception) {
+            throw new IllegalStateException(archive + " contains an invalid archive entry path: " + entryName, exception);
+        }
+        Path archiveRoot = Paths.get("/archive-root");
+        Path candidate = archiveRoot.resolve(entryPath).normalize();
+        boolean hasParentSegment = java.util.stream.StreamSupport.stream(entryPath.spliterator(), false)
+                .anyMatch(segment -> segment.toString().equals(".."));
+        if (entryPath.isAbsolute()
+                || entryName.startsWith("/")
+                || entryName.matches("^[A-Za-z]:.*")
+                || hasParentSegment
+                || !candidate.startsWith(archiveRoot)) {
+            throw new IllegalStateException(archive + " contains a traversal-shaped archive entry: " + entryName);
+        }
+
         String normalized = "/" + entryName.replace('\\', '/').toLowerCase(Locale.ROOT);
         if (normalized.endsWith(".map")) {
             throw new IllegalStateException(archive + " contains an unapproved source map: " + entryName);
@@ -196,7 +239,7 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         }
     }
 
-    private void inspectContent(String entryName, byte[] bytes, String archive) {
+    static void inspectContent(String entryName, byte[] bytes, String archive) {
         String content = new String(bytes, StandardCharsets.ISO_8859_1);
         for (String forbidden : FORBIDDEN_CONTENT) {
             if (content.contains(forbidden)) {
@@ -205,21 +248,40 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 );
             }
         }
+        if (isTextLike(entryName) && !CREDENTIAL_SCAN_ALLOWLIST.contains(entryName)) {
+            String text = new String(bytes, StandardCharsets.UTF_8);
+            CREDENTIAL_PATTERNS.forEach((description, pattern) -> {
+                if (pattern.matcher(text).find()) {
+                    throw new IllegalStateException(
+                            archive + "!/" + entryName + " contains a forbidden " + description
+                    );
+                }
+            });
+        }
     }
 
-    private void requireEntry(Map<String, byte[]> contents, String entry, Path archive) {
+    private static boolean isTextLike(String entryName) {
+        String fileName = Path.of(entryName).getFileName().toString().toLowerCase(Locale.ROOT);
+        if (fileName.equals("license") || fileName.equals("notice")) {
+            return true;
+        }
+        int dot = fileName.lastIndexOf('.');
+        return dot >= 0 && TEXT_EXTENSIONS.contains(fileName.substring(dot + 1));
+    }
+
+    private static void requireEntry(Map<String, byte[]> contents, String entry, Path archive) {
         if (!contents.containsKey(entry)) {
             throw new IllegalStateException(archive + " plugin JAR is missing " + entry);
         }
     }
 
-    private void requireContains(String value, String expected, Path archive) {
+    private static void requireContains(String value, String expected, Path archive) {
         if (!value.contains(expected)) {
             throw new IllegalStateException(archive + " descriptor is missing " + expected);
         }
     }
 
-    private String text(byte[] bytes) {
+    private static String text(byte[] bytes) {
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
