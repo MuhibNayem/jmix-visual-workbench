@@ -1,0 +1,49 @@
+<idea-plugin>
+    <id>org.jmixworkbench.intellij</id>
+    <name>Jmix Visual Workbench</name>
+    <version>1.0.0</version>
+    <vendor>Jmix Visual Workbench contributors</vendor>
+
+    <description><![CDATA[
+    Compatible with Jmix. This independent project is not affiliated with or endorsed by Haulmont.
+    Early, non-certified clean-room visual workbench prototype for IntelliJ IDEA.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Jmix Visual Workbench"
+                    anchor="right"
+                    factoryClass="org.jmixworkbench.toolwindow.JmixWorkbenchToolWindowFactory"
+                    icon="/icons/workbench.svg"/>
+
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
+    </extensions>
+
+    <actions>
+        <group id="JmixWorkbench.NewMenu" text="Jmix Visual Workbench" popup="true">
+            <add-to-group group-id="NewGroup" anchor="last"/>
+            <action id="JmixWorkbench.NewEntity"
+                    class="org.jmixworkbench.actions.NewEntityAction"
+                    text="Entity"
+                    description="Create a new Jmix entity visually"/>
+            <action id="JmixWorkbench.NewView"
+                    class="org.jmixworkbench.actions.NewViewAction"
+                    text="View"
+                    description="Create a new Jmix view visually"/>
+            <action id="JmixWorkbench.NewCrud"
+                    class="org.jmixworkbench.actions.NewCrudAction"
+                    text="CRUD Screens"
+                    description="Generate full CRUD screens for an entity"/>
+        </group>
+
+        <action id="JmixWorkbench.OpenDesigner"
+                class="org.jmixworkbench.actions.OpenDesignerAction"
+                text="Open Jmix Visual Workbench"
+                description="Open the Jmix Visual Workbench">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
