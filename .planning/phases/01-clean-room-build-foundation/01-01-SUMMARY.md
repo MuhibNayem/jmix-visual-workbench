@@ -36,7 +36,7 @@ key-files:
     - webui/src/App.tsx
 
 key-decisions:
-  - "Use Jmix Visual Workbench with plugin ID org.jmixworkbench.intellij and Kotlin namespace org.jmixworkbench."
+  - "Use Jmix Visual Workbench with plugin ID org.jmixworkbench and Kotlin namespace org.jmixworkbench."
   - "Treat all existing generators and mutation paths as non-certified prototypes; this plan changes identity only and does not enable mutation."
 
 patterns-established:
@@ -167,7 +167,7 @@ changed.
 
 ## Decisions Made
 
-- Selected the stable original plugin ID `org.jmixworkbench.intellij` and product namespace `org.jmixworkbench`.
+- Selected the stable original plugin ID `org.jmixworkbench` and product namespace `org.jmixworkbench`.
 - Renamed only the public class exposing `JmixStudio` to `JmixWorkbench`; all other Kotlin class and behavior shapes remain unchanged.
 - Kept the prototype visible but labeled it non-certified rather than deleting or expanding mutation features.
 - Used GitHub private vulnerability reporting when available and repository maintainers otherwise, avoiding a fabricated security address.

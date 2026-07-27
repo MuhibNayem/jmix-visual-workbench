@@ -8,7 +8,7 @@
 ### Product, Build, and Integrity
 
 - [x] **PROD-01**: A contributor or CI worker can clone the repository and build all supported plugin artifacts through checked-in wrappers; the build provisions a pinned project-local Node distribution when no global Node is present.
-- [ ] **PROD-02**: A developer can install each produced ZIP into its advertised IntelliJ IDEA lane and open the workbench without class-loading, JCEF, or missing-resource errors.
+- [x] **PROD-02**: A developer can install each produced ZIP into its advertised IntelliJ IDEA lane and open the workbench without class-loading, JCEF, or missing-resource errors.
 - [x] **PROD-03**: Every plugin build creates and includes a production web bundle from the same source revision, fails if the bundle is missing or stale, and produces an installed plugin that requires no Node runtime.
 - [x] **PROD-04**: Users see an original product name, original assets, an explicit license, and a clear “compatible with Jmix; not affiliated with or endorsed by Haulmont” disclaimer.
 - [x] **PROD-05**: Contributors work under documented clean-room, source-provenance, trademark, security, and contribution rules that prohibit proprietary Studio materials and license circumvention.
@@ -154,7 +154,7 @@
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | PROD-01 | Phase 1 | Complete |
-| PROD-02 | Phase 1 | Pending |
+| PROD-02 | Phase 1 | Complete |
 | PROD-03 | Phase 1 | Complete |
 | PROD-04 | Phase 1 | Complete |
 | PROD-05 | Phase 1 | Complete |

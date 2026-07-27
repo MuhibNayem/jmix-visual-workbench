@@ -106,7 +106,7 @@ Target-project Java support is separate metadata for later phases. Phase 1 docum
 Adopt an original identity before expanding implementation:
 
 - Product name: **Jmix Visual Workbench** (descriptive compatibility use; not “Studio” and not “Clone”).
-- Plugin ID: a stable original ID such as `org.jmixworkbench.intellij`.
+- Plugin ID: a stable original ID such as `org.jmixworkbench`.
 - Kotlin namespace: an original namespace such as `org.jmixworkbench`.
 - Tool-window/action names: “Jmix Visual Workbench.”
 - Original icon and visual assets; remove the current Jmix-logo-derived asset if provenance cannot be established.
