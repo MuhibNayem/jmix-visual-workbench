@@ -153,87 +153,87 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PROD-01 | TBD | Pending |
-| PROD-02 | TBD | Pending |
-| PROD-03 | TBD | Pending |
-| PROD-04 | TBD | Pending |
-| PROD-05 | TBD | Pending |
-| PROD-06 | TBD | Pending |
-| PROD-07 | TBD | Pending |
-| PROD-08 | TBD | Pending |
-| COMP-01 | TBD | Pending |
-| COMP-02 | TBD | Pending |
-| COMP-03 | TBD | Pending |
-| COMP-04 | TBD | Pending |
-| COMP-05 | TBD | Pending |
-| COMP-06 | TBD | Pending |
-| COMP-07 | TBD | Pending |
-| COMP-08 | TBD | Pending |
-| DISC-01 | TBD | Pending |
-| DISC-02 | TBD | Pending |
-| DISC-03 | TBD | Pending |
-| DISC-04 | TBD | Pending |
-| DISC-05 | TBD | Pending |
-| DISC-06 | TBD | Pending |
-| DISC-07 | TBD | Pending |
-| DISC-08 | TBD | Pending |
-| DISC-09 | TBD | Pending |
-| DISC-10 | TBD | Pending |
-| SAFE-01 | TBD | Pending |
-| SAFE-02 | TBD | Pending |
-| SAFE-03 | TBD | Pending |
-| SAFE-04 | TBD | Pending |
-| SAFE-05 | TBD | Pending |
-| SAFE-06 | TBD | Pending |
-| SAFE-07 | TBD | Pending |
-| SAFE-08 | TBD | Pending |
-| SAFE-09 | TBD | Pending |
-| SAFE-10 | TBD | Pending |
-| SAFE-11 | TBD | Pending |
-| SAFE-12 | TBD | Pending |
-| SAFE-13 | TBD | Pending |
-| DATA-01 | TBD | Pending |
-| DATA-02 | TBD | Pending |
-| DATA-03 | TBD | Pending |
-| DATA-04 | TBD | Pending |
-| DATA-05 | TBD | Pending |
-| DATA-06 | TBD | Pending |
-| DATA-07 | TBD | Pending |
-| DATA-08 | TBD | Pending |
-| DATA-09 | TBD | Pending |
-| DATA-10 | TBD | Pending |
-| CRUD-01 | TBD | Pending |
-| CRUD-02 | TBD | Pending |
-| CRUD-03 | TBD | Pending |
-| CRUD-04 | TBD | Pending |
-| CRUD-05 | TBD | Pending |
-| CRUD-06 | TBD | Pending |
-| CRUD-07 | TBD | Pending |
-| CRUD-08 | TBD | Pending |
-| TEAM-01 | TBD | Pending |
-| TEAM-02 | TBD | Pending |
-| TEAM-03 | TBD | Pending |
-| TEAM-04 | TBD | Pending |
-| TEAM-05 | TBD | Pending |
-| TEAM-06 | TBD | Pending |
-| TEAM-07 | TBD | Pending |
-| TEAM-08 | TBD | Pending |
-| TEAM-09 | TBD | Pending |
-| ENT-01 | TBD | Pending |
-| ENT-02 | TBD | Pending |
-| ENT-03 | TBD | Pending |
-| ENT-04 | TBD | Pending |
-| ENT-05 | TBD | Pending |
-| ENT-06 | TBD | Pending |
-| ENT-07 | TBD | Pending |
-| ENT-08 | TBD | Pending |
-| ENT-09 | TBD | Pending |
-| ENT-10 | TBD | Pending |
+| PROD-01 | Phase 1 | Pending |
+| PROD-02 | Phase 1 | Pending |
+| PROD-03 | Phase 1 | Pending |
+| PROD-04 | Phase 1 | Pending |
+| PROD-05 | Phase 1 | Pending |
+| PROD-06 | Phase 1 | Pending |
+| PROD-07 | Phase 8 | Pending |
+| PROD-08 | Phase 8 | Pending |
+| COMP-01 | Phase 2 | Pending |
+| COMP-02 | Phase 2 | Pending |
+| COMP-03 | Phase 2 | Pending |
+| COMP-04 | Phase 5 | Pending |
+| COMP-05 | Phase 5 | Pending |
+| COMP-06 | Phase 2 | Pending |
+| COMP-07 | Phase 2 | Pending |
+| COMP-08 | Phase 6 | Pending |
+| DISC-01 | Phase 2 | Pending |
+| DISC-02 | Phase 2 | Pending |
+| DISC-03 | Phase 2 | Pending |
+| DISC-04 | Phase 2 | Pending |
+| DISC-05 | Phase 2 | Pending |
+| DISC-06 | Phase 2 | Pending |
+| DISC-07 | Phase 2 | Pending |
+| DISC-08 | Phase 2 | Pending |
+| DISC-09 | Phase 2 | Pending |
+| DISC-10 | Phase 2 | Pending |
+| SAFE-01 | Phase 3 | Pending |
+| SAFE-02 | Phase 3 | Pending |
+| SAFE-03 | Phase 3 | Pending |
+| SAFE-04 | Phase 3 | Pending |
+| SAFE-05 | Phase 3 | Pending |
+| SAFE-06 | Phase 3 | Pending |
+| SAFE-07 | Phase 3 | Pending |
+| SAFE-08 | Phase 3 | Pending |
+| SAFE-09 | Phase 3 | Pending |
+| SAFE-10 | Phase 3 | Pending |
+| SAFE-11 | Phase 3 | Pending |
+| SAFE-12 | Phase 6 | Pending |
+| SAFE-13 | Phase 3 | Pending |
+| DATA-01 | Phase 4 | Pending |
+| DATA-02 | Phase 4 | Pending |
+| DATA-03 | Phase 4 | Pending |
+| DATA-04 | Phase 4 | Pending |
+| DATA-05 | Phase 4 | Pending |
+| DATA-06 | Phase 4 | Pending |
+| DATA-07 | Phase 4 | Pending |
+| DATA-08 | Phase 4 | Pending |
+| DATA-09 | Phase 4 | Pending |
+| DATA-10 | Phase 4 | Pending |
+| CRUD-01 | Phase 5 | Pending |
+| CRUD-02 | Phase 5 | Pending |
+| CRUD-03 | Phase 5 | Pending |
+| CRUD-04 | Phase 5 | Pending |
+| CRUD-05 | Phase 5 | Pending |
+| CRUD-06 | Phase 5 | Pending |
+| CRUD-07 | Phase 5 | Pending |
+| CRUD-08 | Phase 5 | Pending |
+| TEAM-01 | Phase 6 | Pending |
+| TEAM-02 | Phase 6 | Pending |
+| TEAM-03 | Phase 6 | Pending |
+| TEAM-04 | Phase 6 | Pending |
+| TEAM-05 | Phase 6 | Pending |
+| TEAM-06 | Phase 6 | Pending |
+| TEAM-07 | Phase 2 | Pending |
+| TEAM-08 | Phase 6 | Pending |
+| TEAM-09 | Phase 6 | Pending |
+| ENT-01 | Phase 7 | Pending |
+| ENT-02 | Phase 7 | Pending |
+| ENT-03 | Phase 7 | Pending |
+| ENT-04 | Phase 7 | Pending |
+| ENT-05 | Phase 7 | Pending |
+| ENT-06 | Phase 7 | Pending |
+| ENT-07 | Phase 7 | Pending |
+| ENT-08 | Phase 7 | Pending |
+| ENT-09 | Phase 7 | Pending |
+| ENT-10 | Phase 8 | Pending |
 
 **Coverage:**
 - v1 requirements: 76
-- Mapped to phases: 0
-- Unmapped: 76
+- Mapped to phases: 76
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-07-27*
