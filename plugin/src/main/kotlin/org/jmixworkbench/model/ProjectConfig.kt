@@ -1,4 +1,4 @@
-package com.jmixstudio.model
+package org.jmixworkbench.model
 
 data class ProjectConfig(
     val projectRoot: String,

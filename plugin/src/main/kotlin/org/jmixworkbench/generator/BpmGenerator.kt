@@ -1,6 +1,6 @@
-package com.jmixstudio.generator
+package org.jmixworkbench.generator
 
-import com.jmixstudio.generator.XmlBuilder
+import org.jmixworkbench.generator.XmlBuilder
 
 /**
  * Generates BPMN 2.0 process definition XML for Jmix BPM module.

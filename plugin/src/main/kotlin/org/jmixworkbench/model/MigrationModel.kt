@@ -1,4 +1,4 @@
-package com.jmixstudio.model
+package org.jmixworkbench.model
 
 import com.google.gson.annotations.SerializedName
 
@@ -6,13 +6,13 @@ import com.google.gson.annotations.SerializedName
 
 data class MigrationModel(
     val changelogId: String,
-    val author: String = "jmix-studio",
+    val author: String = "jmix-visual-workbench",
     val changes: MutableList<ChangeSetModel> = mutableListOf()
 )
 
 data class ChangeSetModel(
     val id: String,
-    val author: String = "jmix-studio",
+    val author: String = "jmix-visual-workbench",
     val comment: String? = null,
     val changes: MutableList<DbChange> = mutableListOf(),
     val preConditions: MutableList<PreCondition> = mutableListOf(),

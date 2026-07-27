@@ -1,4 +1,4 @@
-package com.jmixstudio.model
+package org.jmixworkbench.model
 
 import com.google.gson.annotations.SerializedName
 

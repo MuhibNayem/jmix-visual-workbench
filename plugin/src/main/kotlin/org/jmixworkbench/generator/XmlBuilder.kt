@@ -1,4 +1,4 @@
-package com.jmixstudio.generator
+package org.jmixworkbench.generator
 
 /**
  * Generic XML document builder with fluent API.

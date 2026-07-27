@@ -1,6 +1,6 @@
-package com.jmixstudio.generator
+package org.jmixworkbench.generator
 
-import com.jmixstudio.model.*
+import org.jmixworkbench.model.*
 
 /**
  * Generates Spring Data repository interfaces for Jmix entities.

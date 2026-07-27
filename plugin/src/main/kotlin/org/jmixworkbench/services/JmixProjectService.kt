@@ -1,10 +1,10 @@
-package com.jmixstudio.services
+package org.jmixworkbench.services
 
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
-import com.jmixstudio.model.DatabaseType
-import com.jmixstudio.model.ProjectConfig
+import org.jmixworkbench.model.DatabaseType
+import org.jmixworkbench.model.ProjectConfig
 
 /**
  * Detects and manages Jmix project configuration.

@@ -1,4 +1,4 @@
-package com.jmixstudio.services
+package org.jmixworkbench.services
 
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
@@ -7,8 +7,8 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
-import com.jmixstudio.generator.*
-import com.jmixstudio.model.*
+import org.jmixworkbench.generator.*
+import org.jmixworkbench.model.*
 import java.io.File
 
 /**

@@ -1,4 +1,4 @@
-package com.jmixstudio.bridge
+package org.jmixworkbench.bridge
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
@@ -7,10 +7,10 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
-import com.jmixstudio.generator.CrudOrchestrator
-import com.jmixstudio.model.*
-import com.jmixstudio.services.CodeGenerationService
-import com.jmixstudio.services.JmixProjectService
+import org.jmixworkbench.generator.CrudOrchestrator
+import org.jmixworkbench.model.*
+import org.jmixworkbench.services.CodeGenerationService
+import org.jmixworkbench.services.JmixProjectService
 import org.cef.browser.CefBrowser
 import org.cef.handler.CefLoadHandlerAdapter
 
@@ -136,7 +136,7 @@ class JcefBridge(
         val config = JmixProjectService.getInstance(project).getConfig()
             ?: return """{"error":"Not a Jmix project"}"""
         val entityName = payload.get("entityName").asString
-        val process = com.jmixstudio.generator.BpmGenerator.generateApprovalProcess(entityName)
+        val process = org.jmixworkbench.generator.BpmGenerator.generateApprovalProcess(entityName)
         val result = CodeGenerationService.getInstance(project).generateBpmProcess(process, config)
         return gson.toJson(result)
     }

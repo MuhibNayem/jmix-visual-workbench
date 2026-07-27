@@ -34,8 +34,8 @@ export default function App() {
       {/* Sidebar */}
       <nav className="w-52 flex-shrink-0 bg-surface-light border-r border-surface-border flex flex-col">
         <div className="p-3 border-b border-surface-border">
-          <h1 className="text-sm font-bold text-jmix-400 tracking-wide">JMIX STUDIO</h1>
-          <p className="text-[10px] text-gray-500 mt-0.5">Visual Development Suite</p>
+          <h1 className="text-sm font-bold text-jmix-400 tracking-wide">JMIX VISUAL WORKBENCH</h1>
+          <p className="text-[10px] text-gray-500 mt-0.5">Clean-room prototype</p>
         </div>
         <div className="flex-1 py-2">
           {tabs.map((tab) => (
@@ -54,7 +54,7 @@ export default function App() {
           ))}
         </div>
         <div className="p-3 border-t border-surface-border text-[10px] text-gray-600">
-          v1.0.0 — Open Source
+          v1.0.0 — Non-certified
         </div>
       </nav>
 

@@ -1,49 +1,48 @@
 <idea-plugin>
-    <id>com.jmixstudio.clone</id>
-    <name>Jmix Studio Clone</name>
+    <id>org.jmixworkbench.intellij</id>
+    <name>Jmix Visual Workbench</name>
     <version>1.0.0</version>
-    <vendor>Open Source</vendor>
+    <vendor>Jmix Visual Workbench contributors</vendor>
 
     <description><![CDATA[
-    Open-source Jmix development studio with visual designers for entities, views,
-    CRUD scaffolding, menu, roles, and database migrations. Integrates directly
-    into IntelliJ IDEA.
+    Compatible with Jmix. This independent project is not affiliated with or endorsed by Haulmont.
+    Early, non-certified clean-room visual workbench prototype for IntelliJ IDEA.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow id="Jmix Studio"
+        <toolWindow id="Jmix Visual Workbench"
                     anchor="right"
-                    factoryClass="com.jmixstudio.toolwindow.JmixStudioToolWindowFactory"
-                    icon="/icons/jmix.svg"/>
+                    factoryClass="org.jmixworkbench.toolwindow.JmixWorkbenchToolWindowFactory"
+                    icon="/icons/workbench.svg"/>
 
-        <projectService serviceImplementation="com.jmixstudio.services.JmixProjectService"/>
-        <projectService serviceImplementation="com.jmixstudio.services.CodeGenerationService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
     </extensions>
 
     <actions>
-        <group id="JmixStudio.NewMenu" text="Jmix Studio" popup="true">
+        <group id="JmixWorkbench.NewMenu" text="Jmix Visual Workbench" popup="true">
             <add-to-group group-id="NewGroup" anchor="last"/>
-            <action id="JmixStudio.NewEntity"
-                    class="com.jmixstudio.actions.NewEntityAction"
+            <action id="JmixWorkbench.NewEntity"
+                    class="org.jmixworkbench.actions.NewEntityAction"
                     text="Entity"
                     description="Create a new Jmix entity visually"/>
-            <action id="JmixStudio.NewView"
-                    class="com.jmixstudio.actions.NewViewAction"
+            <action id="JmixWorkbench.NewView"
+                    class="org.jmixworkbench.actions.NewViewAction"
                     text="View"
                     description="Create a new Jmix view visually"/>
-            <action id="JmixStudio.NewCrud"
-                    class="com.jmixstudio.actions.NewCrudAction"
+            <action id="JmixWorkbench.NewCrud"
+                    class="org.jmixworkbench.actions.NewCrudAction"
                     text="CRUD Screens"
                     description="Generate full CRUD screens for an entity"/>
         </group>
 
-        <action id="JmixStudio.OpenDesigner"
-                class="com.jmixstudio.actions.OpenDesignerAction"
-                text="Open Jmix Studio Designer"
-                description="Open the Jmix Studio visual designer">
+        <action id="JmixWorkbench.OpenDesigner"
+                class="org.jmixworkbench.actions.OpenDesignerAction"
+                text="Open Jmix Visual Workbench"
+                description="Open the Jmix Visual Workbench">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
     </actions>

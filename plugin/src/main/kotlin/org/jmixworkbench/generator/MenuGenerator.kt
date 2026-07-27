@@ -1,6 +1,6 @@
-package com.jmixstudio.generator
+package org.jmixworkbench.generator
 
-import com.jmixstudio.model.MenuEntryModel
+import org.jmixworkbench.model.MenuEntryModel
 
 /**
  * Generates Jmix menu XML configuration.

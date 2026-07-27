@@ -1,6 +1,6 @@
-package com.jmixstudio.generator
+package org.jmixworkbench.generator
 
-import com.jmixstudio.model.EntityModel
+import org.jmixworkbench.model.EntityModel
 
 /**
  * Generates Jmix entity event listener classes.

@@ -1,17 +1,17 @@
-package com.jmixstudio.actions
+package org.jmixworkbench.actions
 
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.wm.ToolWindowManager
-import com.jmixstudio.services.JmixProjectService
+import org.jmixworkbench.services.JmixProjectService
 
 /**
- * Opens the Jmix Studio Designer tool window.
+ * Opens the Jmix Visual Workbench Designer tool window.
  */
 class OpenDesignerAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
-        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Jmix Studio")
+        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Jmix Visual Workbench")
         toolWindow?.show()
     }
 
@@ -28,7 +28,7 @@ class OpenDesignerAction : AnAction() {
 class NewEntityAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
-        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Jmix Studio")
+        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Jmix Visual Workbench")
         toolWindow?.show {
             // Signal the React UI to open Entity Designer
             // This is handled via the JCEF bridge
@@ -48,7 +48,7 @@ class NewEntityAction : AnAction() {
 class NewViewAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
-        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Jmix Studio")
+        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Jmix Visual Workbench")
         toolWindow?.show()
     }
 
@@ -65,7 +65,7 @@ class NewViewAction : AnAction() {
 class NewCrudAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
-        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Jmix Studio")
+        val toolWindow = ToolWindowManager.getInstance(project).getToolWindow("Jmix Visual Workbench")
         toolWindow?.show()
     }
 

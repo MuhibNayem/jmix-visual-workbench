@@ -1,6 +1,6 @@
-package com.jmixstudio.generator
+package org.jmixworkbench.generator
 
-import com.jmixstudio.model.*
+import org.jmixworkbench.model.*
 
 /**
  * Generates complete JPA/Jmix entity Java source from an EntityModel.

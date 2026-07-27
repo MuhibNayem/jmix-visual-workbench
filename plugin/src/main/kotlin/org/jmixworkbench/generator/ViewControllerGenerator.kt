@@ -1,6 +1,6 @@
-package com.jmixstudio.generator
+package org.jmixworkbench.generator
 
-import com.jmixstudio.model.*
+import org.jmixworkbench.model.*
 
 /**
  * Generates Jmix Flow UI view controller Java classes from a ViewModel.

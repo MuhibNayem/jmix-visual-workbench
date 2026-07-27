@@ -1,4 +1,4 @@
-package com.jmixstudio.toolwindow
+package org.jmixworkbench.toolwindow
 
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
@@ -7,14 +7,14 @@ import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.content.ContentFactory
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
-import com.jmixstudio.bridge.JcefBridge
+import org.jmixworkbench.bridge.JcefBridge
 import java.io.File
 
 /**
- * Creates the Jmix Studio tool window with an embedded JCEF browser
+ * Creates the Jmix Visual Workbench tool window with an embedded JCEF browser
  * running the React-based visual designer UI.
  */
-class JmixStudioToolWindowFactory : ToolWindowFactory, DumbAware {
+class JmixWorkbenchToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         if (!JBCefApp.isSupported()) {
@@ -41,7 +41,7 @@ class JmixStudioToolWindowFactory : ToolWindowFactory, DumbAware {
 
     private fun resolveUiUrl(): String {
         // In development: load from Vite dev server
-        val devUrl = System.getProperty("jmixstudio.dev.url")
+        val devUrl = System.getProperty("jmixworkbench.dev.url")
         if (devUrl != null) return devUrl
 
         // In production: load bundled files from plugin resources
