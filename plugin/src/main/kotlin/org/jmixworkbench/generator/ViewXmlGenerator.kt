@@ -18,9 +18,6 @@ object ViewXmlGenerator {
         xml.noDeclaration()
 
         xml.root {
-            ns("", NS_LAYOUT)
-            ns("data", NS_DATA)
-
             attr("xmlns", NS_LAYOUT)
             attr("xmlns:data", NS_DATA)
             attr("title", "msg://${view.viewName}.${view.viewId}")
@@ -185,7 +182,7 @@ object ViewXmlGenerator {
 
             // DataGrid columns
             if (component.type == ComponentType.DATA_GRID || component.type == ComponentType.TREE_DATA_GRID) {
-                generateDataGridContents(this, component, view)
+                generateDataGridContents(this, component)
             }
 
             // Generic filter
@@ -218,8 +215,7 @@ object ViewXmlGenerator {
 
     private fun generateDataGridContents(
         parent: XmlBuilder.Element,
-        component: ComponentModel,
-        view: ViewModel
+        component: ComponentModel
     ) {
         // Columns
         if (component.columns.isNotEmpty()) {
@@ -241,16 +237,6 @@ object ViewXmlGenerator {
             }
         }
 
-        // Actions toolbar
-        val listActions = component.actions.filter {
-            it.type in listOf(
-                ActionType.LIST_CREATE, ActionType.LIST_EDIT, ActionType.LIST_REMOVE,
-                ActionType.LIST_REFRESH, ActionType.LIST_IMPORT, ActionType.LIST_EXPORT
-            )
-        }
-        if (listActions.isNotEmpty()) {
-            // Actions already generated above
-        }
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -274,8 +260,6 @@ object ViewXmlGenerator {
         xml.noDeclaration()
 
         xml.root {
-            ns("", NS_LAYOUT)
-            ns("data", NS_DATA)
             attr("xmlns", NS_LAYOUT)
             attr("xmlns:data", NS_DATA)
 
