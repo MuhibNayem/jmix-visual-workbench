@@ -258,6 +258,7 @@ export default function ProjectMap() {
 
           <footer className="border-t border-surface-border px-4 py-2 text-[10px] text-gray-600">
             Snapshot {graph.snapshotDigest.slice(0, 12)} · {graph.candidateFiles.toLocaleString()} candidates ·{' '}
+            {graph.reusedFiles.toLocaleString()} unchanged sources reused · {graph.changedFiles.toLocaleString()} sources reread ·{' '}
             {graph.excludedFiles.toLocaleString()} excluded by safety/size policy
           </footer>
         </>

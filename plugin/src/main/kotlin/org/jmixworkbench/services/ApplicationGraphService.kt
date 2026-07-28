@@ -1,5 +1,6 @@
 package org.jmixworkbench.services
 
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
@@ -10,6 +11,9 @@ import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.openapi.vfs.newvfs.BulkFileListener
+import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import org.jmixworkbench.discovery.model.ArtifactKind
 import org.jmixworkbench.discovery.model.ArtifactOrigin
 import org.jmixworkbench.discovery.model.ArtifactOwner
@@ -26,8 +30,22 @@ import java.util.concurrent.atomic.AtomicReference
 @Service(Service.Level.PROJECT)
 class ApplicationGraphService(
     private val project: Project,
-) {
+) : Disposable {
     private val cached = AtomicReference<CachedGraph?>()
+    private val cachedSources = AtomicReference<Map<String, CachedSource>>(emptyMap())
+
+    init {
+        project.messageBus.connect(this).subscribe(
+            VirtualFileManager.VFS_CHANGES,
+            object : BulkFileListener {
+                override fun after(events: List<VFileEvent>) {
+                    if (events.any(::affectsApplicationGraph)) {
+                        cached.set(null)
+                    }
+                }
+            },
+        )
+    }
 
     fun graph(forceRefresh: Boolean = false): ApplicationGraphResponse {
         val startedAt = System.nanoTime()
@@ -36,16 +54,33 @@ class ApplicationGraphService(
         if (!forceRefresh && previous != null && previous.stamps == inventory.stamps) {
             return previous.response.copy(
                 cacheHit = true,
+                reusedFiles = previous.response.scannedFiles,
+                changedFiles = 0,
                 durationMillis = elapsedMillis(startedAt),
             )
         }
 
+        val previousSources = cachedSources.get()
+        val nextSources = linkedMapOf<String, CachedSource>()
+        var reusedFiles = 0
+        var changedFiles = 0
+        var cachedSourceBytes = 0L
         val sources = inventory.candidates.mapNotNull { candidate ->
             ProgressManager.checkCanceled()
+            previousSources[candidate.stamp.relativePath]
+                ?.takeIf { it.stamp == candidate.stamp }
+                ?.let { cachedSource ->
+                    if (cachedSourceBytes + candidate.stamp.length <= MAX_CACHED_SOURCE_BYTES) {
+                        nextSources[candidate.stamp.relativePath] = cachedSource
+                        cachedSourceBytes += candidate.stamp.length
+                    }
+                    reusedFiles += 1
+                    return@mapNotNull cachedSource.source
+                }
             val content = runCatching {
                 String(candidate.file.contentsToByteArray(false), candidate.file.charset)
             }.getOrNull() ?: return@mapNotNull null
-            GraphSourceFile(
+            val source = GraphSourceFile(
                 relativePath = candidate.stamp.relativePath,
                 content = content,
                 owner = ArtifactOwner(
@@ -61,7 +96,14 @@ class ApplicationGraphService(
                 },
                 fingerprint = CanonicalDiscoveryJson.sha256(content),
             )
+            if (cachedSourceBytes + candidate.stamp.length <= MAX_CACHED_SOURCE_BYTES) {
+                nextSources[candidate.stamp.relativePath] = CachedSource(candidate.stamp, source)
+                cachedSourceBytes += candidate.stamp.length
+            }
+            changedFiles += 1
+            source
         }
+        cachedSources.set(nextSources)
 
         val graph = ApplicationGraphIndexer().index(
             ApplicationGraphIndexInput(
@@ -76,6 +118,8 @@ class ApplicationGraphService(
             candidateFiles = inventory.candidates.size,
             excludedFiles = inventory.excludedFiles,
             excludedBytes = inventory.excludedBytes,
+            reusedFiles = reusedFiles,
+            changedFiles = changedFiles,
             cacheHit = false,
             durationMillis = elapsedMillis(startedAt),
         )
@@ -85,6 +129,11 @@ class ApplicationGraphService(
 
     fun invalidate() {
         cached.set(null)
+    }
+
+    override fun dispose() {
+        cached.set(null)
+        cachedSources.set(emptyMap())
     }
 
     fun prepareNavigation(request: SourceNavigationRequest): PreparedSourceNavigation {
@@ -238,6 +287,8 @@ class ApplicationGraphService(
         candidateFiles: Int,
         excludedFiles: Int,
         excludedBytes: Long,
+        reusedFiles: Int,
+        changedFiles: Int,
         cacheHit: Boolean,
         durationMillis: Long,
     ): ApplicationGraphResponse {
@@ -269,6 +320,8 @@ class ApplicationGraphService(
             candidateFiles = candidateFiles,
             excludedFiles = excludedFiles,
             excludedBytes = excludedBytes,
+            reusedFiles = reusedFiles,
+            changedFiles = changedFiles,
             cacheHit = cacheHit,
             durationMillis = durationMillis,
             snapshotDigest = CanonicalDiscoveryJson.sha256(digestPayload),
@@ -286,6 +339,21 @@ class ApplicationGraphService(
 
     private fun elapsedMillis(startedAt: Long): Long =
         (System.nanoTime() - startedAt) / 1_000_000
+
+    private fun affectsApplicationGraph(event: VFileEvent): Boolean {
+        val basePath = project.basePath?.trimEnd('/') ?: return false
+        val path = event.path.replace('\\', '/')
+        if (path != basePath && !path.startsWith("$basePath/")) {
+            return false
+        }
+        if (path.split('/').any(EXCLUDED_DIRECTORY_NAMES::contains)) {
+            return false
+        }
+        if (event.file?.isDirectory == true) {
+            return true
+        }
+        return languageFor(path.substringAfterLast('.', missingDelimiterValue = "")) != null
+    }
 
     private data class CandidateInventory(
         val candidates: List<CandidateFile>,
@@ -314,10 +382,16 @@ class ApplicationGraphService(
         val response: ApplicationGraphResponse,
     )
 
+    private data class CachedSource(
+        val stamp: FileStamp,
+        val source: GraphSourceFile,
+    )
+
     companion object {
         private const val MAX_FILES = 50_000
         private const val MAX_FILE_BYTES = 2 * 1024 * 1024
         private const val MAX_ARTIFACTS = 250_000
+        private const val MAX_CACHED_SOURCE_BYTES = 256L * 1024 * 1024
         private val RESOURCE_LANGUAGES = setOf(SourceLanguage.XML, SourceLanguage.PROPERTIES)
         private val EXCLUDED_DIRECTORY_NAMES = setOf(
             ".git",
@@ -352,6 +426,8 @@ data class ApplicationGraphResponse(
     val candidateFiles: Int,
     val excludedFiles: Int,
     val excludedBytes: Long,
+    val reusedFiles: Int,
+    val changedFiles: Int,
     val cacheHit: Boolean,
     val durationMillis: Long,
     val snapshotDigest: String,

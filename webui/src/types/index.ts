@@ -280,6 +280,8 @@ export interface ApplicationGraphResponse {
   candidateFiles: number
   excludedFiles: number
   excludedBytes: number
+  reusedFiles: number
+  changedFiles: number
   cacheHit: boolean
   durationMillis: number
   snapshotDigest: string
