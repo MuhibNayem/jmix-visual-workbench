@@ -7,6 +7,7 @@ import { useStore } from '../../store'
 import type {
   FlowUiElementSnapshot,
   FlowUiDirectTextChangeRequest,
+  FlowUiControllerInjectionRequest,
   FlowUiPropertyChangeRequest,
   FlowUiStructureChangeRequest,
   FlowUiWorkspaceResponse,
@@ -160,6 +161,10 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     kind: 'text'
     change: FlowUiDirectTextChangeRequest
     preview: WorkspaceChangePreviewResponse
+  } | {
+    kind: 'controller'
+    change: FlowUiControllerInjectionRequest
+    preview: WorkspaceChangePreviewResponse
   } | null>(null)
 
   const load = useCallback(async (target: GraphSourceLocator) => {
@@ -267,6 +272,29 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     setPending({ kind: 'structure', change: fullChange, preview })
   }
 
+  const previewControllerInjection = async () => {
+    if (!selected?.id || !workspace?.controllerModel?.psiSupported) return
+    const change: FlowUiControllerInjectionRequest = {
+      controllerLocator: {
+        relativePath: workspace.controllerModel.relativePath,
+        revisionFingerprint: workspace.controllerModel.revisionFingerprint,
+      },
+      componentId: selected.id,
+      componentTag: selected.localTag,
+      entityClass: selectedContainer?.entityClass,
+    }
+    const preview = await bridge.previewFlowUiControllerInjection(change)
+    if (!preview.accepted) {
+      addToast(preview.issues[0]?.message ?? 'Controller injection was rejected.', 'error')
+      return
+    }
+    if (!preview.planDigest || preview.files.length === 0) {
+      addToast('This component is already injected into the controller.', 'info')
+      return
+    }
+    setPending({ kind: 'controller', change, preview })
+  }
+
   const applyPending = async () => {
     if (!pending?.preview.planDigest) return
     setApplying(true)
@@ -275,9 +303,16 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
         ? await bridge.applyFlowUiPropertyChange(pending.change, pending.preview.planDigest)
         : pending.kind === 'structure'
           ? await bridge.applyFlowUiStructureChange(pending.change, pending.preview.planDigest)
-          : await bridge.applyFlowUiDirectTextChange(pending.change, pending.preview.planDigest)
+          : pending.kind === 'text'
+            ? await bridge.applyFlowUiDirectTextChange(pending.change, pending.preview.planDigest)
+            : await bridge.applyFlowUiControllerInjection(pending.change, pending.preview.planDigest)
       if (!result.success) {
         addToast(result.issues[0]?.message ?? 'The FlowUI source change failed.', 'error')
+        return
+      }
+      if (pending.kind === 'controller') {
+        addToast('Component injection added to the existing controller without replacing Java code.', 'success')
+        await load(locator)
         return
       }
       const nextFingerprint = pending.preview.files[0]?.afterFingerprint
@@ -468,7 +503,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                       ? <>{pending.change.propertyName} → &quot;{pending.change.value}&quot;</>
                       : pending.kind === 'structure'
                         ? <>{pending.change.operation.replace(/_/g, ' ').toLowerCase()} {pending.change.tagName ?? ''}</>
-                        : <>update direct query/text value</>}
+                        : pending.kind === 'text'
+                          ? <>update direct query/text value</>
+                          : <>inject {pending.change.componentId} into controller</>}
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -594,6 +631,32 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                         ))}
                       </select>
                     </label>
+                  </div>
+                )}
+                {selectedInLayout && selected.id && workspace.controllerModel?.psiSupported && (
+                  <div className="border-t border-surface-border pt-2">
+                    <div className="text-[9px] uppercase tracking-wider text-gray-600">Java controller</div>
+                    {workspace.controllerModel.injections.some((injection) => injection.componentId === selected.id) ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const injection = workspace.controllerModel!.injections
+                            .find((candidate) => candidate.componentId === selected.id)
+                          if (injection) void bridge.navigateToSource(injection.sourceLocator)
+                        }}
+                        className={`${quietButton} mt-1.5`}
+                      >
+                        Open existing @ViewComponent
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void previewControllerInjection()}
+                        className={`${quietButton} mt-1.5`}
+                      >
+                        Preview Inject to Controller
+                      </button>
+                    )}
                   </div>
                 )}
                 <div className="border-t border-surface-border pt-2">

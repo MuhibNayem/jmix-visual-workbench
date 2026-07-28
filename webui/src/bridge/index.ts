@@ -3,6 +3,7 @@ import type {
   FlowUiPropertyChangeRequest,
   FlowUiStructureChangeRequest,
   FlowUiDirectTextChangeRequest,
+  FlowUiControllerInjectionRequest,
   FlowUiWorkspaceResponse,
   GenerationResult,
   GraphSourceLocator,
@@ -161,6 +162,17 @@ class Bridge {
 
   applyFlowUiDirectTextChange(change: FlowUiDirectTextChangeRequest, expectedPlanDigest: string) {
     return this.request<WorkspaceChangeApplyResponse>('applyFlowUiDirectTextChange', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewFlowUiControllerInjection(change: FlowUiControllerInjectionRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiControllerInjection', change)
+  }
+
+  applyFlowUiControllerInjection(change: FlowUiControllerInjectionRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiControllerInjection', {
       change,
       expectedPlanDigest,
     })

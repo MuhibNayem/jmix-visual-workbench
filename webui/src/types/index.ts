@@ -497,6 +497,13 @@ export interface FlowUiControllerWorkspaceSnapshot {
   message?: string
 }
 
+export interface FlowUiControllerInjectionRequest {
+  controllerLocator: GraphSourceLocator
+  componentId: string
+  componentTag: string
+  entityClass?: string
+}
+
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {

@@ -22,6 +22,7 @@
         <projectService serviceImplementation="org.jmixworkbench.services.ApplicationGraphService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.WorkspaceChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiWorkspaceService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.FlowUiControllerChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
     </extensions>
 
