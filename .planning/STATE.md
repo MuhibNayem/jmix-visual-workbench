@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-07-28T07:57:55.419Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-07-28T08:18:35.223Z"
 last_activity: 2026-07-28
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 23
-  completed_plans: 6
-  percent: 26
+  completed_plans: 7
+  percent: 30
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-07-27)
 ## Current Position
 
 Phase: 02 (compatibility-laboratory-and-read-only-onboarding) — EXECUTING
-Plan: 2 of 18
+Plan: 3 of 18
 Status: Ready to execute
 Last activity: 2026-07-28
 
@@ -56,6 +56,7 @@ Milestone progress: [█░░░░░░░░░] 13%
 | Phase 01 P04 | 36min | 2 tasks | 14 files |
 | Phase 01 P05 | 109min | 2 tasks | 10 files |
 | Phase 02 P01 | 16 min | 2 tasks | 6 files |
+| Phase 02 P02 | 15 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,10 @@ Recent decisions affecting current work:
 - [Phase 02]: Exclude snapshot IDs, project-local IDs, and creation timestamps from canonical discovery identities.
 - [Phase 02]: Represent source locations only as validated project-relative coordinates plus a revision fingerprint.
 - [Phase 02]: Preserve absent or conflicting optional IDE evidence with nullable values and explicit confidence.
+- [Phase 02]: Allowlist only discovery.snapshot, discovery.inventory, discovery.relationships, and discovery.navigate in the Phase 2 registry; every other operation fails closed.
+- [Phase 02]: Certify exact Jmix 2.8 Java 17/21 and Jmix 3.0 Java 21/25 read cells only with injected reviewed fixtures and both host lanes.
+- [Phase 02]: Merge imported and static facts by evidence strength while preserving distinct observed values as CONFLICTING.
+- [Phase 02]: Redact configured internal coordinate groups to stable opaque SHA-256 identifiers before parser output.
 
 ### Pending Todos
 
@@ -102,6 +107,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-28T07:57:55.415Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-07-28T08:18:35.219Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

@@ -29,7 +29,12 @@ jmix-studio-clone/
 │       │   ├── services/              # Project discovery and file-write services
 │       │   └── toolwindow/
 │       │       └── JmixStudioToolWindowFactory.kt
+│       ├── kotlin/org/jmixworkbench/discovery/
+│       │   ├── compatibility/          # Deny-by-default compatibility registry/evaluator
+│       │   ├── model/                  # IntelliJ-free immutable discovery contracts
+│       │   └── static/                 # Pure static Gradle/profile evidence parser
 │       └── resources/
+│           ├── compatibility/          # Reviewed version-controlled registry data
 │           ├── META-INF/plugin.xml    # IntelliJ extension/action registration
 │           └── icons/jmix.svg         # Tool-window icon
 └── webui/                             # React/TypeScript visual designer
@@ -116,10 +121,16 @@ jmix-studio-clone/
 - Key files: `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`
 - Keep browser hosting concerns here and command handling in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
 
+**`plugin/src/main/kotlin/org/jmixworkbench/discovery/`:**
+- Purpose: Provide the clean-room, IntelliJ-independent discovery and compatibility core.
+- Contains: Immutable evidence/snapshot contracts, canonical identities, the reviewed compatibility registry/evaluator, and bounded static Gradle/profile parsing.
+- Key files: `plugin/src/main/kotlin/org/jmixworkbench/discovery/model/DiscoveryModel.kt`, `plugin/src/main/kotlin/org/jmixworkbench/discovery/compatibility/CompatibilityRegistry.kt`, `plugin/src/main/kotlin/org/jmixworkbench/discovery/static/GradleConfigParser.kt`
+- Keep this core free of IntelliJ, Gradle runtime, scripting, process, network, SQL, and write-action dependencies.
+
 **`plugin/src/main/resources/`:**
-- Purpose: Supply IntelliJ plugin metadata and packaged visual assets.
-- Contains: `META-INF/plugin.xml` and `icons/jmix.svg`; the Gradle build also copies the generated web bundle to build resources.
-- Key files: `plugin/src/main/resources/META-INF/plugin.xml`, `plugin/src/main/resources/icons/jmix.svg`, `plugin/build.gradle.kts`
+- Purpose: Supply IntelliJ plugin metadata, packaged visual assets, and reviewed compatibility data.
+- Contains: `META-INF/plugin.xml`, `icons/jmix.svg`, and `compatibility/phase2-registry.json`; the Gradle build also copies the generated web bundle to build resources.
+- Key files: `plugin/src/main/resources/META-INF/plugin.xml`, `plugin/src/main/resources/icons/jmix.svg`, `plugin/src/main/resources/compatibility/phase2-registry.json`, `plugin/build.gradle.kts`
 - Declare extensions/actions in `plugin/src/main/resources/META-INF/plugin.xml`; add static IDE assets under `plugin/src/main/resources/`.
 
 **`webui/`:**

@@ -49,7 +49,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [x] 02-01-PLAN.md — Establish the IntelliJ-free discovery model, safe locators, and deterministic serialization lane.
-- [ ] 02-02-PLAN.md — Implement the pure deny-by-default registry and static Gradle/profile parser.
+- [x] 02-02-PLAN.md — Implement the pure deny-by-default registry and static Gradle/profile parser.
 - [ ] 02-03-PLAN.md — Define enforceable discovery effects and intentional zero-mutation tripwires.
 - [ ] 02-04-PLAN.md — Add transitive forbidden-effect scans and the pure-first dual-host fast gate.
 - [ ] 02-05-PLAN.md — Collect imported build/module/root/dependency facts through exact 253/262 adapters.

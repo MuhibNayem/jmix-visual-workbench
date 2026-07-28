@@ -19,20 +19,20 @@
 ### Compatibility Contract
 
 - [x] **COMP-01**: A developer can view the exact detected IntelliJ, Jmix, JDK, Gradle DSL, build topology, language, add-on, data-store, trust, and import-health profile for the open project.
-- [ ] **COMP-02**: The backend returns an operation-specific compatibility state and reason: certified read/write, certified read-only, recognized diagnostic, or unsupported.
-- [ ] **COMP-03**: A project receives write capability only when its exact operation/profile cell is present in the reviewed compatibility registry with passing fixture evidence.
+- [x] **COMP-02**: The backend returns an operation-specific compatibility state and reason: certified read/write, certified read-only, recognized diagnostic, or unsupported.
+- [x] **COMP-03**: A project receives write capability only when its exact operation/profile cell is present in the reviewed compatibility registry with passing fixture evidence.
 - [ ] **COMP-04**: Certified Jmix 2.8.x fixtures on Java 17 and Java 21 can complete the v1 entity/data and CRUD workflows using adapter-specific source and configuration rules.
 - [ ] **COMP-05**: Certified Jmix 3.0.x fixtures on Java 21 and Java 25 can complete the v1 entity/data and CRUD workflows using adapter-specific source and configuration rules.
-- [ ] **COMP-06**: Recognized earlier Jmix 2.x, Jmix 1.x, CUBA-era, future, ambiguous, stale, untrusted, or uncertified projects remain useful for diagnostics and navigation but cannot be mutated.
-- [ ] **COMP-07**: Users can see why a requested option is unavailable for their exact profile and what tested profile or migration path would make it available.
+- [x] **COMP-06**: Recognized earlier Jmix 2.x, Jmix 1.x, CUBA-era, future, ambiguous, stale, untrusted, or uncertified projects remain useful for diagnostics and navigation but cannot be mutated.
+- [x] **COMP-07**: Users can see why a requested option is unavailable for their exact profile and what tested profile or migration path would make it available.
 - [ ] **COMP-08**: Release compatibility tables are generated from the same registry that authorizes backend operations, so documentation cannot claim unsupported write coverage.
 
 ### Existing-Project Discovery and Semantic Understanding
 
-- [ ] **DISC-01**: Opening, importing, indexing, browsing, and closing any fixture causes zero source, configuration, build, VCS, database, or network mutation.
+- [x] **DISC-01**: Opening, importing, indexing, browsing, and closing any fixture causes zero source, configuration, build, VCS, database, or network mutation.
 - [ ] **DISC-02**: Developers can inspect single-module, multi-project, composite/included-build, nested-build, and add-on functional/starter topologies without flattening module ownership.
 - [ ] **DISC-03**: The workbench identifies real Java, Kotlin, mixed-language, custom, generated, test, and resource source roots from IDE/imported build evidence instead of hard-coded paths.
-- [ ] **DISC-04**: The workbench reports resolved Jmix platform versions, Gradle plugins, official/third-party/internal add-ons, optional IDE capabilities, and unresolved dependencies without executing arbitrary project code.
+- [x] **DISC-04**: The workbench reports resolved Jmix platform versions, Gradle plugins, official/third-party/internal add-ons, optional IDE capabilities, and unresolved dependencies without executing arbitrary project code.
 - [ ] **DISC-05**: Developers can inspect main and additional data stores, their module ownership, migration roots, and dialect evidence without opening a database connection.
 - [ ] **DISC-06**: Developers can browse an indexed semantic inventory of entities, DTOs, enums, views/controllers, fetch plans, menus, roles, messages, repositories, changelogs, modules, and add-on provenance.
 - [x] **DISC-07**: Every indexed artifact exposes stable identity, owning build/module/source set, source location, origin/provenance, diagnostics, and current revision fingerprint.
@@ -162,17 +162,17 @@
 | PROD-07 | Phase 8 | Pending |
 | PROD-08 | Phase 8 | Pending |
 | COMP-01 | Phase 2 | Complete |
-| COMP-02 | Phase 2 | Pending |
-| COMP-03 | Phase 2 | Pending |
+| COMP-02 | Phase 2 | Complete |
+| COMP-03 | Phase 2 | Complete |
 | COMP-04 | Phase 5 | Pending |
 | COMP-05 | Phase 5 | Pending |
-| COMP-06 | Phase 2 | Pending |
-| COMP-07 | Phase 2 | Pending |
+| COMP-06 | Phase 2 | Complete |
+| COMP-07 | Phase 2 | Complete |
 | COMP-08 | Phase 6 | Pending |
-| DISC-01 | Phase 2 | Pending |
+| DISC-01 | Phase 2 | Complete |
 | DISC-02 | Phase 2 | Pending |
 | DISC-03 | Phase 2 | Pending |
-| DISC-04 | Phase 2 | Pending |
+| DISC-04 | Phase 2 | Complete |
 | DISC-05 | Phase 2 | Pending |
 | DISC-06 | Phase 2 | Pending |
 | DISC-07 | Phase 2 | Complete |
