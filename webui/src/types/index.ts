@@ -350,6 +350,59 @@ export interface WorkspaceChangeApplyResponse {
   issues: WorkspaceChangeIssue[]
 }
 
+// ─── Existing FlowUI round-trip workspace ───────────────────────────────────
+
+export interface FlowUiAttributeSnapshot {
+  name: string
+  value: string
+  rawValue: string
+  sourceStart: number
+  sourceEnd: number
+  valueStart: number
+  valueEnd: number
+  quote: string
+}
+
+export interface FlowUiElementSnapshot {
+  key: string
+  tagName: string
+  localTag: string
+  id?: string
+  parentKey?: string
+  childKeys: string[]
+  sourceStart: number
+  startTagEnd: number
+  endTagStart: number
+  sourceEnd: number
+  selfClosing: boolean
+  attributes: FlowUiAttributeSnapshot[]
+  directText?: string
+}
+
+export interface FlowUiDescriptorSnapshot {
+  relativePath: string
+  revisionFingerprint: string
+  viewId: string
+  rootKey: string
+  sourceText: string
+  elements: FlowUiElementSnapshot[]
+}
+
+export interface FlowUiWorkspaceResponse {
+  accepted: boolean
+  document?: FlowUiDescriptorSnapshot
+  contextArtifacts: GraphArtifact[]
+  contextRelationships: GraphRelationship[]
+  issues: WorkspaceChangeIssue[]
+}
+
+export interface FlowUiPropertyChangeRequest {
+  sourceLocator: GraphSourceLocator
+  elementKey: string
+  propertyName: string
+  value: string
+}
+
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {

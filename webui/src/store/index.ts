@@ -1,5 +1,11 @@
 import { create } from 'zustand'
-import type { EntityModel, ViewModel, RoleModel, ProjectConfig, GenerationResult, AttributeModel } from '../types'
+import type {
+  AttributeModel,
+  EntityModel,
+  GenerationResult,
+  GraphSourceLocator,
+  ProjectConfig,
+} from '../types'
 
 export type ActiveTab = 'projectMap' | 'entity' | 'view' | 'crud' | 'menu' | 'role' | 'migration'
 
@@ -40,6 +46,10 @@ interface AppState {
   activeTab: ActiveTab
   setActiveTab: (tab: ActiveTab) => void
 
+  flowUiLocator: GraphSourceLocator | null
+  openFlowUiDesigner: (locator: GraphSourceLocator) => void
+  closeFlowUiDesigner: () => void
+
   projectConfig: ProjectConfig | null
   setProjectConfig: (config: ProjectConfig) => void
 
@@ -68,6 +78,9 @@ let toastId = 0
 export const useStore = create<AppState>((set, get) => ({
   activeTab: 'projectMap',
   setActiveTab: (tab) => set({ activeTab: tab }),
+  flowUiLocator: null,
+  openFlowUiDesigner: (locator) => set({ activeTab: 'view', flowUiLocator: locator }),
+  closeFlowUiDesigner: () => set({ flowUiLocator: null }),
 
   projectConfig: null,
   setProjectConfig: (config) => set({ projectConfig: config }),

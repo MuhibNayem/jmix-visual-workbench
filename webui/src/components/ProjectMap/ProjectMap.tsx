@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { bridge } from '../../bridge'
+import { useStore } from '../../store'
 import type {
   ApplicationGraphResponse,
   GraphArtifact,
@@ -85,6 +86,7 @@ function severityClass(severity: GraphDiagnostic['severity']): string {
 }
 
 export default function ProjectMap() {
+  const openFlowUiDesigner = useStore((state) => state.openFlowUiDesigner)
   const [graph, setGraph] = useState<ApplicationGraphResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -247,6 +249,7 @@ export default function ProjectMap() {
                   diagnostics={selectedDiagnostics}
                   artifactsById={artifactsById}
                   onNavigate={setSelectedId}
+                  onOpenDesigner={() => openFlowUiDesigner(selected.sourceLocator)}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center text-sm text-gray-500">
@@ -312,6 +315,7 @@ function ArtifactInspector({
   diagnostics,
   artifactsById,
   onNavigate,
+  onOpenDesigner,
 }: {
   artifact: GraphArtifact
   outgoing: GraphRelationship[]
@@ -319,6 +323,7 @@ function ArtifactInspector({
   diagnostics: GraphDiagnostic[]
   artifactsById: Map<string, GraphArtifact>
   onNavigate: (id: string) => void
+  onOpenDesigner: () => void
 }) {
   const [navigationMessage, setNavigationMessage] = useState<string | null>(null)
   const openSource = async () => {
@@ -332,13 +337,24 @@ function ArtifactInspector({
         <div className="text-[10px] uppercase tracking-wider text-jmix-400">{readable(artifact.kind)}</div>
         <h3 className="mt-1 break-words text-xl font-semibold text-gray-100">{artifact.displayName}</h3>
         <p className="mt-1 text-xs text-gray-400">{artifact.summary}</p>
-        <button
-          type="button"
-          onClick={() => void openSource()}
-          className="mt-3 rounded border border-jmix-500/50 bg-jmix-500/10 px-3 py-1.5 text-xs font-medium text-jmix-300 hover:bg-jmix-500/20"
-        >
-          Open source in IntelliJ
-        </button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {artifact.kind === 'VIEW_DESCRIPTOR' && (
+            <button
+              type="button"
+              onClick={onOpenDesigner}
+              className="rounded bg-jmix-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-jmix-600"
+            >
+              Open in round-trip designer
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void openSource()}
+            className="rounded border border-jmix-500/50 bg-jmix-500/10 px-3 py-1.5 text-xs font-medium text-jmix-300 hover:bg-jmix-500/20"
+          >
+            Open source in IntelliJ
+          </button>
+        </div>
         {navigationMessage && (
           <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-100" role="alert">
             {navigationMessage}

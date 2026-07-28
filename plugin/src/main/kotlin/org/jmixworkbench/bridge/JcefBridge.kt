@@ -16,6 +16,11 @@ import org.jmixworkbench.model.*
 import org.jmixworkbench.discovery.change.WorkspaceChangeSet
 import org.jmixworkbench.services.CodeGenerationService
 import org.jmixworkbench.services.ApplicationGraphService
+import org.jmixworkbench.services.FlowUiPropertyChangeRequest
+import org.jmixworkbench.services.FlowUiPropertyApplyRequest
+import org.jmixworkbench.services.FlowUiWorkspaceRequest
+import org.jmixworkbench.services.FlowUiWorkspaceResponse
+import org.jmixworkbench.services.FlowUiWorkspaceService
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
 import org.jmixworkbench.services.SourceNavigationRequest
@@ -92,6 +97,18 @@ class JcefBridge(
             }
             if (action == "navigateToSource") {
                 handleNavigateToSource(action, requestId, payload)
+                return
+            }
+            if (action == "getFlowUiWorkspace") {
+                handleGetFlowUiWorkspace(action, requestId, payload)
+                return
+            }
+            if (action == "previewFlowUiPropertyChange") {
+                handlePreviewFlowUiPropertyChange(action, requestId, payload)
+                return
+            }
+            if (action == "applyFlowUiPropertyChange") {
+                handleApplyFlowUiPropertyChange(action, requestId, payload)
                 return
             }
             if (action == "previewWorkspaceChange") {
@@ -241,6 +258,109 @@ class JcefBridge(
                     ).navigate(true)
                 }
                 sendResponse(action, requestId, gson.toJson(prepared.response()))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleGetFlowUiWorkspace(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiWorkspaceRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    FlowUiWorkspaceResponse(
+                        accepted = false,
+                        document = null,
+                        contextArtifacts = emptyList(),
+                        contextRelationships = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-FLOWUI-REQUEST-INVALID",
+                                message = error.message ?: "The FlowUI workspace request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<FlowUiWorkspaceResponse> {
+            FlowUiWorkspaceService.getInstance(project).load(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { response ->
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewFlowUiPropertyChange(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiPropertyChangeRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    mapOf(
+                        "accepted" to false,
+                        "changeSetId" to "flowui-property:rejected",
+                        "label" to "FlowUI property change rejected",
+                        "files" to emptyList<Any>(),
+                        "issues" to listOf(
+                            mapOf(
+                                "code" to "JVW-FLOWUI-REQUEST-INVALID",
+                                "message" to (error.message ?: "The FlowUI property request is malformed."),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
+            FlowUiWorkspaceService.getInstance(project).previewPropertyChange(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { preview ->
+                sendResponse(action, requestId, gson.toJson(preview))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyFlowUiPropertyChange(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiPropertyApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangeApplyResponse(
+                        success = false,
+                        changeSetId = "flowui-property:rejected",
+                        planDigest = null,
+                        filesChanged = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-FLOWUI-REQUEST-INVALID",
+                                message = error.message ?: "The FlowUI property apply request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            FlowUiWorkspaceService.getInstance(project).preparePropertyChange(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

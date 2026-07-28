@@ -1,5 +1,7 @@
 import type {
   ApplicationGraphResponse,
+  FlowUiPropertyChangeRequest,
+  FlowUiWorkspaceResponse,
   GenerationResult,
   GraphSourceLocator,
   ProjectConfig,
@@ -123,6 +125,21 @@ class Bridge {
 
   navigateToSource(locator: GraphSourceLocator) {
     return this.request<SourceNavigationResponse>('navigateToSource', locator)
+  }
+
+  getFlowUiWorkspace(sourceLocator: GraphSourceLocator) {
+    return this.request<FlowUiWorkspaceResponse>('getFlowUiWorkspace', { sourceLocator })
+  }
+
+  previewFlowUiPropertyChange(change: FlowUiPropertyChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiPropertyChange', change)
+  }
+
+  applyFlowUiPropertyChange(change: FlowUiPropertyChangeRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiPropertyChange', {
+      change,
+      expectedPlanDigest,
+    })
   }
 
   previewWorkspaceChange(changeSet: WorkspaceChangeSet) {

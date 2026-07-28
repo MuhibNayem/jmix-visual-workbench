@@ -10,6 +10,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
+import ExistingFlowUiDesigner from './ExistingFlowUiDesigner'
 import type {
   ComponentModel, ComponentType, DataContainerModel, ViewModel, ViewType,
 } from '../../types'
@@ -491,6 +492,14 @@ function SectionHeader({ icon: Icon, title, count, action }: {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 export default function ViewDesigner() {
+  const flowUiLocator = useStore((state) => state.flowUiLocator)
+  const closeFlowUiDesigner = useStore((state) => state.closeFlowUiDesigner)
+  return flowUiLocator
+    ? <ExistingFlowUiDesigner initialLocator={flowUiLocator} onClose={closeFlowUiDesigner} />
+    : <NewViewDesigner />
+}
+
+function NewViewDesigner() {
   const { projectConfig, addToast, isGenerating, setIsGenerating, setLastResult } = useStore()
 
   const [view, setView] = useState<ViewModel>(() => ({
