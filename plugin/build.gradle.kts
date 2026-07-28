@@ -2,6 +2,7 @@ import com.github.gradle.node.npm.task.NpmTask
 import org.jmixworkbench.build.AssembleWebBundleTask
 import org.jmixworkbench.build.VerifyPluginZipContentsTask
 import org.jmixworkbench.build.VerifyWebBundleTask
+import org.gradle.api.tasks.testing.Test
 import java.io.File
 import java.security.MessageDigest
 import java.util.HexFormat
@@ -9,10 +10,66 @@ import java.util.HexFormat
 plugins {
     base
     alias(libs.plugins.node)
+    alias(libs.plugins.kotlin.jvm)
 }
 
 group = providers.gradleProperty("pluginGroup").get()
 version = providers.gradleProperty("pluginVersion").get()
+
+repositories {
+    // Node plugin 7.1.0 adds its distribution Ivy repository at project scope,
+    // so aggregate JVM dependencies must use the reviewed project-level mirror too.
+    mavenCentral()
+}
+
+val phase2CoreSourceSet = sourceSets.create("phase2Core") {
+    kotlin.setSrcDirs(listOf("src/main/kotlin"))
+    kotlin.include(
+        "org/jmixworkbench/discovery/model/**",
+        "org/jmixworkbench/discovery/compatibility/**",
+        "org/jmixworkbench/discovery/static/GradleConfigParser.kt",
+    )
+    resources.setSrcDirs(listOf("src/main/resources"))
+    resources.include("compatibility/phase2-registry.json")
+}
+
+val phase2CoreTestSourceSet = sourceSets.create("phase2CoreTest") {
+    kotlin.setSrcDirs(listOf("src/phase2CoreTest/kotlin"))
+    resources.setSrcDirs(listOf("src/phase2CoreTest/resources"))
+    compileClasspath += phase2CoreSourceSet.output
+    runtimeClasspath += output + compileClasspath
+}
+
+configurations.named(phase2CoreTestSourceSet.implementationConfigurationName) {
+    extendsFrom(configurations[phase2CoreSourceSet.implementationConfigurationName])
+}
+
+dependencies {
+    add(phase2CoreTestSourceSet.implementationConfigurationName, kotlin("test-junit5"))
+    add(
+        phase2CoreTestSourceSet.runtimeOnlyConfigurationName,
+        "org.junit.jupiter:junit-jupiter-engine:5.10.1",
+    )
+    add(
+        phase2CoreTestSourceSet.runtimeOnlyConfigurationName,
+        "org.junit.platform:junit-platform-launcher:1.10.1",
+    )
+}
+
+val phase2CoreTest = tasks.register<Test>("phase2CoreTest") {
+    description = "Runs platform-independent Phase 2 discovery contract tests."
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    testClassesDirs = phase2CoreTestSourceSet.output.classesDirs
+    classpath = phase2CoreTestSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    reports.junitXml.required.set(true)
+}
+
+tasks.register("phase2FastCheck") {
+    description = "Runs the currently available fast Phase 2 verification lanes."
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    dependsOn(phase2CoreTest)
+}
 
 val webUiDirectory = layout.projectDirectory.dir("../webui")
 val stagedWebUiDirectory = layout.buildDirectory.dir("webui-dist")
