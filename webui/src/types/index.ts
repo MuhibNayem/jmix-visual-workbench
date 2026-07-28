@@ -504,6 +504,15 @@ export interface FlowUiControllerInjectionRequest {
   entityClass?: string
 }
 
+export type FlowUiControllerHandlerKind = 'VIEW_INIT' | 'VIEW_BEFORE_SHOW' | 'VIEW_READY' | 'BUTTON_CLICK'
+
+export interface FlowUiControllerHandlerRequest {
+  controllerLocator: GraphSourceLocator
+  kind: FlowUiControllerHandlerKind
+  componentId?: string
+  componentTag?: string
+}
+
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {

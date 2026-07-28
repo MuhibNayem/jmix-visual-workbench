@@ -25,8 +25,9 @@ class FlowUiControllerChangeService(
 ) {
     fun previewInjection(request: FlowUiControllerInjectionRequest): WorkspaceChangePreviewResponse {
         val proposal = proposeInjection(request)
-        if (!proposal.accepted) return proposal.preview()
-        val changeSet = proposal.changeSet ?: return proposal.preview()
+        if (!proposal.accepted) return proposal.preview("flowui-controller-injection", "Controller injection")
+        val changeSet = proposal.changeSet
+            ?: return proposal.preview("flowui-controller-injection", "Controller injection")
         return WorkspaceChangeService.getInstance(project).preview(changeSet)
     }
 
@@ -46,6 +47,43 @@ class FlowUiControllerChangeService(
                             WorkspaceChangeIssue(
                                 code = "JVW-CONTROLLER-NO-CHANGE",
                                 message = "The component is already injected into this controller.",
+                                relativePath = request.change.controllerLocator.relativePath,
+                            ),
+                        )
+                    },
+                ),
+                baseDir = null,
+            )
+        }
+        return WorkspaceChangeService.getInstance(project).prepareApply(
+            WorkspaceChangeApplyRequest(changeSet, request.expectedPlanDigest),
+        )
+    }
+
+    fun previewHandler(request: FlowUiControllerHandlerRequest): WorkspaceChangePreviewResponse {
+        val proposal = proposeHandler(request)
+        if (!proposal.accepted) return proposal.preview("flowui-controller-handler", "Controller handler")
+        val changeSet = proposal.changeSet
+            ?: return proposal.preview("flowui-controller-handler", "Controller handler")
+        return WorkspaceChangeService.getInstance(project).preview(changeSet)
+    }
+
+    fun prepareHandler(request: FlowUiControllerHandlerApplyRequest): PreparedWorkspaceChange {
+        val proposal = proposeHandler(request.change)
+        val changeSet = proposal.changeSet
+        if (!proposal.accepted || changeSet == null) {
+            return PreparedWorkspaceChange(
+                plan = WorkspaceChangePlan(
+                    accepted = false,
+                    changeSetId = "flowui-controller-handler:rejected",
+                    label = "Controller handler rejected",
+                    planDigest = null,
+                    files = emptyList(),
+                    issues = proposal.issues.ifEmpty {
+                        listOf(
+                            WorkspaceChangeIssue(
+                                code = "JVW-CONTROLLER-NO-CHANGE",
+                                message = "An equivalent handler already exists in this controller.",
                                 relativePath = request.change.controllerLocator.relativePath,
                             ),
                         )
@@ -161,6 +199,166 @@ class FlowUiControllerChangeService(
             issues = emptyList(),
         )
     }
+
+    private fun proposeHandler(request: FlowUiControllerHandlerRequest): ControllerChangeProposal {
+        if (request.kind == FlowUiControllerHandlerKind.BUTTON_CLICK &&
+            (request.componentId.isNullOrBlank() || request.componentTag?.substringAfter(':') != "button")
+        ) {
+            return rejected(
+                "JVW-CONTROLLER-HANDLER-TARGET-INVALID",
+                "A button click handler requires a selected button with an id.",
+                request.controllerLocator.relativePath,
+            )
+        }
+        val loaded = loadController(request.controllerLocator)
+        val psiFile = loaded.psiFile
+            ?: return ControllerChangeProposal(false, null, loaded.issues)
+        val controllerClass = loaded.controllerClass
+            ?: return ControllerChangeProposal(false, null, loaded.issues)
+        val handler = handlerTemplate(request)
+        if (!SourceVersion.isIdentifier(handler.methodName) || SourceVersion.isKeyword(handler.methodName)) {
+            return rejected(
+                "JVW-CONTROLLER-METHOD-NAME-INVALID",
+                "The generated handler method name is not a valid Java identifier.",
+                request.controllerLocator.relativePath,
+            )
+        }
+        val equivalent = controllerClass.methods.any { method ->
+            val subscribe = method.annotations.firstOrNull { it.shortName() == "Subscribe" }
+                ?: return@any false
+            val target = subscribe.stringAttribute("id")
+                ?: subscribe.stringAttribute("value")
+            val subject = subscribe.stringAttribute("subject")
+            when (request.kind) {
+                FlowUiControllerHandlerKind.BUTTON_CLICK ->
+                    target == request.componentId &&
+                        (subject == null || subject == "clickListener") &&
+                        method.parameterList.parameters.any {
+                            it.type.canonicalText.endsWith("ClickEvent") ||
+                                it.type.canonicalText.contains("ClickEvent<")
+                        }
+                else ->
+                    target.isNullOrBlank() &&
+                        method.parameterList.parameters.any {
+                            it.type.canonicalText.endsWith(".${handler.eventSimpleName}") ||
+                                it.type.canonicalText == handler.eventSimpleName
+                        }
+            }
+        }
+        if (equivalent) return ControllerChangeProposal(true, null, emptyList())
+        if (controllerClass.findMethodsByName(handler.methodName, false).isNotEmpty()) {
+            return rejected(
+                "JVW-CONTROLLER-METHOD-CONFLICT",
+                "A method named '${handler.methodName}' already exists but is not the requested handler.",
+                request.controllerLocator.relativePath,
+            )
+        }
+
+        val edits = mutableListOf<WorkspaceTextEdit>()
+        addImportEdit(
+            psiFile = psiFile,
+            requiredImports = handler.imports,
+        )?.let(edits::add)
+        val rBrace = controllerClass.rBrace
+            ?: return rejected(
+                "JVW-CONTROLLER-CLASS-MALFORMED",
+                "The controller class body cannot be edited safely.",
+                request.controllerLocator.relativePath,
+            )
+        val indent = memberIndent(loaded.content, controllerClass)
+        val methodText = buildString {
+            append("\n\n")
+            append(indent).append(handler.annotation).append('\n')
+            append(indent).append("public void ").append(handler.methodName)
+                .append("(final ").append(handler.eventType).append(" event) {\n")
+            append(indent).append("}\n")
+        }
+        edits += WorkspaceTextEdit(
+            startOffset = rBrace.textRange.startOffset,
+            endOffset = rBrace.textRange.startOffset,
+            expectedText = "",
+            replacement = methodText,
+        )
+        val identity = "${request.controllerLocator.relativePath}\u0000${request.kind}\u0000${request.componentId}"
+        return ControllerChangeProposal(
+            accepted = true,
+            changeSet = WorkspaceChangeSet(
+                id = "flowui-controller-handler:${CanonicalDiscoveryJson.sha256(identity).take(24)}",
+                label = "Add ${handler.methodName} to ${controllerClass.name}",
+                files = listOf(
+                    WorkspaceFileChange(
+                        relativePath = request.controllerLocator.relativePath,
+                        mode = WorkspaceFileChangeMode.MODIFY,
+                        baseRevisionFingerprint = loaded.fingerprint,
+                        edits = edits.sortedBy(WorkspaceTextEdit::startOffset),
+                    ),
+                ),
+            ),
+            issues = emptyList(),
+        )
+    }
+
+    private fun handlerTemplate(request: FlowUiControllerHandlerRequest): ControllerHandlerTemplate =
+        when (request.kind) {
+            FlowUiControllerHandlerKind.VIEW_INIT -> ControllerHandlerTemplate(
+                methodName = "onInit",
+                annotation = "@Subscribe",
+                eventType = "InitEvent",
+                eventSimpleName = "InitEvent",
+                imports = setOf(SUBSCRIBE_IMPORT, "io.jmix.flowui.view.View.InitEvent"),
+            )
+            FlowUiControllerHandlerKind.VIEW_BEFORE_SHOW -> ControllerHandlerTemplate(
+                methodName = "onBeforeShow",
+                annotation = "@Subscribe",
+                eventType = "BeforeShowEvent",
+                eventSimpleName = "BeforeShowEvent",
+                imports = setOf(SUBSCRIBE_IMPORT, "io.jmix.flowui.view.View.BeforeShowEvent"),
+            )
+            FlowUiControllerHandlerKind.VIEW_READY -> ControllerHandlerTemplate(
+                methodName = "onReady",
+                annotation = "@Subscribe",
+                eventType = "ReadyEvent",
+                eventSimpleName = "ReadyEvent",
+                imports = setOf(SUBSCRIBE_IMPORT, "io.jmix.flowui.view.View.ReadyEvent"),
+            )
+            FlowUiControllerHandlerKind.BUTTON_CLICK -> {
+                val componentId = request.componentId.orEmpty()
+                ControllerHandlerTemplate(
+                    methodName = "on${componentId.replaceFirstChar { it.uppercaseChar() }}Click",
+                    annotation = "@Subscribe(id = \"${escapeJavaString(componentId)}\", subject = \"clickListener\")",
+                    eventType = "ClickEvent<JmixButton>",
+                    eventSimpleName = "ClickEvent",
+                    imports = setOf(
+                        SUBSCRIBE_IMPORT,
+                        "com.vaadin.flow.component.ClickEvent",
+                        "io.jmix.flowui.kit.component.button.JmixButton",
+                    ),
+                )
+            }
+        }
+
+    private fun addImportEdit(
+        psiFile: PsiJavaFile,
+        requiredImports: Set<String>,
+    ): WorkspaceTextEdit? {
+        val missing = requiredImports.filterNot { psiFile.hasImport(it) }
+        if (missing.isEmpty()) return null
+        val importList = psiFile.importList ?: return null
+        val existingImports = importList.allImportStatements
+        val importOffset = existingImports.lastOrNull()?.textRange?.endOffset
+            ?: psiFile.packageStatement?.textRange?.endOffset
+            ?: 0
+        val importText = missing.sorted().joinToString("\n") { "import $it;" }
+        val replacement = when {
+            existingImports.isNotEmpty() -> "\n$importText"
+            importOffset > 0 -> "\n\n$importText"
+            else -> "$importText\n\n"
+        }
+        return WorkspaceTextEdit(importOffset, importOffset, "", replacement)
+    }
+
+    private fun escapeJavaString(value: String): String =
+        value.replace("\\", "\\\\").replace("\"", "\\\"")
 
     private fun loadController(locator: SourceLocator): LoadedJavaController {
         val validation = SourceNavigationPolicy.validate(
@@ -338,6 +536,7 @@ class FlowUiControllerChangeService(
 
     companion object {
         private const val VIEW_COMPONENT_IMPORT = "io.jmix.flowui.view.ViewComponent"
+        private const val SUBSCRIBE_IMPORT = "io.jmix.flowui.view.Subscribe"
         private const val MAX_CONTROLLER_BYTES = 2L * 1024 * 1024
         private val JAVA_QUALIFIED_NAME = Regex("""[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
 
@@ -358,8 +557,35 @@ data class FlowUiControllerInjectionApplyRequest(
     val expectedPlanDigest: String,
 )
 
+enum class FlowUiControllerHandlerKind {
+    VIEW_INIT,
+    VIEW_BEFORE_SHOW,
+    VIEW_READY,
+    BUTTON_CLICK,
+}
+
+data class FlowUiControllerHandlerRequest(
+    val controllerLocator: SourceLocator,
+    val kind: FlowUiControllerHandlerKind,
+    val componentId: String? = null,
+    val componentTag: String? = null,
+)
+
+data class FlowUiControllerHandlerApplyRequest(
+    val change: FlowUiControllerHandlerRequest,
+    val expectedPlanDigest: String,
+)
+
 private data class ControllerFieldType(
     val sourceType: String,
+    val imports: Set<String>,
+)
+
+private data class ControllerHandlerTemplate(
+    val methodName: String,
+    val annotation: String,
+    val eventType: String,
+    val eventSimpleName: String,
     val imports: Set<String>,
 )
 
@@ -368,10 +594,10 @@ private data class ControllerChangeProposal(
     val changeSet: WorkspaceChangeSet?,
     val issues: List<WorkspaceChangeIssue>,
 ) {
-    fun preview() = WorkspaceChangePreviewResponse(
+    fun preview(prefix: String, label: String) = WorkspaceChangePreviewResponse(
         accepted = accepted,
-        changeSetId = changeSet?.id ?: if (accepted) "flowui-controller-injection:no-change" else "flowui-controller-injection:rejected",
-        label = changeSet?.label ?: if (accepted) "No controller source change required" else "Controller injection rejected",
+        changeSetId = changeSet?.id ?: if (accepted) "$prefix:no-change" else "$prefix:rejected",
+        label = changeSet?.label ?: if (accepted) "No controller source change required" else "$label rejected",
         planDigest = null,
         files = emptyList(),
         issues = issues,

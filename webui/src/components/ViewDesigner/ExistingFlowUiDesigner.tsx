@@ -8,6 +8,8 @@ import type {
   FlowUiElementSnapshot,
   FlowUiDirectTextChangeRequest,
   FlowUiControllerInjectionRequest,
+  FlowUiControllerHandlerKind,
+  FlowUiControllerHandlerRequest,
   FlowUiPropertyChangeRequest,
   FlowUiStructureChangeRequest,
   FlowUiWorkspaceResponse,
@@ -162,8 +164,12 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     change: FlowUiDirectTextChangeRequest
     preview: WorkspaceChangePreviewResponse
   } | {
-    kind: 'controller'
+    kind: 'controllerInjection'
     change: FlowUiControllerInjectionRequest
+    preview: WorkspaceChangePreviewResponse
+  } | {
+    kind: 'controllerHandler'
+    change: FlowUiControllerHandlerRequest
     preview: WorkspaceChangePreviewResponse
   } | null>(null)
 
@@ -292,7 +298,33 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       addToast('This component is already injected into the controller.', 'info')
       return
     }
-    setPending({ kind: 'controller', change, preview })
+    setPending({ kind: 'controllerInjection', change, preview })
+  }
+
+  const previewControllerHandler = async (
+    kind: FlowUiControllerHandlerKind,
+    component?: FlowUiElementSnapshot,
+  ) => {
+    if (!workspace?.controllerModel?.psiSupported) return
+    const change: FlowUiControllerHandlerRequest = {
+      controllerLocator: {
+        relativePath: workspace.controllerModel.relativePath,
+        revisionFingerprint: workspace.controllerModel.revisionFingerprint,
+      },
+      kind,
+      componentId: component?.id,
+      componentTag: component?.localTag,
+    }
+    const preview = await bridge.previewFlowUiControllerHandler(change)
+    if (!preview.accepted) {
+      addToast(preview.issues[0]?.message ?? 'Controller handler generation was rejected.', 'error')
+      return
+    }
+    if (!preview.planDigest || preview.files.length === 0) {
+      addToast('An equivalent controller handler already exists.', 'info')
+      return
+    }
+    setPending({ kind: 'controllerHandler', change, preview })
   }
 
   const applyPending = async () => {
@@ -305,13 +337,20 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           ? await bridge.applyFlowUiStructureChange(pending.change, pending.preview.planDigest)
           : pending.kind === 'text'
             ? await bridge.applyFlowUiDirectTextChange(pending.change, pending.preview.planDigest)
-            : await bridge.applyFlowUiControllerInjection(pending.change, pending.preview.planDigest)
+            : pending.kind === 'controllerInjection'
+              ? await bridge.applyFlowUiControllerInjection(pending.change, pending.preview.planDigest)
+              : await bridge.applyFlowUiControllerHandler(pending.change, pending.preview.planDigest)
       if (!result.success) {
         addToast(result.issues[0]?.message ?? 'The FlowUI source change failed.', 'error')
         return
       }
-      if (pending.kind === 'controller') {
-        addToast('Component injection added to the existing controller without replacing Java code.', 'success')
+      if (pending.kind === 'controllerInjection' || pending.kind === 'controllerHandler') {
+        addToast(
+          pending.kind === 'controllerInjection'
+            ? 'Component injection added without replacing Java code.'
+            : 'Controller handler added without replacing Java code.',
+          'success',
+        )
         await load(locator)
         return
       }
@@ -505,7 +544,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                         ? <>{pending.change.operation.replace(/_/g, ' ').toLowerCase()} {pending.change.tagName ?? ''}</>
                         : pending.kind === 'text'
                           ? <>update direct query/text value</>
-                          : <>inject {pending.change.componentId} into controller</>}
+                          : pending.kind === 'controllerInjection'
+                            ? <>inject {pending.change.componentId} into controller</>
+                            : <>generate {pending.change.kind.replace(/_/g, ' ').toLowerCase()} handler</>}
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -657,6 +698,15 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                         Preview Inject to Controller
                       </button>
                     )}
+                    {selected.localTag === 'button' && (
+                      <button
+                        type="button"
+                        onClick={() => void previewControllerHandler('BUTTON_CLICK', selected)}
+                        className={`${quietButton} mt-1.5`}
+                      >
+                        Preview Click Handler
+                      </button>
+                    )}
                   </div>
                 )}
                 <div className="border-t border-surface-border pt-2">
@@ -743,6 +793,24 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                     <p className="mt-1 text-[9px] leading-relaxed text-amber-300/70">
                       {workspace.controllerModel.message}
                     </p>
+                  )}
+                  {workspace.controllerModel.psiSupported && (
+                    <div className="mt-2 grid grid-cols-3 gap-1">
+                      {([
+                        ['VIEW_INIT', 'Init'],
+                        ['VIEW_BEFORE_SHOW', 'Before show'],
+                        ['VIEW_READY', 'Ready'],
+                      ] as const).map(([kind, label]) => (
+                        <button
+                          type="button"
+                          key={kind}
+                          onClick={() => void previewControllerHandler(kind)}
+                          className={quietButton}
+                        >
+                          + {label}
+                        </button>
+                      ))}
+                    </div>
                   )}
                 </div>
               )}

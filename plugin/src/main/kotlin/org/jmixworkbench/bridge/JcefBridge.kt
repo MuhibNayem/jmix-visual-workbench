@@ -28,6 +28,8 @@ import org.jmixworkbench.services.FlowUiDirectTextChangeRequest
 import org.jmixworkbench.services.FlowUiControllerInjectionApplyRequest
 import org.jmixworkbench.services.FlowUiControllerInjectionRequest
 import org.jmixworkbench.services.FlowUiControllerChangeService
+import org.jmixworkbench.services.FlowUiControllerHandlerApplyRequest
+import org.jmixworkbench.services.FlowUiControllerHandlerRequest
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
 import org.jmixworkbench.services.SourceNavigationRequest
@@ -140,6 +142,14 @@ class JcefBridge(
             }
             if (action == "applyFlowUiControllerInjection") {
                 handleApplyFlowUiControllerInjection(action, requestId, payload)
+                return
+            }
+            if (action == "previewFlowUiControllerHandler") {
+                handlePreviewFlowUiControllerHandler(action, requestId, payload)
+                return
+            }
+            if (action == "applyFlowUiControllerHandler") {
+                handleApplyFlowUiControllerHandler(action, requestId, payload)
                 return
             }
             if (action == "previewWorkspaceChange") {
@@ -594,6 +604,75 @@ class JcefBridge(
         }
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiControllerChangeService.getInstance(project).prepareInjection(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewFlowUiControllerHandler(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiControllerHandlerRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    mapOf(
+                        "accepted" to false,
+                        "changeSetId" to "flowui-controller-handler:rejected",
+                        "label" to "Controller handler rejected",
+                        "files" to emptyList<Any>(),
+                        "issues" to listOf(
+                            mapOf(
+                                "code" to "JVW-CONTROLLER-REQUEST-INVALID",
+                                "message" to (error.message ?: "The controller handler request is malformed."),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
+            FlowUiControllerChangeService.getInstance(project).previewHandler(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { preview ->
+                sendResponse(action, requestId, gson.toJson(preview))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyFlowUiControllerHandler(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiControllerHandlerApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangeApplyResponse(
+                        success = false,
+                        changeSetId = "flowui-controller-handler:rejected",
+                        planDigest = null,
+                        filesChanged = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-CONTROLLER-REQUEST-INVALID",
+                                message = error.message ?: "The controller handler apply request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            FlowUiControllerChangeService.getInstance(project).prepareHandler(request)
         }
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
