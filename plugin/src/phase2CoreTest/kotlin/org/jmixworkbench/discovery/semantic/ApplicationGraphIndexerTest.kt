@@ -248,16 +248,40 @@ class ApplicationGraphIndexerTest {
                         @ViewController("payroll_LoanApp.detail")
                         @ViewDescriptor("loan-detail-view.xml")
                         public class LoanDetailView {
+                            private LoanService loanService;
                             @ViewComponent
                             private InstanceContainer<LoanApp> loanAppDc;
                             @ViewComponent("approveButton")
                             private Button approve;
 
                             @Subscribe("approveButton")
-                            public void onApprove(ClickEvent<Button> event) {}
+                            public void onApprove(ClickEvent<Button> event) {
+                                loanService.approve(loanAppDc.getItem());
+                            }
 
                             @Subscribe(id = "loanAppDc", target = Target.DATA_CONTAINER)
                             public void onLoanChanged(InstanceContainer.ItemChangeEvent<LoanApp> event) {}
+                        }
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "loan/src/main/java/com/acme/payroll/LoanSideEffects.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.payroll;
+                        @Component
+                        public class LoanSideEffects {
+                            private LoanService loanService;
+
+                            @TransactionalEventListener
+                            public void afterCommit(EntityChangedEvent<LoanApp> event) {
+                                loanService.approve(event.getEntity());
+                            }
+
+                            @Scheduled(cron = "0 0 1 * * *")
+                            public void reconcile() {
+                                loanService.reconcile();
+                            }
                         }
                         """.trimIndent(),
                     ),
@@ -368,6 +392,23 @@ class ApplicationGraphIndexerTest {
         assertTrue(relationships.getValue(RelationshipType.IMPLEMENTED_BY).any { it.targetArtifactId != null })
         assertTrue(relationships.getValue(RelationshipType.CONFIGURES).all { it.targetArtifactId != null })
         assertTrue(relationships.getValue(RelationshipType.MIGRATES).any { it.targetArtifactId != null })
+        assertTrue(relationships.getValue(RelationshipType.LISTENS_TO).any { it.targetArtifactId != null })
+        val artifactsById = result.artifacts.associateBy { it.id }
+        assertTrue(
+            relationships.getValue(RelationshipType.CALLS_SERVICE).any { relationship ->
+                artifactsById[relationship.sourceArtifactId]?.kind in setOf(
+                    ArtifactKind.VIEW_HANDLER,
+                    ArtifactKind.EVENT_LISTENER,
+                    ArtifactKind.SCHEDULED_JOB,
+                ) && relationship.targetArtifactId != null
+            },
+        )
+        assertTrue(
+            relationships.getValue(RelationshipType.USES_ENTITY).any { relationship ->
+                artifactsById[relationship.sourceArtifactId]?.kind == ArtifactKind.SERVICE_METHOD &&
+                    relationship.targetArtifactId != null
+            },
+        )
 
         val reasonCodes = result.diagnostics.map { it.reasonCode }.toSet()
         assertTrue("P2_REST_QUERY_PARAMETER_MISMATCH" in reasonCodes)
@@ -410,12 +451,32 @@ class ApplicationGraphIndexerTest {
                         }
                         """.trimIndent(),
                     ),
+                    source(
+                        "integration/src/main/java/com/acme/SmsQueue.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme;
+                        @JmixEntity
+                        @Entity
+                        @Table(name = "SMS_QUEUE")
+                        public class SmsQueue {
+                            @Id
+                            private UUID id;
+                        }
+                        """.trimIndent(),
+                    ),
                 ),
             ),
         )
 
         assertEquals(1, result.artifacts.count { it.kind == ArtifactKind.SOURCE_TYPE })
         assertEquals(1, result.artifacts.count { it.kind == ArtifactKind.SERVICE })
+        assertEquals(1, result.artifacts.count { it.kind == ArtifactKind.DATABASE_OPERATION })
+        assertTrue(
+            result.relationships.any {
+                it.type == RelationshipType.WRITES_ENTITY && it.targetArtifactId != null
+            },
+        )
         val reasonCodes = result.diagnostics.map { it.reasonCode }.toSet()
         assertTrue("P2_UNCONSTRAINED_DATA_ACCESS" in reasonCodes)
         assertTrue("P2_NATIVE_SQL_WRITE" in reasonCodes)

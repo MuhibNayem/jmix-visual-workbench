@@ -131,6 +131,7 @@ class ApplicationGraphIndexer {
             symbol = semanticKey,
             aliases = aliases,
             token = typeName,
+            analysisText = file.content,
         )
 
         if (primaryKind == ArtifactKind.ENTITY) {
@@ -175,9 +176,9 @@ class ApplicationGraphIndexer {
         }
 
         val mappedMethods = KOTLIN_MAPPED_METHOD.findAll(file.content).map { match ->
-            MappedMethod(match.groupValues[1], match.groupValues[2], match.groupValues[3])
+            MappedMethod(match.groupValues[1], match.groupValues[2], match.groupValues[3], match.range.last + 1)
         } + JAVA_MAPPED_METHOD.findAll(file.content).map { match ->
-            MappedMethod(match.groupValues[1], match.groupValues[2], match.groupValues[3])
+            MappedMethod(match.groupValues[1], match.groupValues[2], match.groupValues[3], match.range.last + 1)
         }
         mappedMethods.forEach { method ->
             val mapping = mappingVerb(method.annotation)
@@ -193,6 +194,7 @@ class ApplicationGraphIndexer {
                 symbol = "$semanticKey#$methodName",
                 aliases = setOf("$semanticKey#$methodName", "$mapping $path", path),
                 token = methodName,
+                analysisText = file.memberSnippet(method.bodyAnchor),
             )
             links += primary.link(endpoint, RelationshipType.EXPOSES_ENDPOINT, file.locator(methodName, semanticKey))
         }
@@ -209,8 +211,17 @@ class ApplicationGraphIndexer {
                 symbol = "$semanticKey#$methodName",
                 aliases = setOf("$semanticKey#$methodName", methodName),
                 token = methodName,
+                analysisText = file.memberSnippet(match.range.last + 1),
             )
             links += primary.link(listener, RelationshipType.DECLARES, file.locator(methodName, semanticKey))
+            ENTITY_EVENT_TARGET.find(listener.analysisText.orEmpty())?.groupValues?.get(1)?.let { entity ->
+                links += listener.link(
+                    entity,
+                    RelationshipType.LISTENS_TO,
+                    setOf(ArtifactKind.ENTITY),
+                    file.locator(entity, "$semanticKey#$methodName"),
+                )
+            }
         }
 
         SCHEDULED_METHOD.findAll(file.content).forEach { match ->
@@ -225,8 +236,33 @@ class ApplicationGraphIndexer {
                 symbol = "$semanticKey#$methodName",
                 aliases = setOf("$semanticKey#$methodName", methodName),
                 token = methodName,
+                analysisText = file.memberSnippet(match.range.last + 1),
             )
             links += primary.link(job, RelationshipType.SCHEDULED_BY, file.locator(methodName, semanticKey))
+        }
+
+        NATIVE_SQL_STATEMENT.findAll(file.content).forEachIndexed { index, match ->
+            val operationName = match.groupValues[1].uppercase()
+            val tableName = match.groupValues[2]
+            val operation = addArtifact(
+                artifacts = artifacts,
+                file = file,
+                kind = ArtifactKind.DATABASE_OPERATION,
+                semanticKey = "$semanticKey#$operationName:$tableName:${index + 1}",
+                displayName = "$operationName $tableName",
+                summary = "Native SQL write declared by $typeName",
+                symbol = semanticKey,
+                aliases = setOf("$semanticKey#$operationName:$tableName:${index + 1}"),
+                token = match.value,
+                analysisText = match.value,
+            )
+            links += primary.link(operation, RelationshipType.DECLARES, file.locator(match.value, semanticKey))
+            links += operation.link(
+                tableName,
+                RelationshipType.WRITES_ENTITY,
+                setOf(ArtifactKind.ENTITY),
+                file.locator(tableName, semanticKey),
+            )
         }
 
         ROLE_REFERENCES.findAll(file.content).forEach { match ->
@@ -366,6 +402,7 @@ class ApplicationGraphIndexer {
                 symbol = "$semanticKey#$methodName",
                 aliases = setOf("$semanticKey#$methodName", methodName),
                 token = methodName,
+                analysisText = file.memberSnippet(match.range.last + 1),
             )
             links += controller.link(handler, RelationshipType.DECLARES, file.locator(methodName, "$semanticKey#$methodName"))
             if (targetId.isNotBlank()) {
@@ -391,6 +428,7 @@ class ApplicationGraphIndexer {
                 symbol = "$semanticKey#$methodName",
                 aliases = setOf("$semanticKey#$methodName", methodName),
                 token = methodName,
+                analysisText = file.memberSnippet(match.range.last + 1),
             )
             links += controller.link(handler, RelationshipType.DECLARES, file.locator(methodName, "$semanticKey#$methodName"))
             links += handler.link(
@@ -415,10 +453,10 @@ class ApplicationGraphIndexer {
             .toSet()
         val declarations = buildList {
             JAVA_METHOD_DECLARATION.findAll(file.content).forEach { match ->
-                add(MethodDeclaration(match.groupValues[1]))
+                add(MethodDeclaration(match.groupValues[1], match.range.last + 1))
             }
             KOTLIN_METHOD_DECLARATION.findAll(file.content).forEach { match ->
-                add(MethodDeclaration(match.groupValues[1]))
+                add(MethodDeclaration(match.groupValues[1], match.range.last + 1))
             }
         }.distinctBy(MethodDeclaration::name)
             .filterNot { it.name == typeName || it.name in METHOD_KEYWORDS }
@@ -436,6 +474,7 @@ class ApplicationGraphIndexer {
                 symbol = "$semanticKey#${declaration.name}",
                 aliases = aliases,
                 token = declaration.name,
+                analysisText = file.memberSnippet(declaration.bodyAnchor),
             )
             links += service.link(
                 method,
@@ -1309,8 +1348,9 @@ class ApplicationGraphIndexer {
         files.forEach { file ->
             val owners = sourceArtifacts[file.relativePath].orEmpty()
             owners.forEach { source ->
+                val evidenceText = source.analysisText ?: return@forEach
                 entities.filterNot { it.id == source.id }.forEach { entity ->
-                    if (entity.aliases.any { alias -> containsSymbol(file.content, alias) }) {
+                    if (entity.aliases.any { alias -> containsSymbol(evidenceText, alias) }) {
                         links += source.link(
                             entity,
                             RelationshipType.USES_ENTITY,
@@ -1319,7 +1359,7 @@ class ApplicationGraphIndexer {
                     }
                 }
                 services.filterNot { it.id == source.id }.forEach { service ->
-                    if (service.aliases.any { alias -> containsSymbol(file.content, alias) }) {
+                    if (service.aliases.any { alias -> containsSymbol(evidenceText, alias) }) {
                         links += source.link(
                             service,
                             RelationshipType.CALLS_SERVICE,
@@ -1328,7 +1368,7 @@ class ApplicationGraphIndexer {
                     }
                 }
                 workflows.forEach { workflow ->
-                    if (workflow.aliases.any { alias -> containsSymbol(file.content, alias) }) {
+                    if (workflow.aliases.any { alias -> containsSymbol(evidenceText, alias) }) {
                         links += source.link(
                             workflow,
                             RelationshipType.PARTICIPATES_IN_WORKFLOW,
@@ -1395,6 +1435,7 @@ class ApplicationGraphIndexer {
         symbol: String?,
         aliases: Set<String>,
         token: String,
+        analysisText: String? = null,
     ): DetectedArtifact {
         val id = CanonicalDiscoveryJson.artifactId(kind, file.owner.buildId, file.owner.moduleId, semanticKey)
         return artifacts.getOrPut(id) {
@@ -1415,6 +1456,7 @@ class ApplicationGraphIndexer {
                 semanticKey = semanticKey,
                 displayName = displayName,
                 aliases = (aliases + semanticKey + displayName).filter(String::isNotBlank).toSet(),
+                analysisText = analysisText,
             )
         }
     }
@@ -1520,6 +1562,56 @@ class ApplicationGraphIndexer {
     private fun GraphSourceFile.classpathResourcePath(): String =
         relativePath.substringAfter("/src/main/resources/", relativePath)
 
+    private fun GraphSourceFile.memberSnippet(anchor: Int): String {
+        val safeAnchor = anchor.coerceIn(0, content.length)
+        val declarationEnd = (safeAnchor + 1_500).coerceAtMost(content.length)
+        val openingBrace = content.indexOf('{', safeAnchor).takeIf { it in safeAnchor until declarationEnd }
+            ?: return content.substring(safeAnchor, declarationEnd)
+        val maximumEnd = (openingBrace + 12_000).coerceAtMost(content.length)
+        var depth = 0
+        var index = openingBrace
+        var quote: Char? = null
+        var escaped = false
+        var lineComment = false
+        var blockComment = false
+        while (index < maximumEnd) {
+            val current = content[index]
+            val next = content.getOrNull(index + 1)
+            when {
+                lineComment -> if (current == '\n') lineComment = false
+                blockComment -> if (current == '*' && next == '/') {
+                    blockComment = false
+                    index += 1
+                }
+                quote != null -> {
+                    when {
+                        escaped -> escaped = false
+                        current == '\\' -> escaped = true
+                        current == quote -> quote = null
+                    }
+                }
+                current == '/' && next == '/' -> {
+                    lineComment = true
+                    index += 1
+                }
+                current == '/' && next == '*' -> {
+                    blockComment = true
+                    index += 1
+                }
+                current == '"' || current == '\'' -> quote = current
+                current == '{' -> depth += 1
+                current == '}' -> {
+                    depth -= 1
+                    if (depth == 0) {
+                        return content.substring(safeAnchor, index + 1)
+                    }
+                }
+            }
+            index += 1
+        }
+        return content.substring(safeAnchor, maximumEnd)
+    }
+
     private fun DetectedArtifact.link(
         target: DetectedArtifact,
         type: RelationshipType,
@@ -1609,6 +1701,7 @@ class ApplicationGraphIndexer {
         val semanticKey: String,
         val displayName: String,
         val aliases: Set<String>,
+        val analysisText: String?,
     ) {
         val id: String
             get() = snapshot.id
@@ -1626,6 +1719,7 @@ class ApplicationGraphIndexer {
         val annotation: String,
         val path: String,
         val name: String,
+        val bodyAnchor: Int,
     )
 
     private data class FieldDeclaration(
@@ -1635,6 +1729,7 @@ class ApplicationGraphIndexer {
 
     private data class MethodDeclaration(
         val name: String,
+        val bodyAnchor: Int,
     )
 
     private companion object {
@@ -1662,7 +1757,10 @@ class ApplicationGraphIndexer {
         val JAVA_MAPPED_METHOD = Regex(
             """@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\s*(?:\(\s*(?:value\s*=\s*)?["']?([^"')\s,]*)["']?[^)]*\))?[\s\S]{0,500}?\b(?:public|protected|private)?\s*[\w<>,?.\[\]\s]+\s+([A-Za-z_]\w*)\s*\(""",
         )
-        val EVENT_METHOD = Regex("""@EventListener(?:\s*\([^)]*\))?[\s\S]{0,300}?\b(?:fun\s+|[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""")
+        val EVENT_METHOD = Regex("""@(?:Transactional)?EventListener(?:\s*\([^)]*\))?[\s\S]{0,300}?\b(?:fun\s+|[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""")
+        val ENTITY_EVENT_TARGET = Regex(
+            """\b(?:EntitySavingEvent|EntityChangedEvent|EntityLoadingEvent|EntityLoadedEvent|EntityDeletingEvent|EntityRemovedEvent)\s*<\s*(?:\?\s+extends\s+)?([A-Za-z_][\w.]*)""",
+        )
         val SCHEDULED_METHOD = Regex("""@Scheduled(?:\s*\([^)]*\))?[\s\S]{0,300}?\b(?:fun\s+|[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""")
         val JAVA_FIELD = Regex(
             """(?m)^\s*(?:@\w+(?:\s*\([^)]*\))?\s*)*(?:private|protected|public)\s+(?:final\s+)?([A-Za-z_][\w<>,?.\[\]\s]*)\s+([A-Za-z_]\w*)\s*(?:[;=])""",
@@ -1710,6 +1808,9 @@ class ApplicationGraphIndexer {
         val NATIVE_SQL_WRITE = Regex(
             """(?is)(?:createNativeQuery|executeUpdate|JdbcTemplate|NamedParameterJdbcTemplate)[\s\S]{0,240}?\b(?:insert\s+into|update\s+|delete\s+from|merge\s+into|truncate\s+)""",
         )
+        val NATIVE_SQL_STATEMENT = Regex(
+            """(?is)(?:createNativeQuery|queryForObject|queryForList|update)\s*\(\s*["']\s*(insert\s+into|update|delete\s+from|merge\s+into|truncate)\s+([A-Za-z_][\w$.]*)""",
+        )
         val PRINT_STACK_TRACE = Regex("""\.printStackTrace\s*\(""")
         val SWALLOWED_EXCEPTION = Regex(
             """(?s)catch\s*\([^)]*(?:Exception|Throwable)[^)]*\)\s*\{\s*(?://[^\n]*\s*|/\*.*?\*/\s*)?}""",
@@ -1742,8 +1843,13 @@ class ApplicationGraphIndexer {
             ArtifactKind.VIEW_CONTROLLER,
             ArtifactKind.REPOSITORY,
             ArtifactKind.SERVICE,
+            ArtifactKind.SERVICE_METHOD,
             ArtifactKind.REST_CONTROLLER,
+            ArtifactKind.REST_ENDPOINT,
             ArtifactKind.VALIDATOR,
+            ArtifactKind.VIEW_HANDLER,
+            ArtifactKind.EVENT_LISTENER,
+            ArtifactKind.SCHEDULED_JOB,
             ArtifactKind.RESOURCE_ROLE,
             ArtifactKind.ROW_ROLE,
         )

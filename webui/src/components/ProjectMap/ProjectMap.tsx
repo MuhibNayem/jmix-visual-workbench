@@ -54,7 +54,10 @@ const GROUPS: { id: Group; label: string; kinds?: string[] }[] = [
   {
     id: 'DATABASE',
     label: 'Database',
-    kinds: ['LIQUIBASE_ROOT', 'LIQUIBASE_INCLUDE', 'LIQUIBASE_CHANGESET', 'SCHEMA_OBJECT', 'DATA_STORE'],
+    kinds: [
+      'LIQUIBASE_ROOT', 'LIQUIBASE_INCLUDE', 'LIQUIBASE_CHANGESET', 'SCHEMA_OBJECT',
+      'DATABASE_OPERATION', 'DATA_STORE',
+    ],
   },
   {
     id: 'CONFIG',
