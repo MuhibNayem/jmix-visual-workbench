@@ -44,8 +44,27 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Developers can browse a cancellable, incremental semantic inventory with stable identity, ownership, provenance, fingerprints, diagnostics, relationships, smart/dumb-mode behavior, and native file-and-line navigation.
   4. Every operation receives a backend compatibility state and reason; write capability is absent unless the exact operation/profile cell has reviewed passing evidence, and uncertified, legacy, ambiguous, stale, untrusted, or future projects remain diagnostic/read-only.
   5. When an option is unavailable, the workbench explains the missing evidence and identifies the tested profile or isolated migration path that could make it available.
-**Plans**: TBD
+**Plans**: 17 plans
 **UI hint**: yes
+
+Plans:
+- [ ] 02-01-PLAN.md — Establish the IntelliJ-free discovery model, safe locators, and deterministic serialization lane.
+- [ ] 02-02-PLAN.md — Implement the pure deny-by-default registry and static Gradle/profile parser.
+- [ ] 02-03-PLAN.md — Define enforceable discovery effects and intentional zero-mutation tripwires.
+- [ ] 02-04-PLAN.md — Add transitive forbidden-effect scans and the pure-first dual-host fast gate.
+- [ ] 02-05-PLAN.md — Collect imported build/module/root/dependency facts through exact 253/262 adapters.
+- [ ] 02-06-PLAN.md — Parse bounded static build/config/store/Liquibase evidence without execution or connections.
+- [ ] 02-07-PLAN.md — Inventory semantic artifacts and assemble typed relationship provenance with safe locators.
+- [ ] 02-08-PLAN.md — Orchestrate cancellable smart/dumb incremental snapshots, cache, and invalidation.
+- [ ] 02-09-PLAN.md — Register revision-bound native navigation and lock all shared/host descriptors.
+- [ ] 02-10-PLAN.md — Expose bounded redacted read-only bridge pages and projection-time navigation handles.
+- [ ] 02-11-PLAN.md — Build TypeScript contracts, bridge/store state, and the web test harness.
+- [ ] 02-12-PLAN.md — Implement overview, compatibility, diagnostics, and every durable UI state.
+- [ ] 02-13-PLAN.md — Implement the responsive shell, structure/inventory/relationships, and locked designers.
+- [ ] 02-14-PLAN.md — Complete the bounded deterministic fixture laboratory and exact expected outputs.
+- [ ] 02-15-PLAN.md — Run clean non-circular automated pre-UAT lifecycle certification.
+- [ ] 02-16-PLAN.md — Verify the full installed signed-host UI and zero-mutation matrix.
+- [ ] 02-17-PLAN.md — Validate installed evidence and run definitive clean Phase 2 certification.
 
 ### Phase 3: Typed Privilege Boundary and Change Engine
 **Goal**: Every project mutation passes through one deterministic, least-privilege plan, validation, apply, and recovery pipeline.
@@ -128,7 +147,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Clean-Room Build Foundation | 5/5 | Complete | 2026-07-28 |
-| 2. Compatibility Laboratory and Read-Only Onboarding | 0/TBD | Not started | - |
+| 2. Compatibility Laboratory and Read-Only Onboarding | 0/17 | Not started | - |
 | 3. Typed Privilege Boundary and Change Engine | 0/TBD | Not started | - |
 | 4. Certified Entity and Data Round Trip | 0/TBD | Not started | - |
 | 5. Certified Existing CRUD Round Trip | 0/TBD | Not started | - |

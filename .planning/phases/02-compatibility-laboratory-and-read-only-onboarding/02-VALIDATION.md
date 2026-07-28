@@ -17,10 +17,10 @@ created: 2026-07-28
 | Property | Value |
 |----------|-------|
 | **Framework** | JUnit 5 + IntelliJ Platform managed tests + Gradle fixture tasks + Vitest/Testing Library |
-| **Config file** | Existing dual-host Gradle builds; Wave 0 adds Phase 2 fixture and web test harnesses |
-| **Quick run command** | `./gradlew phase2FastCheck --dependency-verification=strict` |
+| **Config file** | Platform-independent `phase2CoreTest`, exact dual-host Gradle builds, deterministic fixture harness, and web test harness |
+| **Quick run command** | `./gradlew phase2FastCheck --dependency-verification=strict` (pure core first, then effect scans/tripwires and exact hosts) |
 | **Full suite command** | `./gradlew clean phase2Check --dependency-verification=strict` |
-| **Estimated runtime** | Quick: <=120 seconds after warm-up; full: environment-dependent exact-host and installed-product gates |
+| **Estimated runtime** | Pure: <=60 seconds; quick: <=120 seconds after warm-up; pre-UAT/full: environment-dependent exact-host and installed-product gates |
 
 ## Sampling Rate
 
@@ -28,7 +28,8 @@ created: 2026-07-28
   `./gradlew phase2FastCheck --dependency-verification=strict`.
 - **After every plan wave:** Run the relevant fixture, host, web, and mutation
   tripwire lifecycle tasks.
-- **Before `/gsd-verify-work`:** Clean `phase2Check` must be green.
+- **Before installed UAT:** Clean `phase2PreUatCheck` must be green and must not depend on installed evidence.
+- **After installed UAT / before `/gsd-verify-work`:** `phase2InstalledCheck`, then clean definitive `phase2Check`, must be green.
 - **Maximum warm quick-feedback latency:** 120 seconds.
 - **No three consecutive tasks:** without a behavioral automated check.
 - **Negative/adversarial fixtures:** required in the same plan that implements
@@ -38,7 +39,7 @@ created: 2026-07-28
 
 | Capability | Requirements | Threat Ref | Secure Behavior | Test Type | Lifecycle gate | Status |
 |---|---|---|---|---|---|---|
-| Registry/schema/reason codes | COMP-01/02/03/06/07 | T2-CAP | Unknown, missing, stale, conflicting, legacy, future, or untrusted profiles cannot authorize writes | unit/property | `phase2FastCheck` | ⬜ pending |
+| Registry/schema/reason codes | COMP-01/02/03/06/07 | T2-CAP | Unknown, missing, stale, conflicting, legacy, future, or untrusted profiles cannot authorize writes | platform-independent unit/property | `phase2CoreTest phase2FastCheck` | ⬜ pending |
 | Mutation tripwire | DISC-01 | T2-MUTATE, T2-PROCESS, T2-NET, T2-DB | Open/index/browse/navigate/cancel/close changes no repository, IDE, VCS, DB, process, or network state | fixture/contract | `phase2MutationCheck` | ⬜ pending |
 | Build/module/root topology | DISC-02/03/04 | T2-EXEC, T2-PATH | Consumes imported IDE facts and bounded static files without Gradle execution or path escape | host/fixture | `phase2HostCheck phase2FixtureCheck` | ⬜ pending |
 | Stores/migration roots | DISC-05 | T2-DB, T2-SECRET | Reports store/changelog evidence without resolving credentials or opening a connection | unit/fixture | `phase2FixtureCheck phase2MutationCheck` | ⬜ pending |
@@ -70,16 +71,27 @@ created: 2026-07-28
 
 ## Wave 0 Requirements
 
-- [ ] Add platform-agnostic unit test source set for discovery/registry pure code.
+- [ ] Add platform-agnostic `phase2Core`/`phase2CoreTest` source sets for model, fingerprint, parser, registry, and deterministic serialization with no IntelliJ classpath.
 - [ ] Add a deterministic fixture manifest and fixture generator beneath
-  `plugin/fixtures/phase2/` with no credentials or proprietary source.
+  `plugin/fixtures/phase2/`; generator source is
+  `plugin/src/test/kotlin/org/jmixworkbench/discovery/lab/Phase2FixtureGenerator.kt`,
+  tracked outputs are bounded to `manifest.json` and `expected.json`, and
+  generated repositories exist only under `plugin/build/phase2-fixtures/`.
+- [ ] Add production `DiscoveryEffects` read/effect interfaces consumed by all
+  collectors; prohibited process/network/JDBC/file-store/write/VFS/sync
+  channels have deny-only implementations.
 - [ ] Add before/after mutation tripwire for repository bytes, `.idea`,
   `.gradle`, VCS metadata, processes, sockets, and database hooks.
+- [ ] Add transitive shared/host source and compiled-bytecode forbidden-effect
+  scan with intentional bypass fixtures for Gradle/Tooling, process, network,
+  JDBC/data-source, file-store, IDE write, VFS mutation, and generator channels.
 - [ ] Add exact 253/262 managed host discovery harnesses.
 - [ ] Add Vitest + Testing Library + accessibility checks owned by the
   build-provisioned Node workflow.
-- [ ] Add lifecycle tasks `phase2FastCheck`, `phase2FixtureCheck`,
-  `phase2HostCheck`, `phase2WebCheck`, `phase2MutationCheck`, and `phase2Check`.
+- [ ] Add lifecycle tasks `phase2CoreTest`, `phase2FastCheck`,
+  `phase2FixtureCheck`, `phase2HostCheck`, `phase2WebCheck`,
+  `phase2MutationCheck`, `phase2PreUatCheck`, `phase2InstalledCheck`, and
+  definitive `phase2Check`; pre-UAT explicitly excludes installed evidence.
 - [ ] Add deterministic snapshot/registry golden update workflow that cannot run
   during normal verification.
 - [ ] Add test-controlled scheduler/cancellation seams and EDT assertions.
@@ -124,7 +136,8 @@ created: 2026-07-28
 - [x] `nyquist_compliant: true` set in frontmatter.
 - [ ] Wave 0 infrastructure implemented.
 - [ ] Quick feedback measured below 120 seconds after warm-up.
-- [ ] Full clean dual-host gate green.
-- [ ] Signed installed-product UAT and identity/read-only review passed.
+- [ ] Clean `phase2PreUatCheck` dual-host gate green before UAT.
+- [ ] Signed installed-product UAT full fixture/width/accessibility matrix and identity/read-only review passed.
+- [ ] Post-UAT `phase2InstalledCheck` and clean definitive `phase2Check` green.
 
 **Approval:** planning contract approved 2026-07-28; execution evidence pending
