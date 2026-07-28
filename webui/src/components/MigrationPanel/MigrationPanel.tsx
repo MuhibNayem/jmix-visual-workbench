@@ -8,6 +8,7 @@ import type { LucideIcon } from 'lucide-react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
 import type { MigrationModel } from '../../types'
+import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
 // ─── Model ───────────────────────────────────────────────────────────────────
 
@@ -104,6 +105,7 @@ export default function MigrationPanel() {
   const [author, setAuthor] = useState('jmix-studio')
   const [changesets, setChangesets] = useState<ChangeSet[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [activePane, setActivePane] = useState<'changesets' | 'editor'>('changesets')
 
   const uid = useRef(1)
   const selected = changesets.find((cs) => cs.id === selectedId) ?? null
@@ -115,6 +117,7 @@ export default function MigrationPanel() {
     const id = `changeset-${uid.current++}`
     setChangesets((prev) => [...prev, { id, comment: '', changes: [] }])
     setSelectedId(id)
+    setActivePane('editor')
   }
 
   const removeChangeset = (id: string) => {
@@ -508,7 +511,7 @@ export default function MigrationPanel() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full flex-col bg-surface [color-scheme:dark]">
+    <div className="flex h-full min-w-0 flex-col bg-surface [color-scheme:dark]">
       {/* Top bar */}
       <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-surface-border bg-surface-light/60 px-3 py-2">
         <div className="flex items-center gap-2">
@@ -521,7 +524,7 @@ export default function MigrationPanel() {
           <input
             value={changelogId}
             onChange={(e) => setChangelogId(e.target.value)}
-            className="w-52 py-1 font-mono text-xs tracking-normal"
+            className="w-40 py-1 font-mono text-xs tracking-normal sm:w-52"
             placeholder="2026-07-27-order-schema"
           />
         </label>
@@ -539,7 +542,7 @@ export default function MigrationPanel() {
           <Plus size={12} className="text-jmix-400" /> Add Changeset
         </button>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <span className="rounded-full border border-surface-border bg-surface-lighter px-2 py-0.5 text-[10px] text-gray-400">
             {changesets.length} changeset{changesets.length === 1 ? '' : 's'} · {totalChanges} change{totalChanges === 1 ? '' : 's'}
           </span>
@@ -550,10 +553,20 @@ export default function MigrationPanel() {
         </div>
       </header>
 
+      <ResponsivePaneSwitcher
+        value={activePane}
+        onChange={setActivePane}
+        label="Migration builder panels"
+        options={[
+          { id: 'changesets', label: 'Changesets', icon: <GitCommit size={12} />, badge: changesets.length },
+          { id: 'editor', label: 'Change editor', icon: <Database size={12} />, badge: totalChanges },
+        ]}
+      />
+
       {/* Workspace */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: changeset list */}
-        <aside className="flex w-64 shrink-0 flex-col border-r border-surface-border bg-surface-light/40">
+        <aside className={`${activePane === 'changesets' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
           <div className="flex items-center gap-1.5 border-b border-surface-border px-3 py-2 text-[10px] font-semibold uppercase tracking-widest text-gray-500">
             <GitCommit size={12} className="text-jmix-400" /> Changesets
           </div>
@@ -576,8 +589,13 @@ export default function MigrationPanel() {
                   key={cs.id}
                   role="button"
                   tabIndex={0}
-                  onClick={() => setSelectedId(cs.id)}
-                  onKeyDown={(e) => e.key === 'Enter' && setSelectedId(cs.id)}
+                  onClick={() => { setSelectedId(cs.id); setActivePane('editor') }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      setSelectedId(cs.id)
+                      setActivePane('editor')
+                    }
+                  }}
                   className={`group w-full cursor-pointer rounded-md border p-2.5 text-left transition-all ${
                     isSelected
                       ? 'border-jmix-500 bg-jmix-500/10 ring-1 ring-inset ring-jmix-500/40'
@@ -624,7 +642,7 @@ export default function MigrationPanel() {
         </aside>
 
         {/* Right: changeset editor */}
-        <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <section className={`${activePane === 'editor' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col overflow-hidden min-[1200px]:flex`}>
           {!selected ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
               <GitCommit size={26} className="text-gray-600" />

@@ -11,6 +11,7 @@ import type { LucideIcon } from 'lucide-react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
 import ExistingFlowUiDesigner from './ExistingFlowUiDesigner'
+import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 import type {
   ComponentModel, ComponentType, DataContainerModel, ViewModel, ViewType,
 } from '../../types'
@@ -516,6 +517,7 @@ function NewViewDesigner() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [cssText, setCssText] = useState('')
+  const [activePane, setActivePane] = useState<'palette' | 'canvas' | 'properties'>('canvas')
 
   const uid = useRef(1)
   const nextId = useCallback((type: string) => `${type}${uid.current++}`, [])
@@ -632,7 +634,7 @@ function NewViewDesigner() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full flex-col bg-surface [color-scheme:dark]">
+    <div className="flex h-full min-w-0 flex-col bg-surface [color-scheme:dark]">
       {/* Top bar */}
       <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-surface-border bg-surface-light/60 px-3 py-2">
         <div className="flex items-center gap-2">
@@ -645,7 +647,7 @@ function NewViewDesigner() {
           <input
             value={view.viewName}
             onChange={(e) => setView((v) => ({ ...v, viewName: e.target.value }))}
-            className="w-36 py-1 text-xs normal-case tracking-normal"
+            className="w-32 py-1 text-xs normal-case tracking-normal sm:w-36"
             placeholder="CustomerDetailView"
           />
         </label>
@@ -655,7 +657,7 @@ function NewViewDesigner() {
           <input
             value={view.packageName}
             onChange={(e) => setView((v) => ({ ...v, packageName: e.target.value }))}
-            className="w-48 py-1 font-mono text-xs tracking-normal"
+            className="w-36 py-1 font-mono text-xs tracking-normal sm:w-48"
           />
         </label>
 
@@ -675,12 +677,12 @@ function NewViewDesigner() {
           <input
             value={view.entityClass ?? ''}
             onChange={(e) => setView((v) => ({ ...v, entityClass: e.target.value }))}
-            className="w-44 py-1 font-mono text-xs tracking-normal"
+            className="w-36 py-1 font-mono text-xs tracking-normal sm:w-44"
             placeholder="com.example.entity.Order"
           />
         </label>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <span className="rounded-full border border-surface-border bg-surface-lighter px-2 py-0.5 text-[10px] text-gray-400">
             {componentCount} component{componentCount === 1 ? '' : 's'}
           </span>
@@ -691,10 +693,21 @@ function NewViewDesigner() {
         </div>
       </header>
 
+      <ResponsivePaneSwitcher
+        value={activePane}
+        onChange={setActivePane}
+        label="View designer panels"
+        options={[
+          { id: 'palette', label: 'Components', icon: <PanelLeft size={12} />, badge: PALETTE.reduce((sum, group) => sum + group.items.length, 0) },
+          { id: 'canvas', label: 'Canvas', icon: <LayoutTemplate size={12} />, badge: componentCount },
+          { id: 'properties', label: 'Properties', icon: <Tag size={12} /> },
+        ]}
+      />
+
       {/* Three-pane workspace */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: palette + data containers */}
-        <aside className="flex w-56 shrink-0 flex-col border-r border-surface-border bg-surface-light/40">
+        <aside className={`${activePane === 'palette' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-56 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
           <div className="flex-1 overflow-y-auto">
             {PALETTE.map((group) => (
               <div key={group.category} className="border-b border-surface-border/60">
@@ -795,16 +808,16 @@ function NewViewDesigner() {
         </aside>
 
         {/* Center: canvas */}
-        <section className="flex min-w-0 flex-1 flex-col">
+        <section className={`${activePane === 'canvas' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1200px]:flex`}>
           <div
-            className="flex-1 overflow-auto p-6"
+            className="flex-1 overflow-auto p-3 sm:p-6"
             style={{
               backgroundImage: 'radial-gradient(circle, rgba(69,71,90,0.45) 1px, transparent 1px)',
               backgroundSize: '18px 18px',
             }}
             onClick={() => setSelectedId(null)}
           >
-            <div className="mx-auto min-h-full max-w-3xl rounded-md border border-surface-border bg-surface-light/30 p-4 shadow-2xl shadow-black/30">
+            <div className="min-h-full w-full rounded-md border border-surface-border bg-surface-light/30 p-3 shadow-2xl shadow-black/30 sm:p-4">
               <NodeView
                 node={layout}
                 depth={0}
@@ -836,7 +849,7 @@ function NewViewDesigner() {
         </section>
 
         {/* Right: properties inspector */}
-        <aside className="flex w-64 shrink-0 flex-col overflow-y-auto border-l border-surface-border bg-surface-light/40">
+        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-y-auto bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
           <SectionHeader icon={Tag} title="Properties" />
 
           {!selected ? (

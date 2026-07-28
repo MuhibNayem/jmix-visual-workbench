@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { bridge } from '../../bridge'
 import { useStore } from '../../store'
+import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 import type {
   ApplicationGraphResponse,
   GraphArtifact,
@@ -93,6 +94,7 @@ export default function ProjectMap() {
   const [query, setQuery] = useState('')
   const [group, setGroup] = useState<Group>('ALL')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [activePane, setActivePane] = useState<'artifacts' | 'impact'>('artifacts')
 
   const load = async (forceRefresh: boolean = false) => {
     setLoading(true)
@@ -221,8 +223,20 @@ export default function ProjectMap() {
             </div>
           </div>
 
-          <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[minmax(22rem,0.9fr)_minmax(30rem,1.4fr)]">
-            <div className="min-h-0 overflow-auto border-r border-surface-border">
+          <ResponsivePaneSwitcher
+            value={activePane}
+            onChange={setActivePane}
+            label="Application map panels"
+            options={[
+              { id: 'artifacts', label: 'Artifacts', badge: filtered.length },
+              { id: 'impact', label: 'Impact', badge: outgoing.length + incoming.length },
+            ]}
+          />
+
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            <div className={`${activePane === 'artifacts' ? 'block' : 'hidden'} min-h-0 w-full overflow-auto ${
+              selected ? 'min-[1200px]:w-[42%] min-[1200px]:shrink-0 min-[1200px]:border-r min-[1200px]:border-surface-border' : ''
+            } min-[1200px]:block`}>
               <div className="sticky top-0 z-10 border-b border-surface-border bg-surface/95 px-4 py-2 text-[11px] text-gray-500 backdrop-blur">
                 Showing {Math.min(filtered.length, MAX_VISIBLE_ARTIFACTS).toLocaleString()} of {filtered.length.toLocaleString()} matches
                 {filtered.length > MAX_VISIBLE_ARTIFACTS && ' — refine the search to see more'}
@@ -232,16 +246,26 @@ export default function ProjectMap() {
                   key={artifact.id}
                   artifact={artifact}
                   active={artifact.id === selectedId}
-                  onSelect={() => setSelectedId(artifact.id)}
+                  onSelect={() => {
+                    setSelectedId(artifact.id)
+                    setActivePane('impact')
+                  }}
                 />
               ))}
               {filtered.length === 0 && (
-                <div className="p-8 text-center text-xs text-gray-500">No matching artifacts.</div>
+                <div className="flex min-h-[28rem] items-center justify-center p-8 text-center text-xs text-gray-500">
+                  <div>
+                    <div className="text-sm font-medium text-gray-400">No matching artifacts</div>
+                    <p className="mt-1 max-w-md leading-relaxed">
+                      Clear the search or refresh the graph after Jmix modules finish importing.
+                    </p>
+                  </div>
+                </div>
               )}
             </div>
 
-            <div className="min-h-0 overflow-auto p-5">
-              {selected ? (
+            {selected && (
+              <div className={`${activePane === 'impact' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-auto p-3 sm:p-5 min-[1200px]:block`}>
                 <ArtifactInspector
                   artifact={selected}
                   outgoing={outgoing}
@@ -251,12 +275,8 @@ export default function ProjectMap() {
                   onNavigate={setSelectedId}
                   onOpenDesigner={() => openFlowUiDesigner(selected.sourceLocator)}
                 />
-              ) : (
-                <div className="flex h-full items-center justify-center text-sm text-gray-500">
-                  Select an artifact to inspect its impact.
-                </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
 
           <footer className="border-t border-surface-border px-4 py-2 text-[10px] text-gray-600">

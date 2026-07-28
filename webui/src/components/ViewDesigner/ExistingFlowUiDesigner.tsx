@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { bridge } from '../../bridge'
 import { useStore } from '../../store'
+import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 import type {
   FlowUiElementSnapshot,
   FlowUiDirectTextChangeRequest,
@@ -179,6 +180,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
   const [selectedRuntimeTargetId, setSelectedRuntimeTargetId] = useState<string | null>(null)
   const runtimeInspectionSequence = useRef(0)
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [activePane, setActivePane] = useState<'tree' | 'canvas' | 'properties'>('canvas')
   const [loading, setLoading] = useState(true)
   const [applying, setApplying] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -211,6 +213,10 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     change: JmixFlowUiHotDeployRequest
     preview: WorkspaceChangePreviewResponse
   } | null>(null)
+  const selectElement = (key: string) => {
+    setSelectedKey(key)
+    setActivePane('properties')
+  }
 
   const inspectRuntime = useCallback(async (target: GraphSourceLocator) => {
     const sequence = ++runtimeInspectionSequence.current
@@ -526,8 +532,8 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
   }) ?? []
 
   return (
-    <div className="flex h-full flex-col bg-surface">
-      <header className="flex items-center gap-3 border-b border-surface-border bg-surface-light/60 px-3 py-2">
+    <div className="flex h-full min-w-0 flex-col bg-surface">
+      <header className="flex flex-wrap items-center gap-2 border-b border-surface-border bg-surface-light/60 px-3 py-2 sm:gap-3">
         <Code2 size={15} className="text-jmix-400" />
         <div className="min-w-0">
           <h2 className="truncate text-xs font-bold uppercase tracking-widest text-gray-300">
@@ -535,7 +541,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           </h2>
           <p className="truncate text-[10px] text-gray-600">{document.relativePath}</p>
         </div>
-        <span className="ml-auto rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
+        <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300 sm:ml-auto">
           Manual source preserved
         </span>
         <button
@@ -570,7 +576,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
               <select
                 value={selectedRuntimeTarget?.id ?? ''}
                 onChange={(event) => setSelectedRuntimeTargetId(event.target.value)}
-                className="min-w-64 py-1 text-[10px]"
+                className="min-w-0 max-w-full flex-1 py-1 text-[10px] sm:min-w-64"
               >
                 {runtime.targets.map((target) => (
                   <option key={target.id} value={target.id}>
@@ -638,8 +644,19 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1">
-        <aside className="flex w-64 shrink-0 flex-col border-r border-surface-border bg-surface-light/40">
+      <ResponsivePaneSwitcher
+        value={activePane}
+        onChange={setActivePane}
+        label="Existing FlowUI designer panels"
+        options={[
+          { id: 'tree', label: 'Tree & data', icon: <Layers size={12} />, badge: document.elements.length },
+          { id: 'canvas', label: 'Canvas', icon: <Code2 size={12} /> },
+          { id: 'properties', label: 'Properties', icon: <Tag size={12} /> },
+        ]}
+      />
+
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <aside className={`${activePane === 'tree' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
           <PanelTitle icon={Layers} title="Component tree" count={document.elements.length} />
           <div className="min-h-0 flex-1 overflow-auto py-1">
             {elements.get(document.rootKey) && (
@@ -647,7 +664,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                 element={elements.get(document.rootKey)!}
                 elements={elements}
                 selectedKey={selectedKey}
-                onSelect={setSelectedKey}
+                onSelect={selectElement}
               />
             )}
           </div>
@@ -658,7 +675,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                 <div key={container.elementKey} className="rounded border border-surface-border bg-surface p-2">
                   <button
                     type="button"
-                    onClick={() => setSelectedKey(container.elementKey)}
+                    onClick={() => selectElement(container.elementKey)}
                     className="flex w-full items-center justify-between gap-2 text-left"
                   >
                     <span className="truncate font-mono text-[10px] text-jmix-300">{container.id}</span>
@@ -715,30 +732,30 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           </div>
         </aside>
 
-        <section className="flex min-w-0 flex-1 flex-col">
+        <section className={`${activePane === 'canvas' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1200px]:flex`}>
           <div
-            className="flex-1 overflow-auto p-6"
+            className="flex-1 overflow-auto p-3 sm:p-6"
             style={{
               backgroundImage: 'radial-gradient(circle, rgba(69,71,90,0.45) 1px, transparent 1px)',
               backgroundSize: '18px 18px',
             }}
             onClick={() => setSelectedKey(null)}
           >
-            <div className="mx-auto flex min-h-full max-w-4xl flex-col gap-3 rounded border border-surface-border bg-surface/80 p-4 shadow-2xl shadow-black/30">
+            <div className="flex min-h-full w-full flex-col gap-3 rounded border border-surface-border bg-surface/80 p-3 shadow-2xl shadow-black/30 sm:p-4">
               {canvasRoots.map((element) => (
                 <CanvasNode
                   key={element.key}
                   element={element}
                   elements={elements}
                   selectedKey={selectedKey}
-                  onSelect={setSelectedKey}
+                  onSelect={selectElement}
                 />
               ))}
             </div>
           </div>
           {pending && (
             <div className="border-t border-amber-500/30 bg-amber-500/5 p-3">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="text-xs font-medium text-amber-200">{pending.preview.label}</div>
                   <div className="mt-0.5 text-[10px] text-amber-100/60">
@@ -758,7 +775,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                               : <>stage descriptor and verified Jmix cache-reset trigger</>}
                   </div>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button type="button" onClick={() => setPending(null)} className={quietButton}>Discard</button>
                   <button type="button" onClick={() => void applyPending()} disabled={applying} className={primaryButton}>
                     {applying ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
@@ -768,7 +785,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
               </div>
             </div>
           )}
-          <footer className="flex gap-4 border-t border-surface-border px-3 py-1 text-[10px] text-gray-600">
+          <footer className="flex flex-wrap gap-x-4 gap-y-1 border-t border-surface-border px-3 py-1 text-[10px] text-gray-600">
             <span>{document.elements.length} XML elements</span>
             <span>{workspace.contextArtifacts.length} connected artifacts</span>
             <span>{workspace.contextRelationships.length} impact links</span>
@@ -776,7 +793,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           </footer>
         </section>
 
-        <aside className="flex w-72 shrink-0 flex-col overflow-hidden border-l border-surface-border bg-surface-light/40">
+        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-hidden bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-72 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
           <PanelTitle icon={Tag} title="Exact XML properties" />
           <div className="max-h-[55%] overflow-auto p-3">
             {!selected ? (

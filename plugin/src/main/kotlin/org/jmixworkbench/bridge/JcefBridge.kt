@@ -15,6 +15,9 @@ import com.intellij.ui.jcef.JBCefJSQuery
 import org.jmixworkbench.generator.CrudOrchestrator
 import org.jmixworkbench.model.*
 import org.jmixworkbench.discovery.change.WorkspaceChangeSet
+import org.jmixworkbench.discovery.security.SecurityWorkspaceBuilder
+import org.jmixworkbench.discovery.security.SecurityWorkspaceInput
+import org.jmixworkbench.discovery.security.SecurityWorkspaceSnapshot
 import org.jmixworkbench.services.CodeGenerationService
 import org.jmixworkbench.services.ApplicationGraphService
 import org.jmixworkbench.services.FlowUiPropertyChangeRequest
@@ -108,6 +111,10 @@ class JcefBridge(
 
             if (action == "getApplicationGraph") {
                 handleGetApplicationGraph(action, requestId, payload)
+                return
+            }
+            if (action == "getSecurityWorkspace") {
+                handleGetSecurityWorkspace(action, requestId, payload)
                 return
             }
             if (action == "navigateToSource") {
@@ -282,6 +289,26 @@ class JcefBridge(
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
         ReadAction.nonBlocking<org.jmixworkbench.services.ApplicationGraphResponse> {
             ApplicationGraphService.getInstance(project).graph(forceRefresh)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { result ->
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleGetSecurityWorkspace(action: String, requestId: String?, payload: JsonObject) {
+        val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
+        ReadAction.nonBlocking<SecurityWorkspaceSnapshot> {
+            val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh)
+            SecurityWorkspaceBuilder.build(
+                SecurityWorkspaceInput(
+                    artifacts = graph.artifacts,
+                    relationships = graph.relationships,
+                    diagnostics = graph.diagnostics,
+                    graphDigest = graph.snapshotDigest,
+                ),
+            )
         }
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->

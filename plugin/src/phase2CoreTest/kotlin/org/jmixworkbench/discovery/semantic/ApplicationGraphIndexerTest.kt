@@ -417,6 +417,74 @@ class ApplicationGraphIndexerTest {
     }
 
     @Test
+    fun `indexes inherited row policies and reports incomplete root and nested coverage`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "security/src/main/java/com/acme/LoanApp.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme;
+                        @JmixEntity
+                        public class LoanApp {
+                            private UUID id;
+                        }
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "security/src/main/java/com/acme/BaseLoanRows.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme;
+                        @RowLevelRole(name = "Base loan rows", code = "base-loan-rows")
+                        public interface BaseLoanRows {
+                            @JpqlRowLevelPolicy(
+                                entityClass = LoanApp.class,
+                                where = "{E}.createdBy = :current_user_username")
+                            void loan();
+                        }
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "security/src/main/java/com/acme/PayrollRows.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme;
+                        @RowLevelRole(name = "Payroll rows", code = "payroll-rows")
+                        public interface PayrollRows extends BaseLoanRows {
+                            @PredicateRowLevelPolicy(
+                                entityClass = LoanApp.class,
+                                actions = RowLevelPolicyAction.READ)
+                            default RowLevelPredicate<LoanApp> loanPredicate() {
+                                return loan -> true;
+                            }
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(2, result.artifacts.count { it.kind == ArtifactKind.ROW_ROLE })
+        assertEquals(2, result.artifacts.count { it.kind == ArtifactKind.SECURITY_POLICY })
+        assertTrue(
+            result.relationships.any {
+                it.type == RelationshipType.EXTENDS && it.targetArtifactId != null
+            },
+        )
+        assertEquals(
+            2,
+            result.relationships.count {
+                it.type == RelationshipType.APPLIES_POLICY_TO && it.targetArtifactId != null
+            },
+        )
+        val reasonCodes = result.diagnostics.map { it.reasonCode }.toSet()
+        assertTrue("P2_ROW_POLICY_NESTED_GRAPH_COVERAGE" in reasonCodes)
+        assertTrue("P2_ROW_POLICY_ROOT_QUERY_COVERAGE" in reasonCodes)
+    }
+
+    @Test
     fun `does not misclassify ordinary source types as services and reports production risks`() {
         val result = ApplicationGraphIndexer().index(
             ApplicationGraphIndexInput(

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
 import type { AttributeType, TraitType, IdType, IdGeneration, AssociationType, FetchType, ValidationType } from '../../types'
+import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
 const ATTRIBUTE_TYPES: AttributeType[] = [
   'string', 'integer', 'long', 'double', 'bigDecimal', 'boolean',
@@ -32,6 +33,7 @@ export default function EntityDesigner() {
   const { entity, setEntity, addAttribute, updateAttribute, removeAttribute, resetEntity, addToast, isGenerating, setIsGenerating } = useStore()
   const [selectedAttr, setSelectedAttr] = useState<number | null>(null)
   const [showPreview, setShowPreview] = useState(false)
+  const [activePane, setActivePane] = useState<'config' | 'attributes' | 'preview'>('attributes')
 
   const handleGenerate = async () => {
     if (!entity.className.trim()) {
@@ -61,13 +63,19 @@ export default function EntityDesigner() {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-w-0 flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-border bg-surface-light">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-surface-light px-3 py-2.5 sm:px-4">
         <h2 className="text-sm font-semibold text-gray-200">Entity Designer</h2>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <button
-            onClick={() => setShowPreview(!showPreview)}
+            onClick={() => {
+              setShowPreview((current) => {
+                const next = !current
+                setActivePane(next ? 'preview' : 'attributes')
+                return next
+              })
+            }}
             className="px-3 py-1.5 text-xs rounded bg-surface-lighter text-gray-300 hover:bg-surface-border transition-colors"
           >
             {showPreview ? 'Hide Preview' : 'Preview'}
@@ -88,9 +96,23 @@ export default function EntityDesigner() {
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
+      <ResponsivePaneSwitcher
+        value={activePane}
+        onChange={(pane) => {
+          setActivePane(pane)
+          if (pane === 'preview') setShowPreview(true)
+        }}
+        label="Entity designer panels"
+        options={[
+          { id: 'config', label: 'Entity setup' },
+          { id: 'attributes', label: 'Attributes', badge: entity.attributes.length },
+          { id: 'preview', label: 'Code preview' },
+        ]}
+      />
+
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: Entity Config */}
-        <div className="w-80 flex-shrink-0 overflow-y-auto border-r border-surface-border p-4 space-y-4">
+        <div className={`${activePane === 'config' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 space-y-4 overflow-y-auto p-4 min-[1200px]:block min-[1200px]:w-80 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
           {/* Basic Info */}
           <Section title="Basic Information">
             <Field label="Class Name">
@@ -274,7 +296,7 @@ export default function EntityDesigner() {
         </div>
 
         {/* Center: Attributes Table */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className={`${activePane === 'attributes' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto p-3 sm:p-4 min-[1200px]:block`}>
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider">Attributes</h3>
             <button
@@ -290,8 +312,8 @@ export default function EntityDesigner() {
               No attributes yet. Click "+ Add Attribute" to start.
             </div>
           ) : (
-            <div className="border border-surface-border rounded-lg overflow-hidden">
-              <table className="w-full text-xs">
+            <div className="overflow-x-auto rounded-lg border border-surface-border">
+              <table className="w-full min-w-[40rem] text-xs">
                 <thead>
                   <tr className="bg-surface-light text-gray-400 text-left">
                     <th className="px-3 py-2 font-medium">Name</th>
@@ -383,7 +405,7 @@ export default function EntityDesigner() {
 
         {/* Right: Preview */}
         {showPreview && (
-          <div className="w-96 flex-shrink-0 border-l border-surface-border overflow-y-auto p-4">
+          <div className={`${activePane === 'preview' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 overflow-y-auto p-4 min-[1200px]:block min-[1200px]:w-96 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
             <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider mb-3">Generated Code Preview</h3>
             <pre className="text-[10px] text-gray-400 bg-surface-lighter rounded-lg p-3 overflow-x-auto whitespace-pre-wrap font-mono leading-relaxed">
               {generatePreview(entity)}
@@ -399,7 +421,7 @@ function AttributeDetail({ attr, onChange }: { attr: any; onChange: (p: any) => 
   return (
     <div className="mt-4 border border-surface-border rounded-lg p-4 bg-surface-light">
       <h4 className="text-xs font-semibold text-jmix-400 mb-3">Attribute: {attr.name || '(unnamed)'}</h4>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {(attr.type === 'association' || attr.type === 'composition') && (
           <>
             <Field label="Association Type">

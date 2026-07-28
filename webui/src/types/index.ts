@@ -288,6 +288,86 @@ export interface ApplicationGraphResponse {
   error?: string
 }
 
+export type SecurityRoleKind = 'RESOURCE' | 'ROW_LEVEL'
+export type SecurityPolicyEffect = 'GRANT' | 'RESTRICT' | 'DENY' | 'UNKNOWN'
+export type SecuritySurfaceKind = 'MENU' | 'VIEW' | 'ENTITY' | 'ATTRIBUTE' | 'REST' | 'COMPONENT'
+
+export interface SecurityRoleSnapshot {
+  id: string
+  className: string
+  name: string
+  code: string
+  kind: SecurityRoleKind
+  scopes: string[]
+  moduleId: string
+  policyIds: string[]
+  inheritedRoleIds: string[]
+  unresolvedBaseRoleCount: number
+  sourceLocator: GraphSourceLocator
+}
+
+export interface SecurityPolicySnapshot {
+  id: string
+  roleId: string
+  type: string
+  effect: SecurityPolicyEffect
+  actions: string[]
+  resourceExpressions: string[]
+  targetArtifactIds: string[]
+  wildcard: boolean
+  condition?: string
+  sourceLocator: GraphSourceLocator
+}
+
+export interface SecuritySurfaceSnapshot {
+  artifactId: string
+  kind: SecuritySurfaceKind
+  displayName: string
+  semanticKey: string
+  moduleId: string
+  grantingRoleIds: string[]
+  restrictingRoleIds: string[]
+  sourceLocator: GraphSourceLocator
+}
+
+export interface SecurityMenuRouteSnapshot {
+  menuArtifactId: string
+  viewArtifactId?: string
+  menuId: string
+  viewId?: string
+  sourceLocator: GraphSourceLocator
+}
+
+export interface SecurityFindingSnapshot {
+  code: string
+  severity: 'INFO' | 'WARNING' | 'ERROR' | 'BLOCKING'
+  title: string
+  message: string
+  remediation?: string
+  roleId?: string
+  artifactId?: string
+  sourceLocator?: GraphSourceLocator
+}
+
+export interface SecurityWorkspaceSnapshot {
+  graphDigest: string
+  roles: SecurityRoleSnapshot[]
+  policies: SecurityPolicySnapshot[]
+  surfaces: SecuritySurfaceSnapshot[]
+  menuRoutes: SecurityMenuRouteSnapshot[]
+  findings: SecurityFindingSnapshot[]
+  summary: {
+    resourceRoleCount: number
+    rowRoleCount: number
+    policyCount: number
+    coveredSurfaceCount: number
+    uncoveredMenuCount: number
+    uncoveredViewCount: number
+    errorCount: number
+    warningCount: number
+  }
+}
+
 export interface SourceNavigationResponse {
   success: boolean
   errorCode?: string

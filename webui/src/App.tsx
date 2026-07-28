@@ -32,36 +32,41 @@ export default function App() {
   }, [])
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-surface">
+    <div className="flex h-screen w-screen min-w-0 overflow-hidden bg-surface">
       {/* Sidebar */}
-      <nav className="w-52 flex-shrink-0 bg-surface-light border-r border-surface-border flex flex-col">
-        <div className="p-3 border-b border-surface-border">
-          <h1 className="text-sm font-bold text-jmix-400 tracking-wide">JMIX VISUAL WORKBENCH</h1>
-          <p className="text-[10px] text-gray-500 mt-0.5">Clean-room prototype</p>
+      <nav className="flex w-14 flex-shrink-0 flex-col border-r border-surface-border bg-surface-light min-[1100px]:w-52">
+        <div className="border-b border-surface-border p-3">
+          <h1 className="text-center text-sm font-bold tracking-wide text-jmix-400 min-[1100px]:text-left">
+            <span className="min-[1100px]:hidden">JVW</span>
+            <span className="hidden min-[1100px]:inline">JMIX VISUAL WORKBENCH</span>
+          </h1>
+          <p className="mt-0.5 hidden text-[10px] text-gray-500 min-[1100px]:block">Clean-room prototype</p>
         </div>
         <div className="flex-1 py-2">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors ${
+              title={tab.label}
+              aria-label={tab.label}
+              className={`flex w-full items-center justify-center gap-2 px-3 py-2 text-left text-xs transition-colors min-[1100px]:justify-start ${
                 activeTab === tab.id
                   ? 'bg-jmix-500/15 text-jmix-400 border-r-2 border-jmix-500'
                   : 'text-gray-400 hover:bg-surface-lighter hover:text-gray-200'
               }`}
             >
               <span className="text-sm">{tab.icon}</span>
-              {tab.label}
+              <span className="hidden min-[1100px]:inline">{tab.label}</span>
             </button>
           ))}
         </div>
-        <div className="p-3 border-t border-surface-border text-[10px] text-gray-600">
+        <div className="hidden border-t border-surface-border p-3 text-[10px] text-gray-600 min-[1100px]:block">
           v1.0.0 — Non-certified
         </div>
       </nav>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-hidden flex flex-col">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {activeTab === 'projectMap' && <ProjectMap />}
         {activeTab === 'entity' && <EntityDesigner />}
         {activeTab === 'view' && <ViewDesigner />}

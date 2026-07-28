@@ -30,6 +30,7 @@ val phase2CoreSourceSet = sourceSets.create("phase2Core") {
         "org/jmixworkbench/discovery/change/**",
         "org/jmixworkbench/discovery/flowui/**",
         "org/jmixworkbench/discovery/runtime/**",
+        "org/jmixworkbench/discovery/security/**",
         "org/jmixworkbench/discovery/navigation/**",
         "org/jmixworkbench/discovery/compatibility/**",
         "org/jmixworkbench/discovery/semantic/**",

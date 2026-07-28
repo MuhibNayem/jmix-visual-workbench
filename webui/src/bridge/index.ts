@@ -13,11 +13,17 @@ import type {
   JmixRuntimeInspectionResponse,
   JmixRuntimeViewport,
   ProjectConfig,
+  SecurityWorkspaceSnapshot,
   SourceNavigationResponse,
   WorkspaceChangeApplyResponse,
   WorkspaceChangePreviewResponse,
   WorkspaceChangeSet,
 } from '../types'
+import {
+  developmentApplicationGraph,
+  developmentProjectConfig,
+  developmentSecurityWorkspace,
+} from './devMocks'
 
 type BridgeCallback = (action: string, requestId: string | null, result: any) => void
 
@@ -60,11 +66,23 @@ class Bridge {
       if (import.meta.env.DEV) {
         console.log(`[Bridge] ${action}`, payload)
         setTimeout(() => {
-          this.listeners.forEach(cb => cb(action, requestId, {
-            success: true,
-            filesWritten: [`generated/${action}.java`],
-            errors: [],
-          }))
+          const result = (() => {
+            switch (action) {
+              case 'getApplicationGraph':
+                return developmentApplicationGraph
+              case 'getProjectConfig':
+                return developmentProjectConfig
+              case 'getSecurityWorkspace':
+                return developmentSecurityWorkspace
+              default:
+                return {
+                  success: true,
+                  filesWritten: [`generated/${action}.java`],
+                  errors: [],
+                }
+            }
+          })()
+          this.listeners.forEach(cb => cb(action, requestId, result))
         }, 300)
         return
       }
@@ -129,6 +147,10 @@ class Bridge {
 
   getApplicationGraph(forceRefresh: boolean = false) {
     return this.request<ApplicationGraphResponse>('getApplicationGraph', { forceRefresh })
+  }
+
+  getSecurityWorkspace(forceRefresh: boolean = false) {
+    return this.request<SecurityWorkspaceSnapshot>('getSecurityWorkspace', { forceRefresh })
   }
 
   navigateToSource(locator: GraphSourceLocator) {

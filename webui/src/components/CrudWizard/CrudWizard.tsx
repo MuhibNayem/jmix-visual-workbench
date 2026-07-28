@@ -51,11 +51,11 @@ export default function CrudWizard() {
   const expectedFiles = getExpectedFiles(entity.className, options)
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-w-0 flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-border bg-surface-light">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-surface-light px-3 py-2.5 sm:px-4">
         <h2 className="text-sm font-semibold text-gray-200">CRUD Scaffolding Wizard</h2>
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center justify-end gap-1">
           {steps.map((s, i) => (
             <button
               key={s}
@@ -72,7 +72,7 @@ export default function CrudWizard() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-3 sm:p-6">
         {/* Step 0: Entity Summary */}
         {step === 0 && (
           <div className="max-w-2xl mx-auto">
@@ -125,7 +125,7 @@ export default function CrudWizard() {
           <div className="max-w-2xl mx-auto space-y-6">
             <h3 className="text-sm font-medium text-gray-200">Generation Options</h3>
 
-            <div className="grid grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
               <div className="space-y-3">
                 <h4 className="text-[10px] font-semibold text-gray-400 uppercase">Artifacts</h4>
                 <Toggle label="Database Migration (Liquibase)" checked={options.generateMigration} onChange={v => setOptions({ ...options, generateMigration: v })} />
@@ -190,7 +190,7 @@ export default function CrudWizard() {
               {expectedFiles.map((file, i) => (
                 <div key={i} className="flex items-center gap-2 text-xs text-gray-300 py-1.5 px-3 bg-surface-lighter rounded">
                   <span className="text-jmix-400">📄</span>
-                  <span className="font-mono text-[11px]">{file}</span>
+                  <span className="min-w-0 break-all font-mono text-[11px]">{file}</span>
                 </div>
               ))}
             </div>

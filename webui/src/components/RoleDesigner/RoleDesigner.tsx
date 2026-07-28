@@ -8,6 +8,7 @@ import type { LucideIcon } from 'lucide-react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
 import type { RoleModel } from '../../types'
+import SecurityWorkspace from './SecurityWorkspace'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -60,7 +61,7 @@ function EmptyHint({ children }: { children: ReactNode }) {
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function RoleDesigner() {
+function NewRoleDesigner() {
   const { addToast, isGenerating, setIsGenerating, setLastResult } = useStore()
 
   const [role, setRole] = useState<RoleModel>({
@@ -174,7 +175,7 @@ export default function RoleDesigner() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-[220px_220px_1fr]">
+        <div className="grid grid-cols-1 gap-3 min-[800px]:grid-cols-[minmax(10rem,220px)_minmax(10rem,220px)_minmax(12rem,1fr)]">
           <label className="block">
             <span className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-gray-500">Role Name *</span>
             <input
@@ -480,6 +481,40 @@ export default function RoleDesigner() {
         <span>{role.menuPolicies.length + role.screenPolicies.length} ui policies</span>
         {isRowLevel && <span>{role.rowLevelPolicies.length} row rules</span>}
       </footer>
+    </div>
+  )
+}
+
+export default function RoleDesigner() {
+  const [mode, setMode] = useState<'explore' | 'create'>('explore')
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-surface">
+      <div className="flex flex-wrap items-center gap-1 border-b border-surface-border bg-surface-light px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setMode('explore')}
+          className={`rounded px-3 py-1.5 text-[11px] font-semibold ${
+            mode === 'explore' ? 'bg-jmix-500 text-white' : 'text-gray-500 hover:bg-surface-lighter hover:text-gray-200'
+          }`}
+        >
+          Effective Access
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode('create')}
+          className={`rounded px-3 py-1.5 text-[11px] font-semibold ${
+            mode === 'create' ? 'bg-jmix-500 text-white' : 'text-gray-500 hover:bg-surface-lighter hover:text-gray-200'
+          }`}
+        >
+          Create Role
+        </button>
+        <span className="ml-auto hidden text-[9px] text-gray-600 sm:inline">
+          Source-aware security · revision-safe navigation
+        </span>
+      </div>
+      <div className="flex min-h-0 flex-1">
+        {mode === 'explore' ? <SecurityWorkspace /> : <NewRoleDesigner />}
+      </div>
     </div>
   )
 }

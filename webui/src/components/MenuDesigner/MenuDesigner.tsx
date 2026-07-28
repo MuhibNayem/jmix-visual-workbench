@@ -9,6 +9,7 @@ import type { LucideIcon } from 'lucide-react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
 import type { GenerationResult } from '../../types'
+import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
 // ─── Model ───────────────────────────────────────────────────────────────────
 
@@ -121,11 +122,16 @@ export default function MenuDesigner() {
   ])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [activePane, setActivePane] = useState<'structure' | 'preview' | 'properties'>('preview')
 
   const uid = useRef(1)
   const selected = selectedId ? findMenuNode(items, selectedId) : null
   const selectedIsGroup = selectedId ? items.some((g) => g.id === selectedId) : false
   const total = countMenuNodes(items)
+  const selectNode = (id: string) => {
+    setSelectedId(id)
+    setActivePane('properties')
+  }
 
   const toggleCollapsed = (id: string) => {
     setCollapsed((prev) => {
@@ -246,9 +252,12 @@ export default function MenuDesigner() {
     const Icon = iconFor(item.icon)
     const isSelected = selectedId === item.id
     return (
-      <button
+      <div
         key={item.id}
-        onClick={() => setSelectedId(item.id)}
+        role="button"
+        tabIndex={0}
+        onClick={() => selectNode(item.id)}
+        onKeyDown={(event) => event.key === 'Enter' && selectNode(item.id)}
         className={`group/row flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition-all ${
           isSelected
             ? 'bg-jmix-500/15 text-jmix-300 ring-1 ring-inset ring-jmix-500/40'
@@ -263,7 +272,7 @@ export default function MenuDesigner() {
           </span>
         )}
         {rowActions(item)}
-      </button>
+      </div>
     )
   }
 
@@ -276,8 +285,8 @@ export default function MenuDesigner() {
         <div
           role="button"
           tabIndex={0}
-          onClick={() => setSelectedId(group.id)}
-          onKeyDown={(e) => e.key === 'Enter' && setSelectedId(group.id)}
+          onClick={() => selectNode(group.id)}
+          onKeyDown={(e) => e.key === 'Enter' && selectNode(group.id)}
           className={`group/row flex w-full cursor-pointer items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs font-medium transition-all ${
             isSelected
               ? 'bg-jmix-500/15 text-jmix-300 ring-1 ring-inset ring-jmix-500/40'
@@ -314,7 +323,7 @@ export default function MenuDesigner() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full flex-col bg-surface [color-scheme:dark]">
+    <div className="flex h-full min-w-0 flex-col bg-surface [color-scheme:dark]">
       {/* Top bar */}
       <header className="flex flex-wrap items-center gap-2 border-b border-surface-border bg-surface-light/60 px-3 py-2">
         <div className="flex items-center gap-2">
@@ -322,7 +331,7 @@ export default function MenuDesigner() {
           <h2 className="text-xs font-bold uppercase tracking-widest text-gray-300">Menu Designer</h2>
         </div>
 
-        <div className="ml-2 flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 sm:ml-2">
           <button onClick={handleAddGroup} className={btnGhost}>
             <FolderPlus size={12} className="text-jmix-400" /> Add Group
           </button>
@@ -331,7 +340,7 @@ export default function MenuDesigner() {
           </button>
         </div>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <span className="rounded-full border border-surface-border bg-surface-lighter px-2 py-0.5 text-[10px] text-gray-400">
             {total} node{total === 1 ? '' : 's'}
           </span>
@@ -342,10 +351,21 @@ export default function MenuDesigner() {
         </div>
       </header>
 
+      <ResponsivePaneSwitcher
+        value={activePane}
+        onChange={setActivePane}
+        label="Menu designer panels"
+        options={[
+          { id: 'structure', label: 'Structure', icon: <ListTree size={12} />, badge: total },
+          { id: 'preview', label: 'Preview', icon: <MenuIcon size={12} /> },
+          { id: 'properties', label: 'Properties', icon: <Settings size={12} /> },
+        ]}
+      />
+
       {/* Workspace */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: structure tree */}
-        <aside className="flex w-64 shrink-0 flex-col border-r border-surface-border bg-surface-light/40">
+        <aside className={`${activePane === 'structure' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
           <div className="flex items-center gap-1.5 border-b border-surface-border px-3 py-2 text-[10px] font-semibold uppercase tracking-widest text-gray-500">
             <ListTree size={12} className="text-jmix-400" /> Structure
           </div>
@@ -367,7 +387,7 @@ export default function MenuDesigner() {
 
         {/* Center: live preview */}
         <section
-          className="flex min-w-0 flex-1 flex-col items-center overflow-auto p-6"
+          className={`${activePane === 'preview' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col items-center overflow-auto p-3 sm:p-6 min-[1200px]:flex`}
           style={{
             backgroundImage: 'radial-gradient(circle, rgba(69,71,90,0.45) 1px, transparent 1px)',
             backgroundSize: '18px 18px',
@@ -376,60 +396,87 @@ export default function MenuDesigner() {
           <p className="mb-3 self-start text-[10px] font-semibold uppercase tracking-widest text-gray-500">
             Live Preview — application sidebar
           </p>
-          <div className="w-full max-w-[250px] overflow-hidden rounded-lg border border-surface-border bg-surface-light shadow-2xl shadow-black/40">
-            <div className="border-b border-surface-border px-3 py-2.5">
-              <p className="text-xs font-bold tracking-wide text-jmix-400">APPLICATION</p>
-              <p className="text-[9px] text-gray-500">main menu</p>
+          <div className="grid w-full max-w-5xl overflow-hidden rounded-lg border border-surface-border bg-surface-light shadow-2xl shadow-black/40 sm:grid-cols-[minmax(13rem,250px)_minmax(0,1fr)]">
+            <div className="min-w-0 border-surface-border sm:border-r">
+              <div className="border-b border-surface-border px-3 py-2.5">
+                <p className="text-xs font-bold tracking-wide text-jmix-400">APPLICATION</p>
+                <p className="text-[9px] text-gray-500">main menu</p>
+              </div>
+              <nav className="space-y-2 p-2" aria-label="Menu preview">
+                {items.map((group) => {
+                  const GroupIcon = iconFor(group.icon)
+                  return (
+                    <div key={group.id}>
+                      <div className="flex items-center gap-1.5 px-2 py-1 text-[9px] font-semibold uppercase tracking-widest text-gray-500">
+                        <GroupIcon size={10} />
+                        {group.caption || group.id}
+                      </div>
+                      <div className="mt-0.5 space-y-px">
+                        {group.children.map((item) => {
+                          const ItemIcon = iconFor(item.icon)
+                          const isSelected = selectedId === item.id
+                          return (
+                            <button
+                              key={item.id}
+                              onClick={() => selectNode(item.id)}
+                              className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition-all ${
+                                isSelected
+                                  ? 'bg-jmix-500/15 font-medium text-jmix-300'
+                                  : 'text-gray-400 hover:bg-surface-lighter hover:text-gray-200'
+                              }`}
+                            >
+                              <ItemIcon size={13} className={isSelected ? 'text-jmix-400' : 'text-gray-500'} />
+                              <span className="truncate">{item.caption || item.id}</span>
+                              {item.shortcut && (
+                                <kbd className="ml-auto shrink-0 rounded border border-surface-border bg-surface px-1 py-px text-[8px] text-gray-500">
+                                  {item.shortcut}
+                                </kbd>
+                              )}
+                            </button>
+                          )
+                        })}
+                        {group.children.length === 0 && (
+                          <p className="px-2 py-1 text-[10px] italic text-gray-600">No items</p>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+                {items.length === 0 && (
+                  <p className="px-2 py-6 text-center text-[10px] text-gray-600">Menu preview is empty</p>
+                )}
+              </nav>
             </div>
-            <nav className="space-y-2 p-2" aria-label="Menu preview">
-              {items.map((group) => {
-                const GroupIcon = iconFor(group.icon)
-                return (
-                  <div key={group.id}>
-                    <div className="flex items-center gap-1.5 px-2 py-1 text-[9px] font-semibold uppercase tracking-widest text-gray-500">
-                      <GroupIcon size={10} />
-                      {group.caption || group.id}
+            <div className="hidden min-w-0 flex-col bg-surface/70 sm:flex">
+              <div className="flex items-center gap-2 border-b border-surface-border px-4 py-3">
+                <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                <span className="truncate text-[10px] text-gray-500">Authenticated application preview</span>
+              </div>
+              <div className="flex flex-1 flex-col justify-center p-5">
+                <div className="text-[9px] font-semibold uppercase tracking-widest text-jmix-400">
+                  Selected destination
+                </div>
+                <div className="mt-2 truncate text-lg font-semibold text-gray-200">
+                  {selected?.caption || 'Choose a menu item'}
+                </div>
+                <div className="mt-1 truncate font-mono text-[10px] text-gray-500">
+                  {selected?.viewId || 'No view is connected yet'}
+                </div>
+                <div className="mt-5 grid gap-2 lg:grid-cols-3">
+                  {['Menu policy', 'View policy', 'Row constraints'].map((label, index) => (
+                    <div key={label} className="rounded border border-surface-border bg-surface-light px-3 py-2">
+                      <div className="text-[9px] uppercase tracking-wider text-gray-600">{index + 1}</div>
+                      <div className="mt-1 text-[10px] text-gray-300">{label}</div>
                     </div>
-                    <div className="mt-0.5 space-y-px">
-                      {group.children.map((item) => {
-                        const ItemIcon = iconFor(item.icon)
-                        const isSelected = selectedId === item.id
-                        return (
-                          <button
-                            key={item.id}
-                            onClick={() => setSelectedId(item.id)}
-                            className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] transition-all ${
-                              isSelected
-                                ? 'bg-jmix-500/15 font-medium text-jmix-300'
-                                : 'text-gray-400 hover:bg-surface-lighter hover:text-gray-200'
-                            }`}
-                          >
-                            <ItemIcon size={13} className={isSelected ? 'text-jmix-400' : 'text-gray-500'} />
-                            <span className="truncate">{item.caption || item.id}</span>
-                            {item.shortcut && (
-                              <kbd className="ml-auto shrink-0 rounded border border-surface-border bg-surface px-1 py-px text-[8px] text-gray-500">
-                                {item.shortcut}
-                              </kbd>
-                            )}
-                          </button>
-                        )
-                      })}
-                      {group.children.length === 0 && (
-                        <p className="px-2 py-1 text-[10px] italic text-gray-600">No items</p>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-              {items.length === 0 && (
-                <p className="px-2 py-6 text-center text-[10px] text-gray-600">Menu preview is empty</p>
-              )}
-            </nav>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
         {/* Right: editor */}
-        <aside className="flex w-64 shrink-0 flex-col overflow-y-auto border-l border-surface-border bg-surface-light/40">
+        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-y-auto bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
           <div className="flex items-center justify-between border-b border-surface-border px-3 py-2">
             <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-500">Properties</span>
             {selected && (

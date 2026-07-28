@@ -113,7 +113,7 @@ class ApplicationGraphIndexer {
         val primaryKind = jvmKind(file.content, typeMatch.groupValues[1], typeName)
         val aliases = linkedSetOf(semanticKey, typeName)
         VIEW_CONTROLLER_ID.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
-        ROLE_CODE.find(file.content)?.groupValues?.get(2)?.let(aliases::add)
+        roleCode(file.content)?.let(aliases::add)
         SPRING_BEAN_NAME.find(file.content)?.groupValues?.get(2)?.let(aliases::add)
         REST_SERVICE_NAME.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
         JMIX_ENTITY_NAME.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
@@ -163,7 +163,15 @@ class ApplicationGraphIndexer {
         }
 
         if (primaryKind == ArtifactKind.RESOURCE_ROLE || primaryKind == ArtifactKind.ROW_ROLE) {
-            indexSecurityPolicies(file, primary, semanticKey, artifacts, links)
+            indexSecurityPolicies(file, primary, semanticKey, artifacts, links, diagnostics)
+            roleBaseReferences(file.content, typeName).forEach { baseRole ->
+                links += primary.link(
+                    target = baseRole,
+                    type = RelationshipType.EXTENDS,
+                    expectedKinds = setOf(primaryKind),
+                    locator = file.locator(baseRole, semanticKey),
+                )
+            }
         }
 
         VIEW_DESCRIPTOR.find(file.content)?.groupValues?.get(1)?.let { descriptor ->
@@ -497,7 +505,9 @@ class ApplicationGraphIndexer {
         semanticKey: String,
         artifacts: MutableMap<String, DetectedArtifact>,
         links: MutableList<PendingLink>,
+        diagnostics: MutableList<DiscoveryDiagnostic>,
     ) {
+        val rowPolicyKindsByEntity = linkedMapOf<String, MutableSet<String>>()
         POLICY_ANNOTATION.findAll(file.content).forEachIndexed { index, match ->
             val policyType = match.groupValues[1]
             val body = match.groupValues[2]
@@ -557,6 +567,87 @@ class ApplicationGraphIndexer {
                             file.locator(menu, policy.semanticKey),
                         )
                     }
+                }
+                "JpqlRowLevelPolicy", "PredicateRowLevelPolicy" -> {
+                    val entity = policyEntityReference(body)
+                    if (entity != null) {
+                        links += policy.link(
+                            entity,
+                            RelationshipType.APPLIES_POLICY_TO,
+                            setOf(ArtifactKind.ENTITY),
+                            file.locator(entity, policy.semanticKey),
+                        )
+                        rowPolicyKindsByEntity.getOrPut(entity) { linkedSetOf() } += policyType
+                    }
+                    if (policyType == "JpqlRowLevelPolicy") {
+                        val where = stringArgument(body, "where")
+                        val join = stringArgument(body, "join")
+                        if (where.isNullOrBlank()) {
+                            diagnostics += diagnostic(
+                                reasonCode = "P2_ROW_POLICY_WHERE_MISSING",
+                                message = "A JPQL row-level policy has no visible where clause.",
+                                nextStep = "Add a bounded where clause using the {E} placeholder.",
+                                category = DiagnosticCategory.SECURITY,
+                                severity = DiagnosticSeverity.ERROR,
+                                locator = file.locator(policyType, policy.semanticKey),
+                            )
+                        } else if ("{E}" !in where && (join == null || "{E}" !in join)) {
+                            diagnostics += diagnostic(
+                                reasonCode = "P2_ROW_POLICY_ENTITY_PLACEHOLDER_MISSING",
+                                message = "A JPQL row-level policy does not use the required {E} entity placeholder.",
+                                nextStep = "Reference the protected entity through {E} in the where or join clause.",
+                                category = DiagnosticCategory.SECURITY,
+                                severity = DiagnosticSeverity.WARNING,
+                                locator = file.locator(policyType, policy.semanticKey),
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (containsWildcardGrant(policyType, body)) {
+                diagnostics += diagnostic(
+                    reasonCode = "P2_SECURITY_WILDCARD_POLICY",
+                    message = "$policyType grants wildcard access and should be reviewed as an enterprise boundary.",
+                    nextStep = "Prefer narrowly scoped policies or document why unrestricted access is required.",
+                    category = DiagnosticCategory.SECURITY,
+                    severity = DiagnosticSeverity.WARNING,
+                    locator = file.locator(policyType, policy.semanticKey),
+                )
+            }
+        }
+
+        if (role.snapshot.kind == ArtifactKind.ROW_ROLE) {
+            if (rowPolicyKindsByEntity.isEmpty()) {
+                diagnostics += diagnostic(
+                    reasonCode = "P2_ROW_ROLE_EMPTY",
+                    message = "A row-level role declares no JPQL or predicate policies.",
+                    nextStep = "Add row-level policies or remove the empty role before assigning it.",
+                    category = DiagnosticCategory.SECURITY,
+                    severity = DiagnosticSeverity.WARNING,
+                    locator = role.snapshot.sourceLocator,
+                )
+            }
+            rowPolicyKindsByEntity.forEach { (entity, policyKinds) ->
+                if ("JpqlRowLevelPolicy" in policyKinds && "PredicateRowLevelPolicy" !in policyKinds) {
+                    diagnostics += diagnostic(
+                        reasonCode = "P2_ROW_POLICY_NESTED_GRAPH_COVERAGE",
+                        message = "$entity has JPQL row filtering but no predicate policy for nested object graphs.",
+                        nextStep = "Review whether the entity can be loaded as a nested collection; add a READ predicate when required.",
+                        category = DiagnosticCategory.SECURITY,
+                        severity = DiagnosticSeverity.WARNING,
+                        locator = role.snapshot.sourceLocator,
+                    )
+                }
+                if ("PredicateRowLevelPolicy" in policyKinds && "JpqlRowLevelPolicy" !in policyKinds) {
+                    diagnostics += diagnostic(
+                        reasonCode = "P2_ROW_POLICY_ROOT_QUERY_COVERAGE",
+                        message = "$entity has predicate filtering but no JPQL policy for efficient root queries.",
+                        nextStep = "Add a matching JPQL policy when the entity is loaded as a root.",
+                        category = DiagnosticCategory.SECURITY,
+                        severity = DiagnosticSeverity.WARNING,
+                        locator = role.snapshot.sourceLocator,
+                    )
                 }
             }
         }
@@ -1478,8 +1569,26 @@ class ApplicationGraphIndexer {
             else -> ArtifactKind.SOURCE_TYPE
         }
 
-    private fun jvmSummary(kind: ArtifactKind, file: GraphSourceFile): String =
-        "${kind.name.lowercase().replace('_', ' ')} from ${file.language.name.lowercase()} source"
+    private fun jvmSummary(kind: ArtifactKind, file: GraphSourceFile): String {
+        if (kind == ArtifactKind.RESOURCE_ROLE || kind == ArtifactKind.ROW_ROLE) {
+            val annotation = if (kind == ArtifactKind.RESOURCE_ROLE) "ResourceRole" else "RowLevelRole"
+            val body = ROLE_ANNOTATION.find(file.content)
+                ?.takeIf { it.groupValues[1] == annotation }
+                ?.groupValues
+                ?.get(2)
+                .orEmpty()
+            val name = stringArgument(body, "name")
+            val code = roleCode(file.content)
+            val scope = Regex("""\bscope\s*=\s*([^,\n)]+)""").find(body)?.groupValues?.get(1)?.trim()
+            val details = buildList {
+                name?.let { add("name=$it") }
+                code?.let { add("code=$it") }
+                scope?.let { add("scope=$it") }
+            }
+            return if (details.isEmpty()) annotation else "$annotation: ${details.joinToString(", ")}"
+        }
+        return "${kind.name.lowercase().replace('_', ' ')} from ${file.language.name.lowercase()} source"
+    }
 
     private fun parseXml(content: String): Document? =
         runCatching {
@@ -1651,6 +1760,54 @@ class ApplicationGraphIndexer {
         return if (compactBody.isBlank()) policyType else "$policyType: $compactBody"
     }
 
+    private fun roleBaseReferences(content: String, typeName: String): List<String> {
+        val escapedType = Regex.escape(typeName)
+        val raw = Regex("""\binterface\s+$escapedType\s+(?:extends\s+|:\s*)([^{]+)""")
+            .find(content)
+            ?.groupValues
+            ?.get(1)
+            .orEmpty()
+        return raw.split(',')
+            .map { declaration ->
+                declaration.trim()
+                    .substringBefore('<')
+                    .substringBefore('(')
+                    .trim()
+            }
+            .filter { JAVA_TYPE_REFERENCE.matches(it) }
+            .distinct()
+    }
+
+    private fun roleCode(content: String): String? {
+        val annotationBody = ROLE_ANNOTATION.find(content)?.groupValues?.get(2).orEmpty()
+        stringArgument(annotationBody, "code")?.let { return it }
+        val codeExpression = Regex("""\bcode\s*=\s*([A-Za-z_$][\w$.]*)""")
+            .find(annotationBody)
+            ?.groupValues
+            ?.get(1)
+        val constantName = codeExpression?.substringAfterLast('.') ?: "CODE"
+        return Regex(
+            """(?m)\b(?:String\s+|const\s+val\s+)${Regex.escape(constantName)}\s*(?::\s*String\s*)?=\s*["']([^"']+)["']""",
+        ).find(content)?.groupValues?.get(1)
+    }
+
+    private fun stringArgument(body: String, name: String): String? =
+        Regex("""\b${Regex.escape(name)}\s*=\s*["']([^"']*)["']""")
+            .find(body)
+            ?.groupValues
+            ?.get(1)
+
+    private fun containsWildcardGrant(policyType: String, body: String): Boolean =
+        when (policyType) {
+            "EntityPolicy" -> policyEntityReference(body) == "*" ||
+                Regex("""\bactions\s*=\s*(?:\{[^}]*\bALL\b[^}]*}|[^,\n)]*\bALL\b)""").containsMatchIn(body)
+            "EntityAttributePolicy" -> "*" in stringValues(ATTRIBUTES_ARGUMENT.find(body)?.groupValues?.get(1).orEmpty())
+            "ViewPolicy" -> "*" in stringValues(VIEW_IDS_ARGUMENT.find(body)?.groupValues?.get(1).orEmpty())
+            "MenuPolicy" -> "*" in stringValues(MENU_IDS_ARGUMENT.find(body)?.groupValues?.get(1).orEmpty())
+            "SpecificPolicy" -> "*" in stringValues(RESOURCES_ARGUMENT.find(body)?.groupValues?.get(1).orEmpty())
+            else -> false
+        }
+
     private fun isLiteralSecret(value: String): Boolean {
         val normalized = value.trim()
         return normalized.isNotBlank() &&
@@ -1790,16 +1947,18 @@ class ApplicationGraphIndexer {
             """@RestMethod(?:\s*\([^)]*\))?[\s\S]{0,320}?\b(?:fun\s+|(?:public|protected|private)?\s*[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""",
         )
         val ROLE_REFERENCES = Regex("""@(RolesAllowed|Secured)\s*\(\s*(?:value\s*=\s*)?([^)]*)\)""")
-        val ROLE_CODE = Regex("""@(ResourceRole|RowLevelRole)\s*\([^)]*\bcode\s*=\s*["']([^"']+)["'][^)]*\)""")
+        val ROLE_ANNOTATION = Regex("""@(ResourceRole|RowLevelRole)\s*\(([\s\S]{0,1200}?)\)""")
         val POLICY_ANNOTATION = Regex(
-            """@(EntityPolicy|EntityAttributePolicy|ViewPolicy|MenuPolicy|SpecificPolicy|UiComponentPolicy)\s*\(([\s\S]{0,1400}?)\)""",
+            """@(EntityPolicy|EntityAttributePolicy|ViewPolicy|MenuPolicy|SpecificPolicy|UiComponentPolicy|JpqlRowLevelPolicy|PredicateRowLevelPolicy)\s*\(([\s\S]{0,2200}?)\)""",
         )
         val ENTITY_CLASS_ARGUMENT = Regex("""\bentityClass\s*=\s*([A-Za-z_][\w.]*)\.class""")
         val ENTITY_NAME_ARGUMENT = Regex("""\bentityName\s*=\s*["']([^"']+)["']""")
         val ATTRIBUTES_ARGUMENT = Regex("""\battributes\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
         val VIEW_IDS_ARGUMENT = Regex("""\bviewIds\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
         val MENU_IDS_ARGUMENT = Regex("""\bmenuIds\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
+        val RESOURCES_ARGUMENT = Regex("""\bresources\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
         val STRING_LITERAL = Regex("""["']([^"']+)["']""")
+        val JAVA_TYPE_REFERENCE = Regex("""[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
         val UNSAFE_MONEY_FIELD = Regex(
             """(?i)\b(?:Double|Float|double|float)\s+([A-Za-z_]\w*(?:amount|balance|salary|wage|loan|interest|payment|principal|rate|money|total)\w*|(?:amount|balance|salary|wage|loan|interest|payment|principal|rate|money|total)\w*)""",
         )
