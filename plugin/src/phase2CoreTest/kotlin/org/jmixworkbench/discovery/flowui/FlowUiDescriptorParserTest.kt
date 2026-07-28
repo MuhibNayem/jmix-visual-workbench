@@ -130,6 +130,60 @@ class FlowUiDescriptorParserTest {
         assertTrue(FlowUiDescriptorParser.parse("view.xml", deleted).accepted)
     }
 
+    @Test
+    fun `JPQL direct text edit preserves CDATA wrapper whitespace and unrelated XML`() {
+        val source = descriptor()
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val query = document.elements.single { it.localTag == "query" }
+        assertTrue(query.directTextCdata)
+        assertNotNull(query.directTextStart)
+        assertNotNull(query.directTextEnd)
+
+        val proposal = FlowUiDescriptorParser.proposeDirectTextChange(
+            document,
+            query.key,
+            "select e from LoanApp e where e.processState = :state",
+        )
+        val changed = WorkspaceChangePlanner.plan(
+            assertNotNull(proposal.changeSet),
+            mapOf("view.xml" to source),
+        ).files.single().resultContent
+
+        assertTrue("<![CDATA[select e from LoanApp e where e.processState = :state]]>" in changed)
+        assertTrue("<!-- manual layout comment -->" in changed)
+        assertEquals(
+            "select e from LoanApp e where e.processState = :state",
+            assertNotNull(FlowUiDescriptorParser.parse("view.xml", changed).document)
+                .elements.single { it.localTag == "query" }.directText,
+        )
+    }
+
+    @Test
+    fun `plain direct text edit escapes markup and remains parseable`() {
+        val source = descriptor().replace(
+            "<![CDATA[select e from LoanApp e]]>",
+            "select e from LoanApp e",
+        )
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val query = document.elements.single { it.localTag == "query" }
+        val proposal = FlowUiDescriptorParser.proposeDirectTextChange(
+            document,
+            query.key,
+            "select e from LoanApp e where e.amount < :maximum",
+        )
+        val changed = WorkspaceChangePlanner.plan(
+            assertNotNull(proposal.changeSet),
+            mapOf("view.xml" to source),
+        ).files.single().resultContent
+
+        assertTrue("e.amount &lt; :maximum" in changed)
+        assertEquals(
+            "select e from LoanApp e where e.amount < :maximum",
+            assertNotNull(FlowUiDescriptorParser.parse("view.xml", changed).document)
+                .elements.single { it.localTag == "query" }.directText,
+        )
+    }
+
     private fun descriptor(): String =
         """
         <?xml version="1.0" encoding="UTF-8"?>

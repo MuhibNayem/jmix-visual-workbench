@@ -6,6 +6,7 @@ import { bridge } from '../../bridge'
 import { useStore } from '../../store'
 import type {
   FlowUiElementSnapshot,
+  FlowUiDirectTextChangeRequest,
   FlowUiPropertyChangeRequest,
   FlowUiStructureChangeRequest,
   FlowUiWorkspaceResponse,
@@ -155,6 +156,10 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     kind: 'structure'
     change: FlowUiStructureChangeRequest
     preview: WorkspaceChangePreviewResponse
+  } | {
+    kind: 'text'
+    change: FlowUiDirectTextChangeRequest
+    preview: WorkspaceChangePreviewResponse
   } | null>(null)
 
   const load = useCallback(async (target: GraphSourceLocator) => {
@@ -209,11 +214,11 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       ? [elements.get(document.rootKey)].filter((element): element is FlowUiElementSnapshot => Boolean(element))
       : []
 
-  const previewProperty = async (propertyName: string, value: string) => {
-    if (!selected || !propertyName.trim()) return
+  const previewElementProperty = async (elementKey: string, propertyName: string, value: string) => {
+    if (!propertyName.trim()) return
     const change: FlowUiPropertyChangeRequest = {
       sourceLocator: locator,
-      elementKey: selected.key,
+      elementKey,
       propertyName: propertyName.trim(),
       value,
     }
@@ -227,6 +232,25 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       return
     }
     setPending({ kind: 'property', change, preview })
+  }
+
+  const previewProperty = async (propertyName: string, value: string) => {
+    if (!selected) return
+    await previewElementProperty(selected.key, propertyName, value)
+  }
+
+  const previewDirectText = async (elementKey: string, value: string) => {
+    const change: FlowUiDirectTextChangeRequest = { sourceLocator: locator, elementKey, value }
+    const preview = await bridge.previewFlowUiDirectTextChange(change)
+    if (!preview.accepted) {
+      addToast(preview.issues[0]?.message ?? 'The query change was rejected.', 'error')
+      return
+    }
+    if (!preview.planDigest || preview.files.length === 0) {
+      addToast('The query already has this value.', 'info')
+      return
+    }
+    setPending({ kind: 'text', change, preview })
   }
 
   const previewStructure = async (change: Omit<FlowUiStructureChangeRequest, 'sourceLocator'>) => {
@@ -249,7 +273,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     try {
       const result = pending.kind === 'property'
         ? await bridge.applyFlowUiPropertyChange(pending.change, pending.preview.planDigest)
-        : await bridge.applyFlowUiStructureChange(pending.change, pending.preview.planDigest)
+        : pending.kind === 'structure'
+          ? await bridge.applyFlowUiStructureChange(pending.change, pending.preview.planDigest)
+          : await bridge.applyFlowUiDirectTextChange(pending.change, pending.preview.planDigest)
       if (!result.success) {
         addToast(result.issues[0]?.message ?? 'The FlowUI source change failed.', 'error')
         return
@@ -300,6 +326,17 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     'SECURITY_POLICY', 'WORKFLOW_PROCESS', 'WORKFLOW_STATE',
   ])
   const dataKinds = new Set(['DATA_CONTAINER', 'DATA_LOADER', 'FETCH_PLAN', 'JPQL_QUERY', 'ENTITY'])
+  const selectedBinding = selected
+    ? workspace.dataModel?.bindings.find((binding) => binding.elementKey === selected.key)
+    : undefined
+  const selectedContainer = selectedBinding
+    ? workspace.dataModel?.containers.find((container) => container.id === selectedBinding.containerId)
+    : undefined
+  const selectedFieldOptions = workspace.dataModel?.entityFields.filter((field) => {
+    if (!selectedContainer?.entityClass) return true
+    return field.entitySemanticKey === selectedContainer.entityClass ||
+      field.entitySemanticKey.endsWith(`.${selectedContainer.entityClass}`)
+  }) ?? []
 
   return (
     <div className="flex h-full flex-col bg-surface">
@@ -336,17 +373,63 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           <div className="max-h-[38%] overflow-auto border-t border-surface-border">
             <PanelTitle icon={Database} title="Data & bindings" />
             <div className="space-y-1 p-2">
-              {workspace.contextArtifacts.filter((artifact) => dataKinds.has(artifact.kind)).map((artifact) => (
-                <button
-                  type="button"
-                  key={artifact.id}
-                  onClick={() => void bridge.navigateToSource(artifact.sourceLocator)}
-                  className="w-full rounded border border-surface-border bg-surface px-2 py-1.5 text-left hover:border-jmix-500/50"
-                >
-                  <div className="truncate text-[10px] text-gray-300">{artifact.displayName}</div>
-                  <div className="text-[9px] text-gray-600">{artifact.kind.replace(/_/g, ' ')}</div>
-                </button>
+              {workspace.dataModel?.containers.map((container) => (
+                <div key={container.elementKey} className="rounded border border-surface-border bg-surface p-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedKey(container.elementKey)}
+                    className="flex w-full items-center justify-between gap-2 text-left"
+                  >
+                    <span className="truncate font-mono text-[10px] text-jmix-300">{container.id}</span>
+                    <span className="text-[9px] text-gray-600">{container.kind}</span>
+                  </button>
+                  <div className="mt-1 truncate text-[9px] text-gray-500">
+                    {container.entityClass ?? 'key/value data'} · {container.fetchPlan ?? 'no fetch plan'}
+                  </div>
+                  {container.queryElementKey && (
+                    <div className="mt-2">
+                      <textarea
+                        key={`${container.queryElementKey}-${container.query}`}
+                        defaultValue={container.query ?? ''}
+                        rows={3}
+                        className="w-full resize-y font-mono text-[9px]"
+                        aria-label={`${container.id} JPQL query`}
+                      />
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          const textarea = event.currentTarget.previousElementSibling as HTMLTextAreaElement
+                          void previewDirectText(container.queryElementKey!, textarea.value)
+                        }}
+                        className={`${quietButton} mt-1`}
+                      >
+                        Preview JPQL update
+                      </button>
+                      <div className="mt-1 text-[9px] text-gray-600">
+                        {(workspace.dataModel?.queryParameters
+                          .filter((parameter) => parameter.queryElementKey === container.queryElementKey)
+                          .map((parameter) => `:${parameter.name}`)
+                          .join(', ')) || 'No named parameters'}
+                      </div>
+                    </div>
+                  )}
+                </div>
               ))}
+              {!workspace.dataModel?.containers.length && (
+                <p className="p-2 text-[10px] text-gray-600">No FlowUI data containers were found.</p>
+              )}
+              <div className="border-t border-surface-border pt-2">
+                {workspace.contextArtifacts.filter((artifact) => dataKinds.has(artifact.kind)).slice(0, 8).map((artifact) => (
+                  <button
+                    type="button"
+                    key={artifact.id}
+                    onClick={() => void bridge.navigateToSource(artifact.sourceLocator)}
+                    className="mb-1 w-full truncate text-left text-[9px] text-gray-600 hover:text-jmix-300"
+                  >
+                    {artifact.kind.replace(/_/g, ' ')} · {artifact.displayName}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </aside>
@@ -383,7 +466,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                   <div className="mt-1 font-mono text-[10px] text-amber-100">
                     {pending.kind === 'property'
                       ? <>{pending.change.propertyName} → &quot;{pending.change.value}&quot;</>
-                      : <>{pending.change.operation.replace(/_/g, ' ').toLowerCase()} {pending.change.tagName ?? ''}</>}
+                      : pending.kind === 'structure'
+                        ? <>{pending.change.operation.replace(/_/g, ' ').toLowerCase()} {pending.change.tagName ?? ''}</>
+                        : <>update direct query/text value</>}
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -475,6 +560,42 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                     </div>
                   </label>
                 ))}
+                {selectedInLayout && workspace.dataModel && (
+                  <div className="border-t border-surface-border pt-2">
+                    <div className="text-[9px] uppercase tracking-wider text-gray-600">Smart entity binding</div>
+                    <label className="mt-1 block text-[9px] text-gray-500">
+                      Data container
+                      <select
+                        value={selectedBinding?.containerId ?? ''}
+                        onChange={(event) => void previewElementProperty(selected.key, 'dataContainer', event.target.value)}
+                        className="mt-0.5 w-full py-1 text-[10px]"
+                      >
+                        <option value="">— select —</option>
+                        {workspace.dataModel.containers.map((container) => (
+                          <option key={container.elementKey} value={container.id}>
+                            {container.id} · {container.entityClass ?? container.kind}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="mt-1 block text-[9px] text-gray-500">
+                      Entity property
+                      <select
+                        value={selectedBinding?.property ?? ''}
+                        disabled={!selectedBinding?.containerId}
+                        onChange={(event) => void previewElementProperty(selected.key, 'property', event.target.value)}
+                        className="mt-0.5 w-full py-1 text-[10px]"
+                      >
+                        <option value="">— select —</option>
+                        {selectedFieldOptions.map((field) => (
+                          <option key={field.artifactId} value={field.name}>
+                            {field.name}{field.type ? ` · ${field.type}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
                 <div className="border-t border-surface-border pt-2">
                   <div className="text-[9px] uppercase tracking-wider text-gray-600">Add property</div>
                   <input

@@ -377,6 +377,9 @@ export interface FlowUiElementSnapshot {
   selfClosing: boolean
   attributes: FlowUiAttributeSnapshot[]
   directText?: string
+  directTextStart?: number
+  directTextEnd?: number
+  directTextCdata: boolean
 }
 
 export interface FlowUiDescriptorSnapshot {
@@ -394,6 +397,7 @@ export interface FlowUiWorkspaceResponse {
   contextArtifacts: GraphArtifact[]
   contextRelationships: GraphRelationship[]
   issues: WorkspaceChangeIssue[]
+  dataModel?: FlowUiDataWorkspaceSnapshot
 }
 
 export interface FlowUiPropertyChangeRequest {
@@ -412,6 +416,54 @@ export interface FlowUiStructureChangeRequest {
   parentKey?: string
   tagName?: string
   attributes?: Record<string, string>
+}
+
+export interface FlowUiDirectTextChangeRequest {
+  sourceLocator: GraphSourceLocator
+  elementKey: string
+  value: string
+}
+
+export interface FlowUiDataContainerSnapshot {
+  elementKey: string
+  id: string
+  kind: string
+  entityClass?: string
+  property?: string
+  fetchPlan?: string
+  fetchPlanElementKey?: string
+  loaderElementKey?: string
+  loaderId?: string
+  queryElementKey?: string
+  query?: string
+}
+
+export interface FlowUiComponentBindingSnapshot {
+  elementKey: string
+  componentId?: string
+  componentTag: string
+  containerId: string
+  property?: string
+}
+
+export interface FlowUiEntityFieldSnapshot {
+  artifactId: string
+  entitySemanticKey: string
+  name: string
+  type?: string
+  sourceLocator: GraphSourceLocator
+}
+
+export interface FlowUiQueryParameterSnapshot {
+  queryElementKey: string
+  name: string
+}
+
+export interface FlowUiDataWorkspaceSnapshot {
+  containers: FlowUiDataContainerSnapshot[]
+  bindings: FlowUiComponentBindingSnapshot[]
+  entityFields: FlowUiEntityFieldSnapshot[]
+  queryParameters: FlowUiQueryParameterSnapshot[]
 }
 
 // ─── CRUD Options ────────────────────────────────────────────────────────────

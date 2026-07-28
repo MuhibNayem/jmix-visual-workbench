@@ -30,6 +30,7 @@ class FlowUiWorkspaceService(
                 contextArtifacts = emptyList(),
                 contextRelationships = emptyList(),
                 issues = loaded.issues,
+                dataModel = null,
             )
         }
 
@@ -57,6 +58,7 @@ class FlowUiWorkspaceService(
             contextArtifacts = context.artifacts,
             contextRelationships = context.relationships,
             issues = emptyList(),
+            dataModel = buildDataModel(loaded.document, graph.artifacts),
         )
     }
 
@@ -111,6 +113,32 @@ class FlowUiWorkspaceService(
         )
     }
 
+    fun previewDirectTextChange(request: FlowUiDirectTextChangeRequest): WorkspaceChangePreviewResponse {
+        val proposal = directTextProposal(request)
+        if (!proposal.accepted) {
+            return rejectedPreview("flowui-text:rejected", proposal.issues)
+        }
+        if (proposal.noChange || proposal.changeSet == null) {
+            return WorkspaceChangePreviewResponse(
+                accepted = true,
+                changeSetId = "flowui-text:no-change",
+                label = "No FlowUI source change required",
+                planDigest = null,
+                files = emptyList(),
+                issues = emptyList(),
+            )
+        }
+        return WorkspaceChangeService.getInstance(project).preview(proposal.changeSet)
+    }
+
+    fun prepareDirectTextChange(request: FlowUiDirectTextApplyRequest): PreparedWorkspaceChange =
+        prepareProposal(
+            proposal = directTextProposal(request.change),
+            expectedPlanDigest = request.expectedPlanDigest,
+            path = request.change.sourceLocator.relativePath,
+            rejectedId = "flowui-text:rejected",
+        )
+
     fun previewStructureChange(request: FlowUiStructureChangeRequest): WorkspaceChangePreviewResponse {
         val proposal = structureProposal(request)
         if (!proposal.accepted) {
@@ -152,6 +180,18 @@ class FlowUiWorkspaceService(
                 propertyName = request.propertyName,
                 value = request.value,
             )
+        }
+
+    private fun directTextProposal(request: FlowUiDirectTextChangeRequest): FlowUiPropertyChangeProposal =
+        loadDescriptor(request.sourceLocator).let { loaded ->
+            val document = loaded.document
+                ?: return@let FlowUiPropertyChangeProposal(
+                    accepted = false,
+                    noChange = false,
+                    changeSet = null,
+                    issues = loaded.issues,
+                )
+            FlowUiDescriptorParser.proposeDirectTextChange(document, request.elementKey, request.value)
         }
 
     private fun structureProposal(request: FlowUiStructureChangeRequest): FlowUiPropertyChangeProposal =
@@ -199,7 +239,7 @@ class FlowUiWorkspaceService(
                 listOf(
                     WorkspaceChangeIssue(
                         code = "JVW-FLOWUI-NO-CHANGE",
-                        message = "The requested FlowUI structure already has the selected position.",
+                        message = "The requested FlowUI operation no longer produces a source change.",
                         relativePath = path,
                     ),
                 )
@@ -327,6 +367,93 @@ class FlowUiWorkspaceService(
         return ContextSelection(selectedArtifacts, selectedRelationships)
     }
 
+    private fun buildDataModel(
+        document: FlowUiDescriptorSnapshot,
+        allArtifacts: List<ArtifactSnapshot>,
+    ): FlowUiDataWorkspaceSnapshot {
+        val elements = document.elements.associateBy { it.key }
+        fun children(elementKey: String) =
+            elements[elementKey]?.childKeys.orEmpty().mapNotNull(elements::get)
+
+        val containers = document.elements
+            .filter { it.localTag in DATA_CONTAINER_TAGS && !it.id.isNullOrBlank() }
+            .map { container ->
+                val loader = children(container.key).firstOrNull { it.localTag == "loader" }
+                val query = loader?.let { children(it.key).firstOrNull { child -> child.localTag == "query" } }
+                val inlineFetchPlan = children(container.key).firstOrNull { it.localTag == "fetchPlan" }
+                FlowUiDataContainerSnapshot(
+                    elementKey = container.key,
+                    id = container.id.orEmpty(),
+                    kind = container.localTag,
+                    entityClass = container.attributes.firstOrNull { it.name == "class" }?.value,
+                    property = container.attributes.firstOrNull { it.name == "property" }?.value,
+                    fetchPlan = container.attributes.firstOrNull { it.name == "fetchPlan" }?.value
+                        ?: inlineFetchPlan?.attributes?.firstOrNull {
+                            it.name == "extends" || it.name == "name"
+                        }?.value,
+                    fetchPlanElementKey = inlineFetchPlan?.key,
+                    loaderElementKey = loader?.key,
+                    loaderId = loader?.id,
+                    queryElementKey = query?.key,
+                    query = query?.directText,
+                )
+            }
+        val bindings = document.elements.mapNotNull { element ->
+            val containerId = element.attributes.firstOrNull {
+                it.name == "dataContainer" || it.name == "itemsContainer"
+            }?.value ?: return@mapNotNull null
+            FlowUiComponentBindingSnapshot(
+                elementKey = element.key,
+                componentId = element.id,
+                componentTag = element.localTag,
+                containerId = containerId,
+                property = element.attributes.firstOrNull { it.name == "property" }?.value,
+            )
+        }
+        val relevantEntities = containers.mapNotNull(FlowUiDataContainerSnapshot::entityClass).toSet()
+        val fields = allArtifacts.asSequence()
+            .filter { it.kind == ArtifactKind.ENTITY_ATTRIBUTE }
+            .filter { artifact ->
+                val entityKey = artifact.semanticKey.substringBeforeLast('.', "")
+                relevantEntities.any { requested ->
+                    entityKey == requested ||
+                        entityKey.endsWith(".$requested") ||
+                        requested.endsWith(".$entityKey")
+                }
+            }
+            .map { artifact ->
+                FlowUiEntityFieldSnapshot(
+                    artifactId = artifact.id,
+                    entitySemanticKey = artifact.semanticKey.substringBeforeLast('.', ""),
+                    name = artifact.displayName,
+                    type = artifact.summary?.substringBefore(" attribute of"),
+                    sourceLocator = artifact.sourceLocator,
+                )
+            }
+            .distinctBy { "${it.entitySemanticKey}.${it.name}" }
+            .sortedWith(compareBy(FlowUiEntityFieldSnapshot::entitySemanticKey, FlowUiEntityFieldSnapshot::name))
+            .take(MAX_ENTITY_FIELDS)
+            .toList()
+        val queryParameters = document.elements.asSequence()
+            .filter { it.localTag == "query" && !it.directText.isNullOrBlank() }
+            .flatMap { query ->
+                JPQL_PARAMETER.findAll(query.directText.orEmpty()).map { match ->
+                    FlowUiQueryParameterSnapshot(
+                        queryElementKey = query.key,
+                        name = match.groupValues[1],
+                    )
+                }
+            }
+            .distinct()
+            .toList()
+        return FlowUiDataWorkspaceSnapshot(
+            containers = containers,
+            bindings = bindings,
+            entityFields = fields,
+            queryParameters = queryParameters,
+        )
+    }
+
     private fun contextRank(kind: ArtifactKind): Int = when (kind) {
         ArtifactKind.VIEW_DESCRIPTOR -> 0
         ArtifactKind.VIEW_CONTROLLER -> 1
@@ -361,7 +488,10 @@ class FlowUiWorkspaceService(
         private const val MAX_DESCRIPTOR_BYTES = 2L * 1024 * 1024
         private const val MAX_CONTEXT_ARTIFACTS = 250
         private const val MAX_CONTEXT_RELATIONSHIPS = 1_000
+        private const val MAX_ENTITY_FIELDS = 5_000
         private const val CONTEXT_DEPTH = 2
+        private val DATA_CONTAINER_TAGS = setOf("instance", "collection", "keyValueCollection", "keyValueInstance")
+        private val JPQL_PARAMETER = Regex(""":([A-Za-z_][A-Za-z0-9_]*)""")
 
         fun getInstance(project: Project): FlowUiWorkspaceService =
             project.getService(FlowUiWorkspaceService::class.java)
@@ -381,6 +511,17 @@ data class FlowUiPropertyChangeRequest(
 
 data class FlowUiPropertyApplyRequest(
     val change: FlowUiPropertyChangeRequest,
+    val expectedPlanDigest: String,
+)
+
+data class FlowUiDirectTextChangeRequest(
+    val sourceLocator: SourceLocator,
+    val elementKey: String,
+    val value: String,
+)
+
+data class FlowUiDirectTextApplyRequest(
+    val change: FlowUiDirectTextChangeRequest,
     val expectedPlanDigest: String,
 )
 
@@ -411,6 +552,49 @@ data class FlowUiWorkspaceResponse(
     val contextArtifacts: List<ArtifactSnapshot>,
     val contextRelationships: List<ArtifactRelationship>,
     val issues: List<WorkspaceChangeIssue>,
+    val dataModel: FlowUiDataWorkspaceSnapshot? = null,
+)
+
+data class FlowUiDataContainerSnapshot(
+    val elementKey: String,
+    val id: String,
+    val kind: String,
+    val entityClass: String?,
+    val property: String?,
+    val fetchPlan: String?,
+    val fetchPlanElementKey: String?,
+    val loaderElementKey: String?,
+    val loaderId: String?,
+    val queryElementKey: String?,
+    val query: String?,
+)
+
+data class FlowUiComponentBindingSnapshot(
+    val elementKey: String,
+    val componentId: String?,
+    val componentTag: String,
+    val containerId: String,
+    val property: String?,
+)
+
+data class FlowUiEntityFieldSnapshot(
+    val artifactId: String,
+    val entitySemanticKey: String,
+    val name: String,
+    val type: String?,
+    val sourceLocator: SourceLocator,
+)
+
+data class FlowUiQueryParameterSnapshot(
+    val queryElementKey: String,
+    val name: String,
+)
+
+data class FlowUiDataWorkspaceSnapshot(
+    val containers: List<FlowUiDataContainerSnapshot>,
+    val bindings: List<FlowUiComponentBindingSnapshot>,
+    val entityFields: List<FlowUiEntityFieldSnapshot>,
+    val queryParameters: List<FlowUiQueryParameterSnapshot>,
 )
 
 private data class LoadedDescriptor(

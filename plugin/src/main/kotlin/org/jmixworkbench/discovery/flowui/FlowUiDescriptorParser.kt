@@ -37,6 +37,9 @@ data class FlowUiElementSnapshot(
     val selfClosing: Boolean,
     val attributes: List<FlowUiAttributeSnapshot>,
     val directText: String?,
+    val directTextStart: Int?,
+    val directTextEnd: Int?,
+    val directTextCdata: Boolean,
 )
 
 data class FlowUiDescriptorSnapshot(
@@ -151,6 +154,9 @@ object FlowUiDescriptorParser {
         }
 
         val snapshots = builders.map { builder ->
+            var directTextStart: Int? = null
+            var directTextEnd: Int? = null
+            var directTextCdata = false
             val directText = if (!builder.selfClosing &&
                 builder.childIndices.isEmpty() &&
                 builder.endTagStart >= builder.startTagEnd
@@ -158,9 +164,26 @@ object FlowUiDescriptorParser {
                 val inner = content.substring(builder.startTagEnd, builder.endTagStart)
                 val trimmed = inner.trim()
                 when {
-                    trimmed.startsWith("<![CDATA[") && trimmed.endsWith("]]>") ->
-                        trimmed.removePrefix("<![CDATA[").removeSuffix("]]>").trim()
-                    '<' !in trimmed -> trimmed.takeIf(String::isNotBlank)
+                    trimmed.startsWith("<![CDATA[") && trimmed.endsWith("]]>") -> {
+                        val cdataOpening = content.indexOf("<![CDATA[", builder.startTagEnd)
+                        val cdataClosing = content.indexOf("]]>", cdataOpening + 9)
+                        val rawStart = cdataOpening + 9
+                        val rawEnd = cdataClosing
+                        val raw = content.substring(rawStart, rawEnd)
+                        val leading = raw.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 } ?: raw.length
+                        val trailing = raw.indexOfLast { !it.isWhitespace() }.takeIf { it >= 0 }?.plus(1) ?: leading
+                        directTextStart = rawStart + leading
+                        directTextEnd = rawStart + trailing
+                        directTextCdata = true
+                        raw.substring(leading, trailing).takeIf(String::isNotBlank)
+                    }
+                    '<' !in trimmed -> {
+                        val leading = inner.indexOfFirst { !it.isWhitespace() }.takeIf { it >= 0 } ?: inner.length
+                        val trailing = inner.indexOfLast { !it.isWhitespace() }.takeIf { it >= 0 }?.plus(1) ?: leading
+                        directTextStart = builder.startTagEnd + leading
+                        directTextEnd = builder.startTagEnd + trailing
+                        inner.substring(leading, trailing).takeIf(String::isNotBlank)?.let(::unescapeText)
+                    }
                     else -> null
                 }
             } else {
@@ -180,6 +203,9 @@ object FlowUiDescriptorParser {
                 selfClosing = builder.selfClosing,
                 attributes = builder.attributes,
                 directText = directText,
+                directTextStart = directTextStart,
+                directTextEnd = directTextEnd,
+                directTextCdata = directTextCdata,
             )
         }
         val rootSnapshot = snapshots.first()
@@ -257,6 +283,46 @@ object FlowUiDescriptorParser {
                 ),
             ),
             issues = emptyList(),
+        )
+    }
+
+    fun proposeDirectTextChange(
+        document: FlowUiDescriptorSnapshot,
+        elementKey: String,
+        value: String,
+    ): FlowUiPropertyChangeProposal {
+        val element = document.elements.singleOrNull { it.key == elementKey }
+            ?: return proposalRejected(
+                "JVW-FLOWUI-ELEMENT-STALE",
+                "The selected FlowUI element no longer exists.",
+                document.relativePath,
+            )
+        val start = element.directTextStart
+        val end = element.directTextEnd
+        if (start == null || end == null || start > end) {
+            return proposalRejected(
+                "JVW-FLOWUI-TEXT-UNSUPPORTED",
+                "This element does not contain a safely editable direct text value.",
+                document.relativePath,
+            )
+        }
+        if (element.directTextCdata && "]]>" in value) {
+            return proposalRejected(
+                "JVW-FLOWUI-CDATA-TERMINATOR-REJECTED",
+                "The value cannot contain a CDATA closing delimiter.",
+                document.relativePath,
+            )
+        }
+        val replacement = if (element.directTextCdata) value else escapeText(value)
+        val expected = document.sourceText.substring(start, end)
+        if (replacement == expected) {
+            return FlowUiPropertyChangeProposal(true, true, null, emptyList())
+        }
+        return structuralProposal(
+            document = document,
+            operationIdentity = "text\u0000$elementKey\u0000$value",
+            label = "Update ${element.id ?: element.localTag} text",
+            edit = WorkspaceTextEdit(start, end, expected, replacement),
         )
     }
 
@@ -518,6 +584,16 @@ object FlowUiDescriptorParser {
             .replace("\"", "&quot;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
+
+    private fun escapeText(value: String): String =
+        value.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+
+    private fun unescapeText(value: String): String =
+        value.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
 
     private fun unescapeAttribute(value: String): String =
         value.replace("&quot;", "\"")

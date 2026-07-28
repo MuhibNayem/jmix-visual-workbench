@@ -23,6 +23,8 @@ import org.jmixworkbench.services.FlowUiWorkspaceResponse
 import org.jmixworkbench.services.FlowUiWorkspaceService
 import org.jmixworkbench.services.FlowUiStructureApplyRequest
 import org.jmixworkbench.services.FlowUiStructureChangeRequest
+import org.jmixworkbench.services.FlowUiDirectTextApplyRequest
+import org.jmixworkbench.services.FlowUiDirectTextChangeRequest
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
 import org.jmixworkbench.services.SourceNavigationRequest
@@ -119,6 +121,14 @@ class JcefBridge(
             }
             if (action == "applyFlowUiStructureChange") {
                 handleApplyFlowUiStructureChange(action, requestId, payload)
+                return
+            }
+            if (action == "previewFlowUiDirectTextChange") {
+                handlePreviewFlowUiDirectTextChange(action, requestId, payload)
+                return
+            }
+            if (action == "applyFlowUiDirectTextChange") {
+                handleApplyFlowUiDirectTextChange(action, requestId, payload)
                 return
             }
             if (action == "previewWorkspaceChange") {
@@ -435,6 +445,75 @@ class JcefBridge(
         }
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiWorkspaceService.getInstance(project).prepareStructureChange(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewFlowUiDirectTextChange(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiDirectTextChangeRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    mapOf(
+                        "accepted" to false,
+                        "changeSetId" to "flowui-text:rejected",
+                        "label" to "FlowUI text change rejected",
+                        "files" to emptyList<Any>(),
+                        "issues" to listOf(
+                            mapOf(
+                                "code" to "JVW-FLOWUI-REQUEST-INVALID",
+                                "message" to (error.message ?: "The FlowUI direct-text request is malformed."),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
+            FlowUiWorkspaceService.getInstance(project).previewDirectTextChange(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { preview ->
+                sendResponse(action, requestId, gson.toJson(preview))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyFlowUiDirectTextChange(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiDirectTextApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangeApplyResponse(
+                        success = false,
+                        changeSetId = "flowui-text:rejected",
+                        planDigest = null,
+                        filesChanged = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-FLOWUI-REQUEST-INVALID",
+                                message = error.message ?: "The FlowUI direct-text apply request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            FlowUiWorkspaceService.getInstance(project).prepareDirectTextChange(request)
         }
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
