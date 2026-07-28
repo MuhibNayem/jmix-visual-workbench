@@ -31,6 +31,7 @@ class FlowUiWorkspaceService(
                 contextRelationships = emptyList(),
                 issues = loaded.issues,
                 dataModel = null,
+                controllerModel = null,
             )
         }
 
@@ -59,6 +60,7 @@ class FlowUiWorkspaceService(
             contextRelationships = context.relationships,
             issues = emptyList(),
             dataModel = buildDataModel(loaded.document, graph.artifacts),
+            controllerModel = FlowUiControllerPsiReader.read(project, context.artifacts),
         )
     }
 
@@ -553,6 +555,7 @@ data class FlowUiWorkspaceResponse(
     val contextRelationships: List<ArtifactRelationship>,
     val issues: List<WorkspaceChangeIssue>,
     val dataModel: FlowUiDataWorkspaceSnapshot? = null,
+    val controllerModel: FlowUiControllerWorkspaceSnapshot? = null,
 )
 
 data class FlowUiDataContainerSnapshot(

@@ -136,6 +136,7 @@ dependencies {
         } else {
             intellijIdeaUltimate("2025.3")
         }
+        bundledModule("intellij.java.psi")
         pluginVerifier()
     }
 }

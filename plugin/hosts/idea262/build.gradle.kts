@@ -136,6 +136,7 @@ dependencies {
         } else {
             intellijIdeaUltimate("2026.2")
         }
+        bundledModule("intellij.java.psi")
         bundledModule("intellij.libraries.jcef")
         bundledModule("intellij.platform.ui.jcef")
         pluginVerifier()

@@ -398,6 +398,7 @@ export interface FlowUiWorkspaceResponse {
   contextRelationships: GraphRelationship[]
   issues: WorkspaceChangeIssue[]
   dataModel?: FlowUiDataWorkspaceSnapshot
+  controllerModel?: FlowUiControllerWorkspaceSnapshot
 }
 
 export interface FlowUiPropertyChangeRequest {
@@ -464,6 +465,36 @@ export interface FlowUiDataWorkspaceSnapshot {
   bindings: FlowUiComponentBindingSnapshot[]
   entityFields: FlowUiEntityFieldSnapshot[]
   queryParameters: FlowUiQueryParameterSnapshot[]
+}
+
+export interface FlowUiControllerInjectionSnapshot {
+  fieldName: string
+  componentId: string
+  type: string
+  visibility?: string
+  sourceLocator: GraphSourceLocator
+}
+
+export interface FlowUiControllerHandlerSnapshot {
+  methodName: string
+  kind: string
+  target?: string
+  subject?: string
+  targetScope?: string
+  returnType?: string
+  parameterTypes: string[]
+  sourceLocator: GraphSourceLocator
+}
+
+export interface FlowUiControllerWorkspaceSnapshot {
+  relativePath: string
+  revisionFingerprint: string
+  className: string
+  language: string
+  psiSupported: boolean
+  injections: FlowUiControllerInjectionSnapshot[]
+  handlers: FlowUiControllerHandlerSnapshot[]
+  message?: string
 }
 
 // ─── CRUD Options ────────────────────────────────────────────────────────────

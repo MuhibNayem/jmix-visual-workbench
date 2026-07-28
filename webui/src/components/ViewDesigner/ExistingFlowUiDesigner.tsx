@@ -659,6 +659,60 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           <div className="min-h-0 flex-1 overflow-auto border-t border-surface-border">
             <PanelTitle icon={Code2} title="Controller & business logic" />
             <div className="space-y-1 p-2">
+              {workspace.controllerModel && (
+                <div className="mb-2 rounded border border-surface-border bg-surface p-2">
+                  <button
+                    type="button"
+                    onClick={() => void bridge.navigateToSource({
+                      relativePath: workspace.controllerModel!.relativePath,
+                      revisionFingerprint: workspace.controllerModel!.revisionFingerprint,
+                    })}
+                    className="w-full text-left"
+                  >
+                    <div className="truncate font-mono text-[10px] text-jmix-300">
+                      {workspace.controllerModel.className}
+                    </div>
+                    <div className="mt-0.5 text-[9px] text-gray-600">
+                      PSI {workspace.controllerModel.psiSupported ? 'connected' : 'read-only'} · {workspace.controllerModel.language}
+                    </div>
+                  </button>
+                  {workspace.controllerModel.message && (
+                    <p className="mt-1 text-[9px] leading-relaxed text-amber-300/70">
+                      {workspace.controllerModel.message}
+                    </p>
+                  )}
+                </div>
+              )}
+              {workspace.controllerModel?.injections.map((injection) => (
+                <button
+                  type="button"
+                  key={`injection-${injection.fieldName}`}
+                  onClick={() => void bridge.navigateToSource(injection.sourceLocator)}
+                  className="w-full rounded border border-surface-border bg-surface px-2 py-1.5 text-left hover:border-jmix-500/50"
+                >
+                  <div className="truncate font-mono text-[10px] text-gray-300">
+                    @ViewComponent {injection.fieldName}
+                  </div>
+                  <div className="mt-0.5 truncate text-[9px] text-gray-600">
+                    {injection.componentId} · {injection.type}
+                  </div>
+                </button>
+              ))}
+              {workspace.controllerModel?.handlers.map((handler) => (
+                <button
+                  type="button"
+                  key={`handler-${handler.kind}-${handler.methodName}-${handler.target ?? ''}`}
+                  onClick={() => void bridge.navigateToSource(handler.sourceLocator)}
+                  className="w-full rounded border border-surface-border bg-surface px-2 py-1.5 text-left hover:border-jmix-500/50"
+                >
+                  <div className="truncate font-mono text-[10px] text-gray-300">
+                    @{handler.kind} {handler.methodName}()
+                  </div>
+                  <div className="mt-0.5 truncate text-[9px] text-gray-600">
+                    {[handler.target, handler.subject, ...handler.parameterTypes].filter(Boolean).join(' · ') || 'view lifecycle'}
+                  </div>
+                </button>
+              ))}
               {workspace.contextArtifacts.filter((artifact) => logicKinds.has(artifact.kind)).map((artifact) => (
                 <button
                   type="button"
