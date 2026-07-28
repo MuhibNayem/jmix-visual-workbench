@@ -65,8 +65,8 @@ class JcefBridge(
         val injection = jsQuery.inject("request")
         val script = """
             window.javaBridge = {
-                send: function(action, payload) {
-                    var request = JSON.stringify({ action: action, payload: payload });
+                send: function(action, payload, requestId) {
+                    var request = JSON.stringify({ action: action, payload: payload, requestId: requestId });
                     $injection
                 }
             };
@@ -76,27 +76,30 @@ class JcefBridge(
     }
 
     private fun handleRequest(requestJson: String) {
+        var action = "error"
+        var requestId: String? = null
         try {
             val json = JsonParser.parseString(requestJson).asJsonObject
-            val action = json.get("action").asString
+            action = json.get("action").asString
+            requestId = json.get("requestId")?.takeUnless { it.isJsonNull }?.asString
             val payload = json.getAsJsonObject("payload")
 
             log.info("Bridge request: $action")
 
             if (action == "getApplicationGraph") {
-                handleGetApplicationGraph(action, payload)
+                handleGetApplicationGraph(action, requestId, payload)
                 return
             }
             if (action == "navigateToSource") {
-                handleNavigateToSource(action, payload)
+                handleNavigateToSource(action, requestId, payload)
                 return
             }
             if (action == "previewWorkspaceChange") {
-                handlePreviewWorkspaceChange(action, payload)
+                handlePreviewWorkspaceChange(action, requestId, payload)
                 return
             }
             if (action == "applyWorkspaceChange") {
-                handleApplyWorkspaceChange(action, payload)
+                handleApplyWorkspaceChange(action, requestId, payload)
                 return
             }
 
@@ -113,10 +116,14 @@ class JcefBridge(
                 else -> """{"error":"Unknown action: $action"}"""
             }
 
-            sendResponse(action, result)
+            sendResponse(action, requestId, result)
         } catch (e: Exception) {
             log.error("Bridge error", e)
-            sendResponse("error", """{"error":"${e.message}"}""")
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(mapOf("error" to (e.message ?: "Bridge request failed."))),
+            )
         }
     }
 
@@ -191,24 +198,25 @@ class JcefBridge(
         )
     }
 
-    private fun handleGetApplicationGraph(action: String, payload: JsonObject) {
+    private fun handleGetApplicationGraph(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
         ReadAction.nonBlocking<org.jmixworkbench.services.ApplicationGraphResponse> {
             ApplicationGraphService.getInstance(project).graph(forceRefresh)
         }
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, gson.toJson(result))
+                sendResponse(action, requestId, gson.toJson(result))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }
 
-    private fun handleNavigateToSource(action: String, payload: JsonObject) {
+    private fun handleNavigateToSource(action: String, requestId: String?, payload: JsonObject) {
         val request = runCatching {
             gson.fromJson(payload, SourceNavigationRequest::class.java)
         }.getOrElse { error ->
             sendResponse(
                 action,
+                requestId,
                 gson.toJson(
                     org.jmixworkbench.services.SourceNavigationResponse(
                         success = false,
@@ -232,17 +240,18 @@ class JcefBridge(
                         prepared.zeroBasedColumn,
                     ).navigate(true)
                 }
-                sendResponse(action, gson.toJson(prepared.response()))
+                sendResponse(action, requestId, gson.toJson(prepared.response()))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }
 
-    private fun handlePreviewWorkspaceChange(action: String, payload: JsonObject) {
+    private fun handlePreviewWorkspaceChange(action: String, requestId: String?, payload: JsonObject) {
         val changeSet = runCatching {
             gson.fromJson(payload, WorkspaceChangeSet::class.java)
         }.getOrElse { error ->
             sendResponse(
                 action,
+                requestId,
                 gson.toJson(
                     mapOf(
                         "accepted" to false,
@@ -262,17 +271,18 @@ class JcefBridge(
         }
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
-                sendResponse(action, gson.toJson(preview))
+                sendResponse(action, requestId, gson.toJson(preview))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }
 
-    private fun handleApplyWorkspaceChange(action: String, payload: JsonObject) {
+    private fun handleApplyWorkspaceChange(action: String, requestId: String?, payload: JsonObject) {
         val request = runCatching {
             gson.fromJson(payload, WorkspaceChangeApplyRequest::class.java)
         }.getOrElse { error ->
             sendResponse(
                 action,
+                requestId,
                 gson.toJson(
                     WorkspaceChangeApplyResponse(
                         success = false,
@@ -296,15 +306,17 @@ class JcefBridge(
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
-                sendResponse(action, gson.toJson(response))
+                sendResponse(action, requestId, gson.toJson(response))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }
 
-    private fun sendResponse(action: String, resultJson: String) {
+    private fun sendResponse(action: String, requestId: String?, resultJson: String) {
+        val actionJson = gson.toJson(action)
+        val requestIdJson = gson.toJson(requestId)
         val script = """
             if (window.onBridgeResponse) {
-                window.onBridgeResponse('$action', $resultJson);
+                window.onBridgeResponse($actionJson, $requestIdJson, $resultJson);
             }
         """.trimIndent()
         browser.cefBrowser.executeJavaScript(script, browser.cefBrowser.url, 0)

@@ -9,14 +9,14 @@ import type {
   WorkspaceChangeSet,
 } from '../types'
 
-type BridgeCallback = (action: string, result: any) => void
+type BridgeCallback = (action: string, requestId: string | null, result: any) => void
 
 declare global {
   interface Window {
     javaBridge?: {
-      send: (action: string, payload: any) => void
+      send: (action: string, payload: any, requestId: string) => void
     }
-    onBridgeResponse?: (action: string, result: any) => void
+    onBridgeResponse?: (action: string, requestId: string | null, result: any) => void
     onBridgeReady?: () => void
   }
 }
@@ -24,16 +24,17 @@ declare global {
 class Bridge {
   private listeners: BridgeCallback[] = []
   private ready = false
-  private pendingQueue: { action: string; payload: any }[] = []
+  private requestSequence = 0
+  private pendingQueue: { action: string; payload: any; requestId: string }[] = []
 
   constructor() {
-    window.onBridgeResponse = (action: string, result: any) => {
-      this.listeners.forEach(cb => cb(action, result))
+    window.onBridgeResponse = (action: string, requestId: string | null, result: any) => {
+      this.listeners.forEach(cb => cb(action, requestId, result))
     }
 
     window.onBridgeReady = () => {
       this.ready = true
-      this.pendingQueue.forEach(({ action, payload }) => this.send(action, payload))
+      this.pendingQueue.forEach(({ action, payload, requestId }) => this.send(action, payload, requestId))
       this.pendingQueue = []
     }
 
@@ -43,23 +44,24 @@ class Bridge {
     }
   }
 
-  send(action: string, payload: any = {}) {
+  send(action: string, payload: any = {}, requestId: string = this.nextRequestId()) {
     if (!this.ready || !window.javaBridge) {
-      this.pendingQueue.push({ action, payload })
       // In dev mode, simulate response
       if (import.meta.env.DEV) {
         console.log(`[Bridge] ${action}`, payload)
         setTimeout(() => {
-          this.listeners.forEach(cb => cb(action, {
+          this.listeners.forEach(cb => cb(action, requestId, {
             success: true,
             filesWritten: [`generated/${action}.java`],
             errors: [],
           }))
         }, 300)
+        return
       }
+      this.pendingQueue.push({ action, payload, requestId })
       return
     }
-    window.javaBridge.send(action, payload)
+    window.javaBridge.send(action, payload, requestId)
   }
 
   onResponse(callback: BridgeCallback) {
@@ -70,15 +72,21 @@ class Bridge {
   }
 
   async request<T = any>(action: string, payload: any = {}): Promise<T> {
+    const requestId = this.nextRequestId()
     return new Promise((resolve) => {
-      const unsub = this.onResponse((respAction, result) => {
-        if (respAction === action || respAction === 'error') {
+      const unsub = this.onResponse((respAction, responseRequestId, result) => {
+        if (responseRequestId === requestId && respAction === action) {
           unsub()
           resolve(result)
         }
       })
-      this.send(action, payload)
+      this.send(action, payload, requestId)
     })
+  }
+
+  private nextRequestId(): string {
+    this.requestSequence += 1
+    return `jvw-${Date.now().toString(36)}-${this.requestSequence.toString(36)}`
   }
 
   generateEntity(entity: any) {
