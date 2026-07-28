@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Phase 1 passed; ready to research and plan Phase 2
-stopped_at: Phase 2 UI-SPEC approved
-last_updated: "2026-07-28T06:11:02.349Z"
+status: executing
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-07-28T07:57:55.419Z"
 last_activity: 2026-07-28
 progress:
   total_phases: 8
   completed_phases: 1
-  total_plans: 5
-  completed_plans: 5
-  percent: 100
+  total_plans: 23
+  completed_plans: 6
+  percent: 26
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-27)
 
 **Core value:** Developers can make substantial Jmix project changes visually without risking silent source corruption: every operation understands the existing project, shows the intended diff, validates the result, applies changes atomically, and can be undone.
-**Current focus:** Phase 02 — Compatibility Laboratory and Read-Only Onboarding
+**Current focus:** Phase 02 — compatibility-laboratory-and-read-only-onboarding
 
 ## Current Position
 
-Phase: 02 (Compatibility Laboratory and Read-Only Onboarding) — PLANNING
-Plan: Not yet planned
-Status: Phase 1 passed; ready to research and plan Phase 2
+Phase: 02 (compatibility-laboratory-and-read-only-onboarding) — EXECUTING
+Plan: 2 of 18
+Status: Ready to execute
 Last activity: 2026-07-28
 
 Milestone progress: [█░░░░░░░░░] 13%
@@ -55,6 +55,7 @@ Milestone progress: [█░░░░░░░░░] 13%
 | Phase 01 P03 | 54min | 2 tasks | 17 files |
 | Phase 01 P04 | 36min | 2 tasks | 14 files |
 | Phase 01 P05 | 109min | 2 tasks | 10 files |
+| Phase 02 P01 | 16 min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,10 @@ Recent decisions affecting current work:
 - [Phase 01]: Keep target-project mutation non-certified and disabled after Phase 1.
 - [Phase 01]: Serve packaged UI only from `https://jmix-workbench.invalid` through a constrained classpath-backed JCEF handler; never navigate Chromium to a JVM `jar:file:` URL.
 - [Phase 01]: Require official signed-product visual UAT and bridge logs on both exact host lanes before certifying installed startup.
+- [Phase 02]: Phase 2 supersedes the Phase 1 Kotlin-free aggregate constraint only for allowlisted pure discovery compilation; the aggregate remains IntelliJ-free.
+- [Phase 02]: Exclude snapshot IDs, project-local IDs, and creation timestamps from canonical discovery identities.
+- [Phase 02]: Represent source locations only as validated project-relative coordinates plus a revision fingerprint.
+- [Phase 02]: Preserve absent or conflicting optional IDE evidence with nullable values and explicit confidence.
 
 ### Pending Todos
 
@@ -97,6 +102,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-28T06:11:02.344Z
-Stopped at: Phase 2 UI-SPEC approved
-Resume file: .planning/phases/02-compatibility-laboratory-and-read-only-onboarding/02-UI-SPEC.md
+Last session: 2026-07-28T07:57:55.415Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

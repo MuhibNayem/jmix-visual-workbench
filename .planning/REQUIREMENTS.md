@@ -18,7 +18,7 @@
 
 ### Compatibility Contract
 
-- [ ] **COMP-01**: A developer can view the exact detected IntelliJ, Jmix, JDK, Gradle DSL, build topology, language, add-on, data-store, trust, and import-health profile for the open project.
+- [x] **COMP-01**: A developer can view the exact detected IntelliJ, Jmix, JDK, Gradle DSL, build topology, language, add-on, data-store, trust, and import-health profile for the open project.
 - [ ] **COMP-02**: The backend returns an operation-specific compatibility state and reason: certified read/write, certified read-only, recognized diagnostic, or unsupported.
 - [ ] **COMP-03**: A project receives write capability only when its exact operation/profile cell is present in the reviewed compatibility registry with passing fixture evidence.
 - [ ] **COMP-04**: Certified Jmix 2.8.x fixtures on Java 17 and Java 21 can complete the v1 entity/data and CRUD workflows using adapter-specific source and configuration rules.
@@ -35,7 +35,7 @@
 - [ ] **DISC-04**: The workbench reports resolved Jmix platform versions, Gradle plugins, official/third-party/internal add-ons, optional IDE capabilities, and unresolved dependencies without executing arbitrary project code.
 - [ ] **DISC-05**: Developers can inspect main and additional data stores, their module ownership, migration roots, and dialect evidence without opening a database connection.
 - [ ] **DISC-06**: Developers can browse an indexed semantic inventory of entities, DTOs, enums, views/controllers, fetch plans, menus, roles, messages, repositories, changelogs, modules, and add-on provenance.
-- [ ] **DISC-07**: Every indexed artifact exposes stable identity, owning build/module/source set, source location, origin/provenance, diagnostics, and current revision fingerprint.
+- [x] **DISC-07**: Every indexed artifact exposes stable identity, owning build/module/source set, source location, origin/provenance, diagnostics, and current revision fingerprint.
 - [ ] **DISC-08**: Index updates are incremental, cancellable, dumb-mode aware, and never retain invalid PSI as long-lived application state.
 - [ ] **DISC-09**: Developers can inspect incoming and outgoing relationships among indexed Jmix artifacts without creating a second authoritative project model.
 - [ ] **DISC-10**: Developers can navigate from workbench items and diagnostics to the relevant source file and line using native IntelliJ navigation.
@@ -88,7 +88,7 @@
 - [ ] **TEAM-04**: A documented headless command validates the same project model, compatibility decisions, artifact references, and policy rules used by the IDE.
 - [ ] **TEAM-05**: For the same revision and inputs, IDE and headless planning produce the same normalized operations, digest, compatibility state, and diagnostic codes.
 - [ ] **TEAM-06**: Released visual workflows are fully operable by keyboard, expose labeled/focusable controls, retain visible focus, support zoom, and pass automated plus manual accessibility gates.
-- [ ] **TEAM-07**: Long-running discovery, indexing, planning, validation, and rendering work is cancellable and does not perform blocking work on the IntelliJ event-dispatch thread.
+- [x] **TEAM-07**: Long-running discovery, indexing, planning, validation, and rendering work is cancellable and does not perform blocking work on the IntelliJ event-dispatch thread.
 - [ ] **TEAM-08**: Developers can create a redacted support bundle containing compatibility, diagnostics, performance, and release metadata without source contents, credentials, or proprietary dependency data.
 - [ ] **TEAM-09**: Plans identify ownership and dependent operations clearly enough for teams to review generated changes in the IDE, CI, and version control without workstation-specific output.
 
@@ -161,7 +161,7 @@
 | PROD-06 | Phase 1 | Complete |
 | PROD-07 | Phase 8 | Pending |
 | PROD-08 | Phase 8 | Pending |
-| COMP-01 | Phase 2 | Pending |
+| COMP-01 | Phase 2 | Complete |
 | COMP-02 | Phase 2 | Pending |
 | COMP-03 | Phase 2 | Pending |
 | COMP-04 | Phase 5 | Pending |
@@ -175,7 +175,7 @@
 | DISC-04 | Phase 2 | Pending |
 | DISC-05 | Phase 2 | Pending |
 | DISC-06 | Phase 2 | Pending |
-| DISC-07 | Phase 2 | Pending |
+| DISC-07 | Phase 2 | Complete |
 | DISC-08 | Phase 2 | Pending |
 | DISC-09 | Phase 2 | Pending |
 | DISC-10 | Phase 2 | Pending |
@@ -216,7 +216,7 @@
 | TEAM-04 | Phase 6 | Pending |
 | TEAM-05 | Phase 6 | Pending |
 | TEAM-06 | Phase 6 | Pending |
-| TEAM-07 | Phase 2 | Pending |
+| TEAM-07 | Phase 2 | Complete |
 | TEAM-08 | Phase 6 | Pending |
 | TEAM-09 | Phase 6 | Pending |
 | ENT-01 | Phase 7 | Pending |
