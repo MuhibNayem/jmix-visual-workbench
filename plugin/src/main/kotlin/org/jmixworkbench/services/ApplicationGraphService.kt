@@ -15,6 +15,8 @@ import org.jmixworkbench.discovery.model.ArtifactOrigin
 import org.jmixworkbench.discovery.model.ArtifactOwner
 import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
 import org.jmixworkbench.discovery.model.SourceLanguage
+import org.jmixworkbench.discovery.model.SourceLocator
+import org.jmixworkbench.discovery.navigation.SourceNavigationPolicy
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexInput
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexResult
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexer
@@ -83,6 +85,58 @@ class ApplicationGraphService(
 
     fun invalidate() {
         cached.set(null)
+    }
+
+    fun prepareNavigation(request: SourceNavigationRequest): PreparedSourceNavigation {
+        val validation = SourceNavigationPolicy.validate(
+            relativePath = request.relativePath,
+            line = request.line,
+            column = request.column,
+            revisionFingerprint = request.revisionFingerprint,
+        )
+        val locator = validation.locator
+        if (!validation.accepted || locator == null) {
+            return PreparedSourceNavigation.failure(
+                validation.errorCode ?: "JVW-NAVIGATION-PATH-REJECTED",
+                validation.message,
+            )
+        }
+        val baseDir = project.basePath?.let(LocalFileSystem.getInstance()::findFileByPath)
+            ?: return PreparedSourceNavigation.failure(
+                "JVW-NAVIGATION-PROJECT-MISSING",
+                "The project root is unavailable.",
+            )
+        val file = baseDir.findFileByRelativePath(locator.relativePath)
+            ?: return PreparedSourceNavigation.failure(
+                "JVW-NAVIGATION-SOURCE-MISSING",
+                "The indexed source file no longer exists.",
+            )
+        if (file.isDirectory || !VfsUtilCore.isAncestor(baseDir, file, false)) {
+            return PreparedSourceNavigation.failure(
+                "JVW-NAVIGATION-PATH-REJECTED",
+                "The requested source is outside the open project.",
+            )
+        }
+        val currentFingerprint = runCatching {
+            CanonicalDiscoveryJson.sha256(String(file.contentsToByteArray(false), file.charset))
+        }.getOrNull() ?: return PreparedSourceNavigation.failure(
+            "JVW-NAVIGATION-SOURCE-UNREADABLE",
+            "The indexed source file can no longer be read.",
+        )
+        if (!SourceNavigationPolicy.revisionMatches(locator, currentFingerprint)) {
+            return PreparedSourceNavigation.failure(
+                "JVW-NAVIGATION-STALE",
+                "The source changed after this graph snapshot. Refresh the application map.",
+            )
+        }
+        return PreparedSourceNavigation(
+            success = true,
+            errorCode = null,
+            message = "Source location verified.",
+            file = file,
+            zeroBasedLine = (locator.line ?: 1) - 1,
+            zeroBasedColumn = (locator.column ?: 1) - 1,
+        )
     }
 
     private fun collectCandidates(): CandidateInventory {
@@ -302,3 +356,40 @@ data class ApplicationGraphResponse(
     val durationMillis: Long,
     val snapshotDigest: String,
 )
+
+data class SourceNavigationRequest(
+    val relativePath: String,
+    val line: Int?,
+    val column: Int?,
+    val revisionFingerprint: String,
+)
+
+data class SourceNavigationResponse(
+    val success: Boolean,
+    val errorCode: String?,
+    val message: String,
+)
+
+data class PreparedSourceNavigation(
+    val success: Boolean,
+    val errorCode: String?,
+    val message: String,
+    val file: VirtualFile?,
+    val zeroBasedLine: Int,
+    val zeroBasedColumn: Int,
+) {
+    fun response(): SourceNavigationResponse =
+        SourceNavigationResponse(success, errorCode, message)
+
+    companion object {
+        fun failure(errorCode: String, message: String): PreparedSourceNavigation =
+            PreparedSourceNavigation(
+                success = false,
+                errorCode = errorCode,
+                message = message,
+                file = null,
+                zeroBasedLine = 0,
+                zeroBasedColumn = 0,
+            )
+    }
+}

@@ -27,6 +27,7 @@ val phase2CoreSourceSet = sourceSets.create("phase2Core") {
     kotlin.setSrcDirs(listOf("src/main/kotlin"))
     kotlin.include(
         "org/jmixworkbench/discovery/model/**",
+        "org/jmixworkbench/discovery/navigation/**",
         "org/jmixworkbench/discovery/compatibility/**",
         "org/jmixworkbench/discovery/semantic/**",
         "org/jmixworkbench/discovery/static/GradleConfigParser.kt",

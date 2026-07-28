@@ -273,12 +273,30 @@ function ArtifactInspector({
   artifactsById: Map<string, GraphArtifact>
   onNavigate: (id: string) => void
 }) {
+  const [navigationMessage, setNavigationMessage] = useState<string | null>(null)
+  const openSource = async () => {
+    const response = await bridge.navigateToSource(artifact.sourceLocator)
+    setNavigationMessage(response.success ? null : `${response.errorCode ?? 'Navigation failed'}: ${response.message}`)
+  }
+
   return (
     <div className="space-y-5">
       <div>
         <div className="text-[10px] uppercase tracking-wider text-jmix-400">{readable(artifact.kind)}</div>
         <h3 className="mt-1 break-words text-xl font-semibold text-gray-100">{artifact.displayName}</h3>
         <p className="mt-1 text-xs text-gray-400">{artifact.summary}</p>
+        <button
+          type="button"
+          onClick={() => void openSource()}
+          className="mt-3 rounded border border-jmix-500/50 bg-jmix-500/10 px-3 py-1.5 text-xs font-medium text-jmix-300 hover:bg-jmix-500/20"
+        >
+          Open source in IntelliJ
+        </button>
+        {navigationMessage && (
+          <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-100" role="alert">
+            {navigationMessage}
+          </div>
+        )}
       </div>
 
       <dl className="grid gap-3 rounded border border-surface-border bg-surface-light p-4 text-xs sm:grid-cols-2">
@@ -324,6 +342,15 @@ function ArtifactInspector({
               <div className="font-medium">{diagnostic.reasonCode}</div>
               <div className="mt-1 opacity-90">{diagnostic.message}</div>
               {diagnostic.nextStep && <div className="mt-2 opacity-70">Next: {diagnostic.nextStep}</div>}
+              {diagnostic.sourceLocator && (
+                <button
+                  type="button"
+                  onClick={() => void bridge.navigateToSource(diagnostic.sourceLocator!)}
+                  className="mt-2 underline decoration-dotted underline-offset-2 opacity-80 hover:opacity-100"
+                >
+                  Open diagnostic source
+                </button>
+              )}
             </div>
           ))}
           {diagnostics.length === 0 && <div className="text-xs text-gray-600">No source-linked diagnostics.</div>}

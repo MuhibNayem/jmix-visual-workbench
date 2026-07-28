@@ -286,6 +286,12 @@ export interface ApplicationGraphResponse {
   error?: string
 }
 
+export interface SourceNavigationResponse {
+  success: boolean
+  errorCode?: string
+  message: string
+}
+
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {

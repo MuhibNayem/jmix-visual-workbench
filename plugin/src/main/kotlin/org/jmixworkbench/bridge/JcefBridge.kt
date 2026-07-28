@@ -7,6 +7,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
@@ -14,6 +15,8 @@ import org.jmixworkbench.generator.CrudOrchestrator
 import org.jmixworkbench.model.*
 import org.jmixworkbench.services.CodeGenerationService
 import org.jmixworkbench.services.ApplicationGraphService
+import org.jmixworkbench.services.PreparedSourceNavigation
+import org.jmixworkbench.services.SourceNavigationRequest
 import org.jmixworkbench.services.JmixProjectService
 import org.jmixworkbench.toolwindow.isPackagedWorkbenchOriginUrl
 import org.cef.browser.CefBrowser
@@ -77,6 +80,10 @@ class JcefBridge(
 
             if (action == "getApplicationGraph") {
                 handleGetApplicationGraph(action, payload)
+                return
+            }
+            if (action == "navigateToSource") {
+                handleNavigateToSource(action, payload)
                 return
             }
 
@@ -179,6 +186,40 @@ class JcefBridge(
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleNavigateToSource(action: String, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, SourceNavigationRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                gson.toJson(
+                    org.jmixworkbench.services.SourceNavigationResponse(
+                        success = false,
+                        errorCode = "JVW-NAVIGATION-REQUEST-INVALID",
+                        message = error.message ?: "The navigation request is malformed.",
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedSourceNavigation> {
+            ApplicationGraphService.getInstance(project).prepareNavigation(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                if (prepared.success && prepared.file != null) {
+                    OpenFileDescriptor(
+                        project,
+                        prepared.file,
+                        prepared.zeroBasedLine,
+                        prepared.zeroBasedColumn,
+                    ).navigate(true)
+                }
+                sendResponse(action, gson.toJson(prepared.response()))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

@@ -1,4 +1,10 @@
-import type { ApplicationGraphResponse, GenerationResult, ProjectConfig } from '../types'
+import type {
+  ApplicationGraphResponse,
+  GenerationResult,
+  GraphSourceLocator,
+  ProjectConfig,
+  SourceNavigationResponse,
+} from '../types'
 
 type BridgeCallback = (action: string, result: any) => void
 
@@ -102,6 +108,10 @@ class Bridge {
 
   getApplicationGraph(forceRefresh: boolean = false) {
     return this.request<ApplicationGraphResponse>('getApplicationGraph', { forceRefresh })
+  }
+
+  navigateToSource(locator: GraphSourceLocator) {
+    return this.request<SourceNavigationResponse>('navigateToSource', locator)
   }
 }
 
