@@ -504,13 +504,31 @@ export interface FlowUiControllerInjectionRequest {
   entityClass?: string
 }
 
-export type FlowUiControllerHandlerKind = 'VIEW_INIT' | 'VIEW_BEFORE_SHOW' | 'VIEW_READY' | 'BUTTON_CLICK'
+export type FlowUiControllerHandlerKind =
+  | 'VIEW_INIT'
+  | 'VIEW_BEFORE_SHOW'
+  | 'VIEW_READY'
+  | 'VIEW_ATTACH'
+  | 'VIEW_BEFORE_CLOSE'
+  | 'VIEW_AFTER_CLOSE'
+  | 'VIEW_DETACH'
+  | 'VIEW_QUERY_PARAMETERS_CHANGE'
+  | 'BUTTON_CLICK'
+  | 'COMPONENT_TYPED_VALUE_CHANGE'
+  | 'COMPONENT_VALUE_CHANGE'
+  | 'ACTION_PERFORMED'
+  | 'COLLECTION_LOADER_PRE_LOAD'
+  | 'COLLECTION_LOADER_POST_LOAD'
+  | 'COLLECTION_LOADER_LOAD_DELEGATE'
+  | 'COMPONENT_VALIDATOR'
 
 export interface FlowUiControllerHandlerRequest {
   controllerLocator: GraphSourceLocator
   kind: FlowUiControllerHandlerKind
   componentId?: string
   componentTag?: string
+  targetId?: string
+  entityClass?: string
 }
 
 export interface JmixRuntimeInspectionResponse {

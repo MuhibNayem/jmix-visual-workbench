@@ -29,6 +29,32 @@ const componentContainers = new Set([
   'layout', 'vbox', 'hbox', 'formLayout', 'gridLayout', 'flexLayout', 'split',
   'tabSheet', 'tab', 'accordion', 'details', 'scroller',
 ])
+const typedValueComponents = new Set([
+  'textField', 'textArea', 'emailField', 'passwordField', 'integerField', 'bigDecimalField',
+  'numberField', 'datePicker', 'dateTimePicker', 'timePicker', 'comboBox', 'entityComboBox',
+  'entityPicker', 'valuePicker', 'checkbox', 'radioButtonGroup', 'select',
+])
+const actionTargetOwners = new Set([
+  'dataGrid', 'treeDataGrid', 'entityPicker', 'entityComboBox', 'valuePicker',
+  'multiValuePicker', 'multiSelectComboBoxPicker', 'genericFilter', 'userMenu',
+  'actionItem', 'textItem', 'componentItem',
+])
+
+function actionTargetId(
+  action: FlowUiElementSnapshot,
+  elements: Map<string, FlowUiElementSnapshot>,
+): string | undefined {
+  if (action.localTag !== 'action' || !action.id) return undefined
+  const ownerIds: string[] = []
+  let parentKey = action.parentKey
+  while (parentKey) {
+    const parent = elements.get(parentKey)
+    if (!parent) break
+    if (parent.id && actionTargetOwners.has(parent.localTag)) ownerIds.unshift(parent.id)
+    parentKey = parent.parentKey
+  }
+  return [...ownerIds, action.id].join('.')
+}
 
 function PanelTitle({ title, count, icon: Icon }: {
   title: string
@@ -352,6 +378,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     component?: FlowUiElementSnapshot,
   ) => {
     if (!workspace?.controllerModel?.psiSupported) return
+    const loaderContainer = component
+      ? workspace.dataModel?.containers.find((container) => container.loaderElementKey === component.key)
+      : undefined
     const change: FlowUiControllerHandlerRequest = {
       controllerLocator: {
         relativePath: workspace.controllerModel.relativePath,
@@ -360,6 +389,8 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       kind,
       componentId: component?.id,
       componentTag: component?.localTag,
+      targetId: component ? actionTargetId(component, elements) : undefined,
+      entityClass: loaderContainer?.entityClass,
     }
     const preview = await bridge.previewFlowUiControllerHandler(change)
     if (!preview.accepted) {
@@ -852,29 +883,31 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                     </label>
                   </div>
                 )}
-                {selectedInLayout && selected.id && workspace.controllerModel?.psiSupported && (
+                {selected.id && workspace.controllerModel?.psiSupported && (
                   <div className="border-t border-surface-border pt-2">
                     <div className="text-[9px] uppercase tracking-wider text-gray-600">Java controller</div>
-                    {workspace.controllerModel.injections.some((injection) => injection.componentId === selected.id) ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const injection = workspace.controllerModel!.injections
-                            .find((candidate) => candidate.componentId === selected.id)
-                          if (injection) void bridge.navigateToSource(injection.sourceLocator)
-                        }}
-                        className={`${quietButton} mt-1.5`}
-                      >
-                        Open existing @ViewComponent
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => void previewControllerInjection()}
-                        className={`${quietButton} mt-1.5`}
-                      >
-                        Preview Inject to Controller
-                      </button>
+                    {selectedInLayout && (
+                      workspace.controllerModel.injections.some((injection) => injection.componentId === selected.id) ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const injection = workspace.controllerModel!.injections
+                              .find((candidate) => candidate.componentId === selected.id)
+                            if (injection) void bridge.navigateToSource(injection.sourceLocator)
+                          }}
+                          className={`${quietButton} mt-1.5`}
+                        >
+                          Open existing @ViewComponent
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void previewControllerInjection()}
+                          className={`${quietButton} mt-1.5`}
+                        >
+                          Preview Inject to Controller
+                        </button>
+                      )
                     )}
                     {selected.localTag === 'button' && (
                       <button
@@ -884,6 +917,72 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                       >
                         Preview Click Handler
                       </button>
+                    )}
+                    {selected.localTag === 'action' && (
+                      <button
+                        type="button"
+                        onClick={() => void previewControllerHandler('ACTION_PERFORMED', selected)}
+                        className={`${quietButton} mt-1.5`}
+                      >
+                        Preview Action Handler
+                      </button>
+                    )}
+                    {selectedInLayout && typedValueComponents.has(selected.localTag) && (
+                      <div className="mt-1.5 grid grid-cols-2 gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void previewControllerHandler('COMPONENT_TYPED_VALUE_CHANGE', selected)}
+                          className={quietButton}
+                        >
+                          Typed change
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void previewControllerHandler('COMPONENT_VALUE_CHANGE', selected)}
+                          className={quietButton}
+                        >
+                          Raw change
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void previewControllerHandler('COMPONENT_VALIDATOR', selected)}
+                          className={`${quietButton} col-span-2`}
+                        >
+                          Preview UI validator skeleton
+                        </button>
+                        <p className="col-span-2 text-[9px] leading-relaxed text-amber-300/70">
+                          UI validation is not a server control. Enforce payroll and financial rules in a transactional
+                          service as well.
+                        </p>
+                      </div>
+                    )}
+                    {selected.localTag === 'loader' && workspace.dataModel?.containers.some(
+                      (container) => container.loaderElementKey === selected.key &&
+                        container.kind.toLowerCase().includes('collection'),
+                    ) && (
+                      <div className="mt-1.5 grid grid-cols-2 gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void previewControllerHandler('COLLECTION_LOADER_PRE_LOAD', selected)}
+                          className={quietButton}
+                        >
+                          Pre-load
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void previewControllerHandler('COLLECTION_LOADER_POST_LOAD', selected)}
+                          className={quietButton}
+                        >
+                          Post-load
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void previewControllerHandler('COLLECTION_LOADER_LOAD_DELEGATE', selected)}
+                          className={`${quietButton} col-span-2`}
+                        >
+                          Preview load delegate
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}
@@ -973,11 +1072,16 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                     </p>
                   )}
                   {workspace.controllerModel.psiSupported && (
-                    <div className="mt-2 grid grid-cols-3 gap-1">
+                    <div className="mt-2 grid grid-cols-2 gap-1">
                       {([
                         ['VIEW_INIT', 'Init'],
                         ['VIEW_BEFORE_SHOW', 'Before show'],
                         ['VIEW_READY', 'Ready'],
+                        ['VIEW_ATTACH', 'Attach'],
+                        ['VIEW_BEFORE_CLOSE', 'Before close'],
+                        ['VIEW_AFTER_CLOSE', 'After close'],
+                        ['VIEW_DETACH', 'Detach'],
+                        ['VIEW_QUERY_PARAMETERS_CHANGE', 'Query parameters'],
                       ] as const).map(([kind, label]) => (
                         <button
                           type="button"

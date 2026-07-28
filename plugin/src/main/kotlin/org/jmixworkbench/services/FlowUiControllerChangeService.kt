@@ -4,10 +4,12 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
+import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiManager
+import com.intellij.psi.search.GlobalSearchScope
 import org.jmixworkbench.discovery.change.WorkspaceChangeIssue
 import org.jmixworkbench.discovery.change.WorkspaceChangePlan
 import org.jmixworkbench.discovery.change.WorkspaceChangeSet
@@ -201,21 +203,72 @@ class FlowUiControllerChangeService(
     }
 
     private fun proposeHandler(request: FlowUiControllerHandlerRequest): ControllerChangeProposal {
-        if (request.kind == FlowUiControllerHandlerKind.BUTTON_CLICK &&
-            (request.componentId.isNullOrBlank() || request.componentTag?.substringAfter(':') != "button")
-        ) {
-            return rejected(
-                "JVW-CONTROLLER-HANDLER-TARGET-INVALID",
-                "A button click handler requires a selected button with an id.",
-                request.controllerLocator.relativePath,
-            )
+        when (request.kind) {
+            FlowUiControllerHandlerKind.BUTTON_CLICK -> {
+                if (request.componentId.isNullOrBlank() || request.componentTag?.substringAfter(':') != "button") {
+                    return rejected(
+                        "JVW-CONTROLLER-HANDLER-TARGET-INVALID",
+                        "A button click handler requires a selected button with an id.",
+                        request.controllerLocator.relativePath,
+                    )
+                }
+            }
+            FlowUiControllerHandlerKind.COMPONENT_TYPED_VALUE_CHANGE,
+            FlowUiControllerHandlerKind.COMPONENT_VALUE_CHANGE,
+            FlowUiControllerHandlerKind.COMPONENT_VALIDATOR -> {
+                if (request.componentId.isNullOrBlank()) {
+                    return rejected(
+                        "JVW-CONTROLLER-HANDLER-TARGET-INVALID",
+                        "This handler requires a selected component with an id.",
+                        request.controllerLocator.relativePath,
+                    )
+                }
+            }
+            FlowUiControllerHandlerKind.ACTION_PERFORMED -> {
+                if (request.targetId.isNullOrBlank()) {
+                    return rejected(
+                        "JVW-CONTROLLER-HANDLER-TARGET-INVALID",
+                        "An action handler requires the connected action id.",
+                        request.controllerLocator.relativePath,
+                    )
+                }
+            }
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_PRE_LOAD,
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_POST_LOAD,
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE -> {
+                if (request.componentId.isNullOrBlank() || request.componentTag?.substringAfter(':') != "loader") {
+                    return rejected(
+                        "JVW-CONTROLLER-HANDLER-TARGET-INVALID",
+                        "A collection loader handler requires a selected loader with an id.",
+                        request.controllerLocator.relativePath,
+                    )
+                }
+                if (request.entityClass?.matches(JAVA_QUALIFIED_NAME) != true) {
+                    return rejected(
+                        "JVW-CONTROLLER-HANDLER-ENTITY-MISSING",
+                        "The collection loader must resolve to a valid entity class before generating a typed handler.",
+                        request.controllerLocator.relativePath,
+                    )
+                }
+            }
+            else -> Unit
         }
         val loaded = loadController(request.controllerLocator)
         val psiFile = loaded.psiFile
             ?: return ControllerChangeProposal(false, null, loaded.issues)
         val controllerClass = loaded.controllerClass
             ?: return ControllerChangeProposal(false, null, loaded.issues)
-        val handler = handlerTemplate(request)
+        val subscribeSubjectSupported = if (request.kind == FlowUiControllerHandlerKind.BUTTON_CLICK) {
+            subscribeSubjectSupported()
+                ?: return rejected(
+                    "JVW-CONTROLLER-JMIX-API-UNRESOLVED",
+                    "The Jmix @Subscribe API is not indexed. Complete the Gradle sync before generating a version-specific button handler.",
+                    request.controllerLocator.relativePath,
+                )
+        } else {
+            false
+        }
+        val handler = handlerTemplate(request, subscribeSubjectSupported)
         if (!SourceVersion.isIdentifier(handler.methodName) || SourceVersion.isKeyword(handler.methodName)) {
             return rejected(
                 "JVW-CONTROLLER-METHOD-NAME-INVALID",
@@ -224,26 +277,22 @@ class FlowUiControllerChangeService(
             )
         }
         val equivalent = controllerClass.methods.any { method ->
-            val subscribe = method.annotations.firstOrNull { it.shortName() == "Subscribe" }
+            val annotation = method.annotations.firstOrNull { it.shortName() == handler.annotationKind }
                 ?: return@any false
-            val target = subscribe.stringAttribute("id")
-                ?: subscribe.stringAttribute("value")
-            val subject = subscribe.stringAttribute("subject")
-            when (request.kind) {
-                FlowUiControllerHandlerKind.BUTTON_CLICK ->
-                    target == request.componentId &&
-                        (subject == null || subject == "clickListener") &&
-                        method.parameterList.parameters.any {
-                            it.type.canonicalText.endsWith("ClickEvent") ||
-                                it.type.canonicalText.contains("ClickEvent<")
-                        }
-                else ->
-                    target.isNullOrBlank() &&
-                        method.parameterList.parameters.any {
-                            it.type.canonicalText.endsWith(".${handler.eventSimpleName}") ||
-                                it.type.canonicalText == handler.eventSimpleName
-                        }
+            val target = when (handler.annotationKind) {
+                "Install", "Supply" -> annotation.stringAttribute("to")
+                else -> annotation.stringAttribute("id") ?: annotation.stringAttribute("value")
             }
+            val subject = annotation.stringAttribute("subject")
+            val targetScope = annotation.findDeclaredAttributeValue("target")?.text?.trim()
+            target == handler.target &&
+                (subject == handler.subject || (handler.allowMissingSubject && subject == null)) &&
+                targetScopeMatches(targetScope, handler.targetScope) &&
+                (handler.eventSimpleName == null || method.parameterList.parameters.any {
+                    it.type.canonicalText.endsWith(".${handler.eventSimpleName}") ||
+                        it.type.canonicalText == handler.eventSimpleName ||
+                        it.type.canonicalText.contains("${handler.eventSimpleName}<")
+                })
         }
         if (equivalent) return ControllerChangeProposal(true, null, emptyList())
         if (controllerClass.findMethodsByName(handler.methodName, false).isNotEmpty()) {
@@ -269,8 +318,11 @@ class FlowUiControllerChangeService(
         val methodText = buildString {
             append("\n\n")
             append(indent).append(handler.annotation).append('\n')
-            append(indent).append("public void ").append(handler.methodName)
-                .append("(final ").append(handler.eventType).append(" event) {\n")
+            append(indent).append(handler.visibility).append(' ').append(handler.returnType).append(' ')
+                .append(handler.methodName).append('(').append(handler.parameters).append(") {\n")
+            handler.bodyLines.forEach { line ->
+                append(indent).append("    ").append(line).append('\n')
+            }
             append(indent).append("}\n")
         }
         edits += WorkspaceTextEdit(
@@ -279,7 +331,13 @@ class FlowUiControllerChangeService(
             expectedText = "",
             replacement = methodText,
         )
-        val identity = "${request.controllerLocator.relativePath}\u0000${request.kind}\u0000${request.componentId}"
+        val identity = buildString {
+            append(request.controllerLocator.relativePath)
+            append('\u0000').append(request.kind)
+            append('\u0000').append(request.componentId)
+            append('\u0000').append(request.targetId)
+            append('\u0000').append(request.entityClass)
+        }
         return ControllerChangeProposal(
             accepted = true,
             changeSet = WorkspaceChangeSet(
@@ -298,41 +356,251 @@ class FlowUiControllerChangeService(
         )
     }
 
-    private fun handlerTemplate(request: FlowUiControllerHandlerRequest): ControllerHandlerTemplate =
+    private fun handlerTemplate(
+        request: FlowUiControllerHandlerRequest,
+        subscribeSubjectSupported: Boolean,
+    ): ControllerHandlerTemplate =
         when (request.kind) {
             FlowUiControllerHandlerKind.VIEW_INIT -> ControllerHandlerTemplate(
                 methodName = "onInit",
                 annotation = "@Subscribe",
-                eventType = "InitEvent",
+                annotationKind = "Subscribe",
+                target = null,
+                subject = null,
+                targetScope = null,
                 eventSimpleName = "InitEvent",
+                parameters = "final InitEvent event",
                 imports = setOf(SUBSCRIBE_IMPORT, "io.jmix.flowui.view.View.InitEvent"),
             )
             FlowUiControllerHandlerKind.VIEW_BEFORE_SHOW -> ControllerHandlerTemplate(
                 methodName = "onBeforeShow",
                 annotation = "@Subscribe",
-                eventType = "BeforeShowEvent",
+                annotationKind = "Subscribe",
+                target = null,
+                subject = null,
+                targetScope = null,
                 eventSimpleName = "BeforeShowEvent",
+                parameters = "final BeforeShowEvent event",
                 imports = setOf(SUBSCRIBE_IMPORT, "io.jmix.flowui.view.View.BeforeShowEvent"),
             )
             FlowUiControllerHandlerKind.VIEW_READY -> ControllerHandlerTemplate(
                 methodName = "onReady",
                 annotation = "@Subscribe",
-                eventType = "ReadyEvent",
+                annotationKind = "Subscribe",
+                target = null,
+                subject = null,
+                targetScope = null,
                 eventSimpleName = "ReadyEvent",
+                parameters = "final ReadyEvent event",
                 imports = setOf(SUBSCRIBE_IMPORT, "io.jmix.flowui.view.View.ReadyEvent"),
+            )
+            FlowUiControllerHandlerKind.VIEW_ATTACH -> ControllerHandlerTemplate(
+                methodName = "onAttachEvent",
+                annotation = "@Subscribe",
+                annotationKind = "Subscribe",
+                target = null,
+                subject = null,
+                targetScope = null,
+                eventSimpleName = "AttachEvent",
+                parameters = "final AttachEvent event",
+                imports = setOf(SUBSCRIBE_IMPORT, "com.vaadin.flow.component.AttachEvent"),
+            )
+            FlowUiControllerHandlerKind.VIEW_BEFORE_CLOSE -> ControllerHandlerTemplate(
+                methodName = "onBeforeClose",
+                annotation = "@Subscribe",
+                annotationKind = "Subscribe",
+                target = null,
+                subject = null,
+                targetScope = null,
+                eventSimpleName = "BeforeCloseEvent",
+                parameters = "final BeforeCloseEvent event",
+                imports = setOf(SUBSCRIBE_IMPORT, "io.jmix.flowui.view.View.BeforeCloseEvent"),
+            )
+            FlowUiControllerHandlerKind.VIEW_AFTER_CLOSE -> ControllerHandlerTemplate(
+                methodName = "onAfterClose",
+                annotation = "@Subscribe",
+                annotationKind = "Subscribe",
+                target = null,
+                subject = null,
+                targetScope = null,
+                eventSimpleName = "AfterCloseEvent",
+                parameters = "final AfterCloseEvent event",
+                imports = setOf(SUBSCRIBE_IMPORT, "io.jmix.flowui.view.View.AfterCloseEvent"),
+            )
+            FlowUiControllerHandlerKind.VIEW_DETACH -> ControllerHandlerTemplate(
+                methodName = "onDetachEvent",
+                annotation = "@Subscribe",
+                annotationKind = "Subscribe",
+                target = null,
+                subject = null,
+                targetScope = null,
+                eventSimpleName = "DetachEvent",
+                parameters = "final DetachEvent event",
+                imports = setOf(SUBSCRIBE_IMPORT, "com.vaadin.flow.component.DetachEvent"),
+            )
+            FlowUiControllerHandlerKind.VIEW_QUERY_PARAMETERS_CHANGE -> ControllerHandlerTemplate(
+                methodName = "onQueryParametersChange",
+                annotation = "@Subscribe",
+                annotationKind = "Subscribe",
+                target = null,
+                subject = null,
+                targetScope = null,
+                eventSimpleName = "QueryParametersChangeEvent",
+                parameters = "final QueryParametersChangeEvent event",
+                imports = setOf(
+                    SUBSCRIBE_IMPORT,
+                    "io.jmix.flowui.view.View.QueryParametersChangeEvent",
+                ),
             )
             FlowUiControllerHandlerKind.BUTTON_CLICK -> {
                 val componentId = request.componentId.orEmpty()
                 ControllerHandlerTemplate(
-                    methodName = "on${componentId.replaceFirstChar { it.uppercaseChar() }}Click",
-                    annotation = "@Subscribe(id = \"${escapeJavaString(componentId)}\", subject = \"clickListener\")",
-                    eventType = "ClickEvent<JmixButton>",
+                    methodName = "on${handlerStem(componentId)}Click",
+                    annotation = if (subscribeSubjectSupported) {
+                        "@Subscribe(id = \"${escapeJavaString(componentId)}\", subject = \"clickListener\")"
+                    } else {
+                        "@Subscribe(\"${escapeJavaString(componentId)}\")"
+                    },
+                    annotationKind = "Subscribe",
+                    target = componentId,
+                    subject = "clickListener".takeIf { subscribeSubjectSupported },
+                    targetScope = null,
                     eventSimpleName = "ClickEvent",
+                    parameters = "final ClickEvent<JmixButton> event",
                     imports = setOf(
                         SUBSCRIBE_IMPORT,
                         "com.vaadin.flow.component.ClickEvent",
                         "io.jmix.flowui.kit.component.button.JmixButton",
                     ),
+                )
+            }
+            FlowUiControllerHandlerKind.COMPONENT_TYPED_VALUE_CHANGE -> {
+                val componentId = request.componentId.orEmpty()
+                ControllerHandlerTemplate(
+                    methodName = "on${handlerStem(componentId)}TypedValueChange",
+                    annotation = "@Subscribe(\"${escapeJavaString(componentId)}\")",
+                    annotationKind = "Subscribe",
+                    target = componentId,
+                    subject = null,
+                    targetScope = null,
+                    eventSimpleName = "TypedValueChangeEvent",
+                    parameters = "final SupportsTypedValue.TypedValueChangeEvent<?, ?> event",
+                    imports = setOf(
+                        SUBSCRIBE_IMPORT,
+                        "io.jmix.flowui.component.SupportsTypedValue",
+                    ),
+                )
+            }
+            FlowUiControllerHandlerKind.COMPONENT_VALUE_CHANGE -> {
+                val componentId = request.componentId.orEmpty()
+                ControllerHandlerTemplate(
+                    methodName = "on${handlerStem(componentId)}ComponentValueChange",
+                    annotation = "@Subscribe(\"${escapeJavaString(componentId)}\")",
+                    annotationKind = "Subscribe",
+                    target = componentId,
+                    subject = null,
+                    targetScope = null,
+                    eventSimpleName = "ComponentValueChangeEvent",
+                    parameters = "final AbstractField.ComponentValueChangeEvent<?, ?> event",
+                    imports = setOf(
+                        SUBSCRIBE_IMPORT,
+                        "com.vaadin.flow.component.AbstractField",
+                    ),
+                )
+            }
+            FlowUiControllerHandlerKind.ACTION_PERFORMED -> {
+                val targetId = request.targetId.orEmpty()
+                ControllerHandlerTemplate(
+                    methodName = "on${handlerStem(targetId)}",
+                    annotation = "@Subscribe(\"${escapeJavaString(targetId)}\")",
+                    annotationKind = "Subscribe",
+                    target = targetId,
+                    subject = null,
+                    targetScope = null,
+                    eventSimpleName = "ActionPerformedEvent",
+                    parameters = "final ActionPerformedEvent event",
+                    imports = setOf(
+                        SUBSCRIBE_IMPORT,
+                        "io.jmix.flowui.kit.action.ActionPerformedEvent",
+                    ),
+                )
+            }
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_PRE_LOAD -> {
+                val loaderId = request.componentId.orEmpty()
+                val entityType = entityType(request.entityClass)
+                ControllerHandlerTemplate(
+                    methodName = "on${handlerStem(loaderId)}PreLoad",
+                    annotation = "@Subscribe(id = \"${escapeJavaString(loaderId)}\", target = Target.DATA_LOADER)",
+                    annotationKind = "Subscribe",
+                    target = loaderId,
+                    subject = null,
+                    targetScope = "Target.DATA_LOADER",
+                    eventSimpleName = "PreLoadEvent",
+                    parameters = "final CollectionLoader.PreLoadEvent<${entityType.sourceType}> event",
+                    imports = setOf(
+                        SUBSCRIBE_IMPORT,
+                        TARGET_IMPORT,
+                        "io.jmix.flowui.model.CollectionLoader",
+                    ) + entityType.imports,
+                )
+            }
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_POST_LOAD -> {
+                val loaderId = request.componentId.orEmpty()
+                val entityType = entityType(request.entityClass)
+                ControllerHandlerTemplate(
+                    methodName = "on${handlerStem(loaderId)}PostLoad",
+                    annotation = "@Subscribe(id = \"${escapeJavaString(loaderId)}\", target = Target.DATA_LOADER)",
+                    annotationKind = "Subscribe",
+                    target = loaderId,
+                    subject = null,
+                    targetScope = "Target.DATA_LOADER",
+                    eventSimpleName = "PostLoadEvent",
+                    parameters = "final CollectionLoader.PostLoadEvent<${entityType.sourceType}> event",
+                    imports = setOf(
+                        SUBSCRIBE_IMPORT,
+                        TARGET_IMPORT,
+                        "io.jmix.flowui.model.CollectionLoader",
+                    ) + entityType.imports,
+                )
+            }
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE -> {
+                val loaderId = request.componentId.orEmpty()
+                val entityType = entityType(request.entityClass)
+                ControllerHandlerTemplate(
+                    methodName = "${lowercaseStem(loaderId)}LoadDelegate",
+                    annotation = "@Install(to = \"${escapeJavaString(loaderId)}\", target = Target.DATA_LOADER)",
+                    annotationKind = "Install",
+                    target = loaderId,
+                    subject = null,
+                    targetScope = "Target.DATA_LOADER",
+                    eventSimpleName = null,
+                    visibility = "private",
+                    returnType = "List<${entityType.sourceType}>",
+                    parameters = "final LoadContext<${entityType.sourceType}> loadContext",
+                    imports = setOf(
+                        INSTALL_IMPORT,
+                        TARGET_IMPORT,
+                        "io.jmix.core.LoadContext",
+                        "java.util.List",
+                    ) + entityType.imports,
+                    bodyLines = listOf(
+                        "throw new UnsupportedOperationException(\"Implement the ${escapeJavaString(loaderId)} load delegate\");",
+                    ),
+                )
+            }
+            FlowUiControllerHandlerKind.COMPONENT_VALIDATOR -> {
+                val componentId = request.componentId.orEmpty()
+                ControllerHandlerTemplate(
+                    methodName = "${lowercaseStem(componentId)}Validator",
+                    annotation = "@Install(to = \"${escapeJavaString(componentId)}\", subject = \"validator\")",
+                    annotationKind = "Install",
+                    target = componentId,
+                    subject = "validator",
+                    targetScope = null,
+                    eventSimpleName = null,
+                    visibility = "private",
+                    parameters = "final Object value",
+                    imports = setOf(INSTALL_IMPORT),
                 )
             }
         }
@@ -359,6 +627,42 @@ class FlowUiControllerChangeService(
 
     private fun escapeJavaString(value: String): String =
         value.replace("\\", "\\\\").replace("\"", "\\\"")
+
+    private fun handlerStem(value: String): String {
+        val parts = value.split(Regex("[^A-Za-z0-9_$]+")).filter(String::isNotBlank)
+        return parts.joinToString("") { part ->
+            part.replaceFirstChar { character ->
+                if (character.isLowerCase()) character.titlecase() else character.toString()
+            }
+        }.ifBlank { "Target" }
+    }
+
+    private fun lowercaseStem(value: String): String =
+        handlerStem(value).replaceFirstChar { it.lowercaseChar() }
+
+    private fun entityType(qualifiedName: String?): ControllerFieldType {
+        val validName = qualifiedName?.takeIf(JAVA_QUALIFIED_NAME::matches) ?: return ControllerFieldType(
+            sourceType = "Object",
+            imports = emptySet(),
+        )
+        return ControllerFieldType(
+            sourceType = validName.substringAfterLast('.'),
+            imports = setOf(validName).filterTo(linkedSetOf()) { '.' in it },
+        )
+    }
+
+    private fun targetScopeMatches(actual: String?, expected: String?): Boolean =
+        when {
+            expected == null -> actual == null
+            actual == null -> false
+            else -> actual == expected || actual.substringAfterLast('.') == expected.substringAfterLast('.')
+        }
+
+    private fun subscribeSubjectSupported(): Boolean? =
+        JavaPsiFacade.getInstance(project)
+            .findClass(SUBSCRIBE_IMPORT, GlobalSearchScope.allScope(project))
+            ?.findMethodsByName("subject", false)
+            ?.isNotEmpty()
 
     private fun loadController(locator: SourceLocator): LoadedJavaController {
         val validation = SourceNavigationPolicy.validate(
@@ -537,6 +841,8 @@ class FlowUiControllerChangeService(
     companion object {
         private const val VIEW_COMPONENT_IMPORT = "io.jmix.flowui.view.ViewComponent"
         private const val SUBSCRIBE_IMPORT = "io.jmix.flowui.view.Subscribe"
+        private const val INSTALL_IMPORT = "io.jmix.flowui.view.Install"
+        private const val TARGET_IMPORT = "io.jmix.flowui.view.Target"
         private const val MAX_CONTROLLER_BYTES = 2L * 1024 * 1024
         private val JAVA_QUALIFIED_NAME = Regex("""[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
 
@@ -561,7 +867,19 @@ enum class FlowUiControllerHandlerKind {
     VIEW_INIT,
     VIEW_BEFORE_SHOW,
     VIEW_READY,
+    VIEW_ATTACH,
+    VIEW_BEFORE_CLOSE,
+    VIEW_AFTER_CLOSE,
+    VIEW_DETACH,
+    VIEW_QUERY_PARAMETERS_CHANGE,
     BUTTON_CLICK,
+    COMPONENT_TYPED_VALUE_CHANGE,
+    COMPONENT_VALUE_CHANGE,
+    ACTION_PERFORMED,
+    COLLECTION_LOADER_PRE_LOAD,
+    COLLECTION_LOADER_POST_LOAD,
+    COLLECTION_LOADER_LOAD_DELEGATE,
+    COMPONENT_VALIDATOR,
 }
 
 data class FlowUiControllerHandlerRequest(
@@ -569,6 +887,8 @@ data class FlowUiControllerHandlerRequest(
     val kind: FlowUiControllerHandlerKind,
     val componentId: String? = null,
     val componentTag: String? = null,
+    val targetId: String? = null,
+    val entityClass: String? = null,
 )
 
 data class FlowUiControllerHandlerApplyRequest(
@@ -584,9 +904,17 @@ private data class ControllerFieldType(
 private data class ControllerHandlerTemplate(
     val methodName: String,
     val annotation: String,
-    val eventType: String,
-    val eventSimpleName: String,
+    val annotationKind: String,
+    val target: String?,
+    val subject: String?,
+    val targetScope: String?,
+    val eventSimpleName: String?,
+    val visibility: String = "public",
+    val returnType: String = "void",
+    val parameters: String,
     val imports: Set<String>,
+    val bodyLines: List<String> = emptyList(),
+    val allowMissingSubject: Boolean = false,
 )
 
 private data class ControllerChangeProposal(
