@@ -1,4 +1,4 @@
-import type { GenerationResult, ProjectConfig } from '../types'
+import type { ApplicationGraphResponse, GenerationResult, ProjectConfig } from '../types'
 
 type BridgeCallback = (action: string, result: any) => void
 
@@ -98,6 +98,10 @@ class Bridge {
 
   getProjectConfig() {
     return this.request<ProjectConfig>('getProjectConfig')
+  }
+
+  getApplicationGraph(forceRefresh: boolean = false) {
+    return this.request<ApplicationGraphResponse>('getApplicationGraph', { forceRefresh })
   }
 }
 

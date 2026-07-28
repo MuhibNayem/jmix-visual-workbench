@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { EntityModel, ViewModel, RoleModel, ProjectConfig, GenerationResult, AttributeModel } from '../types'
 
-export type ActiveTab = 'entity' | 'view' | 'crud' | 'menu' | 'role' | 'migration'
+export type ActiveTab = 'projectMap' | 'entity' | 'view' | 'crud' | 'menu' | 'role' | 'migration'
 
 function defaultAttribute(name: string = ''): AttributeModel {
   return {
@@ -66,7 +66,7 @@ interface AppState {
 let toastId = 0
 
 export const useStore = create<AppState>((set, get) => ({
-  activeTab: 'entity',
+  activeTab: 'projectMap',
   setActiveTab: (tab) => set({ activeTab: tab }),
 
   projectConfig: null,

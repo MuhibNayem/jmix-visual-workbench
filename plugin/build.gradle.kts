@@ -1,5 +1,6 @@
 import com.github.gradle.node.npm.task.NpmTask
 import org.jmixworkbench.build.AssembleWebBundleTask
+import org.jmixworkbench.build.SnapshotFileHashTask
 import org.jmixworkbench.build.VerifyPluginZipContentsTask
 import org.jmixworkbench.build.VerifyWebBundleTask
 import org.gradle.api.tasks.testing.Test
@@ -116,18 +117,10 @@ node {
     enableTaskRules.set(false)
 }
 
-val snapshotNpmLockHash = tasks.register("snapshotNpmLockHash") {
+val snapshotNpmLockHash = tasks.register<SnapshotFileHashTask>("snapshotNpmLockHash") {
     description = "Captures package-lock.json before npm ci so drift is detectable."
-    val packageLock = webUiDirectory.file("package-lock.json")
-    inputs.file(packageLock)
-    outputs.file(npmLockHashSnapshot)
-    doLast {
-        val lockFile = packageLock.asFile
-        check(lockFile.isFile) { "webui/package-lock.json is required." }
-        val output = npmLockHashSnapshot.get().asFile
-        output.parentFile.mkdirs()
-        output.writeText(sha256(lockFile) + "\n")
-    }
+    inputFile.set(webUiDirectory.file("package-lock.json"))
+    outputFile.set(npmLockHashSnapshot)
 }
 
 val npmCi = tasks.register<NpmTask>("npmCi") {

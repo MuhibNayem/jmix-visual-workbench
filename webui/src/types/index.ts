@@ -220,6 +220,72 @@ export interface ProjectConfig {
   databaseType: string
 }
 
+// ─── Connected Application Graph ─────────────────────────────────────────────
+
+export interface GraphSourceLocator {
+  relativePath: string
+  symbol?: string
+  line?: number
+  column?: number
+  revisionFingerprint: string
+}
+
+export interface GraphDiagnostic {
+  id: string
+  severity: 'INFO' | 'WARNING' | 'ERROR' | 'BLOCKING'
+  category: string
+  reasonCode: string
+  message: string
+  nextStep?: string
+  sourceLocator?: GraphSourceLocator
+}
+
+export interface GraphArtifact {
+  id: string
+  kind: string
+  semanticKey: string
+  owner: {
+    buildId: string
+    moduleId: string
+    sourceSetId?: string
+  }
+  sourceLocator: GraphSourceLocator
+  origin: string
+  fingerprint: string
+  displayName: string
+  summary?: string
+  diagnostics: GraphDiagnostic[]
+}
+
+export interface GraphRelationship {
+  sourceArtifactId: string
+  targetArtifactId?: string
+  type: string
+  sourceLocator: GraphSourceLocator
+  diagnostic?: GraphDiagnostic
+}
+
+export interface ApplicationGraphResponse {
+  artifacts: GraphArtifact[]
+  relationships: GraphRelationship[]
+  diagnostics: GraphDiagnostic[]
+  summary: {
+    artifactCount: number
+    relationshipCount: number
+    diagnosticCount: number
+    unresolvedRelationshipCount: number
+    countsByKind: Record<string, number>
+  }
+  scannedFiles: number
+  candidateFiles: number
+  excludedFiles: number
+  excludedBytes: number
+  cacheHit: boolean
+  durationMillis: number
+  snapshotDigest: string
+  error?: string
+}
+
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {

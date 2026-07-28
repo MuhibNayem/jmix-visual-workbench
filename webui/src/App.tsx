@@ -7,9 +7,11 @@ import CrudWizard from './components/CrudWizard/CrudWizard'
 import MenuDesigner from './components/MenuDesigner/MenuDesigner'
 import RoleDesigner from './components/RoleDesigner/RoleDesigner'
 import MigrationPanel from './components/MigrationPanel/MigrationPanel'
+import ProjectMap from './components/ProjectMap/ProjectMap'
 import Toast from './components/shared/Toast'
 
 const tabs: { id: ActiveTab; label: string; icon: string }[] = [
+  { id: 'projectMap', label: 'Application Map', icon: '◎' },
   { id: 'entity', label: 'Entity Designer', icon: '◆' },
   { id: 'view', label: 'View Designer', icon: '▦' },
   { id: 'crud', label: 'CRUD Wizard', icon: '⚡' },
@@ -60,6 +62,7 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden flex flex-col">
+        {activeTab === 'projectMap' && <ProjectMap />}
         {activeTab === 'entity' && <EntityDesigner />}
         {activeTab === 'view' && <ViewDesigner />}
         {activeTab === 'crud' && <CrudWizard />}

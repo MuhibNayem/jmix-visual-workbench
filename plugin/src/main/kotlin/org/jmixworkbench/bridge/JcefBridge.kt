@@ -4,12 +4,16 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
+import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
 import org.jmixworkbench.generator.CrudOrchestrator
 import org.jmixworkbench.model.*
 import org.jmixworkbench.services.CodeGenerationService
+import org.jmixworkbench.services.ApplicationGraphService
 import org.jmixworkbench.services.JmixProjectService
 import org.jmixworkbench.toolwindow.isPackagedWorkbenchOriginUrl
 import org.cef.browser.CefBrowser
@@ -70,6 +74,11 @@ class JcefBridge(
             val payload = json.getAsJsonObject("payload")
 
             log.info("Bridge request: $action")
+
+            if (action == "getApplicationGraph") {
+                handleGetApplicationGraph(action, payload)
+                return
+            }
 
             val result = when (action) {
                 "generateEntity" -> handleGenerateEntity(payload)
@@ -152,11 +161,26 @@ class JcefBridge(
     }
 
     private fun handleGetEntities(): String {
-        // Scan project for existing entities
-        val config = JmixProjectService.getInstance(project).getConfig()
-            ?: return """{"entities":[]}"""
-        // TODO: scan source files for @JmixEntity annotations
-        return """{"entities":[]}"""
+        val graph = ApplicationGraphService.getInstance(project).graph()
+        return gson.toJson(
+            mapOf(
+                "entities" to graph.artifacts.filter {
+                    it.kind == org.jmixworkbench.discovery.model.ArtifactKind.ENTITY
+                },
+            ),
+        )
+    }
+
+    private fun handleGetApplicationGraph(action: String, payload: JsonObject) {
+        val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
+        ReadAction.nonBlocking<org.jmixworkbench.services.ApplicationGraphResponse> {
+            ApplicationGraphService.getInstance(project).graph(forceRefresh)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { result ->
+                sendResponse(action, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun sendResponse(action: String, resultJson: String) {
