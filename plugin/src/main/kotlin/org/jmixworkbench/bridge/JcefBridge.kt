@@ -13,11 +13,16 @@ import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
 import org.jmixworkbench.generator.CrudOrchestrator
 import org.jmixworkbench.model.*
+import org.jmixworkbench.discovery.change.WorkspaceChangeSet
 import org.jmixworkbench.services.CodeGenerationService
 import org.jmixworkbench.services.ApplicationGraphService
+import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
 import org.jmixworkbench.services.SourceNavigationRequest
 import org.jmixworkbench.services.JmixProjectService
+import org.jmixworkbench.services.WorkspaceChangeApplyRequest
+import org.jmixworkbench.services.WorkspaceChangeApplyResponse
+import org.jmixworkbench.services.WorkspaceChangeService
 import org.jmixworkbench.toolwindow.isPackagedWorkbenchOriginUrl
 import org.cef.browser.CefBrowser
 import org.cef.handler.CefLoadHandlerAdapter
@@ -84,6 +89,14 @@ class JcefBridge(
             }
             if (action == "navigateToSource") {
                 handleNavigateToSource(action, payload)
+                return
+            }
+            if (action == "previewWorkspaceChange") {
+                handlePreviewWorkspaceChange(action, payload)
+                return
+            }
+            if (action == "applyWorkspaceChange") {
+                handleApplyWorkspaceChange(action, payload)
                 return
             }
 
@@ -220,6 +233,70 @@ class JcefBridge(
                     ).navigate(true)
                 }
                 sendResponse(action, gson.toJson(prepared.response()))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewWorkspaceChange(action: String, payload: JsonObject) {
+        val changeSet = runCatching {
+            gson.fromJson(payload, WorkspaceChangeSet::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                gson.toJson(
+                    mapOf(
+                        "accepted" to false,
+                        "issues" to listOf(
+                            mapOf(
+                                "code" to "JVW-CHANGE-REQUEST-INVALID",
+                                "message" to (error.message ?: "The workspace change request is malformed."),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
+            WorkspaceChangeService.getInstance(project).preview(changeSet)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { preview ->
+                sendResponse(action, gson.toJson(preview))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyWorkspaceChange(action: String, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, WorkspaceChangeApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                gson.toJson(
+                    WorkspaceChangeApplyResponse(
+                        success = false,
+                        changeSetId = "",
+                        planDigest = null,
+                        filesChanged = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-CHANGE-REQUEST-INVALID",
+                                message = error.message ?: "The workspace change request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            WorkspaceChangeService.getInstance(project).prepareApply(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, gson.toJson(response))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

@@ -294,6 +294,62 @@ export interface SourceNavigationResponse {
   message: string
 }
 
+export type WorkspaceFileChangeMode = 'CREATE' | 'MODIFY'
+
+export interface WorkspaceTextEdit {
+  startOffset: number
+  endOffset: number
+  expectedText: string
+  replacement: string
+}
+
+export interface WorkspaceFileChange {
+  relativePath: string
+  mode: WorkspaceFileChangeMode
+  baseRevisionFingerprint?: string
+  edits: WorkspaceTextEdit[]
+  createContent?: string
+}
+
+export interface WorkspaceChangeSet {
+  id: string
+  label: string
+  files: WorkspaceFileChange[]
+}
+
+export interface WorkspaceChangeIssue {
+  code: string
+  message: string
+  relativePath?: string
+}
+
+export interface WorkspaceChangeFilePreview {
+  relativePath: string
+  mode: WorkspaceFileChangeMode
+  beforeFingerprint?: string
+  afterFingerprint: string
+  originalContent?: string
+  resultContent: string
+  appliedEditCount: number
+}
+
+export interface WorkspaceChangePreviewResponse {
+  accepted: boolean
+  changeSetId: string
+  label: string
+  planDigest?: string
+  files: WorkspaceChangeFilePreview[]
+  issues: WorkspaceChangeIssue[]
+}
+
+export interface WorkspaceChangeApplyResponse {
+  success: boolean
+  changeSetId: string
+  planDigest?: string
+  filesChanged: string[]
+  issues: WorkspaceChangeIssue[]
+}
+
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {

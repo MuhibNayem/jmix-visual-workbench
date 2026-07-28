@@ -4,6 +4,9 @@ import type {
   GraphSourceLocator,
   ProjectConfig,
   SourceNavigationResponse,
+  WorkspaceChangeApplyResponse,
+  WorkspaceChangePreviewResponse,
+  WorkspaceChangeSet,
 } from '../types'
 
 type BridgeCallback = (action: string, result: any) => void
@@ -112,6 +115,17 @@ class Bridge {
 
   navigateToSource(locator: GraphSourceLocator) {
     return this.request<SourceNavigationResponse>('navigateToSource', locator)
+  }
+
+  previewWorkspaceChange(changeSet: WorkspaceChangeSet) {
+    return this.request<WorkspaceChangePreviewResponse>('previewWorkspaceChange', changeSet)
+  }
+
+  applyWorkspaceChange(changeSet: WorkspaceChangeSet, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyWorkspaceChange', {
+      changeSet,
+      expectedPlanDigest,
+    })
   }
 }
 
