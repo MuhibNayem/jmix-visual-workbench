@@ -12,7 +12,7 @@ This roadmap turns the current prototype into a source-first enterprise workbenc
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Clean-Room Build Foundation** - Produce original, reproducible, installable plugin artifacts suitable for immediate implementation and verification.
+- [x] **Phase 1: Clean-Room Build Foundation** - Produce original, reproducible, installable plugin artifacts suitable for immediate implementation and verification.
 - [ ] **Phase 2: Compatibility Laboratory and Read-Only Onboarding** - Discover and explain real repositories without mutation, while authorizing capabilities only from exact fixture evidence.
 - [ ] **Phase 3: Typed Privilege Boundary and Change Engine** - Make every proposed write bounded, previewable, validated, atomic, recoverable, and centrally enforced.
 - [ ] **Phase 4: Certified Entity and Data Round Trip** - Earn the first narrow write capability for existing Java/Kotlin data models, localization, and additive Liquibase evolution.
@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Each produced ZIP contains the production web bundle from the same source revision, a stale or missing bundle fails the build, and installed plugins require no Node runtime.
   3. A developer can install each ZIP into its advertised IntelliJ lane and open the workbench without class-loading, JCEF, or missing-resource errors.
   4. The installed product and repository use an original identity, license, trademark disclaimer, and contribution/provenance rules, while build dependencies are pinned and integrity-verified.
-**Plans**: 4/4 plans executed
+**Plans**: 5/5 plans executed
 
 ### Phase 2: Compatibility Laboratory and Read-Only Onboarding
 **Goal**: Developers can safely understand and navigate existing Jmix estates before the workbench is allowed to mutate any repository.
@@ -127,7 +127,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Clean-Room Build Foundation | 2/4 | In progress | - |
+| 1. Clean-Room Build Foundation | 5/5 | Complete | 2026-07-28 |
 | 2. Compatibility Laboratory and Read-Only Onboarding | 0/TBD | Not started | - |
 | 3. Typed Privilege Boundary and Change Engine | 0/TBD | Not started | - |
 | 4. Certified Entity and Data Round Trip | 0/TBD | Not started | - |

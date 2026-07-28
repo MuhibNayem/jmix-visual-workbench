@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-07-27T20:41:41.480Z"
-last_activity: 2026-07-27
+status: planning
+stopped_at: Completed and verified 01-05-PLAN.md
+last_updated: "2026-07-28T05:37:15.000Z"
+last_activity: 2026-07-28
 progress:
   total_phases: 8
   completed_phases: 1
-  total_plans: 4
-  completed_plans: 4
-  percent: 100
+  total_plans: 5
+  completed_plans: 5
+  percent: 13
 ---
 
 # Project State
@@ -21,39 +21,40 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-27)
 
 **Core value:** Developers can make substantial Jmix project changes visually without risking silent source corruption: every operation understands the existing project, shows the intended diff, validates the result, applies changes atomically, and can be undone.
-**Current focus:** Phase 01 — Clean-Room Build Foundation
+**Current focus:** Phase 02 — Compatibility Laboratory and Read-Only Onboarding
 
 ## Current Position
 
-Phase: 01 (Clean-Room Build Foundation) — VERIFYING
-Plan: 4 of 4
-Status: Phase complete — ready for verification
-Last activity: 2026-07-27
+Phase: 02 (Compatibility Laboratory and Read-Only Onboarding) — PLANNING
+Plan: Not yet planned
+Status: Phase 1 passed; ready to research and plan Phase 2
+Last activity: 2026-07-28
 
-Progress: [██████████] 100%
+Milestone progress: [█░░░░░░░░░] 13%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 4
-- Average duration: 29 min
-- Total execution time: 2.0 hours
+- Total plans completed: 5
+- Average duration: 45 min
+- Total execution time: 3.8 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 4 | 117 min | 29 min |
+| 01 | 5 | 226 min | 45 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01 (7 min), 01-02 (20 min), 01-03 (54 min), 01-04 (36 min)
-- Trend: Exact-host packaging and final integrity gates dominated Phase 1 execution time
+- Last 5 plans: 01-01 (7 min), 01-02 (20 min), 01-03 (54 min), 01-04 (36 min), 01-05 (109 min)
+- Trend: Installed-host JCEF diagnosis and signed-product UAT dominated the Phase 1 closure
 
 *Updated after each plan completion*
 | Phase 01 P03 | 54min | 2 tasks | 17 files |
 | Phase 01 P04 | 36min | 2 tasks | 14 files |
+| Phase 01 P05 | 109min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Keep exact remote IDEA 2025.3/2026.2 CI coordinates while validating optional lane-specific local SDK paths by IU build number.
 - [Phase 01]: Use JetBrains sidecar SHA-256 values for remote SDK archives and exact-coordinate trust only for unhashable local SDK directory pseudo-artifacts.
 - [Phase 01]: Keep target-project mutation non-certified and disabled after Phase 1.
+- [Phase 01]: Serve packaged UI only from `https://jmix-workbench.invalid` through a constrained classpath-backed JCEF handler; never navigate Chromium to a JVM `jar:file:` URL.
+- [Phase 01]: Require official signed-product visual UAT and bridge logs on both exact host lanes before certifying installed startup.
 
 ### Pending Todos
 
@@ -94,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-07-27T20:41:33.480Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-07-28T05:37:15.000Z
+Stopped at: Completed and verified 01-05-PLAN.md
 Resume file: None

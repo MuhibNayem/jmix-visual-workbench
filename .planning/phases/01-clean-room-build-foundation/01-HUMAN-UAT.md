@@ -1,63 +1,80 @@
 ---
-status: diagnosed
+status: passed
 phase: 01-clean-room-build-foundation
-source: [01-VERIFICATION.md]
+source: [01-VERIFICATION.md, 01-05-PLAN.md]
 started: 2026-07-27T21:43:47Z
-updated: 2026-07-28T03:48:48Z
+completed: 2026-07-28T05:37:15Z
+updated: 2026-07-28T05:37:15Z
 ---
 
-## Current Test
+# Phase 1 Human UAT
 
-number: 1
-name: IDEA 2025.3 installation and open
-expected: |
-  Install the idea253 ZIP in exact IDEA Ultimate 2025.3, open a disposable
-  project, and open Jmix Visual Workbench; the packaged UI renders with no
-  class-loading, JCEF, descriptor, or missing-resource error.
-awaiting: gap fix and retest
+## Result
+
+All three installed-product checkpoints passed. Both artifacts were produced from
+revision `8e9adbefb672e34ece2f4e2d142c507b5608eb65`, installed into isolated
+profiles of official signed JetBrains distributions, and exercised through the
+visible IntelliJ UI.
 
 ## Tests
 
-### 1. IDEA 2025.3 installation and open
-expected: Install the idea253 ZIP in exact IDEA Ultimate 2025.3, open a disposable project, and open Jmix Visual Workbench; the packaged UI renders with no class-loading, JCEF, descriptor, or missing-resource error.
-result: issue
-reported: "The tool window opens, but Chromium displays 'This site can’t be reached' for the packaged jar:file URL with ERR_UNKNOWN_URL_SCHEME."
-severity: blocker
+### 1. IntelliJ IDEA 2025.3 installation and open
 
-### 2. IDEA 2026.2 installation and open
-expected: Install the idea262 ZIP in exact IDEA Ultimate 2026.2 and open Jmix Visual Workbench; the packaged UI renders through the explicit JCEF dependency with no startup or resource error.
-result: [pending]
+- **Artifact:** `plugin/hosts/idea253/build/distributions/jmix-visual-workbench-1.0.0-idea253.zip`
+- **ZIP SHA-256:** `77cd8bf4f988acf98979a5dbe21b6bae23d7dce067972e92bd855943f378f976`
+- **Host:** official signed/notarized IntelliJ IDEA Ultimate 2025.3,
+  build `IU-253.28294.334`
+- **Result:** passed
+- **Observed:** the `Jmix Visual Workbench` tool-window button registered, the
+  packaged React entity designer rendered, and the log recorded
+  `Bridge request: getProjectConfig`.
+- **Negative checks:** no `ERR_UNKNOWN_URL_SCHEME`, class-loading, descriptor,
+  JCEF, or missing-resource error was observed.
+- **Evidence:** `evidence/idea253-packaged-ui.png`
+- **Evidence SHA-256:** `d9988e8600f1dc41e2686f569448b8b189be3c5efdd8e00c24b43c85b5c9b76b`
+
+### 2. IntelliJ IDEA 2026.2 installation and open
+
+- **Artifact:** `plugin/hosts/idea262/build/distributions/jmix-visual-workbench-1.0.0-idea262.zip`
+- **ZIP SHA-256:** `311b795b5e1dc127a6d345eb3d7b50772a1597449ee73bab77350efbe422ad8c`
+- **Host:** official signed/notarized IntelliJ IDEA 2026.2,
+  build `IU-262.8665.258`
+- **Result:** passed
+- **Observed:** after project-model initialization settled, the
+  `Jmix Visual Workbench` tool-window button registered, the packaged React
+  entity designer rendered, JCEF initialized, and the log recorded
+  `Bridge request: getProjectConfig`.
+- **Negative checks:** no plugin exception, `ERR_UNKNOWN_URL_SCHEME`,
+  class-loading, descriptor, JCEF, or missing-resource error was observed.
+- **Evidence:** `evidence/idea262-packaged-ui.png`
+- **Evidence SHA-256:** `a71042c926f13fb94224756e80a5989d155e360b3d14efbc9aa4666bbd83a8a8`
+
+The isolated host initially attempted an unnecessary Gradle synchronization and
+ran out of disk space while copying a bundled Gradle JAR. That project-import
+failure was outside the plugin and did not affect the successful tool-window,
+JCEF, or bridge checks. The disposable import and host profile were removed
+after evidence capture.
 
 ### 3. Identity and clean-room review
-expected: The installed name, icon, descriptor copy, README, and policy documents present an original independent product, create no Haulmont endorsement impression, contain no proprietary Studio material, and state acceptable provenance rules.
-result: [pending]
+
+- **Result:** passed
+- **Observed:** installed UI and descriptor identify the independent product as
+  `Jmix Visual Workbench` with plugin ID `org.jmixworkbench`.
+- **Review:** the icon and UI are original project assets; no Jmix Studio
+  branding, proprietary asset, license bypass, or Haulmont endorsement claim was
+  present. The README and clean-room/trademark/provenance policies explicitly
+  state compatibility without affiliation.
 
 ## Summary
 
-total: 3
-passed: 0
-issues: 1
-pending: 2
-skipped: 0
-blocked: 0
+| Outcome | Count |
+|---|---:|
+| Passed | 3 |
+| Issues | 0 |
+| Pending | 0 |
+| Skipped | 0 |
+| Blocked | 0 |
 
-## Gaps
-
-- truth: "The packaged web UI renders when the installed IDEA 2025.3 plugin tool window opens."
-  status: failed
-  reason: "Installed-product UAT observed ERR_UNKNOWN_URL_SCHEME because JCEF cannot navigate directly to the packaged jar:file URL."
-  severity: blocker
-  test: 1
-  root_cause: "Packaged startup converts the classpath entry point to a JVM jar:file URL and passes it directly to JBCefBrowser.loadURL. Chromium has no jar protocol handler. Existing tests only recorded that URL in a fake browser, while ZIP and Plugin Verifier gates checked presence/compatibility rather than performing a real navigation."
-  artifacts:
-    - path: "plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixWorkbenchToolWindowFactory.kt"
-      issue: "Packaged startup passes a jar:file URL to JBCefBrowser.loadURL."
-    - path: "plugin/src/test/kotlin/org/jmixworkbench/toolwindow/WorkbenchToolWindowFactoryIntegrationTest.kt"
-      issue: "The fake browser asserted URL forwarding but could not exercise Chromium protocol handling."
-    - path: ".planning/debug/jcef-jar-unknown-url-scheme.md"
-      issue: "Root-cause evidence and cross-lane API analysis."
-  missing:
-    - "Register an exact private packaged-resource origin through JCEF request/resource handlers before navigation."
-    - "Normalize and constrain classpath paths, methods, MIME types, response headers, and handler disposal."
-    - "Replace fake jar-URL assertions with provider security tests, packaged-origin integration checks, and real signed-IDE UAT on both host lanes."
-  debug_session: ".planning/debug/jcef-jar-unknown-url-scheme.md"
+The earlier `jar:file:` blocker is closed. Packaged Chromium navigation now uses
+the constrained private origin `https://jmix-workbench.invalid`, backed only by
+classpath resources under `/webui/**`.

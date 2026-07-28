@@ -1,7 +1,7 @@
 ---
 phase: 1
 slug: clean-room-build-foundation
-status: verified-automated
+status: passed
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-07-27
@@ -61,16 +61,20 @@ created: 2026-07-27
 - `snapshotLockHashes verifyLockedConfigurations verifyDependencyIntegrity phase1FastCheck compareLockHashes` passed with strict dependency verification offline.
 - The serialized `clean phase1Check` gate passed with strict dependency verification offline against validated local IU-253.28294.334 and IU-262.8665.258 SDKs.
 - Both lane unit/smoke suites passed, and Plugin Verifier 1.409 reported each plugin compatible with its exact IDE.
-- ZIP inspection reported SHA-256 `99c051d7e523f98d12da4d3b69e7aed8f8f362911488538b04c30da18622b46a` for idea253 and `9aacc63e5d4ba0f8f2c10f4c4c0fa460bc4deacdf80bce03663a389ff55d5c16` for idea262.
-- Both ZIPs contain frontend input SHA-256 `d3e09141750875fbe53c56206d309ae60e2b25224fd3e94f1b9cfd3f051c6ae4`.
+- The post-fix strict clean gate rebuilt both lanes from revision `8e9adbefb672e34ece2f4e2d142c507b5608eb65`.
+- ZIP inspection reported SHA-256 `77cd8bf4f988acf98979a5dbe21b6bae23d7dce067972e92bd855943f378f976` for idea253 and `311b795b5e1dc127a6d345eb3d7b50772a1597449ee73bab77350efbe422ad8c` for idea262.
+- Both ZIPs contain frontend input SHA-256 `68f234d003085b29f314dcbd0091a9441639646b5ced1b581f577f79b280ca79`.
+- Provider/security tests cover the exact private origin, GET/HEAD, response headers, off-origin denial, methods, traversal/encoding ambiguity, MIME, size, missing resources, and lifecycle disposal.
+- Managed host tests require handler installation before packaged-origin navigation and prove development mode remains unbridged.
 
-## Manual-Only Verifications
+## Installed-Product Evidence
 
-| Behavior | Requirement | Why Manual | Test Instructions |
-|----------|-------------|------------|-------------------|
-| Install and open each host ZIP in its exact minimum IDE | PROD-02 | Final installer/UI behavior is not completely represented by unit tests | Install the 253 ZIP into IDEA 2025.3 and the 262 ZIP into IDEA 2026.2, open a project, open the tool window, record versions/logs/screenshots, and confirm no class-loading/JCEF/resource errors |
-| Build on a clean machine/container with no global Node | PROD-01, PROD-03 | Proves absence of hidden workstation Node dependency | Remove Node from `PATH`, use only the checked-in Gradle wrapper and documented bootstrap JDK, run the clean phase gate, then inspect the ZIP |
-| Clean-room/brand review | PROD-04, PROD-05 | Affiliation and provenance require human judgment | Review plugin name/ID/assets/descriptions/docs and contributor policy; confirm no proprietary Studio material or misleading endorsement claim |
+| Behavior | Requirement | Result | Evidence |
+|----------|-------------|--------|----------|
+| Install and open the idea253 ZIP in exact IDEA 2025.3 | PROD-02 | ✅ passed | Official signed/notarized `IU-253.28294.334`; packaged React designer rendered; bridge log received `getProjectConfig`; `evidence/idea253-packaged-ui.png` |
+| Install and open the idea262 ZIP in exact IDEA 2026.2 | PROD-02 | ✅ passed | Official signed/notarized `IU-262.8665.258`; packaged React designer rendered; bridge log received `getProjectConfig`; `evidence/idea262-packaged-ui.png` |
+| Build without global Node | PROD-01, PROD-03 | ✅ passed | Build-owned Node 24.18.0 and `npm ci`; installed ZIPs contain no Node runtime |
+| Clean-room/brand review | PROD-04, PROD-05 | ✅ passed | Original name/ID/icon/UI; explicit independent-product disclaimer and provenance rules; no proprietary Studio material or endorsement impression |
 
 ## Validation Sign-Off
 
@@ -81,5 +85,7 @@ created: 2026-07-27
 - [x] Quick feedback latency is under 120 seconds after warm-up
 - [x] Both exact host lanes pass the full gate
 - [x] `nyquist_compliant: true` set in frontmatter
+- [x] Both official signed exact hosts render the packaged React UI
+- [x] Installed identity and clean-room review passed
 
-**Approval:** pending manual installation
+**Approval:** passed 2026-07-28
