@@ -181,6 +181,25 @@ class GradleConfigParserTest {
     }
 
     @Test
+    fun `matching imported evidence promotes the merged fact to exact`() {
+        val result = parser.parse(
+            inputs = listOf(
+                GradleTextInput(
+                    "build.gradle.kts",
+                    """id("io.jmix") version "3.0.1"""",
+                ),
+            ),
+            importedCoordinates = listOf(
+                ImportedCoordinate("io.jmix.core:jmix-core:3.0.1", "imported-module"),
+            ),
+        )
+
+        assertEquals("3.0.1", result.jmixVersion.value)
+        assertEquals(EvidenceConfidence.EXACT, result.jmixVersion.confidence)
+        assertEquals(EvidenceSourceKind.IMPORTED_GRADLE_MODEL, result.jmixVersion.sourceKind)
+    }
+
+    @Test
     fun `input permutations produce one deterministic profile digest`() {
         val catalog = GradleTextInput(
             "gradle/libs.versions.toml",
