@@ -403,6 +403,17 @@ export interface FlowUiPropertyChangeRequest {
   value: string
 }
 
+export type FlowUiStructureOperation = 'INSERT_CHILD' | 'DELETE' | 'MOVE_UP' | 'MOVE_DOWN'
+
+export interface FlowUiStructureChangeRequest {
+  sourceLocator: GraphSourceLocator
+  operation: FlowUiStructureOperation
+  elementKey?: string
+  parentKey?: string
+  tagName?: string
+  attributes?: Record<string, string>
+}
+
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {

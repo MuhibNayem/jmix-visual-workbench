@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Code2, Database, Layers, Loader2, Play, RefreshCw, Tag } from 'lucide-react'
+import {
+  ArrowDown, ArrowUp, Code2, Database, Layers, Loader2, Play, Plus, RefreshCw, Tag, Trash2,
+} from 'lucide-react'
 import { bridge } from '../../bridge'
 import { useStore } from '../../store'
 import type {
   FlowUiElementSnapshot,
   FlowUiPropertyChangeRequest,
+  FlowUiStructureChangeRequest,
   FlowUiWorkspaceResponse,
   GraphSourceLocator,
   WorkspaceChangePreviewResponse,
@@ -14,6 +17,10 @@ const primaryButton =
   'inline-flex items-center gap-1.5 rounded bg-jmix-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-jmix-600 disabled:opacity-50'
 const quietButton =
   'inline-flex items-center gap-1 rounded border border-surface-border bg-surface-lighter px-2 py-1 text-[11px] text-gray-300 hover:border-jmix-500/60 hover:text-jmix-300 disabled:opacity-50'
+const componentContainers = new Set([
+  'layout', 'vbox', 'hbox', 'formLayout', 'gridLayout', 'flexLayout', 'split',
+  'tabSheet', 'tab', 'accordion', 'details', 'scroller',
+])
 
 function PanelTitle({ title, count, icon: Icon }: {
   title: string
@@ -138,8 +145,15 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
   const [error, setError] = useState<string | null>(null)
   const [newProperty, setNewProperty] = useState('')
   const [newValue, setNewValue] = useState('')
+  const [newTag, setNewTag] = useState('textField')
+  const [newComponentId, setNewComponentId] = useState('')
   const [pending, setPending] = useState<{
+    kind: 'property'
     change: FlowUiPropertyChangeRequest
+    preview: WorkspaceChangePreviewResponse
+  } | {
+    kind: 'structure'
+    change: FlowUiStructureChangeRequest
     preview: WorkspaceChangePreviewResponse
   } | null>(null)
 
@@ -178,6 +192,17 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
   )
   const selected = selectedKey ? elements.get(selectedKey) ?? null : null
   const layout = document?.elements.find((element) => element.localTag === 'layout')
+  const layoutKeys = useMemo(() => {
+    const keys = new Set<string>()
+    const visit = (key: string) => {
+      if (keys.has(key)) return
+      keys.add(key)
+      elements.get(key)?.childKeys.forEach(visit)
+    }
+    if (layout) visit(layout.key)
+    return keys
+  }, [elements, layout])
+  const selectedInLayout = selected ? layoutKeys.has(selected.key) : false
   const canvasRoots = layout
     ? layout.childKeys.map((key) => elements.get(key)).filter((element): element is FlowUiElementSnapshot => Boolean(element))
     : document
@@ -201,14 +226,30 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       addToast('The source already has this value.', 'info')
       return
     }
-    setPending({ change, preview })
+    setPending({ kind: 'property', change, preview })
+  }
+
+  const previewStructure = async (change: Omit<FlowUiStructureChangeRequest, 'sourceLocator'>) => {
+    const fullChange: FlowUiStructureChangeRequest = { sourceLocator: locator, ...change }
+    const preview = await bridge.previewFlowUiStructureChange(fullChange)
+    if (!preview.accepted) {
+      addToast(preview.issues[0]?.message ?? 'The structure change was rejected.', 'error')
+      return
+    }
+    if (!preview.planDigest || preview.files.length === 0) {
+      addToast('The component is already at that position.', 'info')
+      return
+    }
+    setPending({ kind: 'structure', change: fullChange, preview })
   }
 
   const applyPending = async () => {
     if (!pending?.preview.planDigest) return
     setApplying(true)
     try {
-      const result = await bridge.applyFlowUiPropertyChange(pending.change, pending.preview.planDigest)
+      const result = pending.kind === 'property'
+        ? await bridge.applyFlowUiPropertyChange(pending.change, pending.preview.planDigest)
+        : await bridge.applyFlowUiStructureChange(pending.change, pending.preview.planDigest)
       if (!result.success) {
         addToast(result.issues[0]?.message ?? 'The FlowUI source change failed.', 'error')
         return
@@ -223,6 +264,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       openFlowUiDesigner(nextLocator)
       setNewProperty('')
       setNewValue('')
+      setNewComponentId('')
       addToast('FlowUI XML updated without rewriting unrelated source.', 'success')
       await load(nextLocator)
     } finally {
@@ -339,7 +381,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                     {pending.preview.files[0]?.relativePath} · exact {pending.preview.files[0]?.appliedEditCount} edit
                   </div>
                   <div className="mt-1 font-mono text-[10px] text-amber-100">
-                    {pending.change.propertyName} → &quot;{pending.change.value}&quot;
+                    {pending.kind === 'property'
+                      ? <>{pending.change.propertyName} → &quot;{pending.change.value}&quot;</>
+                      : <>{pending.change.operation.replace(/_/g, ' ').toLowerCase()} {pending.change.tagName ?? ''}</>}
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -368,7 +412,39 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
             ) : (
               <div className="space-y-2">
                 <div className="rounded border border-surface-border bg-surface px-2 py-1.5">
-                  <div className="font-mono text-[11px] text-jmix-300">{selected.tagName}</div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-mono text-[11px] text-jmix-300">{selected.tagName}</div>
+                    {selected.parentKey && selectedInLayout && (
+                      <div className="flex gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => void previewStructure({ operation: 'MOVE_UP', elementKey: selected.key })}
+                          className={quietButton}
+                          title="Move component up"
+                        >
+                          <ArrowUp size={10} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void previewStructure({ operation: 'MOVE_DOWN', elementKey: selected.key })}
+                          className={quietButton}
+                          title="Move component down"
+                        >
+                          <ArrowDown size={10} />
+                        </button>
+                        {selected.parentKey !== document.rootKey && (
+                          <button
+                            type="button"
+                            onClick={() => void previewStructure({ operation: 'DELETE', elementKey: selected.key })}
+                            className={`${quietButton} hover:border-red-500/60 hover:text-red-300`}
+                            title="Delete component"
+                          >
+                            <Trash2 size={10} />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <div className="mt-0.5 text-[9px] text-gray-600">
                     Source bytes {selected.sourceStart}–{selected.sourceEnd}
                   </div>
@@ -422,6 +498,40 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                     Preview exact insertion
                   </button>
                 </div>
+                {selectedInLayout && componentContainers.has(selected.localTag) && !selected.selfClosing && (
+                  <div className="border-t border-surface-border pt-2">
+                    <div className="text-[9px] uppercase tracking-wider text-gray-600">Insert child component</div>
+                    <select
+                      value={newTag}
+                      onChange={(event) => setNewTag(event.target.value)}
+                      className="mt-1 w-full py-1 text-[10px]"
+                    >
+                      {[
+                        'vbox', 'hbox', 'formLayout', 'tabSheet', 'textField', 'textArea',
+                        'bigDecimalField', 'datePicker', 'entityPicker', 'dataGrid',
+                        'genericFilter', 'button', 'span', 'fileUploadField',
+                      ].map((tagName) => <option key={tagName} value={tagName}>{tagName}</option>)}
+                    </select>
+                    <input
+                      value={newComponentId}
+                      onChange={(event) => setNewComponentId(event.target.value.replace(/\s+/g, ''))}
+                      placeholder="component id (optional)"
+                      className="mt-1 w-full py-1 font-mono text-[10px]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void previewStructure({
+                        operation: 'INSERT_CHILD',
+                        parentKey: selected.key,
+                        tagName: newTag,
+                        attributes: newComponentId ? { id: newComponentId } : {},
+                      })}
+                      className={`${quietButton} mt-1.5`}
+                    >
+                      <Plus size={10} /> Preview insertion
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

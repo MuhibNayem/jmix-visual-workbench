@@ -72,6 +72,64 @@ class FlowUiDescriptorParserTest {
         assertFalse("property=\"loanAmount\"" in changed)
     }
 
+    @Test
+    fun `component insertion preserves manual XML and produces a parseable child`() {
+        val source = descriptor()
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val form = document.elements.single { it.id == "loanForm" }
+        val proposal = FlowUiDescriptorParser.proposeInsertChild(
+            document = document,
+            parentKey = form.key,
+            tagName = "datePicker",
+            attributes = mapOf(
+                "property" to "applicationDate",
+                "id" to "applicationDateField",
+                "dataContainer" to "loanDc",
+            ),
+        )
+        val changed = WorkspaceChangePlanner.plan(
+            assertNotNull(proposal.changeSet),
+            mapOf("view.xml" to source),
+        ).files.single().resultContent
+
+        assertTrue("<!-- manual layout comment -->" in changed)
+        val reparsed = assertNotNull(FlowUiDescriptorParser.parse("view.xml", changed).document)
+        val inserted = reparsed.elements.single { it.id == "applicationDateField" }
+        assertEquals("datePicker", inserted.localTag)
+        assertEquals("loanForm", reparsed.elements.single { it.key == inserted.parentKey }.id)
+    }
+
+    @Test
+    fun `delete and move proposals modify only selected sibling structure`() {
+        val source = descriptor().replace(
+            """<bigDecimalField id="amountField" dataContainer="loanDc" property="loanAmount"/>""",
+            """
+            <bigDecimalField id="amountField" dataContainer="loanDc" property="loanAmount"/>
+            <textField id="commentField" dataContainer="loanDc" property="comment"/>
+            """.trimIndent(),
+        )
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val comment = document.elements.single { it.id == "commentField" }
+        val move = FlowUiDescriptorParser.proposeMoveElement(document, comment.key, FlowUiMoveDirection.UP)
+        val moved = WorkspaceChangePlanner.plan(
+            assertNotNull(move.changeSet),
+            mapOf("view.xml" to source),
+        ).files.single().resultContent
+        assertTrue(moved.indexOf("commentField") < moved.indexOf("amountField"))
+        assertTrue("<!-- manual layout comment -->" in moved)
+
+        val movedDocument = assertNotNull(FlowUiDescriptorParser.parse("view.xml", moved).document)
+        val amount = movedDocument.elements.single { it.id == "amountField" }
+        val delete = FlowUiDescriptorParser.proposeDeleteElement(movedDocument, amount.key)
+        val deleted = WorkspaceChangePlanner.plan(
+            assertNotNull(delete.changeSet),
+            mapOf("view.xml" to moved),
+        ).files.single().resultContent
+        assertFalse("amountField" in deleted)
+        assertTrue("commentField" in deleted)
+        assertTrue(FlowUiDescriptorParser.parse("view.xml", deleted).accepted)
+    }
+
     private fun descriptor(): String =
         """
         <?xml version="1.0" encoding="UTF-8"?>

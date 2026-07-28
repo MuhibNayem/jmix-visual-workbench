@@ -21,6 +21,8 @@ import org.jmixworkbench.services.FlowUiPropertyApplyRequest
 import org.jmixworkbench.services.FlowUiWorkspaceRequest
 import org.jmixworkbench.services.FlowUiWorkspaceResponse
 import org.jmixworkbench.services.FlowUiWorkspaceService
+import org.jmixworkbench.services.FlowUiStructureApplyRequest
+import org.jmixworkbench.services.FlowUiStructureChangeRequest
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
 import org.jmixworkbench.services.SourceNavigationRequest
@@ -109,6 +111,14 @@ class JcefBridge(
             }
             if (action == "applyFlowUiPropertyChange") {
                 handleApplyFlowUiPropertyChange(action, requestId, payload)
+                return
+            }
+            if (action == "previewFlowUiStructureChange") {
+                handlePreviewFlowUiStructureChange(action, requestId, payload)
+                return
+            }
+            if (action == "applyFlowUiStructureChange") {
+                handleApplyFlowUiStructureChange(action, requestId, payload)
                 return
             }
             if (action == "previewWorkspaceChange") {
@@ -356,6 +366,75 @@ class JcefBridge(
         }
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiWorkspaceService.getInstance(project).preparePropertyChange(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewFlowUiStructureChange(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiStructureChangeRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    mapOf(
+                        "accepted" to false,
+                        "changeSetId" to "flowui-structure:rejected",
+                        "label" to "FlowUI structure change rejected",
+                        "files" to emptyList<Any>(),
+                        "issues" to listOf(
+                            mapOf(
+                                "code" to "JVW-FLOWUI-REQUEST-INVALID",
+                                "message" to (error.message ?: "The FlowUI structure request is malformed."),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
+            FlowUiWorkspaceService.getInstance(project).previewStructureChange(request)
+        }
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { preview ->
+                sendResponse(action, requestId, gson.toJson(preview))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyFlowUiStructureChange(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, FlowUiStructureApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangeApplyResponse(
+                        success = false,
+                        changeSetId = "flowui-structure:rejected",
+                        planDigest = null,
+                        filesChanged = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-FLOWUI-REQUEST-INVALID",
+                                message = error.message ?: "The FlowUI structure apply request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            FlowUiWorkspaceService.getInstance(project).prepareStructureChange(request)
         }
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->

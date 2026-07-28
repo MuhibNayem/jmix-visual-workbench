@@ -8,6 +8,8 @@ import org.jmixworkbench.discovery.change.WorkspaceChangeIssue
 import org.jmixworkbench.discovery.change.WorkspaceChangePlan
 import org.jmixworkbench.discovery.flowui.FlowUiDescriptorParser
 import org.jmixworkbench.discovery.flowui.FlowUiDescriptorSnapshot
+import org.jmixworkbench.discovery.flowui.FlowUiMoveDirection
+import org.jmixworkbench.discovery.flowui.FlowUiPropertyChangeProposal
 import org.jmixworkbench.discovery.model.ArtifactKind
 import org.jmixworkbench.discovery.model.ArtifactRelationship
 import org.jmixworkbench.discovery.model.ArtifactSnapshot
@@ -109,10 +111,36 @@ class FlowUiWorkspaceService(
         )
     }
 
-    private fun propertyProposal(request: FlowUiPropertyChangeRequest) =
+    fun previewStructureChange(request: FlowUiStructureChangeRequest): WorkspaceChangePreviewResponse {
+        val proposal = structureProposal(request)
+        if (!proposal.accepted) {
+            return rejectedPreview("flowui-structure:rejected", proposal.issues)
+        }
+        if (proposal.noChange || proposal.changeSet == null) {
+            return WorkspaceChangePreviewResponse(
+                accepted = true,
+                changeSetId = "flowui-structure:no-change",
+                label = "No FlowUI source change required",
+                planDigest = null,
+                files = emptyList(),
+                issues = emptyList(),
+            )
+        }
+        return WorkspaceChangeService.getInstance(project).preview(proposal.changeSet)
+    }
+
+    fun prepareStructureChange(request: FlowUiStructureApplyRequest): PreparedWorkspaceChange =
+        prepareProposal(
+            proposal = structureProposal(request.change),
+            expectedPlanDigest = request.expectedPlanDigest,
+            path = request.change.sourceLocator.relativePath,
+            rejectedId = "flowui-structure:rejected",
+        )
+
+    private fun propertyProposal(request: FlowUiPropertyChangeRequest): FlowUiPropertyChangeProposal =
         loadDescriptor(request.sourceLocator).let { loaded ->
             val document = loaded.document
-                ?: return@let org.jmixworkbench.discovery.flowui.FlowUiPropertyChangeProposal(
+                ?: return@let FlowUiPropertyChangeProposal(
                     accepted = false,
                     noChange = false,
                     changeSet = null,
@@ -125,6 +153,73 @@ class FlowUiWorkspaceService(
                 value = request.value,
             )
         }
+
+    private fun structureProposal(request: FlowUiStructureChangeRequest): FlowUiPropertyChangeProposal =
+        loadDescriptor(request.sourceLocator).let { loaded ->
+            val document = loaded.document
+                ?: return@let FlowUiPropertyChangeProposal(
+                    accepted = false,
+                    noChange = false,
+                    changeSet = null,
+                    issues = loaded.issues,
+                )
+            when (request.operation) {
+                FlowUiStructureOperation.INSERT_CHILD -> FlowUiDescriptorParser.proposeInsertChild(
+                    document = document,
+                    parentKey = request.parentKey.orEmpty(),
+                    tagName = request.tagName.orEmpty(),
+                    attributes = request.attributes,
+                )
+                FlowUiStructureOperation.DELETE -> FlowUiDescriptorParser.proposeDeleteElement(
+                    document = document,
+                    elementKey = request.elementKey.orEmpty(),
+                )
+                FlowUiStructureOperation.MOVE_UP -> FlowUiDescriptorParser.proposeMoveElement(
+                    document = document,
+                    elementKey = request.elementKey.orEmpty(),
+                    direction = FlowUiMoveDirection.UP,
+                )
+                FlowUiStructureOperation.MOVE_DOWN -> FlowUiDescriptorParser.proposeMoveElement(
+                    document = document,
+                    elementKey = request.elementKey.orEmpty(),
+                    direction = FlowUiMoveDirection.DOWN,
+                )
+            }
+        }
+
+    private fun prepareProposal(
+        proposal: FlowUiPropertyChangeProposal,
+        expectedPlanDigest: String,
+        path: String,
+        rejectedId: String,
+    ): PreparedWorkspaceChange {
+        val changeSet = proposal.changeSet
+        if (!proposal.accepted || proposal.noChange || changeSet == null) {
+            val issues = proposal.issues.ifEmpty {
+                listOf(
+                    WorkspaceChangeIssue(
+                        code = "JVW-FLOWUI-NO-CHANGE",
+                        message = "The requested FlowUI structure already has the selected position.",
+                        relativePath = path,
+                    ),
+                )
+            }
+            return PreparedWorkspaceChange(
+                plan = WorkspaceChangePlan(
+                    accepted = false,
+                    changeSetId = changeSet?.id ?: rejectedId,
+                    label = changeSet?.label ?: "FlowUI structure change rejected",
+                    planDigest = null,
+                    files = emptyList(),
+                    issues = issues,
+                ),
+                baseDir = null,
+            )
+        }
+        return WorkspaceChangeService.getInstance(project).prepareApply(
+            WorkspaceChangeApplyRequest(changeSet, expectedPlanDigest),
+        )
+    }
 
     private fun loadDescriptor(locator: SourceLocator): LoadedDescriptor {
         val validation = SourceNavigationPolicy.validate(
@@ -286,6 +381,27 @@ data class FlowUiPropertyChangeRequest(
 
 data class FlowUiPropertyApplyRequest(
     val change: FlowUiPropertyChangeRequest,
+    val expectedPlanDigest: String,
+)
+
+enum class FlowUiStructureOperation {
+    INSERT_CHILD,
+    DELETE,
+    MOVE_UP,
+    MOVE_DOWN,
+}
+
+data class FlowUiStructureChangeRequest(
+    val sourceLocator: SourceLocator,
+    val operation: FlowUiStructureOperation,
+    val elementKey: String? = null,
+    val parentKey: String? = null,
+    val tagName: String? = null,
+    val attributes: Map<String, String> = emptyMap(),
+)
+
+data class FlowUiStructureApplyRequest(
+    val change: FlowUiStructureChangeRequest,
     val expectedPlanDigest: String,
 )
 
