@@ -213,7 +213,7 @@ function NewRoleDesigner() {
       </header>
 
       {/* Policy cards */}
-      <main className="grid flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 xl:grid-cols-2">
+      <main className="grid flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 min-[1600px]:grid-cols-2">
         {/* Entity policies */}
         <PolicyCard
           icon={Database}

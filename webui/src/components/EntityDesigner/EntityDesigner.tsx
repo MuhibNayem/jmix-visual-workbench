@@ -112,7 +112,7 @@ export default function EntityDesigner() {
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: Entity Config */}
-        <div className={`${activePane === 'config' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 space-y-4 overflow-y-auto p-4 min-[1200px]:block min-[1200px]:w-80 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
+        <div className={`${activePane === 'config' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 space-y-4 overflow-y-auto p-4 min-[1600px]:block min-[1600px]:w-80 min-[1600px]:border-r min-[1600px]:border-surface-border`}>
           {/* Basic Info */}
           <Section title="Basic Information">
             <Field label="Class Name">
@@ -296,7 +296,7 @@ export default function EntityDesigner() {
         </div>
 
         {/* Center: Attributes Table */}
-        <div className={`${activePane === 'attributes' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto p-3 sm:p-4 min-[1200px]:block`}>
+        <div className={`${activePane === 'attributes' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto p-3 sm:p-4 min-[1600px]:block`}>
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider">Attributes</h3>
             <button
@@ -405,7 +405,7 @@ export default function EntityDesigner() {
 
         {/* Right: Preview */}
         {showPreview && (
-          <div className={`${activePane === 'preview' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 overflow-y-auto p-4 min-[1200px]:block min-[1200px]:w-96 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
+          <div className={`${activePane === 'preview' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 overflow-y-auto p-4 min-[1600px]:block min-[1600px]:w-96 min-[1600px]:border-l min-[1600px]:border-surface-border`}>
             <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider mb-3">Generated Code Preview</h3>
             <pre className="text-[10px] text-gray-400 bg-surface-lighter rounded-lg p-3 overflow-x-auto whitespace-pre-wrap font-mono leading-relaxed">
               {generatePreview(entity)}

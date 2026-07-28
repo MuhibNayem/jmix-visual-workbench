@@ -707,7 +707,7 @@ function NewViewDesigner() {
       {/* Three-pane workspace */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: palette + data containers */}
-        <aside className={`${activePane === 'palette' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-56 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'palette' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-56 min-[1600px]:border-r min-[1600px]:border-surface-border`}>
           <div className="flex-1 overflow-y-auto">
             {PALETTE.map((group) => (
               <div key={group.category} className="border-b border-surface-border/60">
@@ -808,7 +808,7 @@ function NewViewDesigner() {
         </aside>
 
         {/* Center: canvas */}
-        <section className={`${activePane === 'canvas' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1200px]:flex`}>
+        <section className={`${activePane === 'canvas' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1600px]:flex`}>
           <div
             className="flex-1 overflow-auto p-3 sm:p-6"
             style={{
@@ -849,7 +849,7 @@ function NewViewDesigner() {
         </section>
 
         {/* Right: properties inspector */}
-        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-y-auto bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-y-auto bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-64 min-[1600px]:border-l min-[1600px]:border-surface-border`}>
           <SectionHeader icon={Tag} title="Properties" />
 
           {!selected ? (

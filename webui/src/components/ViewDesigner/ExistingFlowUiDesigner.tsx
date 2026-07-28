@@ -656,7 +656,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside className={`${activePane === 'tree' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'tree' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-64 min-[1600px]:border-r min-[1600px]:border-surface-border`}>
           <PanelTitle icon={Layers} title="Component tree" count={document.elements.length} />
           <div className="min-h-0 flex-1 overflow-auto py-1">
             {elements.get(document.rootKey) && (
@@ -732,7 +732,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           </div>
         </aside>
 
-        <section className={`${activePane === 'canvas' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1200px]:flex`}>
+        <section className={`${activePane === 'canvas' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1600px]:flex`}>
           <div
             className="flex-1 overflow-auto p-3 sm:p-6"
             style={{
@@ -793,7 +793,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           </footer>
         </section>
 
-        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-hidden bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-72 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-hidden bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-72 min-[1600px]:border-l min-[1600px]:border-surface-border`}>
           <PanelTitle icon={Tag} title="Exact XML properties" />
           <div className="max-h-[55%] overflow-auto p-3">
             {!selected ? (

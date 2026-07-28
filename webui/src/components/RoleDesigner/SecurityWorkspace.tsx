@@ -208,7 +208,7 @@ export default function SecurityWorkspace() {
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
+        <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4 min-[1600px]:grid-cols-8">
           <Metric label="Resource roles" value={workspace.summary.resourceRoleCount} icon={Shield} />
           <Metric label="Row roles" value={workspace.summary.rowRoleCount} icon={SlidersHorizontal} />
           <Metric label="Policies" value={workspace.summary.policyCount} icon={KeyRound} />
@@ -226,7 +226,7 @@ export default function SecurityWorkspace() {
         </div>
       </header>
 
-      <div className="flex items-center gap-2 border-b border-surface-border px-4 py-2.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-surface-border px-4 py-2.5">
         <Search size={13} className="text-gray-600" />
         <input
           value={query}
@@ -234,7 +234,7 @@ export default function SecurityWorkspace() {
           placeholder="Search roles, modules, resources, or policies"
           className="min-w-0 flex-1 border-0 bg-transparent px-0 py-1 text-xs outline-none"
         />
-        <span className="max-w-[40%] truncate text-[10px] text-gray-600">
+        <span className="basis-full break-words pl-5 text-[10px] text-gray-600 sm:ml-auto sm:max-w-[40%] sm:basis-auto sm:truncate sm:pl-0">
           Context: {context} · {selectedNames.length ? selectedNames.join(' + ') : 'no roles selected'}
         </span>
       </div>
@@ -251,7 +251,7 @@ export default function SecurityWorkspace() {
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside className={`${activePane === 'roles' ? 'block' : 'hidden'} min-h-0 w-full shrink-0 overflow-auto bg-surface-light/30 min-[1200px]:block min-[1200px]:w-64 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'roles' ? 'block' : 'hidden'} min-h-0 w-full shrink-0 overflow-auto bg-surface-light/30 min-[1600px]:block min-[1600px]:w-64 min-[1600px]:border-r min-[1600px]:border-surface-border`}>
           <SectionHeading icon={UserRoundCheck} title="Role assignment" subtitle="Combine roles to simulate effective access" />
           {(['RESOURCE', 'ROW_LEVEL'] as const).map((kind) => (
             <div key={kind} className="border-b border-surface-border/70 p-2">
@@ -299,7 +299,7 @@ export default function SecurityWorkspace() {
           ))}
         </aside>
 
-        <main className={`${activePane === 'access' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1200px]:flex`}>
+        <main className={`${activePane === 'access' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1600px]:flex`}>
           <div className="flex flex-wrap gap-1 border-b border-surface-border p-2">
             {surfaceFilters.map((filter) => (
               <button
@@ -414,7 +414,7 @@ export default function SecurityWorkspace() {
           </div>
         </main>
 
-        <aside className={`${activePane === 'findings' ? 'block' : 'hidden'} min-h-0 w-full shrink-0 overflow-auto bg-surface-light/30 min-[1200px]:block min-[1200px]:w-72 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'findings' ? 'block' : 'hidden'} min-h-0 w-full shrink-0 overflow-auto bg-surface-light/30 min-[1600px]:block min-[1600px]:w-72 min-[1600px]:border-l min-[1600px]:border-surface-border`}>
           <SectionHeading
             icon={ShieldAlert}
             title="Security review"

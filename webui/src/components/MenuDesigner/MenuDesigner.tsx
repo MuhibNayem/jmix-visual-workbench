@@ -365,7 +365,7 @@ export default function MenuDesigner() {
       {/* Workspace */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: structure tree */}
-        <aside className={`${activePane === 'structure' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'structure' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-64 min-[1600px]:border-r min-[1600px]:border-surface-border`}>
           <div className="flex items-center gap-1.5 border-b border-surface-border px-3 py-2 text-[10px] font-semibold uppercase tracking-widest text-gray-500">
             <ListTree size={12} className="text-jmix-400" /> Structure
           </div>
@@ -387,7 +387,7 @@ export default function MenuDesigner() {
 
         {/* Center: live preview */}
         <section
-          className={`${activePane === 'preview' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col items-center overflow-auto p-3 sm:p-6 min-[1200px]:flex`}
+          className={`${activePane === 'preview' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col items-center overflow-auto p-3 sm:p-6 min-[1600px]:flex`}
           style={{
             backgroundImage: 'radial-gradient(circle, rgba(69,71,90,0.45) 1px, transparent 1px)',
             backgroundSize: '18px 18px',
@@ -476,7 +476,7 @@ export default function MenuDesigner() {
         </section>
 
         {/* Right: editor */}
-        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-y-auto bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-l min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-y-auto bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-64 min-[1600px]:border-l min-[1600px]:border-surface-border`}>
           <div className="flex items-center justify-between border-b border-surface-border px-3 py-2">
             <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-500">Properties</span>
             {selected && (

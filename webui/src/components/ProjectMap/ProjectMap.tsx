@@ -235,8 +235,8 @@ export default function ProjectMap() {
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
             <div className={`${activePane === 'artifacts' ? 'block' : 'hidden'} min-h-0 w-full overflow-auto ${
-              selected ? 'min-[1200px]:w-[42%] min-[1200px]:shrink-0 min-[1200px]:border-r min-[1200px]:border-surface-border' : ''
-            } min-[1200px]:block`}>
+              selected ? 'min-[1600px]:w-[42%] min-[1600px]:shrink-0 min-[1600px]:border-r min-[1600px]:border-surface-border' : ''
+            } min-[1600px]:block`}>
               <div className="sticky top-0 z-10 border-b border-surface-border bg-surface/95 px-4 py-2 text-[11px] text-gray-500 backdrop-blur">
                 Showing {Math.min(filtered.length, MAX_VISIBLE_ARTIFACTS).toLocaleString()} of {filtered.length.toLocaleString()} matches
                 {filtered.length > MAX_VISIBLE_ARTIFACTS && ' — refine the search to see more'}
@@ -265,7 +265,7 @@ export default function ProjectMap() {
             </div>
 
             {selected && (
-              <div className={`${activePane === 'impact' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-auto p-3 sm:p-5 min-[1200px]:block`}>
+              <div className={`${activePane === 'impact' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-auto p-3 sm:p-5 min-[1600px]:block`}>
                 <ArtifactInspector
                   artifact={selected}
                   outgoing={outgoing}

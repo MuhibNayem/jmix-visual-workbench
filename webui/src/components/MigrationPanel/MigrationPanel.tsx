@@ -566,7 +566,7 @@ export default function MigrationPanel() {
       {/* Workspace */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: changeset list */}
-        <aside className={`${activePane === 'changesets' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1200px]:flex min-[1200px]:w-64 min-[1200px]:border-r min-[1200px]:border-surface-border`}>
+        <aside className={`${activePane === 'changesets' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-64 min-[1600px]:border-r min-[1600px]:border-surface-border`}>
           <div className="flex items-center gap-1.5 border-b border-surface-border px-3 py-2 text-[10px] font-semibold uppercase tracking-widest text-gray-500">
             <GitCommit size={12} className="text-jmix-400" /> Changesets
           </div>
@@ -642,7 +642,7 @@ export default function MigrationPanel() {
         </aside>
 
         {/* Right: changeset editor */}
-        <section className={`${activePane === 'editor' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col overflow-hidden min-[1200px]:flex`}>
+        <section className={`${activePane === 'editor' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col overflow-hidden min-[1600px]:flex`}>
           {!selected ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
               <GitCommit size={26} className="text-gray-600" />
