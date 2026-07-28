@@ -65,7 +65,7 @@ class ApplicationGraphIndexer {
                 -> indexJvm(file, artifacts, pendingLinks, diagnostics)
 
                 SourceLanguage.XML -> indexXml(file, artifacts, pendingLinks, diagnostics)
-                SourceLanguage.PROPERTIES -> indexProperties(file, artifacts)
+                SourceLanguage.PROPERTIES -> indexProperties(file, artifacts, pendingLinks, diagnostics)
                 else -> Unit
             }
 
@@ -114,6 +114,13 @@ class ApplicationGraphIndexer {
         val aliases = linkedSetOf(semanticKey, typeName)
         VIEW_CONTROLLER_ID.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
         ROLE_CODE.find(file.content)?.groupValues?.get(2)?.let(aliases::add)
+        SPRING_BEAN_NAME.find(file.content)?.groupValues?.get(2)?.let(aliases::add)
+        REST_SERVICE_NAME.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
+        JMIX_ENTITY_NAME.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
+        TABLE_NAME.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
+        if (primaryKind == ArtifactKind.SERVICE) {
+            aliases += typeName.replaceFirstChar(Char::lowercase)
+        }
         val primary = addArtifact(
             artifacts = artifacts,
             file = file,
@@ -125,6 +132,38 @@ class ApplicationGraphIndexer {
             aliases = aliases,
             token = typeName,
         )
+
+        if (primaryKind == ArtifactKind.ENTITY) {
+            indexEntityAttributes(file, primary, semanticKey, typeName, artifacts, links)
+        }
+
+        ROUTE.find(file.content)?.let { routeMatch ->
+            val routePath = routeMatch.groupValues[1]
+            val route = addArtifact(
+                artifacts = artifacts,
+                file = file,
+                kind = ArtifactKind.VIEW_ROUTE,
+                semanticKey = "$semanticKey#$routePath",
+                displayName = routePath.ifBlank { "/" },
+                summary = "Vaadin route for $typeName",
+                symbol = semanticKey,
+                aliases = setOf(routePath, "$semanticKey#$routePath"),
+                token = routePath,
+            )
+            links += primary.link(route, RelationshipType.ROUTED_AS, file.locator(routePath, semanticKey))
+        }
+
+        if (primaryKind == ArtifactKind.VIEW_CONTROLLER) {
+            indexViewControllerMembers(file, primary, semanticKey, artifacts, links)
+        }
+
+        if (primaryKind == ArtifactKind.SERVICE) {
+            indexServiceMethods(file, primary, semanticKey, typeName, artifacts, links)
+        }
+
+        if (primaryKind == ArtifactKind.RESOURCE_ROLE || primaryKind == ArtifactKind.ROW_ROLE) {
+            indexSecurityPolicies(file, primary, semanticKey, artifacts, links)
+        }
 
         VIEW_DESCRIPTOR.find(file.content)?.groupValues?.get(1)?.let { descriptor ->
             links += primary.link(
@@ -241,6 +280,319 @@ class ApplicationGraphIndexer {
                 locator = file.locator(match.value, semanticKey),
             )
         }
+
+        addJvmRiskDiagnostics(file, semanticKey, diagnostics)
+    }
+
+    private fun indexEntityAttributes(
+        file: GraphSourceFile,
+        entity: DetectedArtifact,
+        semanticKey: String,
+        typeName: String,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+    ) {
+        val fields = buildList {
+            JAVA_FIELD.findAll(file.content).forEach { match ->
+                add(FieldDeclaration(match.groupValues[2], match.groupValues[1]))
+            }
+            KOTLIN_FIELD.findAll(file.content).forEach { match ->
+                add(FieldDeclaration(match.groupValues[1], match.groupValues[2]))
+            }
+        }.distinctBy(FieldDeclaration::name)
+            .filterNot { it.name == "serialVersionUID" || it.name.all(Char::isUpperCase) }
+
+        fields.forEach { field ->
+            val attribute = addArtifact(
+                artifacts = artifacts,
+                file = file,
+                kind = ArtifactKind.ENTITY_ATTRIBUTE,
+                semanticKey = "$semanticKey.${field.name}",
+                displayName = field.name,
+                summary = "${field.type} attribute of $typeName",
+                symbol = "$semanticKey.${field.name}",
+                aliases = entity.aliases.mapTo(linkedSetOf()) { alias -> "$alias.${field.name}" },
+                token = field.name,
+            )
+            links += entity.link(
+                attribute,
+                RelationshipType.DECLARES,
+                file.locator(field.name, "$semanticKey.${field.name}"),
+            )
+        }
+    }
+
+    private fun indexViewControllerMembers(
+        file: GraphSourceFile,
+        controller: DetectedArtifact,
+        semanticKey: String,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+    ) {
+        val viewId = VIEW_CONTROLLER_ID.find(file.content)?.groupValues?.get(1)
+        val componentKinds = setOf(
+            ArtifactKind.UI_COMPONENT,
+            ArtifactKind.UI_ACTION,
+            ArtifactKind.DATA_CONTAINER,
+            ArtifactKind.DATA_LOADER,
+        )
+        val injected = sequenceOf(JAVA_VIEW_COMPONENT, KOTLIN_VIEW_COMPONENT)
+            .flatMap { regex -> regex.findAll(file.content) }
+            .map { match ->
+                val explicitId = match.groupValues[1]
+                val fieldName = match.groupValues[2]
+                explicitId.ifBlank { fieldName } to fieldName
+            }
+            .distinct()
+        injected.forEach { (componentId, fieldName) ->
+            links += controller.link(
+                target = viewTarget(viewId, componentId),
+                type = RelationshipType.INJECTS_COMPONENT,
+                expectedKinds = componentKinds,
+                locator = file.locator(fieldName, "$semanticKey#$fieldName"),
+            )
+        }
+
+        SUBSCRIBE_METHOD.findAll(file.content).forEach { match ->
+            val targetId = match.groupValues[1]
+            val methodName = match.groupValues[2]
+            val handler = addArtifact(
+                artifacts = artifacts,
+                file = file,
+                kind = ArtifactKind.VIEW_HANDLER,
+                semanticKey = "$semanticKey#$methodName",
+                displayName = methodName,
+                summary = if (targetId.isBlank()) "View lifecycle handler" else "Subscription handler for $targetId",
+                symbol = "$semanticKey#$methodName",
+                aliases = setOf("$semanticKey#$methodName", methodName),
+                token = methodName,
+            )
+            links += controller.link(handler, RelationshipType.DECLARES, file.locator(methodName, "$semanticKey#$methodName"))
+            if (targetId.isNotBlank()) {
+                links += handler.link(
+                    target = viewTarget(viewId, targetId),
+                    type = RelationshipType.SUBSCRIBES_TO,
+                    expectedKinds = componentKinds,
+                    locator = file.locator(targetId, "$semanticKey#$methodName"),
+                )
+            }
+        }
+
+        INSTALL_METHOD.findAll(file.content).forEach { match ->
+            val targetId = match.groupValues[1].substringBefore('.')
+            val methodName = match.groupValues[2]
+            val handler = addArtifact(
+                artifacts = artifacts,
+                file = file,
+                kind = ArtifactKind.VIEW_HANDLER,
+                semanticKey = "$semanticKey#$methodName",
+                displayName = methodName,
+                summary = "Install delegate for ${match.groupValues[1]}",
+                symbol = "$semanticKey#$methodName",
+                aliases = setOf("$semanticKey#$methodName", methodName),
+                token = methodName,
+            )
+            links += controller.link(handler, RelationshipType.DECLARES, file.locator(methodName, "$semanticKey#$methodName"))
+            links += handler.link(
+                target = viewTarget(viewId, targetId),
+                type = RelationshipType.SUBSCRIBES_TO,
+                expectedKinds = componentKinds,
+                locator = file.locator(targetId, "$semanticKey#$methodName"),
+            )
+        }
+    }
+
+    private fun indexServiceMethods(
+        file: GraphSourceFile,
+        service: DetectedArtifact,
+        semanticKey: String,
+        typeName: String,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+    ) {
+        val exposedMethods = REST_METHOD_DECLARATION.findAll(file.content)
+            .map { it.groupValues[1] }
+            .toSet()
+        val declarations = buildList {
+            JAVA_METHOD_DECLARATION.findAll(file.content).forEach { match ->
+                add(MethodDeclaration(match.groupValues[1]))
+            }
+            KOTLIN_METHOD_DECLARATION.findAll(file.content).forEach { match ->
+                add(MethodDeclaration(match.groupValues[1]))
+            }
+        }.distinctBy(MethodDeclaration::name)
+            .filterNot { it.name == typeName || it.name in METHOD_KEYWORDS }
+
+        declarations.forEach { declaration ->
+            val aliases = service.aliases.mapTo(linkedSetOf()) { alias -> "$alias#${declaration.name}" }
+            aliases += "$semanticKey#${declaration.name}"
+            val method = addArtifact(
+                artifacts = artifacts,
+                file = file,
+                kind = ArtifactKind.SERVICE_METHOD,
+                semanticKey = "$semanticKey#${declaration.name}",
+                displayName = declaration.name,
+                summary = "Service operation declared by $typeName",
+                symbol = "$semanticKey#${declaration.name}",
+                aliases = aliases,
+                token = declaration.name,
+            )
+            links += service.link(
+                method,
+                RelationshipType.DECLARES,
+                file.locator(declaration.name, "$semanticKey#${declaration.name}"),
+            )
+            if (declaration.name in exposedMethods) {
+                links += service.link(
+                    method,
+                    RelationshipType.EXPOSES_SERVICE_METHOD,
+                    file.locator(declaration.name, "$semanticKey#${declaration.name}"),
+                )
+            }
+        }
+    }
+
+    private fun indexSecurityPolicies(
+        file: GraphSourceFile,
+        role: DetectedArtifact,
+        semanticKey: String,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+    ) {
+        POLICY_ANNOTATION.findAll(file.content).forEachIndexed { index, match ->
+            val policyType = match.groupValues[1]
+            val body = match.groupValues[2]
+            val policy = addArtifact(
+                artifacts = artifacts,
+                file = file,
+                kind = ArtifactKind.SECURITY_POLICY,
+                semanticKey = "$semanticKey#$policyType-${index + 1}",
+                displayName = policyType,
+                summary = securityPolicySummary(policyType, body),
+                symbol = "$semanticKey#$policyType-${index + 1}",
+                aliases = setOf("$semanticKey#$policyType-${index + 1}"),
+                token = policyType,
+            )
+            links += role.link(policy, RelationshipType.DECLARES, file.locator(policyType, policy.semanticKey))
+
+            when (policyType) {
+                "EntityPolicy" -> policyEntityReference(body)?.let { entity ->
+                    links += policy.link(
+                        entity,
+                        RelationshipType.APPLIES_POLICY_TO,
+                        setOf(ArtifactKind.ENTITY),
+                        file.locator(entity, policy.semanticKey),
+                    )
+                }
+                "EntityAttributePolicy" -> {
+                    val entity = policyEntityReference(body)
+                    if (entity != null) {
+                        stringValues(ATTRIBUTES_ARGUMENT.find(body)?.groupValues?.get(1).orEmpty()).forEach { attribute ->
+                            if (attribute != "*") {
+                                links += policy.link(
+                                    "$entity.$attribute",
+                                    RelationshipType.APPLIES_POLICY_TO,
+                                    setOf(ArtifactKind.ENTITY_ATTRIBUTE),
+                                    file.locator(attribute, policy.semanticKey),
+                                )
+                            }
+                        }
+                    }
+                }
+                "ViewPolicy" -> stringValues(VIEW_IDS_ARGUMENT.find(body)?.groupValues?.get(1).orEmpty()).forEach { view ->
+                    if (view != "*") {
+                        links += policy.link(
+                            view,
+                            RelationshipType.APPLIES_POLICY_TO,
+                            setOf(ArtifactKind.VIEW_DESCRIPTOR),
+                            file.locator(view, policy.semanticKey),
+                        )
+                    }
+                }
+                "MenuPolicy" -> stringValues(MENU_IDS_ARGUMENT.find(body)?.groupValues?.get(1).orEmpty()).forEach { menu ->
+                    if (menu != "*") {
+                        links += policy.link(
+                            menu,
+                            RelationshipType.APPLIES_POLICY_TO,
+                            setOf(ArtifactKind.MENU_ITEM),
+                            file.locator(menu, policy.semanticKey),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun addJvmRiskDiagnostics(
+        file: GraphSourceFile,
+        semanticKey: String,
+        diagnostics: MutableList<DiscoveryDiagnostic>,
+    ) {
+        fun add(
+            regex: Regex,
+            reasonCode: String,
+            message: String,
+            nextStep: String,
+            category: DiagnosticCategory,
+            severity: DiagnosticSeverity = DiagnosticSeverity.WARNING,
+        ) {
+            val match = regex.find(file.content) ?: return
+            diagnostics += diagnostic(
+                reasonCode = reasonCode,
+                message = message,
+                nextStep = nextStep,
+                category = category,
+                severity = severity,
+                locator = file.locator(match.value, semanticKey),
+            )
+        }
+
+        add(
+            UNCONSTRAINED_ACCESS,
+            "P2_UNCONSTRAINED_DATA_ACCESS",
+            "Unconstrained data access bypasses row-level security constraints.",
+            "Verify the server-side authorization boundary and document why constrained DataManager cannot be used.",
+            DiagnosticCategory.SECURITY,
+        )
+        add(
+            NATIVE_SQL_WRITE,
+            "P2_NATIVE_SQL_WRITE",
+            "A native SQL write can bypass entity listeners, validation, security, and audit behavior.",
+            "Move the mutation behind a reviewed transactional service and model its side effects explicitly.",
+            DiagnosticCategory.TRANSACTION,
+        )
+        add(
+            PRINT_STACK_TRACE,
+            "P2_PRINT_STACK_TRACE",
+            "printStackTrace() bypasses structured production logging and may expose sensitive details.",
+            "Use the project logging framework with an appropriate message and exception context.",
+            DiagnosticCategory.SOURCE,
+        )
+        add(
+            SWALLOWED_EXCEPTION,
+            "P2_SWALLOWED_EXCEPTION",
+            "An exception appears to be swallowed without logging, propagation, or recovery.",
+            "Handle the failure explicitly or propagate it to the owning transaction boundary.",
+            DiagnosticCategory.SOURCE,
+        )
+        add(
+            HARDCODED_HTTP_ENDPOINT,
+            "P2_HARDCODED_HTTP_ENDPOINT",
+            "An outbound HTTP endpoint is hard-coded in source.",
+            "Move the endpoint to validated external configuration and keep credentials out of source control.",
+            DiagnosticCategory.SECURITY,
+        )
+        if (OUTBOUND_HTTP_CLIENT.containsMatchIn(file.content) && !HTTP_TIMEOUT_CONFIGURATION.containsMatchIn(file.content)) {
+            val match = OUTBOUND_HTTP_CLIENT.find(file.content)!!
+            diagnostics += diagnostic(
+                reasonCode = "P2_OUTBOUND_HTTP_TIMEOUT_MISSING",
+                message = "An outbound HTTP client is used without visible timeout configuration.",
+                nextStep = "Configure connection and response timeouts and review retry/idempotency behavior.",
+                category = DiagnosticCategory.SOURCE,
+                severity = DiagnosticSeverity.WARNING,
+                locator = file.locator(match.value, semanticKey),
+            )
+        }
     }
 
     private fun indexXml(
@@ -269,6 +621,12 @@ class ApplicationGraphIndexer {
             "fetchPlans", "fetch-plans" -> indexFetchPlans(file, root, artifacts)
             "databaseChangeLog" -> indexLiquibase(file, root, artifacts, links)
             "definitions" -> indexWorkflow(file, root, artifacts, links)
+            "services" -> if (root.namespaceURI.orEmpty().contains("/rest/services")) {
+                indexRestServices(file, root, artifacts, links, diagnostics)
+            }
+            "queries" -> if (root.namespaceURI.orEmpty().contains("/rest/queries")) {
+                indexRestQueries(file, root, artifacts, links, diagnostics)
+            }
         }
     }
 
@@ -291,7 +649,9 @@ class ApplicationGraphIndexer {
             viewId,
         )
 
-        root.descendants("collection", "instance").forEach { element ->
+        val containerEntities = linkedMapOf<String, String>()
+        val containerArtifacts = linkedMapOf<String, DetectedArtifact>()
+        root.descendants("collection", "instance", "keyValueCollection", "keyValueInstance").forEach { element ->
             val id = element.attr("id").ifBlank { return@forEach }
             val container = addArtifact(
                 artifacts,
@@ -304,8 +664,10 @@ class ApplicationGraphIndexer {
                 setOf("$viewId#$id", id),
                 id,
             )
+            containerArtifacts[id] = container
             links += view.link(container, RelationshipType.DECLARES, file.locator(id, id))
             element.attr("class").takeIf(String::isNotBlank)?.let { entity ->
+                containerEntities[id] = entity
                 links += container.link(
                     entity,
                     RelationshipType.BINDS_TO_ENTITY,
@@ -319,6 +681,28 @@ class ApplicationGraphIndexer {
                     RelationshipType.REFERENCES_FETCH_PLAN,
                     setOf(ArtifactKind.FETCH_PLAN),
                     file.locator(fetchPlan, id),
+                )
+            }
+            element.directChildren("fetchPlan", "fetch-plan").firstOrNull()?.let { fetchPlanElement ->
+                val fetchPlanName = fetchPlanElement.attr("name")
+                    .ifBlank { fetchPlanElement.attr("extends") }
+                    .ifBlank { "$viewId#$id:inline" }
+                val entity = containerEntities[id].orEmpty()
+                val inlineFetchPlan = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.FETCH_PLAN,
+                    "$viewId#$id:$fetchPlanName",
+                    fetchPlanName,
+                    if (entity.isBlank()) "Inline view fetch plan" else "Inline fetch plan for $entity",
+                    fetchPlanName,
+                    setOf("$viewId#$id:$fetchPlanName"),
+                    fetchPlanName,
+                )
+                links += container.link(
+                    inlineFetchPlan,
+                    RelationshipType.REFERENCES_FETCH_PLAN,
+                    file.locator(fetchPlanName, id),
                 )
             }
         }
@@ -337,6 +721,14 @@ class ApplicationGraphIndexer {
                 id,
             )
             links += view.link(loader, RelationshipType.DECLARES, file.locator(id, id))
+            val owningContainer = element.ancestors()
+                .firstOrNull { it.localTag() in DATA_CONTAINER_TAGS }
+                ?.attr("id")
+            owningContainer?.let { containerId ->
+                containerArtifacts[containerId]?.let { container ->
+                    links += container.link(loader, RelationshipType.DECLARES, file.locator(id, containerId))
+                }
+            }
             element.attr("fetchPlan").takeIf(String::isNotBlank)?.let { fetchPlan ->
                 links += loader.link(
                     fetchPlan,
@@ -344,6 +736,52 @@ class ApplicationGraphIndexer {
                     setOf(ArtifactKind.FETCH_PLAN),
                     file.locator(fetchPlan, id),
                 )
+            }
+
+            element.directChildren("query").firstOrNull()?.let { queryElement ->
+                val queryText = queryElement.textContent.trim().replace(Regex("""\s+"""), " ")
+                if (queryText.isNotBlank()) {
+                    val query = addArtifact(
+                        artifacts,
+                        file,
+                        ArtifactKind.JPQL_QUERY,
+                        "$viewId#$id:query",
+                        id,
+                        queryText.take(240),
+                        "$viewId#$id:query",
+                        setOf("$viewId#$id:query"),
+                        queryText.take(80),
+                    )
+                    links += loader.link(query, RelationshipType.EXECUTES_QUERY, file.locator(queryText.take(80), id))
+                    val entityRef = JPQL_FROM.find(queryText)?.groupValues?.get(1)
+                        ?: owningContainer?.let(containerEntities::get)
+                    entityRef?.let { entity ->
+                        links += query.link(
+                            entity,
+                            RelationshipType.LOADS_ENTITY,
+                            setOf(ArtifactKind.ENTITY, ArtifactKind.DTO),
+                            file.locator(entity.substringAfterLast('.'), query.semanticKey),
+                        )
+                    }
+                    JPQL_PARAMETER.findAll(queryText).map { it.groupValues[1] }.distinct().forEach { parameterName ->
+                        val parameter = addArtifact(
+                            artifacts,
+                            file,
+                            ArtifactKind.QUERY_PARAMETER,
+                            "${query.semanticKey}#$parameterName",
+                            parameterName,
+                            "JPQL loader parameter",
+                            "${query.semanticKey}#$parameterName",
+                            setOf("${query.semanticKey}#$parameterName"),
+                            parameterName,
+                        )
+                        links += query.link(
+                            parameter,
+                            RelationshipType.DECLARES_PARAMETER,
+                            file.locator(parameterName, query.semanticKey),
+                        )
+                    }
+                }
             }
         }
 
@@ -368,6 +806,25 @@ class ApplicationGraphIndexer {
                     RelationshipType.BINDS_TO_ENTITY,
                     setOf(ArtifactKind.DATA_CONTAINER),
                     file.locator(container, id),
+                )
+            }
+            element.attr("itemsContainer").takeIf(String::isNotBlank)?.let { container ->
+                links += component.link(
+                    "$viewId#$container",
+                    RelationshipType.BINDS_TO_ENTITY,
+                    setOf(ArtifactKind.DATA_CONTAINER),
+                    file.locator(container, id),
+                )
+            }
+            val effectiveContainer = element.inheritedAttr("dataContainer")
+            val property = element.attr("property")
+            val entity = effectiveContainer?.let(containerEntities::get)
+            if (entity != null && property.isNotBlank()) {
+                links += component.link(
+                    "$entity.${property.substringBefore('.')}",
+                    RelationshipType.BINDS_TO_ATTRIBUTE,
+                    setOf(ArtifactKind.ENTITY_ATTRIBUTE),
+                    file.locator(property, id),
                 )
             }
         }
@@ -438,6 +895,193 @@ class ApplicationGraphIndexer {
         }
     }
 
+    private fun indexRestServices(
+        file: GraphSourceFile,
+        root: Element,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+        diagnostics: MutableList<DiscoveryDiagnostic>,
+    ) {
+        val config = addArtifact(
+            artifacts,
+            file,
+            ArtifactKind.REST_SERVICE_CONFIG,
+            file.relativePath,
+            file.fileNameWithoutExtension(),
+            "Jmix REST service allowlist",
+            file.relativePath,
+            setOf(file.relativePath, file.classpathResourcePath(), file.relativePath.substringAfterLast('/')),
+            root.tagName,
+        )
+        val signatures = mutableSetOf<String>()
+        root.descendants("service").forEachIndexed { serviceIndex, serviceElement ->
+            val serviceName = serviceElement.attr("name").ifBlank { "service-${serviceIndex + 1}" }
+            serviceElement.directChildren("method").forEachIndexed { methodIndex, methodElement ->
+                val methodName = methodElement.attr("name").ifBlank { "method-${methodIndex + 1}" }
+                val params = methodElement.directChildren("param")
+                val signature = "$serviceName#$methodName(${params.joinToString { it.attr("type") }})"
+                if (!signatures.add(signature)) {
+                    diagnostics += diagnostic(
+                        reasonCode = "P2_REST_SERVICE_METHOD_DUPLICATE",
+                        message = "Duplicate REST service method contract: $signature.",
+                        nextStep = "Remove the duplicate or provide explicit parameter types for an overloaded service method.",
+                        category = DiagnosticCategory.SOURCE,
+                        severity = DiagnosticSeverity.ERROR,
+                        locator = file.locator(methodName, signature),
+                    )
+                }
+                val method = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.REST_SERVICE_METHOD,
+                    signature,
+                    "$serviceName.$methodName",
+                    "REST-exposed service method with ${params.size} parameter(s)",
+                    signature,
+                    setOf(signature, "$serviceName#$methodName"),
+                    methodName,
+                )
+                links += config.link(method, RelationshipType.EXPOSES_SERVICE_METHOD, file.locator(methodName, signature))
+                links += method.link(
+                    "$serviceName#$methodName",
+                    RelationshipType.IMPLEMENTED_BY,
+                    setOf(ArtifactKind.SERVICE_METHOD),
+                    file.locator(serviceName, signature),
+                )
+                params.forEachIndexed { parameterIndex, parameterElement ->
+                    val name = parameterElement.attr("name").ifBlank { "param-${parameterIndex + 1}" }
+                    val type = parameterElement.attr("type")
+                    val parameter = addArtifact(
+                        artifacts,
+                        file,
+                        ArtifactKind.CONTRACT_PARAMETER,
+                        "$signature#$name",
+                        name,
+                        if (type.isBlank()) "REST parameter with inferred type" else "REST parameter of type $type",
+                        "$signature#$name",
+                        setOf("$signature#$name"),
+                        name,
+                    )
+                    links += method.link(
+                        parameter,
+                        RelationshipType.DECLARES_PARAMETER,
+                        file.locator(name, signature),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun indexRestQueries(
+        file: GraphSourceFile,
+        root: Element,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+        diagnostics: MutableList<DiscoveryDiagnostic>,
+    ) {
+        val config = addArtifact(
+            artifacts,
+            file,
+            ArtifactKind.REST_QUERY_CONFIG,
+            file.relativePath,
+            file.fileNameWithoutExtension(),
+            "Jmix predefined REST query allowlist",
+            file.relativePath,
+            setOf(file.relativePath, file.classpathResourcePath(), file.relativePath.substringAfterLast('/')),
+            root.tagName,
+        )
+        val identities = mutableSetOf<String>()
+        root.descendants("query").forEachIndexed { index, queryElement ->
+            val name = queryElement.attr("name").ifBlank { "query-${index + 1}" }
+            val entity = queryElement.attr("entity")
+            val identity = "$entity:$name"
+            if (!identities.add(identity)) {
+                diagnostics += diagnostic(
+                    reasonCode = "P2_REST_QUERY_DUPLICATE",
+                    message = "Duplicate predefined REST query identity: $identity.",
+                    nextStep = "Give every query a unique entity and name combination.",
+                    category = DiagnosticCategory.QUERY,
+                    severity = DiagnosticSeverity.ERROR,
+                    locator = file.locator(name, identity),
+                )
+            }
+            val jpql = queryElement.directChildren("jpql").firstOrNull()
+                ?.textContent
+                ?.trim()
+                ?.replace(Regex("""\s+"""), " ")
+                .orEmpty()
+            val query = addArtifact(
+                artifacts,
+                file,
+                ArtifactKind.REST_QUERY,
+                identity,
+                name,
+                jpql.ifBlank { "Predefined REST query for $entity" }.take(240),
+                identity,
+                setOf(identity, name),
+                name,
+            )
+            links += config.link(query, RelationshipType.DECLARES, file.locator(name, identity))
+            if (entity.isNotBlank()) {
+                links += query.link(
+                    entity,
+                    RelationshipType.LOADS_ENTITY,
+                    setOf(ArtifactKind.ENTITY, ArtifactKind.DTO),
+                    file.locator(entity, identity),
+                )
+            }
+            queryElement.attr("fetchPlan").takeIf(String::isNotBlank)?.let { fetchPlan ->
+                links += query.link(
+                    fetchPlan,
+                    RelationshipType.REFERENCES_FETCH_PLAN,
+                    setOf(ArtifactKind.FETCH_PLAN),
+                    file.locator(fetchPlan, identity),
+                )
+            }
+
+            val declaredParams = queryElement.descendants("param")
+                .filter { it.ancestors().firstOrNull { ancestor -> ancestor.localTag() == "query" } == queryElement }
+                .mapNotNull { element -> element.attr("name").takeIf(String::isNotBlank)?.let { it to element } }
+                .toMap()
+            declaredParams.forEach { (parameterName, parameterElement) ->
+                val type = parameterElement.attr("type")
+                val parameter = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.CONTRACT_PARAMETER,
+                    "$identity#$parameterName",
+                    parameterName,
+                    if (type.isBlank()) "REST query parameter" else "REST query parameter of type $type",
+                    "$identity#$parameterName",
+                    setOf("$identity#$parameterName"),
+                    parameterName,
+                )
+                links += query.link(
+                    parameter,
+                    RelationshipType.DECLARES_PARAMETER,
+                    file.locator(parameterName, identity),
+                )
+            }
+            val referencedParams = JPQL_PARAMETER.findAll(jpql).map { it.groupValues[1] }.toSet()
+            val missingDeclarations = referencedParams - declaredParams.keys
+            val unusedDeclarations = declaredParams.keys - referencedParams
+            if (missingDeclarations.isNotEmpty() || unusedDeclarations.isNotEmpty()) {
+                val details = buildList {
+                    if (missingDeclarations.isNotEmpty()) add("undeclared: ${missingDeclarations.sorted().joinToString()}")
+                    if (unusedDeclarations.isNotEmpty()) add("unused: ${unusedDeclarations.sorted().joinToString()}")
+                }.joinToString("; ")
+                diagnostics += diagnostic(
+                    reasonCode = "P2_REST_QUERY_PARAMETER_MISMATCH",
+                    message = "REST query $identity has a parameter contract mismatch ($details).",
+                    nextStep = "Make the JPQL placeholders and declared REST parameters match exactly.",
+                    category = DiagnosticCategory.QUERY,
+                    severity = DiagnosticSeverity.ERROR,
+                    locator = file.locator(name, identity),
+                )
+            }
+        }
+    }
+
     private fun indexLiquibase(
         file: GraphSourceFile,
         root: Element,
@@ -489,6 +1133,39 @@ class ApplicationGraphIndexer {
                 id,
             )
             links += rootArtifact.link(changeSet, RelationshipType.DECLARES, file.locator(id, id))
+            element.allElements().filter { it.localTag() in SCHEMA_CHANGE_TAGS }.forEachIndexed { changeIndex, change ->
+                val tableNames = when (change.localTag()) {
+                    "addForeignKeyConstraint" -> listOf(
+                        change.attr("baseTableName"),
+                        change.attr("referencedTableName"),
+                    )
+                    else -> listOf(change.attr("tableName"))
+                }.filter(String::isNotBlank)
+                tableNames.forEach { tableName ->
+                    val schemaObject = addArtifact(
+                        artifacts,
+                        file,
+                        ArtifactKind.SCHEMA_OBJECT,
+                        "${file.relativePath}#$id:${change.localTag()}:$tableName:$changeIndex",
+                        tableName,
+                        "${change.localTag()} in changeset $id",
+                        tableName,
+                        setOf(tableName),
+                        tableName,
+                    )
+                    links += changeSet.link(
+                        schemaObject,
+                        RelationshipType.MIGRATES,
+                        file.locator(tableName, id),
+                    )
+                    links += schemaObject.link(
+                        tableName,
+                        RelationshipType.MIGRATES,
+                        setOf(ArtifactKind.ENTITY),
+                        file.locator(tableName, id),
+                    )
+                }
+            }
         }
     }
 
@@ -548,31 +1225,72 @@ class ApplicationGraphIndexer {
     private fun indexProperties(
         file: GraphSourceFile,
         artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+        diagnostics: MutableList<DiscoveryDiagnostic>,
     ) {
+        val isMessages = file.fileNameWithoutExtension().startsWith("messages")
+        val bundleKind = if (isMessages) ArtifactKind.MESSAGE_BUNDLE else ArtifactKind.CONFIGURATION_FILE
+        val propertyKind = if (isMessages) ArtifactKind.MESSAGE_KEY else ArtifactKind.CONFIGURATION_PROPERTY
         val bundle = addArtifact(
             artifacts,
             file,
-            ArtifactKind.MESSAGE_BUNDLE,
+            bundleKind,
             file.relativePath,
             file.fileNameWithoutExtension(),
-            "Localization message bundle",
+            if (isMessages) "Localization message bundle" else "Application configuration",
             file.relativePath,
             setOf(file.relativePath, file.fileNameWithoutExtension()),
             file.fileNameWithoutExtension(),
         )
-        PROPERTY_KEY.findAll(file.content).forEach { match ->
+        PROPERTY_ENTRY.findAll(file.content).forEach { match ->
             val key = match.groupValues[1]
-            addArtifact(
+            val value = match.groupValues[2].trim()
+            val property = addArtifact(
                 artifacts,
                 file,
-                ArtifactKind.MESSAGE_KEY,
+                propertyKind,
                 "${bundle.semanticKey}#$key",
                 key,
-                "Localization message",
+                if (isMessages) "Localization message" else value.take(240),
                 key,
                 setOf(key, "${bundle.semanticKey}#$key"),
                 key,
             )
+            links += bundle.link(property, RelationshipType.DECLARES, file.locator(key, key))
+            when (key) {
+                "jmix.rest.services-config" -> links += property.link(
+                    value,
+                    RelationshipType.CONFIGURES,
+                    setOf(ArtifactKind.REST_SERVICE_CONFIG),
+                    file.locator(value, key),
+                )
+                "jmix.rest.queries-config" -> links += property.link(
+                    value,
+                    RelationshipType.CONFIGURES,
+                    setOf(ArtifactKind.REST_QUERY_CONFIG),
+                    file.locator(value, key),
+                )
+            }
+            if (!isMessages && SECRET_PROPERTY_KEY.containsMatchIn(key) && isLiteralSecret(value)) {
+                diagnostics += diagnostic(
+                    reasonCode = "P2_HARDCODED_SECRET_PROPERTY",
+                    message = "A credential-like property contains a literal value.",
+                    nextStep = "Use an environment variable, secret store, or encrypted deployment configuration.",
+                    category = DiagnosticCategory.SECURITY,
+                    severity = DiagnosticSeverity.ERROR,
+                    locator = file.locator(key, key),
+                )
+            }
+            if (!isMessages && HTTP_PROPERTY_VALUE.containsMatchIn(value) && !isLocalEndpoint(value)) {
+                diagnostics += diagnostic(
+                    reasonCode = "P2_EXTERNAL_ENDPOINT_CONFIGURATION",
+                    message = "An external endpoint is configured here and should be included in integration impact analysis.",
+                    nextStep = "Verify environment overrides, TLS, timeouts, authentication, retry, and data-handling requirements.",
+                    category = DiagnosticCategory.SOURCE,
+                    severity = DiagnosticSeverity.INFO,
+                    locator = file.locator(key, key),
+                )
+            }
         }
     }
 
@@ -581,7 +1299,9 @@ class ApplicationGraphIndexer {
         artifacts: Map<String, DetectedArtifact>,
         links: MutableList<PendingLink>,
     ) {
-        val sourceArtifacts = artifacts.values.groupBy { it.snapshot.sourceLocator.relativePath }
+        val sourceArtifacts = artifacts.values
+            .filter { it.snapshot.kind in IMPLICIT_RELATIONSHIP_SOURCE_KINDS }
+            .groupBy { it.snapshot.sourceLocator.relativePath }
         val entities = artifacts.values.filter { it.snapshot.kind == ArtifactKind.ENTITY }
         val services = artifacts.values.filter { it.snapshot.kind == ArtifactKind.SERVICE }
         val workflows = artifacts.values.filter { it.snapshot.kind == ArtifactKind.WORKFLOW_PROCESS }
@@ -708,10 +1428,12 @@ class ApplicationGraphIndexer {
             ROW_ROLE.containsMatchIn(content) -> ArtifactKind.ROW_ROLE
             REPOSITORY.containsMatchIn(content) || typeName.endsWith("Repository") -> ArtifactKind.REPOSITORY
             VALIDATOR.containsMatchIn(content) || typeName.endsWith("Validator") -> ArtifactKind.VALIDATOR
-            SERVICE.containsMatchIn(content) || typeName.endsWith("Service") -> ArtifactKind.SERVICE
+            SERVICE.containsMatchIn(content) ||
+                REST_SERVICE_NAME.containsMatchIn(content) ||
+                typeName.endsWith("Service") -> ArtifactKind.SERVICE
             declarationKind == "enum" || declarationKind == "enum class" -> ArtifactKind.ENUM
             declarationKind == "data class" || typeName.endsWith("Dto") || typeName.endsWith("DTO") -> ArtifactKind.DTO
-            else -> ArtifactKind.SERVICE
+            else -> ArtifactKind.SOURCE_TYPE
         }
 
     private fun jvmSummary(kind: ArtifactKind, file: GraphSourceFile): String =
@@ -739,6 +1461,26 @@ class ApplicationGraphIndexer {
 
     private fun Element.descendants(vararg tags: String): List<Element> =
         allElements().filter { element -> tags.any { it == element.localTag() } }
+
+    private fun Element.directChildren(vararg tags: String): List<Element> {
+        val result = mutableListOf<Element>()
+        val children = childNodes
+        for (index in 0 until children.length) {
+            val child = children.item(index)
+            if (child is Element && tags.any { it == child.localTag() }) {
+                result += child
+            }
+        }
+        return result
+    }
+
+    private fun Element.ancestors(): Sequence<Element> =
+        generateSequence(parentNode) { it.parentNode }.filterIsInstance<Element>()
+
+    private fun Element.inheritedAttr(name: String): String? =
+        (sequenceOf(this) + ancestors())
+            .map { it.attr(name) }
+            .firstOrNull(String::isNotBlank)
 
     private fun Element.allElements(): List<Element> {
         val result = mutableListOf<Element>()
@@ -775,6 +1517,9 @@ class ApplicationGraphIndexer {
     private fun GraphSourceFile.fileNameWithoutExtension(): String =
         relativePath.substringAfterLast('/').substringBeforeLast('.')
 
+    private fun GraphSourceFile.classpathResourcePath(): String =
+        relativePath.substringAfter("/src/main/resources/", relativePath)
+
     private fun DetectedArtifact.link(
         target: DetectedArtifact,
         type: RelationshipType,
@@ -798,6 +1543,35 @@ class ApplicationGraphIndexer {
 
     private fun normalizeAlias(value: String): String =
         value.trim().removeSuffix(".xml").replace('\\', '/').lowercase()
+
+    private fun viewTarget(viewId: String?, memberId: String): String =
+        if (viewId.isNullOrBlank()) memberId else "$viewId#$memberId"
+
+    private fun policyEntityReference(body: String): String? =
+        ENTITY_CLASS_ARGUMENT.find(body)?.groupValues?.get(1)
+            ?: ENTITY_NAME_ARGUMENT.find(body)?.groupValues?.get(1)
+
+    private fun stringValues(value: String): List<String> =
+        STRING_LITERAL.findAll(value).map { it.groupValues[1] }.toList()
+
+    private fun securityPolicySummary(policyType: String, body: String): String {
+        val compactBody = body.trim().replace(Regex("""\s+"""), " ").take(180)
+        return if (compactBody.isBlank()) policyType else "$policyType: $compactBody"
+    }
+
+    private fun isLiteralSecret(value: String): Boolean {
+        val normalized = value.trim()
+        return normalized.isNotBlank() &&
+            !normalized.startsWith("\${") &&
+            !normalized.startsWith("#{") &&
+            !normalized.startsWith("ENC(") &&
+            !normalized.startsWith("{cipher}")
+    }
+
+    private fun isLocalEndpoint(value: String): Boolean =
+        value.contains("://localhost", ignoreCase = true) ||
+            value.contains("://127.0.0.1") ||
+            value.contains("://0.0.0.0")
 
     private fun mappingVerb(annotation: String): String =
         when (annotation) {
@@ -854,13 +1628,27 @@ class ApplicationGraphIndexer {
         val name: String,
     )
 
+    private data class FieldDeclaration(
+        val name: String,
+        val type: String,
+    )
+
+    private data class MethodDeclaration(
+        val name: String,
+    )
+
     private companion object {
         val PACKAGE = Regex("""(?m)^\s*package\s+([A-Za-z_][\w.]*)""")
         val TYPE = Regex("""\b(enum\s+class|data\s+class|class|interface|object|record|enum)\s+([A-Za-z_][A-Za-z0-9_]*)""")
         val JMIX_ENTITY = Regex("""@(JmixEntity|Entity)\b""")
+        val JMIX_ENTITY_NAME = Regex("""@JmixEntity\s*\([^)]*\bname\s*=\s*["']([^"']+)["']""")
+        val TABLE_NAME = Regex("""@Table\s*\([^)]*\bname\s*=\s*["']([^"']+)["']""")
         val VIEW_CONTROLLER_ID = Regex("""@ViewController\s*\(\s*["']([^"']+)["']""")
         val VIEW_DESCRIPTOR = Regex("""@ViewDescriptor\s*\(\s*["']([^"']+)["']""")
+        val ROUTE = Regex("""@Route\s*\(\s*(?:value\s*=\s*)?["']([^"']*)["']""")
         val REST_CONTROLLER = Regex("""@(RestController|Controller)\b""")
+        val REST_SERVICE_NAME = Regex("""@RestService\s*\(\s*["']([^"']+)["']""")
+        val SPRING_BEAN_NAME = Regex("""@(Service|Component)\s*\(\s*["']([^"']+)["']""")
         val RESOURCE_ROLE = Regex("""@ResourceRole\b""")
         val ROW_ROLE = Regex("""@(RowLevelRole|RowLevelPolicy)\b""")
         val REPOSITORY = Regex("""@(Repository)\b|JmixDataRepository|CrudRepository|JpaRepository""")
@@ -876,13 +1664,89 @@ class ApplicationGraphIndexer {
         )
         val EVENT_METHOD = Regex("""@EventListener(?:\s*\([^)]*\))?[\s\S]{0,300}?\b(?:fun\s+|[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""")
         val SCHEDULED_METHOD = Regex("""@Scheduled(?:\s*\([^)]*\))?[\s\S]{0,300}?\b(?:fun\s+|[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""")
+        val JAVA_FIELD = Regex(
+            """(?m)^\s*(?:@\w+(?:\s*\([^)]*\))?\s*)*(?:private|protected|public)\s+(?:final\s+)?([A-Za-z_][\w<>,?.\[\]\s]*)\s+([A-Za-z_]\w*)\s*(?:[;=])""",
+        )
+        val KOTLIN_FIELD = Regex(
+            """(?m)^\s*(?:@\w+(?:\s*\([^)]*\))?\s*)*(?:private\s+|protected\s+|public\s+)?(?:lateinit\s+)?(?:val|var)\s+([A-Za-z_]\w*)\s*:\s*([^=\n]+)""",
+        )
+        val JAVA_VIEW_COMPONENT = Regex(
+            """@ViewComponent(?:\s*\(\s*["']([^"']+)["']\s*\))?[\s\S]{0,180}?\b(?:private|protected|public)\s+(?:final\s+)?[\w<>,?.\[\]]+\s+([A-Za-z_]\w*)""",
+        )
+        val KOTLIN_VIEW_COMPONENT = Regex(
+            """@ViewComponent(?:\s*\(\s*["']([^"']+)["']\s*\))?[\s\S]{0,180}?\b(?:private\s+|protected\s+|public\s+)?(?:lateinit\s+)?var\s+([A-Za-z_]\w*)""",
+        )
+        val SUBSCRIBE_METHOD = Regex(
+            """@Subscribe\s*(?:\(\s*(?:(?:id|value)\s*=\s*)?["']([^"']+)["'][^)]*\))?[\s\S]{0,320}?\b(?:fun\s+|(?:public|protected|private)?\s*[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""",
+        )
+        val INSTALL_METHOD = Regex(
+            """@Install\s*\(\s*(?:to\s*=\s*)?["']([^"']+)["'][^)]*\)[\s\S]{0,320}?\b(?:fun\s+|(?:public|protected|private)?\s*[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""",
+        )
+        val JAVA_METHOD_DECLARATION = Regex(
+            """(?m)^\s*(?:@\w+(?:\s*\([^)]*\))?\s*)*(?:public|protected)\s+(?:static\s+)?(?:final\s+)?[\w<>,?.\[\]\s]+\s+([A-Za-z_]\w*)\s*\(""",
+        )
+        val KOTLIN_METHOD_DECLARATION = Regex(
+            """(?m)^\s*(?:@\w+(?:\s*\([^)]*\))?\s*)*(?:public\s+|protected\s+)?fun\s+([A-Za-z_]\w*)\s*\(""",
+        )
+        val REST_METHOD_DECLARATION = Regex(
+            """@RestMethod(?:\s*\([^)]*\))?[\s\S]{0,320}?\b(?:fun\s+|(?:public|protected|private)?\s*[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""",
+        )
         val ROLE_REFERENCES = Regex("""@(RolesAllowed|Secured)\s*\(\s*(?:value\s*=\s*)?([^)]*)\)""")
         val ROLE_CODE = Regex("""@(ResourceRole|RowLevelRole)\s*\([^)]*\bcode\s*=\s*["']([^"']+)["'][^)]*\)""")
+        val POLICY_ANNOTATION = Regex(
+            """@(EntityPolicy|EntityAttributePolicy|ViewPolicy|MenuPolicy|SpecificPolicy|UiComponentPolicy)\s*\(([\s\S]{0,1400}?)\)""",
+        )
+        val ENTITY_CLASS_ARGUMENT = Regex("""\bentityClass\s*=\s*([A-Za-z_][\w.]*)\.class""")
+        val ENTITY_NAME_ARGUMENT = Regex("""\bentityName\s*=\s*["']([^"']+)["']""")
+        val ATTRIBUTES_ARGUMENT = Regex("""\battributes\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
+        val VIEW_IDS_ARGUMENT = Regex("""\bviewIds\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
+        val MENU_IDS_ARGUMENT = Regex("""\bmenuIds\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
+        val STRING_LITERAL = Regex("""["']([^"']+)["']""")
         val UNSAFE_MONEY_FIELD = Regex(
             """(?i)\b(?:Double|Float|double|float)\s+([A-Za-z_]\w*(?:amount|balance|salary|wage|loan|interest|payment|principal|rate|money|total)\w*|(?:amount|balance|salary|wage|loan|interest|payment|principal|rate|money|total)\w*)""",
         )
         val UI_WORKFLOW_TRANSITION = Regex("""\b(setProcessState|setWorkflowState|setStatus|processState\s*=|workflowState\s*=)\b""")
-        val PROPERTY_KEY = Regex("""(?m)^\s*([^#!\s][^=:\s]*)\s*[:=]""")
+        val UNCONSTRAINED_ACCESS = Regex("""\bUnconstrainedDataManager\b|\.unconstrained\s*\(""")
+        val NATIVE_SQL_WRITE = Regex(
+            """(?is)(?:createNativeQuery|executeUpdate|JdbcTemplate|NamedParameterJdbcTemplate)[\s\S]{0,240}?\b(?:insert\s+into|update\s+|delete\s+from|merge\s+into|truncate\s+)""",
+        )
+        val PRINT_STACK_TRACE = Regex("""\.printStackTrace\s*\(""")
+        val SWALLOWED_EXCEPTION = Regex(
+            """(?s)catch\s*\([^)]*(?:Exception|Throwable)[^)]*\)\s*\{\s*(?://[^\n]*\s*|/\*.*?\*/\s*)?}""",
+        )
+        val HARDCODED_HTTP_ENDPOINT = Regex("""["']https?://(?!localhost\b|127\.0\.0\.1\b)[^"']+["']""")
+        val OUTBOUND_HTTP_CLIENT = Regex("""\b(RestTemplate|WebClient|HttpClient|FeignClient|RestClient)\b""")
+        val HTTP_TIMEOUT_CONFIGURATION = Regex("""(?i)\b(connectTimeout|readTimeout|responseTimeout|requestTimeout|callTimeout)\b""")
+        val PROPERTY_ENTRY = Regex("""(?m)^\s*([^#!\s][^=:\s]*)\s*[:=]\s*(.*?)\s*$""")
+        val SECRET_PROPERTY_KEY = Regex("""(?i)(password|passwd|secret|client-secret|api[-_.]?key|access[-_.]?token|private[-_.]?key)""")
+        val HTTP_PROPERTY_VALUE = Regex("""(?i)^https?://""")
+        val JPQL_FROM = Regex("""(?i)\bfrom\s+([A-Za-z_][\w.]*)""")
+        val JPQL_PARAMETER = Regex(""":([A-Za-z_]\w*)""")
+        val METHOD_KEYWORDS = setOf("if", "for", "while", "switch", "catch", "return", "new")
+        val DATA_CONTAINER_TAGS = setOf("collection", "instance", "keyValueCollection", "keyValueInstance")
+        val SCHEMA_CHANGE_TAGS = setOf(
+            "createTable",
+            "addColumn",
+            "dropColumn",
+            "renameColumn",
+            "modifyDataType",
+            "createIndex",
+            "addUniqueConstraint",
+            "addForeignKeyConstraint",
+            "dropTable",
+        )
+        val IMPLICIT_RELATIONSHIP_SOURCE_KINDS = setOf(
+            ArtifactKind.SOURCE_TYPE,
+            ArtifactKind.DTO,
+            ArtifactKind.ENUM,
+            ArtifactKind.VIEW_CONTROLLER,
+            ArtifactKind.REPOSITORY,
+            ArtifactKind.SERVICE,
+            ArtifactKind.REST_CONTROLLER,
+            ArtifactKind.VALIDATOR,
+            ArtifactKind.RESOURCE_ROLE,
+            ArtifactKind.ROW_ROLE,
+        )
         val NON_COMPONENT_VIEW_TAGS = setOf(
             "view",
             "data",

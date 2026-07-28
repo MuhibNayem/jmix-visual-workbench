@@ -7,17 +7,60 @@ import type {
   GraphRelationship,
 } from '../../types'
 
-type Group = 'ALL' | 'DATA' | 'SCREENS' | 'SERVICES' | 'REST' | 'WORKFLOW' | 'SECURITY' | 'DATABASE'
+type Group =
+  | 'ALL'
+  | 'DATA'
+  | 'SCREENS'
+  | 'SERVICES'
+  | 'REST'
+  | 'WORKFLOW'
+  | 'SECURITY'
+  | 'DATABASE'
+  | 'CONFIG'
 
 const GROUPS: { id: Group; label: string; kinds?: string[] }[] = [
   { id: 'ALL', label: 'All' },
-  { id: 'DATA', label: 'Data', kinds: ['ENTITY', 'DTO', 'ENUM', 'REPOSITORY', 'DATA_CONTAINER', 'DATA_LOADER', 'FETCH_PLAN'] },
-  { id: 'SCREENS', label: 'Screens', kinds: ['VIEW_DESCRIPTOR', 'VIEW_CONTROLLER', 'UI_COMPONENT', 'UI_ACTION', 'MENU_SOURCE', 'MENU_ITEM'] },
-  { id: 'SERVICES', label: 'Services', kinds: ['SERVICE', 'VALIDATOR', 'EVENT_LISTENER', 'SCHEDULED_JOB'] },
-  { id: 'REST', label: 'REST', kinds: ['REST_CONTROLLER', 'REST_ENDPOINT'] },
+  {
+    id: 'DATA',
+    label: 'Data',
+    kinds: [
+      'ENTITY', 'ENTITY_ATTRIBUTE', 'DTO', 'ENUM', 'REPOSITORY', 'DATA_CONTAINER', 'DATA_LOADER',
+      'FETCH_PLAN', 'JPQL_QUERY', 'QUERY_PARAMETER',
+    ],
+  },
+  {
+    id: 'SCREENS',
+    label: 'Screens',
+    kinds: [
+      'VIEW_DESCRIPTOR', 'VIEW_CONTROLLER', 'VIEW_ROUTE', 'VIEW_HANDLER', 'UI_COMPONENT', 'UI_ACTION',
+      'MENU_SOURCE', 'MENU_ITEM',
+    ],
+  },
+  {
+    id: 'SERVICES',
+    label: 'Services',
+    kinds: ['SOURCE_TYPE', 'SERVICE', 'SERVICE_METHOD', 'VALIDATOR', 'EVENT_LISTENER', 'SCHEDULED_JOB'],
+  },
+  {
+    id: 'REST',
+    label: 'REST',
+    kinds: [
+      'REST_CONTROLLER', 'REST_ENDPOINT', 'REST_SERVICE_CONFIG', 'REST_SERVICE_METHOD',
+      'REST_QUERY_CONFIG', 'REST_QUERY', 'CONTRACT_PARAMETER',
+    ],
+  },
   { id: 'WORKFLOW', label: 'Workflow', kinds: ['WORKFLOW_PROCESS', 'WORKFLOW_STATE'] },
-  { id: 'SECURITY', label: 'Security', kinds: ['RESOURCE_ROLE', 'ROW_ROLE'] },
-  { id: 'DATABASE', label: 'Database', kinds: ['LIQUIBASE_ROOT', 'LIQUIBASE_INCLUDE', 'LIQUIBASE_CHANGESET', 'DATA_STORE'] },
+  { id: 'SECURITY', label: 'Security', kinds: ['RESOURCE_ROLE', 'ROW_ROLE', 'SECURITY_POLICY'] },
+  {
+    id: 'DATABASE',
+    label: 'Database',
+    kinds: ['LIQUIBASE_ROOT', 'LIQUIBASE_INCLUDE', 'LIQUIBASE_CHANGESET', 'SCHEMA_OBJECT', 'DATA_STORE'],
+  },
+  {
+    id: 'CONFIG',
+    label: 'Config',
+    kinds: ['CONFIGURATION_FILE', 'CONFIGURATION_PROPERTY', 'MESSAGE_BUNDLE', 'MESSAGE_KEY'],
+  },
 ]
 
 const MAX_VISIBLE_ARTIFACTS = 250
