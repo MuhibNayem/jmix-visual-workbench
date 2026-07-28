@@ -30,7 +30,12 @@ class WorkbenchToolWindowFactoryIntegrationTest {
 
         assertEquals(1, runtime.browsers.size)
         assertEquals(1, runtime.bridges.size)
-        assertEquals(listOf(packagedUrl.toExternalForm()), runtime.browsers.single().loadedUrls)
+        assertEquals(1, runtime.browsers.single().packagedProviders.size)
+        assertEquals(listOf(PACKAGED_WORKBENCH_ENTRY_URL), runtime.browsers.single().loadedUrls)
+        assertEquals(
+            listOf("install-packaged-resources", "create-project-bridge", "load:$PACKAGED_WORKBENCH_ENTRY_URL"),
+            runtime.startupEvents,
+        )
         assertEquals(1, toolWindow.attached.size)
         assertSame(runtime.contents.single().proxy, toolWindow.attached.single())
         assertEquals("Designer", runtime.contents.single().displayName)
@@ -38,7 +43,7 @@ class WorkbenchToolWindowFactoryIntegrationTest {
         val disposer = assertNotNull(runtime.contents.single().disposer)
         disposer.dispose()
         disposer.dispose()
-        assertEquals(listOf("bridge", "browser"), runtime.disposalEvents)
+        assertEquals(listOf("bridge", "handler", "browser"), runtime.disposalEvents)
     }
 
     @Test
@@ -55,7 +60,9 @@ class WorkbenchToolWindowFactoryIntegrationTest {
         assertEquals(1, runtime.browsers.size)
         assertTrue(runtime.bridges.isEmpty())
         assertTrue(runtime.resourceRequests.isEmpty())
+        assertTrue(runtime.browsers.single().packagedProviders.isEmpty())
         assertEquals(listOf("http://127.0.0.1:5173"), runtime.browsers.single().loadedUrls)
+        assertEquals(listOf("load:http://127.0.0.1:5173"), runtime.startupEvents)
         assertEquals(1, toolWindow.attached.size)
         assertNotNull(runtime.contents.single().disposer).dispose()
         assertEquals(listOf("browser"), runtime.disposalEvents)
@@ -107,6 +114,7 @@ class WorkbenchToolWindowFactoryIntegrationTest {
         val bridges = mutableListOf<FakeBridge>()
         val contents = mutableListOf<FakeContent>()
         val resourceRequests = mutableListOf<String>()
+        val startupEvents = mutableListOf<String>()
         val disposalEvents = mutableListOf<String>()
 
         override fun isJcefSupported(): Boolean = jcefSupported
@@ -121,29 +129,44 @@ class WorkbenchToolWindowFactoryIntegrationTest {
         }
 
         override fun createBrowser(): WorkbenchEmbeddedBrowser =
-            FakeBrowser(disposalEvents).also(browsers::add)
+            FakeBrowser(startupEvents, disposalEvents).also(browsers::add)
 
         override fun createProjectBridge(
             project: Project,
             browser: WorkbenchEmbeddedBrowser,
         ): WorkbenchProjectBridge =
-            FakeBridge(disposalEvents).also(bridges::add)
+            FakeBridge(disposalEvents).also {
+                startupEvents += "create-project-bridge"
+                bridges += it
+            }
 
         override fun createContent(component: JComponent, displayName: String): Content =
             FakeContent(component, displayName).also(contents::add).proxy
     }
 
     private class FakeBrowser(
+        private val startupEvents: MutableList<String>,
         private val disposalEvents: MutableList<String>,
     ) : WorkbenchEmbeddedBrowser {
         override val component: JComponent = JPanel()
+        val packagedProviders = mutableListOf<PackagedWorkbenchResourceProvider>()
         val loadedUrls = mutableListOf<String>()
+
+        override fun installPackagedResources(provider: PackagedWorkbenchResourceProvider) {
+            packagedProviders += provider
+            startupEvents += "install-packaged-resources"
+        }
 
         override fun loadUrl(url: String) {
             loadedUrls += url
+            startupEvents += "load:$url"
         }
 
         override fun dispose() {
+            if (packagedProviders.isNotEmpty()) {
+                disposalEvents += "handler"
+                packagedProviders.clear()
+            }
             disposalEvents += "browser"
         }
     }

@@ -11,6 +11,7 @@ import org.jmixworkbench.generator.CrudOrchestrator
 import org.jmixworkbench.model.*
 import org.jmixworkbench.services.CodeGenerationService
 import org.jmixworkbench.services.JmixProjectService
+import org.jmixworkbench.toolwindow.isPackagedWorkbenchOriginUrl
 import org.cef.browser.CefBrowser
 import org.cef.handler.CefLoadHandlerAdapter
 
@@ -38,7 +39,10 @@ class JcefBridge(
 
         browser.jbCefClient.addLoadHandler(object : CefLoadHandlerAdapter() {
             override fun onLoadEnd(browser: CefBrowser?, frame: org.cef.browser.CefFrame?, httpStatusCode: Int) {
-                if (frame?.isMain == true) {
+                if (
+                    frame?.isMain == true &&
+                    isPackagedWorkbenchOriginUrl(browser?.url.orEmpty())
+                ) {
                     injectBridge()
                 }
             }

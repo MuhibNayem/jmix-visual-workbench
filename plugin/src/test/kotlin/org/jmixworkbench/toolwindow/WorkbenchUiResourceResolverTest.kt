@@ -20,7 +20,7 @@ class WorkbenchUiResourceResolverTest {
             expected.takeIf { path == "/webui/index.html" }
         }
 
-        assertEquals(expected.toExternalForm(), resolved?.url)
+        assertEquals(PACKAGED_WORKBENCH_ENTRY_URL, resolved?.url)
         assertEquals(WorkbenchBridgeAccess.PACKAGED_PROJECT, resolved?.bridgeAccess)
     }
 

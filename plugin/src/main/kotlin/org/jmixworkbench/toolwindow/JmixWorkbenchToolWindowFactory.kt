@@ -61,8 +61,8 @@ internal object WorkbenchUiResourceResolver {
             }
             return ResolvedWorkbenchUi(uri.toASCIIString(), WorkbenchBridgeAccess.NONE)
         }
-        return resourceLookup(ENTRY_POINT)?.toExternalForm()?.let { packagedUrl ->
-            ResolvedWorkbenchUi(packagedUrl, WorkbenchBridgeAccess.PACKAGED_PROJECT)
+        return resourceLookup(ENTRY_POINT)?.let {
+            ResolvedWorkbenchUi(PACKAGED_WORKBENCH_ENTRY_URL, WorkbenchBridgeAccess.PACKAGED_PROJECT)
         }
     }
 }
@@ -117,6 +117,8 @@ internal class WorkbenchBrowserLifecycle(
 internal interface WorkbenchEmbeddedBrowser {
     val component: JComponent
 
+    fun installPackagedResources(provider: PackagedWorkbenchResourceProvider)
+
     fun loadUrl(url: String)
 
     fun dispose()
@@ -145,14 +147,29 @@ internal interface WorkbenchToolWindowRuntime {
 private class IntelliJEmbeddedBrowser(
     val delegate: JBCefBrowser = JBCefBrowser(),
 ) : WorkbenchEmbeddedBrowser {
+    private var packagedRequestHandler: PackagedWorkbenchRequestHandler? = null
+
     override val component: JComponent
         get() = delegate.component
+
+    override fun installPackagedResources(provider: PackagedWorkbenchResourceProvider) {
+        check(packagedRequestHandler == null) {
+            "Packaged resources are already installed for this browser"
+        }
+        val handler = PackagedWorkbenchRequestHandler(provider)
+        delegate.jbCefClient.addRequestHandler(handler, delegate.cefBrowser)
+        packagedRequestHandler = handler
+    }
 
     override fun loadUrl(url: String) {
         delegate.loadURL(url)
     }
 
     override fun dispose() {
+        packagedRequestHandler?.let { handler ->
+            delegate.jbCefClient.removeRequestHandler(handler, delegate.cefBrowser)
+            packagedRequestHandler = null
+        }
         delegate.dispose()
     }
 }
@@ -264,6 +281,13 @@ class JmixWorkbenchToolWindowFactory private constructor(
     ) {
         val browser = runtime.createBrowser()
         val bridge = if (ui.bridgeAccess == WorkbenchBridgeAccess.PACKAGED_PROJECT) {
+            browser.installPackagedResources(
+                PackagedWorkbenchResourceProvider(
+                    resourceLookup = { path ->
+                        runtime.resource(path)?.openStream()?.use { stream -> stream.readBytes() }
+                    },
+                ),
+            )
             runtime.createProjectBridge(project, browser)
         } else {
             null
