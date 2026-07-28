@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
@@ -30,6 +31,11 @@ import org.jmixworkbench.services.FlowUiControllerInjectionRequest
 import org.jmixworkbench.services.FlowUiControllerChangeService
 import org.jmixworkbench.services.FlowUiControllerHandlerApplyRequest
 import org.jmixworkbench.services.FlowUiControllerHandlerRequest
+import org.jmixworkbench.services.JmixFlowUiHotDeployApplyRequest
+import org.jmixworkbench.services.JmixFlowUiHotDeployRequest
+import org.jmixworkbench.services.JmixRuntimeInspectionRequest
+import org.jmixworkbench.services.JmixRuntimeOpenPreviewRequest
+import org.jmixworkbench.services.JmixRuntimeService
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
 import org.jmixworkbench.services.SourceNavigationRequest
@@ -150,6 +156,22 @@ class JcefBridge(
             }
             if (action == "applyFlowUiControllerHandler") {
                 handleApplyFlowUiControllerHandler(action, requestId, payload)
+                return
+            }
+            if (action == "inspectJmixRuntime") {
+                handleInspectJmixRuntime(action, requestId, payload)
+                return
+            }
+            if (action == "openJmixRuntimePreview") {
+                handleOpenJmixRuntimePreview(action, requestId, payload)
+                return
+            }
+            if (action == "previewFlowUiHotDeploy") {
+                handlePreviewFlowUiHotDeploy(action, requestId, payload)
+                return
+            }
+            if (action == "applyFlowUiHotDeploy") {
+                handleApplyFlowUiHotDeploy(action, requestId, payload)
                 return
             }
             if (action == "previewWorkspaceChange") {
@@ -682,6 +704,134 @@ class JcefBridge(
             .submit(AppExecutorUtil.getAppExecutorService())
     }
 
+    private fun handleInspectJmixRuntime(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixRuntimeInspectionRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    mapOf(
+                        "accepted" to false,
+                        "targets" to emptyList<Any>(),
+                        "issues" to listOf(
+                            mapOf(
+                                "code" to "JVW-RUNTIME-REQUEST-INVALID",
+                                "message" to (error.message ?: "The runtime inspection request is malformed."),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().execute {
+            val response = runCatching {
+                JmixRuntimeService.getInstance(project).inspect(request)
+            }.getOrElse { error ->
+                org.jmixworkbench.services.JmixRuntimeInspectionResponse(
+                    accepted = false,
+                    viewId = null,
+                    targets = emptyList(),
+                    issues = listOf(
+                        org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                            "JVW-RUNTIME-INSPECTION-FAILED",
+                            error.message ?: "Runtime inspection failed.",
+                        ),
+                    ),
+                )
+            }
+            sendResponseOnUiThread(action, requestId, gson.toJson(response))
+        }
+    }
+
+    private fun handleOpenJmixRuntimePreview(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixRuntimeOpenPreviewRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    org.jmixworkbench.services.JmixRuntimeActionResponse(
+                        false,
+                        error.message ?: "The runtime preview request is malformed.",
+                    ),
+                ),
+            )
+            return
+        }
+        ApplicationManager.getApplication().invokeLater({
+            val response = JmixRuntimeService.getInstance(project).openPreview(request)
+            sendResponse(action, requestId, gson.toJson(response))
+        }, ModalityState.any())
+    }
+
+    private fun handlePreviewFlowUiHotDeploy(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixFlowUiHotDeployRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    mapOf(
+                        "accepted" to false,
+                        "changeSetId" to "flowui-hot-deploy:rejected",
+                        "label" to "FlowUI hot deploy rejected",
+                        "files" to emptyList<Any>(),
+                        "issues" to listOf(
+                            mapOf(
+                                "code" to "JVW-RUNTIME-REQUEST-INVALID",
+                                "message" to (error.message ?: "The hot-deploy request is malformed."),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().execute {
+            val response = JmixRuntimeService.getInstance(project).previewHotDeploy(request)
+            sendResponseOnUiThread(action, requestId, gson.toJson(response))
+        }
+    }
+
+    private fun handleApplyFlowUiHotDeploy(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixFlowUiHotDeployApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangeApplyResponse(
+                        success = false,
+                        changeSetId = "flowui-hot-deploy:rejected",
+                        planDigest = null,
+                        filesChanged = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                "JVW-RUNTIME-REQUEST-INVALID",
+                                error.message ?: "The hot-deploy apply request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().execute {
+            val prepared = JmixRuntimeService.getInstance(project).prepareHotDeploy(request)
+            ApplicationManager.getApplication().invokeLater({
+                if (project.isDisposed) return@invokeLater
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }, ModalityState.any())
+        }
+    }
+
     private fun handlePreviewWorkspaceChange(action: String, requestId: String?, payload: JsonObject) {
         val changeSet = runCatching {
             gson.fromJson(payload, WorkspaceChangeSet::class.java)
@@ -757,6 +907,12 @@ class JcefBridge(
             }
         """.trimIndent()
         browser.cefBrowser.executeJavaScript(script, browser.cefBrowser.url, 0)
+    }
+
+    private fun sendResponseOnUiThread(action: String, requestId: String?, resultJson: String) {
+        ApplicationManager.getApplication().invokeLater({
+            if (!project.isDisposed) sendResponse(action, requestId, resultJson)
+        }, ModalityState.any())
     }
 
     fun dispose() {

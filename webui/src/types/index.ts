@@ -513,6 +513,46 @@ export interface FlowUiControllerHandlerRequest {
   componentTag?: string
 }
 
+export interface JmixRuntimeInspectionResponse {
+  accepted: boolean
+  viewId?: string
+  targets: JmixRuntimeTargetSnapshot[]
+  issues: WorkspaceChangeIssue[]
+}
+
+export interface JmixRuntimeTargetSnapshot {
+  id: string
+  moduleId: string
+  moduleRoot: string
+  profile: string
+  preferred: boolean
+  baseUrl: string
+  previewUrl: string
+  routePath?: string
+  routeRequiresParameters: boolean
+  reachable: boolean
+  httpStatus?: number
+  responseTimeMillis: number
+  configSources: string[]
+  hotDeploySupported: boolean
+  hotDeployMessage?: string
+  confDirectory?: string
+  tempDirectory?: string
+  warnings: string[]
+}
+
+export type JmixRuntimeViewport = 'DESKTOP' | 'TABLET' | 'MOBILE'
+
+export interface JmixRuntimeActionResponse {
+  success: boolean
+  message: string
+}
+
+export interface JmixFlowUiHotDeployRequest {
+  descriptorLocator: GraphSourceLocator
+  targetId: string
+}
+
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {

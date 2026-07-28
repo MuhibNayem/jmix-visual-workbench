@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowDown, ArrowUp, Code2, Database, Layers, Loader2, Play, Plus, RefreshCw, Tag, Trash2,
+  ArrowDown, ArrowUp, Code2, Database, ExternalLink, Layers, Loader2, Play, Plus, RefreshCw,
+  Server, Tag, Trash2, Zap,
 } from 'lucide-react'
 import { bridge } from '../../bridge'
 import { useStore } from '../../store'
@@ -14,6 +15,9 @@ import type {
   FlowUiStructureChangeRequest,
   FlowUiWorkspaceResponse,
   GraphSourceLocator,
+  JmixFlowUiHotDeployRequest,
+  JmixRuntimeInspectionResponse,
+  JmixRuntimeViewport,
   WorkspaceChangePreviewResponse,
 } from '../../types'
 
@@ -143,6 +147,11 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
   const openFlowUiDesigner = useStore((state) => state.openFlowUiDesigner)
   const [locator, setLocator] = useState(initialLocator)
   const [workspace, setWorkspace] = useState<FlowUiWorkspaceResponse | null>(null)
+  const [runtime, setRuntime] = useState<JmixRuntimeInspectionResponse | null>(null)
+  const [runtimeLoading, setRuntimeLoading] = useState(false)
+  const [runtimePanelOpen, setRuntimePanelOpen] = useState(false)
+  const [selectedRuntimeTargetId, setSelectedRuntimeTargetId] = useState<string | null>(null)
+  const runtimeInspectionSequence = useRef(0)
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [applying, setApplying] = useState(false)
@@ -171,7 +180,41 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     kind: 'controllerHandler'
     change: FlowUiControllerHandlerRequest
     preview: WorkspaceChangePreviewResponse
+  } | {
+    kind: 'hotDeploy'
+    change: JmixFlowUiHotDeployRequest
+    preview: WorkspaceChangePreviewResponse
   } | null>(null)
+
+  const inspectRuntime = useCallback(async (target: GraphSourceLocator) => {
+    const sequence = ++runtimeInspectionSequence.current
+    setRuntimeLoading(true)
+    try {
+      const response = await bridge.inspectJmixRuntime(target)
+      if (sequence !== runtimeInspectionSequence.current) return
+      setRuntime(response)
+      setSelectedRuntimeTargetId((current) => {
+        if (current && response.targets.some((candidate) => candidate.id === current)) return current
+        return response.targets.find((candidate) => candidate.preferred && candidate.reachable)?.id
+          ?? response.targets.find((candidate) => candidate.reachable)?.id
+          ?? response.targets.find((candidate) => candidate.preferred)?.id
+          ?? response.targets[0]?.id
+          ?? null
+      })
+    } catch (cause) {
+      if (sequence !== runtimeInspectionSequence.current) return
+      setRuntime({
+        accepted: false,
+        targets: [],
+        issues: [{
+          code: 'JVW-RUNTIME-INSPECTION-FAILED',
+          message: cause instanceof Error ? cause.message : 'Runtime inspection failed.',
+        }],
+      })
+    } finally {
+      if (sequence === runtimeInspectionSequence.current) setRuntimeLoading(false)
+    }
+  }, [])
 
   const load = useCallback(async (target: GraphSourceLocator) => {
     setLoading(true)
@@ -184,6 +227,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
         setError(response.issues[0]?.message ?? 'The existing FlowUI descriptor could not be loaded.')
         return
       }
+      void inspectRuntime(target)
       setSelectedKey((current) => (
         current && response.document!.elements.some((element) => element.key === current)
           ? current
@@ -194,7 +238,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [inspectRuntime])
 
   useEffect(() => {
     setLocator(initialLocator)
@@ -207,6 +251,8 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     [document],
   )
   const selected = selectedKey ? elements.get(selectedKey) ?? null : null
+  const selectedRuntimeTarget = runtime?.targets.find((target) => target.id === selectedRuntimeTargetId)
+    ?? runtime?.targets[0]
   const layout = document?.elements.find((element) => element.localTag === 'layout')
   const layoutKeys = useMemo(() => {
     const keys = new Set<string>()
@@ -327,6 +373,34 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     setPending({ kind: 'controllerHandler', change, preview })
   }
 
+  const openRuntimePreview = async (viewport: JmixRuntimeViewport) => {
+    if (!selectedRuntimeTarget || !document) return
+    const response = await bridge.openJmixRuntimePreview(
+      selectedRuntimeTarget.previewUrl,
+      `${document.viewId} · ${selectedRuntimeTarget.moduleId}`,
+      viewport,
+    )
+    addToast(response.message, response.success ? 'success' : 'error')
+  }
+
+  const previewHotDeploy = async () => {
+    if (!selectedRuntimeTarget) return
+    const change: JmixFlowUiHotDeployRequest = {
+      descriptorLocator: locator,
+      targetId: selectedRuntimeTarget.id,
+    }
+    const preview = await bridge.previewFlowUiHotDeploy(change)
+    if (!preview.accepted) {
+      addToast(preview.issues[0]?.message ?? 'FlowUI hot deployment was rejected.', 'error')
+      return
+    }
+    if (!preview.planDigest || preview.files.length === 0) {
+      addToast('The runtime resource and cache reset are already staged.', 'info')
+      return
+    }
+    setPending({ kind: 'hotDeploy', change, preview })
+  }
+
   const applyPending = async () => {
     if (!pending?.preview.planDigest) return
     setApplying(true)
@@ -339,9 +413,17 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
             ? await bridge.applyFlowUiDirectTextChange(pending.change, pending.preview.planDigest)
             : pending.kind === 'controllerInjection'
               ? await bridge.applyFlowUiControllerInjection(pending.change, pending.preview.planDigest)
-              : await bridge.applyFlowUiControllerHandler(pending.change, pending.preview.planDigest)
+              : pending.kind === 'controllerHandler'
+                ? await bridge.applyFlowUiControllerHandler(pending.change, pending.preview.planDigest)
+                : await bridge.applyFlowUiHotDeploy(pending.change, pending.preview.planDigest)
       if (!result.success) {
         addToast(result.issues[0]?.message ?? 'The FlowUI source change failed.', 'error')
+        return
+      }
+      if (pending.kind === 'hotDeploy') {
+        addToast('Descriptor staged and the verified Jmix view cache reset was signaled.', 'success')
+        setPending(null)
+        await inspectRuntime(locator)
         return
       }
       if (pending.kind === 'controllerInjection' || pending.kind === 'controllerHandler') {
@@ -425,11 +507,105 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
         <span className="ml-auto rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
           Manual source preserved
         </span>
+        <button
+          type="button"
+          onClick={() => setRuntimePanelOpen((open) => !open)}
+          className={`${quietButton} ${
+            selectedRuntimeTarget?.reachable ? 'border-emerald-500/40 text-emerald-300' : ''
+          }`}
+        >
+          {runtimeLoading
+            ? <Loader2 size={11} className="animate-spin" />
+            : <Server size={11} />}
+          {selectedRuntimeTarget?.reachable
+            ? `Runtime ${selectedRuntimeTarget.httpStatus ?? 'live'}`
+            : runtimeLoading
+              ? 'Detecting runtime'
+              : 'Runtime offline'}
+        </button>
         <button type="button" onClick={() => void load(locator)} className={quietButton}>
           <RefreshCw size={11} /> Refresh
         </button>
         <button type="button" onClick={onClose} className={quietButton}>New view</button>
       </header>
+
+      {runtimePanelOpen && (
+        <div className="border-b border-surface-border bg-surface-light/80 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-gray-500">
+              <Server size={12} className="text-jmix-400" /> Real Jmix runtime
+            </div>
+            {runtime?.targets.length ? (
+              <select
+                value={selectedRuntimeTarget?.id ?? ''}
+                onChange={(event) => setSelectedRuntimeTargetId(event.target.value)}
+                className="min-w-64 py-1 text-[10px]"
+              >
+                {runtime.targets.map((target) => (
+                  <option key={target.id} value={target.id}>
+                    {target.reachable ? '●' : '○'} {target.moduleId} · {target.profile} · {target.baseUrl}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-[10px] text-amber-300/80">
+                {runtimeLoading
+                  ? 'Inspecting application modules and local ports…'
+                  : runtime?.issues[0]?.message ?? 'No runnable local Jmix target was detected.'}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => void inspectRuntime(locator)}
+              disabled={runtimeLoading}
+              className={quietButton}
+            >
+              <RefreshCw size={10} className={runtimeLoading ? 'animate-spin' : ''} /> Detect
+            </button>
+            {selectedRuntimeTarget && (
+              <>
+                {(['DESKTOP', 'TABLET', 'MOBILE'] as const).map((viewport) => (
+                  <button
+                    type="button"
+                    key={viewport}
+                    onClick={() => void openRuntimePreview(viewport)}
+                    className={quietButton}
+                  >
+                    <ExternalLink size={10} /> {viewport.toLowerCase()}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => void previewHotDeploy()}
+                  disabled={!selectedRuntimeTarget.reachable || !selectedRuntimeTarget.hotDeploySupported}
+                  title={selectedRuntimeTarget.hotDeployMessage}
+                  className={primaryButton}
+                >
+                  <Zap size={11} /> Preview hot deploy
+                </button>
+              </>
+            )}
+          </div>
+          {selectedRuntimeTarget && (
+            <div className="mt-1.5 grid gap-1 text-[9px] text-gray-500 md:grid-cols-2">
+              <div className="truncate">
+                Route: <span className="font-mono text-gray-400">{selectedRuntimeTarget.previewUrl}</span>
+                {' · '}
+                {selectedRuntimeTarget.responseTimeMillis} ms
+              </div>
+              <div className="truncate">
+                Config: {selectedRuntimeTarget.configSources.join(', ') || 'Spring defaults'}
+              </div>
+              {selectedRuntimeTarget.warnings.map((warning) => (
+                <div key={warning} className="text-amber-300/70">⚠ {warning}</div>
+              ))}
+              {!selectedRuntimeTarget.hotDeploySupported && selectedRuntimeTarget.hotDeployMessage && (
+                <div className="text-amber-300/70">Hot deploy unavailable: {selectedRuntimeTarget.hotDeployMessage}</div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-64 shrink-0 flex-col border-r border-surface-border bg-surface-light/40">
@@ -546,7 +722,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                           ? <>update direct query/text value</>
                           : pending.kind === 'controllerInjection'
                             ? <>inject {pending.change.componentId} into controller</>
-                            : <>generate {pending.change.kind.replace(/_/g, ' ').toLowerCase()} handler</>}
+                            : pending.kind === 'controllerHandler'
+                              ? <>generate {pending.change.kind.replace(/_/g, ' ').toLowerCase()} handler</>
+                              : <>stage descriptor and verified Jmix cache-reset trigger</>}
                   </div>
                 </div>
                 <div className="flex gap-2">

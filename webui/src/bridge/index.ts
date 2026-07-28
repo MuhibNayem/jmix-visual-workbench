@@ -8,6 +8,10 @@ import type {
   FlowUiWorkspaceResponse,
   GenerationResult,
   GraphSourceLocator,
+  JmixFlowUiHotDeployRequest,
+  JmixRuntimeActionResponse,
+  JmixRuntimeInspectionResponse,
+  JmixRuntimeViewport,
   ProjectConfig,
   SourceNavigationResponse,
   WorkspaceChangeApplyResponse,
@@ -185,6 +189,25 @@ class Bridge {
 
   applyFlowUiControllerHandler(change: FlowUiControllerHandlerRequest, expectedPlanDigest: string) {
     return this.request<WorkspaceChangeApplyResponse>('applyFlowUiControllerHandler', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  inspectJmixRuntime(descriptorLocator: GraphSourceLocator) {
+    return this.request<JmixRuntimeInspectionResponse>('inspectJmixRuntime', { descriptorLocator })
+  }
+
+  openJmixRuntimePreview(url: string, title: string, viewport: JmixRuntimeViewport = 'DESKTOP') {
+    return this.request<JmixRuntimeActionResponse>('openJmixRuntimePreview', { url, title, viewport })
+  }
+
+  previewFlowUiHotDeploy(change: JmixFlowUiHotDeployRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiHotDeploy', change)
+  }
+
+  applyFlowUiHotDeploy(change: JmixFlowUiHotDeployRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiHotDeploy', {
       change,
       expectedPlanDigest,
     })

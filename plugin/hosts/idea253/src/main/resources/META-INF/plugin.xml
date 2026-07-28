@@ -17,12 +17,18 @@
                     anchor="right"
                     factoryClass="org.jmixworkbench.toolwindow.JmixWorkbenchToolWindowFactory"
                     icon="/icons/workbench.svg"/>
+        <toolWindow id="Jmix Runtime Preview"
+                    anchor="bottom"
+                    canCloseContents="true"
+                    factoryClass="org.jmixworkbench.toolwindow.JmixRuntimePreviewToolWindowFactory"
+                    icon="/icons/workbench.svg"/>
 
         <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.ApplicationGraphService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.WorkspaceChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiWorkspaceService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiControllerChangeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixRuntimeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
     </extensions>
 
