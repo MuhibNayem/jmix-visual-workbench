@@ -44,7 +44,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Developers can browse a cancellable, incremental semantic inventory with stable identity, ownership, provenance, fingerprints, diagnostics, relationships, smart/dumb-mode behavior, and native file-and-line navigation.
   4. Every operation receives a backend compatibility state and reason; write capability is absent unless the exact operation/profile cell has reviewed passing evidence, and uncertified, legacy, ambiguous, stale, untrusted, or future projects remain diagnostic/read-only.
   5. When an option is unavailable, the workbench explains the missing evidence and identifies the tested profile or isolated migration path that could make it available.
-**Plans**: 17 plans
+**Plans**: 18 plans
 **UI hint**: yes
 
 Plans:
@@ -65,6 +65,7 @@ Plans:
 - [ ] 02-15-PLAN.md — Run clean non-circular automated pre-UAT lifecycle certification.
 - [ ] 02-16-PLAN.md — Verify the full installed signed-host UI and zero-mutation matrix.
 - [ ] 02-17-PLAN.md — Validate installed evidence and run definitive clean Phase 2 certification.
+- [ ] 02-18-PLAN.md — Wire the live dual-host tool-window composition root, UI request bindings, and installed-style lifecycle.
 
 ### Phase 3: Typed Privilege Boundary and Change Engine
 **Goal**: Every project mutation passes through one deterministic, least-privilege plan, validation, apply, and recovery pipeline.
@@ -147,7 +148,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Clean-Room Build Foundation | 5/5 | Complete | 2026-07-28 |
-| 2. Compatibility Laboratory and Read-Only Onboarding | 0/17 | Not started | - |
+| 2. Compatibility Laboratory and Read-Only Onboarding | 0/18 | Not started | - |
 | 3. Typed Privilege Boundary and Change Engine | 0/TBD | Not started | - |
 | 4. Certified Entity and Data Round Trip | 0/TBD | Not started | - |
 | 5. Certified Existing CRUD Round Trip | 0/TBD | Not started | - |
