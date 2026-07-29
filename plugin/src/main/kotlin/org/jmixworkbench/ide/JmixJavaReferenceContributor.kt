@@ -23,6 +23,7 @@ import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiNameValuePair
+import com.intellij.psi.PsiMethod
 import com.intellij.psi.xml.XmlFile
 import com.intellij.psi.xml.XmlAttribute
 import com.intellij.psi.xml.XmlTag
@@ -56,6 +57,15 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
             )
         }
         jmixJavaUiSecurityReferences(literal, value)?.let { return it }
+        if (literal.isSubscribeSubjectValue()) {
+            return arrayOf(
+                JmixJavaSubscribeSubjectReference(
+                    literal,
+                    quotedValueRange(value),
+                    value,
+                ),
+            )
+        }
         if (value.isBlank()) return PsiReference.EMPTY_ARRAY
         if (literal.isViewDescriptorValue()) {
             return arrayOf(
@@ -112,6 +122,69 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
                 acceptedTags = setOf("action"),
                 ownerId = ownerId,
             ),
+        )
+    }
+}
+
+internal class JmixJavaSubscribeSubjectReference(
+    element: PsiLiteralExpression,
+    range: TextRange,
+    private val subject: String,
+) : PsiPolyVariantReferenceBase<PsiLiteralExpression>(element, range, false) {
+    override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> =
+        candidates()
+            .filter { candidate ->
+                candidate.logicalName == subject ||
+                    candidate.method.name == subject
+            }
+            .map(JmixSubscribeSubject::method)
+            .map(::PsiElementResolveResult)
+            .toTypedArray()
+
+    override fun getVariants(): Array<Any> =
+        candidates()
+            .map { candidate ->
+                LookupElementBuilder.create(
+                    candidate.method,
+                    candidate.logicalName,
+                ).withTypeText(
+                    candidate.method.containingClass?.qualifiedName.orEmpty(),
+                    true,
+                )
+            }
+            .distinctBy { it.lookupString }
+            .toTypedArray()
+
+    override fun handleElementRename(newElementName: String): PsiElement {
+        val logicalName = newElementName
+            .removePrefix("add")
+            .removePrefix("set")
+            .replaceFirstChar(Char::lowercaseChar)
+        val replacement = JavaPsiFacade.getElementFactory(element.project)
+            .createExpressionFromText(
+                "\"${escapeJavaString(logicalName)}\"",
+                element,
+            )
+        return element.replace(replacement)
+    }
+
+    private fun candidates(): List<JmixSubscribeSubject> {
+        val annotation = element.containingAnnotation() ?: return emptyList()
+        val method = PsiTreeUtil.getParentOfType(
+            annotation,
+            PsiMethod::class.java,
+            false,
+        ) ?: return emptyList()
+        if (method.parameterList.parametersCount != 1) return emptyList()
+        val controller = method.containingClass ?: return emptyList()
+        val targetClasses = JmixFlowUiMetadata.subscribeTargetClasses(
+            controller,
+            annotation,
+        )
+        if (targetClasses.isEmpty()) return emptyList()
+        return JmixFlowUiMetadata.subscribeSubjects(
+            targetClasses,
+            method.parameterList.parameters.single().type,
         )
     }
 }
@@ -191,13 +264,18 @@ internal class JmixJavaFlowUiIdReference(
         element.associatedDescriptorFiles().flatMap { file ->
             val allTags = PsiTreeUtil.findChildrenOfType(file, XmlTag::class.java)
             val owner = ownerId?.let { expectedOwner ->
-                allTags.firstOrNull { it.getAttributeValue("id") == expectedOwner }
+                allTags.firstOrNull { tag ->
+                    JmixFlowUiMetadata.injectionIdentifierAttributes(tag)
+                        .any { attribute -> attribute.value == expectedOwner }
+                }
             }
             val scope = owner?.let { PsiTreeUtil.findChildrenOfType(it, XmlTag::class.java) } ?: allTags
             scope.asSequence()
                 .filter { acceptedTags == null || it.localName in acceptedTags }
-                .mapNotNull { it.getAttribute("id") }
-                .filter { !it.value.isNullOrBlank() }
+                .flatMap { tag ->
+                    JmixFlowUiMetadata.injectionIdentifierAttributes(tag)
+                        .asSequence()
+                }
                 .toList()
         }
 }
@@ -207,6 +285,18 @@ private fun PsiLiteralExpression.isViewDescriptorValue(): Boolean {
     val shortName = annotation.qualifiedName?.substringAfterLast('.')
         ?: annotation.nameReferenceElement?.referenceName
     return shortName == "ViewDescriptor"
+}
+
+private fun PsiLiteralExpression.isSubscribeSubjectValue(): Boolean {
+    val annotation = containingAnnotation() ?: return false
+    val shortName = annotation.qualifiedName?.substringAfterLast('.')
+        ?: annotation.nameReferenceElement?.referenceName
+    if (shortName != "Subscribe") return false
+    return PsiTreeUtil.getParentOfType(
+        this,
+        PsiNameValuePair::class.java,
+        false,
+    )?.attributeName == "subject"
 }
 
 private fun PsiLiteralExpression.controllerReferenceKind(): ControllerReferenceKind? {

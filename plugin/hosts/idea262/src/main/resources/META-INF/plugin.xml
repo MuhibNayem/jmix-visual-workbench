@@ -46,6 +46,7 @@
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFetchPlanCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFlowUiDescriptorCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMessageBundleCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixStudioMetadataCandidateFileIndex"/>
 
         <psi.referenceContributor language="XML"
                                   implementation="org.jmixworkbench.ide.JmixFlowUiReferenceContributor"/>

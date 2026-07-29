@@ -14,8 +14,8 @@ import kotlin.system.measureNanoTime
  * module-shaped roots. They are accepted by the index input filters but
  * unrelated to Jmix symbols. A broad extension scan would revisit all of them
  * after every PSI modification. The persistent indexes must keep all seven
- * cached symbol inventories stable and descriptor discovery restricted to
- * actual FlowUI files.
+ * cached symbol inventories and project-version Studio metadata stable while
+ * descriptor discovery remains restricted to actual FlowUI files.
  */
 class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
 
@@ -94,6 +94,22 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
             "com/company/payroll/messages.properties",
             "EmployeeListView.title=Employees",
         )
+        val studioMetadata = myFixture.addFileToProject(
+            "com/company/payroll/ui/PayrollFlowUiMetadata.java",
+            """
+            package com.company.payroll.ui;
+
+            import io.jmix.flowui.kit.meta.StudioComponent;
+
+            public interface PayrollFlowUiMetadata {
+                @StudioComponent(
+                    classFqn = "com.company.payroll.ui.PayrollButton",
+                    xmlElement = "payrollButton"
+                )
+                Object payrollButton();
+            }
+            """.trimIndent(),
+        )
 
         repeat(1_000) { index ->
             val module = "module-${index % 16}"
@@ -141,6 +157,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         val policies = ui.specificPolicies()
         val beans = spring.beans()
         val descriptors = findAllJmixDescriptorFiles(myFixture.file)
+        val flowUiMetadata = JmixFlowUiMetadata.snapshot(project)
 
         assertEquals(listOf("Employee"), entities.mapNotNull(PsiClass::getName))
         assertEquals(listOf("employee-summary"), fetchPlans.mapNotNull { it.value })
@@ -150,6 +167,10 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         assertEquals(listOf("payroll.execute"), policies.map { it.resource })
         assertEquals(listOf("PayrollMenu"), beans.map { it.name })
         assertEquals(listOf("employee-list-view.xml"), descriptors.map { it.name })
+        assertEquals(
+            listOf("payrollButton"),
+            flowUiMetadata.elements.map { it.xmlElement },
+        )
 
         val warmSamples = LongArray(100) {
             measureNanoTime {
@@ -160,6 +181,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
                 assertSame(messages, ui.messages())
                 assertSame(policies, ui.specificPolicies())
                 assertSame(beans, spring.beans())
+                assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
             }
         }
         val warmLookupNanos = warmSamples.sum()
@@ -207,6 +229,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
             assertSame(messages, ui.messages())
             assertSame(policies, ui.specificPolicies())
             assertSame(beans, spring.beans())
+            assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
         }
         assertTrue(
             "Indexed access after unrelated edits took " +
@@ -247,6 +270,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
                 assertSame(messages, ui.messages())
                 assertSame(policies, ui.specificPolicies())
                 assertSame(beans, spring.beans())
+                assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
             }
         }
         val repeatedTypingNanos = typingSamples.sum()
@@ -295,10 +319,50 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         assertSame(menus, ui.menuIds())
         assertSame(policies, ui.specificPolicies())
         assertSame(beans, spring.beans())
+        assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
         println(
             "JVW_INDEX_RELEVANT_MESSAGE_EDIT_COMMIT_MS=" +
                 messageEditNanos / 1_000_000,
         )
+
+        WriteCommandAction.runWriteCommandAction(project) {
+            VfsUtil.saveText(
+                studioMetadata.virtualFile,
+                """
+                package com.company.payroll.ui;
+
+                import io.jmix.flowui.kit.meta.StudioComponent;
+
+                public interface PayrollFlowUiMetadata {
+                    @StudioComponent(
+                        classFqn = "com.company.payroll.ui.PayrollButton",
+                        xmlElement = "payrollButton"
+                    )
+                    Object payrollButton();
+
+                    @StudioComponent(
+                        classFqn = "com.company.payroll.ui.PayrollField",
+                        xmlElement = "payrollField"
+                    )
+                    Object payrollField();
+                }
+                """.trimIndent(),
+            )
+        }
+        PsiDocumentManager.getInstance(project).commitAllDocuments()
+        val updatedFlowUiMetadata = JmixFlowUiMetadata.snapshot(project)
+        assertNotSame(flowUiMetadata, updatedFlowUiMetadata)
+        assertEquals(
+            listOf("payrollButton", "payrollField"),
+            updatedFlowUiMetadata.elements.map { it.xmlElement },
+        )
+        assertSame(entities, domain.entityClasses())
+        assertSame(fetchPlans, domain.fetchPlanDeclarations())
+        assertSame(views, ui.viewIds())
+        assertSame(menus, ui.menuIds())
+        assertSame(updatedMessages, ui.messages())
+        assertSame(policies, ui.specificPolicies())
+        assertSame(beans, spring.beans())
     }
 
     private fun LongArray.percentileMillis(percentile: Int): Long {
@@ -316,6 +380,18 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
             public @interface JmixEntity {
                 String name() default "";
                 String value() default "";
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package io.jmix.flowui.kit.meta;
+            public @interface StudioComponent {
+                String classFqn() default "";
+                String xmlElement() default "";
+                String xmlns() default "";
+                String injectionIdentifier() default "id";
+                boolean isInjectable() default true;
             }
             """.trimIndent(),
         )

@@ -20,8 +20,6 @@ import com.intellij.psi.PsiModifierListOwner
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.PsiType
 import com.intellij.psi.PsiTypes
-import com.intellij.psi.search.GlobalSearchScope
-import com.intellij.psi.search.PsiShortNamesCache
 import com.intellij.psi.util.InheritanceUtil
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.util.PsiUtil
@@ -85,22 +83,20 @@ internal fun jmixJavaFlowUiControllerIssues(
 ): Map<PsiModifierListOwner, List<JmixFlowUiControllerIssue>> {
     val issues = linkedMapOf<PsiModifierListOwner, MutableList<JmixFlowUiControllerIssue>>()
     val isController = controllerClass.isJmixFlowUiController()
-    val injections = controllerClass.fields
-        .filter { field ->
-            field.annotations.any { it.jmixShortName() == "ViewComponent" }
-        }
-        .associateBy { field ->
-            field.annotations
-                .first { it.jmixShortName() == "ViewComponent" }
-                .stringAttribute("value")
-                ?.ifBlank { field.name }
-                ?: field.name
-        }
+    val descriptors = jmixDescriptorFilesForController(
+        controllerClass,
+        controllerClass,
+    )
+    val injections = linkedMapOf<String, PsiType>()
 
     controllerClass.fields.forEach { field ->
         val annotation = field.annotations
             .firstOrNull { it.jmixShortName() == "ViewComponent" }
             ?: return@forEach
+        val injectionName = annotation.stringAttribute("value")
+            ?.ifBlank { field.name }
+            ?: field.name
+        injections[injectionName] = field.type
         val fieldIssues = issues.getOrPut(field, ::mutableListOf)
         if (!isController) {
             fieldIssues += annotation.issue(
@@ -132,10 +128,61 @@ internal fun jmixJavaFlowUiControllerIssues(
                 ),
             )
         }
+        validateJavaViewComponentType(
+            project = field.project,
+            injectionLabel = field.name,
+            target = injectionName,
+            injectedType = field.type,
+            typeElement = field.typeElement ?: field,
+            descriptors = descriptors,
+            issues = fieldIssues,
+        )
     }
 
     val installationGroups = linkedMapOf<JmixInstallationKey, MutableList<PsiMethod>>()
     controllerClass.methods.forEach { method ->
+        method.annotations
+            .firstOrNull { it.jmixShortName() == "ViewComponent" }
+            ?.let { annotation ->
+                val methodIssues = issues.getOrPut(method, ::mutableListOf)
+                if (!isController) {
+                    methodIssues += annotation.issue(
+                        "JMIX-VIEW-COMPONENT-METHOD-LOCATION",
+                        "@ViewComponent injection method must be declared " +
+                            "inside a Jmix view or fragment controller",
+                    )
+                }
+                if (method.hasModifierProperty(PsiModifier.STATIC)) {
+                    methodIssues += annotation.issue(
+                        "JMIX-VIEW-COMPONENT-METHOD-STATIC",
+                        "@ViewComponent injection method must be an instance method",
+                    )
+                }
+                if (method.parameterList.parametersCount != 1) {
+                    methodIssues += method.issue(
+                        "JMIX-VIEW-COMPONENT-METHOD-PARAMETERS",
+                        "@ViewComponent injection method must declare exactly one parameter",
+                    )
+                } else {
+                    val inferredName = method.name
+                        .removePrefix("set")
+                        .replaceFirstChar(Char::lowercaseChar)
+                    val injectionName = annotation.stringAttribute("value")
+                        ?.ifBlank { inferredName }
+                        ?: inferredName
+                    val parameter = method.parameterList.parameters.single()
+                    injections[injectionName] = parameter.type
+                    validateJavaViewComponentType(
+                        project = method.project,
+                        injectionLabel = "${method.name}()",
+                        target = injectionName,
+                        injectedType = parameter.type,
+                        typeElement = parameter.typeElement ?: parameter,
+                        descriptors = descriptors,
+                        issues = methodIssues,
+                    )
+                }
+            }
         method.annotations
             .filter { it.jmixShortName() in JMIX_HANDLER_ANNOTATIONS }
             .forEach { annotation ->
@@ -154,7 +201,12 @@ internal fun jmixJavaFlowUiControllerIssues(
                     )
                 }
                 when (kind) {
-                    "Subscribe" -> validateJavaSubscribe(method, annotation, methodIssues)
+                    "Subscribe" -> validateJavaSubscribe(
+                        controllerClass,
+                        method,
+                        annotation,
+                        methodIssues,
+                    )
                     "Install" -> {
                         validateJavaInstall(method, annotation, injections, methodIssues)
                         annotation.installationKey()?.let { key ->
@@ -191,7 +243,52 @@ internal fun jmixJavaFlowUiControllerIssues(
     return issues
 }
 
+private fun validateJavaViewComponentType(
+    project: Project,
+    injectionLabel: String,
+    target: String,
+    injectedType: PsiType,
+    typeElement: PsiElement,
+    descriptors: List<com.intellij.psi.xml.XmlFile>,
+    issues: MutableList<JmixFlowUiControllerIssue>,
+) {
+    val tags = JmixFlowUiMetadata.targetTags(
+        descriptors,
+        target,
+        "COMPONENT",
+    )
+    if (tags.size != 1) return
+    val expectedTypes = JmixFlowUiMetadata.expectedTypes(
+        project,
+        tags.single(),
+    )
+    if (expectedTypes.isEmpty()) return
+    val injectedClass = PsiUtil.resolveClassInClassTypeOnly(injectedType)
+        ?: return
+    if (JmixFlowUiMetadata.isCompatibleInjection(
+            project,
+            injectedClass,
+            expectedTypes,
+        ) != false
+    ) {
+        return
+    }
+
+    val expected = expectedTypes
+        .map(JmixFlowUiExpectedType::classFqn)
+        .distinct()
+        .joinToString(" or ")
+    issues += JmixFlowUiControllerIssue(
+        element = typeElement,
+        code = "JMIX-VIEW-COMPONENT-TYPE",
+        message = "@ViewComponent '$injectionLabel' has type " +
+            "${injectedType.presentableText}, but XML target '$target' " +
+            "requires $expected",
+    )
+}
+
 private fun validateJavaSubscribe(
+    controllerClass: PsiClass,
     method: PsiMethod,
     annotation: PsiAnnotation,
     issues: MutableList<JmixFlowUiControllerIssue>,
@@ -215,21 +312,77 @@ private fun validateJavaSubscribe(
             "JMIX-SUBSCRIBE-EVENT-TYPE",
             "@Subscribe parameter must extend java.util.EventObject",
         )
+        return
     }
     val target = annotation.stringAttribute("value")
         ?: annotation.stringAttribute("id")
-    if (target.isNullOrBlank() && !annotation.stringAttribute("subject").isNullOrBlank()) {
+    val subject = annotation.stringAttribute("subject")
+    if (target.isNullOrBlank() && !subject.isNullOrBlank()) {
         issues += annotation.issue(
             "JMIX-SUBSCRIBE-SUBJECT-WITHOUT-TARGET",
             "@Subscribe subject requires a component, data-container, or data-loader target",
         )
+        return
+    }
+    if (target.isNullOrBlank()) return
+
+    val targetClasses = JmixFlowUiMetadata.subscribeTargetClasses(
+        controllerClass,
+        annotation,
+    )
+    if (targetClasses.isEmpty()) return
+    val subjects = JmixFlowUiMetadata.subscribeSubjects(
+        targetClasses,
+        eventType,
+    )
+    if (!subject.isNullOrBlank()) {
+        val matching = subjects.filter { candidate ->
+            candidate.logicalName == subject ||
+                candidate.method.name == subject
+        }
+        if (matching.isEmpty()) {
+            val targetNames = targetClasses
+                .mapNotNull { it.qualifiedName ?: it.name }
+                .distinct()
+                .joinToString()
+            issues += JmixFlowUiControllerIssue(
+                element = annotation.findDeclaredAttributeValue("subject")
+                    ?: annotation.nameReferenceElement
+                    ?: annotation,
+                code = "JMIX-SUBSCRIBE-SUBJECT",
+                message = "@Subscribe subject '$subject' is not available for " +
+                    "${eventType.presentableText} on $targetNames",
+            )
+        }
+        return
+    }
+
+    when {
+        subjects.isEmpty() -> {
+            issues += method.parameterList.parameters.single().issue(
+                "JMIX-SUBSCRIBE-TARGET-EVENT",
+                "@Subscribe target '$target' does not expose a listener for " +
+                    eventType.presentableText,
+            )
+        }
+
+        subjects.map(JmixSubscribeSubject::logicalName).distinct().size > 1 -> {
+            issues += JmixFlowUiControllerIssue(
+                element = annotation.nameReferenceElement ?: annotation,
+                code = "JMIX-SUBSCRIBE-SUBJECT-AMBIGUOUS",
+                message = "@Subscribe target '$target' exposes multiple " +
+                    "listeners for ${eventType.presentableText}; declare " +
+                    "'subject' explicitly",
+                severity = ProblemHighlightType.GENERIC_ERROR_OR_WARNING,
+            )
+        }
     }
 }
 
 private fun validateJavaInstall(
     method: PsiMethod,
     annotation: PsiAnnotation,
-    injections: Map<String, PsiField>,
+    injections: Map<String, PsiType>,
     issues: MutableList<JmixFlowUiControllerIssue>,
 ) {
     val target = annotation.stringAttribute("to").orEmpty()
@@ -254,8 +407,8 @@ private fun validateJavaInstall(
     }
     if (explicitType || subject.isNullOrBlank()) return
 
-    val targetField = injections[target] ?: return
-    val targetClass = PsiUtil.resolveClassInClassTypeOnly(targetField.type) ?: return
+    val targetType = injections[target] ?: return
+    val targetClass = PsiUtil.resolveClassInClassTypeOnly(targetType) ?: return
     val setterName = "set" + subject.replaceFirstChar(Char::uppercaseChar)
     val candidates = targetClass.allMethods.filter { candidate ->
         candidate.name == setterName
@@ -488,7 +641,7 @@ private class AddJmixWildcardTypeArgumentsQuickFix(
     }
 }
 
-private fun jmixKotlinFlowUiControllerIssues(
+internal fun jmixKotlinFlowUiControllerIssues(
     controller: PsiElement,
 ): List<JmixFlowUiControllerIssue> {
     val controllerHeader = controller.text.substringBefore('{')
@@ -508,6 +661,34 @@ private fun jmixKotlinFlowUiControllerIssues(
         .toList()
     val issues = mutableListOf<JmixFlowUiControllerIssue>()
     val installationGroups = linkedMapOf<JmixInstallationKey, MutableList<PsiElement>>()
+    val descriptors = kotlinFlowUiDescriptorFiles(controller)
+
+    PsiTreeUtil.findChildrenOfType(
+        controller,
+        PsiNamedElement::class.java,
+    ).asSequence()
+        .filter { it.javaClass.simpleName == "KtProperty" }
+        .filter { property -> property.nearestKotlinController() === controller }
+        .forEach { property ->
+            validateKotlinViewComponentType(
+                property,
+                descriptors,
+                issues,
+            )
+        }
+    PsiTreeUtil.findChildrenOfType(
+        controller,
+        PsiNamedElement::class.java,
+    ).asSequence()
+        .filter { it.javaClass.simpleName == "KtNamedFunction" }
+        .filter { function -> function.nearestKotlinController() === controller }
+        .forEach { function ->
+            validateKotlinViewComponentMethod(
+                function,
+                descriptors,
+                issues,
+            )
+        }
 
     functions.forEach { (function, annotations) ->
         val signature = parseKotlinControllerFunction(function.text)
@@ -541,6 +722,14 @@ private fun jmixKotlinFlowUiControllerIssues(
                             issues += function.issue(
                                 "JMIX-KOTLIN-SUBSCRIBE-EVENT-TYPE",
                                 "@Subscribe parameter must extend java.util.EventObject",
+                            )
+                        } else if (eventType.isNotBlank()) {
+                            validateKotlinSubscribeTarget(
+                                function = function,
+                                annotation = annotation,
+                                eventTypeSource = eventType,
+                                descriptors = descriptors,
+                                issues = issues,
                             )
                         }
                     }
@@ -629,6 +818,224 @@ private fun jmixKotlinFlowUiControllerIssues(
             }
         }
     return issues
+}
+
+private fun validateKotlinViewComponentType(
+    property: PsiNamedElement,
+    descriptors: List<com.intellij.psi.xml.XmlFile>,
+    issues: MutableList<JmixFlowUiControllerIssue>,
+) {
+    val declarationStart = Regex("""\b(?:val|var)\b""")
+        .find(property.text)
+        ?.range
+        ?.first
+        ?: return
+    val header = property.text.substring(0, declarationStart)
+    val annotation = JMIX_KOTLIN_VIEW_COMPONENT.find(header)
+        ?: return
+    val propertyName = property.name?.takeIf(String::isNotBlank)
+        ?: return
+    val arguments = annotation.groupValues.getOrNull(1).orEmpty()
+    val target = Regex("""\bvalue\s*=\s*"([^"$]+)"""")
+        .find(arguments)
+        ?.groupValues
+        ?.get(1)
+        ?: Regex("""^\s*"([^"$]+)"""")
+            .find(arguments)
+            ?.groupValues
+            ?.get(1)
+        ?: propertyName
+    val typeSource = Regex(
+        """\b(?:val|var)\s+${Regex.escape(propertyName)}\s*:\s*""" +
+            """([A-Za-z_][A-Za-z0-9_$.<>?]*)""",
+    ).find(property.text)
+        ?.groupValues
+        ?.get(1)
+        ?: return
+    val injectedClass = JmixFlowUiMetadata.resolveKotlinClass(
+        property,
+        typeSource,
+    ) ?: return
+    val tags = JmixFlowUiMetadata.targetTags(
+        descriptors,
+        target,
+        "COMPONENT",
+    )
+    if (tags.size != 1) return
+    val expectedTypes = JmixFlowUiMetadata.expectedTypes(
+        property.project,
+        tags.single(),
+    )
+    if (expectedTypes.isEmpty()) return
+    if (JmixFlowUiMetadata.isCompatibleInjection(
+            property.project,
+            injectedClass,
+            expectedTypes,
+        ) != false
+    ) {
+        return
+    }
+    val expected = expectedTypes
+        .map(JmixFlowUiExpectedType::classFqn)
+        .distinct()
+        .joinToString(" or ")
+    issues += property.issue(
+        "JMIX-KOTLIN-VIEW-COMPONENT-TYPE",
+        "@ViewComponent '$propertyName' has type $typeSource, but XML " +
+            "target '$target' requires $expected",
+    )
+}
+
+private fun validateKotlinViewComponentMethod(
+    function: PsiNamedElement,
+    descriptors: List<com.intellij.psi.xml.XmlFile>,
+    issues: MutableList<JmixFlowUiControllerIssue>,
+) {
+    val header = function.text.substringBeforeKotlinFunctionDeclaration()
+    val annotation = JMIX_KOTLIN_VIEW_COMPONENT.find(header)
+        ?: return
+    val signature = parseKotlinControllerFunction(function.text)
+    if (signature.parameters.size != 1) {
+        issues += function.issue(
+            "JMIX-KOTLIN-VIEW-COMPONENT-METHOD-PARAMETERS",
+            "@ViewComponent injection function must declare exactly one parameter",
+        )
+    }
+    val parameterType = signature.parameters.singleOrNull()
+        ?.substringAfter(':', "")
+        ?.substringBefore('=')
+        ?.trim()
+        ?.takeIf(String::isNotBlank)
+        ?: return
+    val methodName = function.name?.takeIf(String::isNotBlank)
+        ?: return
+    val inferredName = methodName
+        .removePrefix("set")
+        .replaceFirstChar(Char::lowercaseChar)
+    val arguments = annotation.groupValues.getOrNull(1).orEmpty()
+    val target = Regex("""\bvalue\s*=\s*"([^"$]+)"""")
+        .find(arguments)
+        ?.groupValues
+        ?.get(1)
+        ?: Regex("""^\s*"([^"$]+)"""")
+            .find(arguments)
+            ?.groupValues
+            ?.get(1)
+        ?: inferredName
+    val injectedClass = JmixFlowUiMetadata.resolveKotlinClass(
+        function,
+        parameterType,
+    ) ?: return
+    val tags = JmixFlowUiMetadata.targetTags(
+        descriptors,
+        target,
+        "COMPONENT",
+    )
+    if (tags.size != 1) return
+    val expectedTypes = JmixFlowUiMetadata.expectedTypes(
+        function.project,
+        tags.single(),
+    )
+    if (expectedTypes.isEmpty()) return
+    if (JmixFlowUiMetadata.isCompatibleInjection(
+            function.project,
+            injectedClass,
+            expectedTypes,
+        ) != false
+    ) {
+        return
+    }
+    issues += function.issue(
+        "JMIX-KOTLIN-VIEW-COMPONENT-METHOD-TYPE",
+        "@ViewComponent '$methodName()' has type $parameterType, but XML " +
+            "target '$target' requires " +
+            expectedTypes.map(JmixFlowUiExpectedType::classFqn)
+                .distinct()
+                .joinToString(" or "),
+    )
+}
+
+private fun validateKotlinSubscribeTarget(
+    function: PsiNamedElement,
+    annotation: KotlinHandlerAnnotation,
+    eventTypeSource: String,
+    descriptors: List<com.intellij.psi.xml.XmlFile>,
+    issues: MutableList<JmixFlowUiControllerIssue>,
+) {
+    if (annotation.target.isBlank()) {
+        if (annotation.subject != null) {
+            issues += function.issue(
+                "JMIX-KOTLIN-SUBSCRIBE-SUBJECT-WITHOUT-TARGET",
+                "@Subscribe subject requires a component, data-container, or data-loader target",
+            )
+        }
+        return
+    }
+    val eventClass = JmixFlowUiMetadata.resolveKotlinClass(
+        function,
+        eventTypeSource,
+    ) ?: return
+    val targetClasses = JmixFlowUiMetadata.kotlinTargetClasses(
+        function,
+        descriptors,
+        annotation.target,
+        annotation.scope,
+    )
+    if (targetClasses.isEmpty()) return
+    val eventType = JavaPsiFacade.getElementFactory(function.project)
+        .createType(eventClass)
+    val subjects = JmixFlowUiMetadata.subscribeSubjects(
+        targetClasses,
+        eventType,
+    )
+    val explicitSubject = annotation.subject
+    if (explicitSubject != null) {
+        if (subjects.none { candidate ->
+                candidate.logicalName == explicitSubject ||
+                    candidate.method.name == explicitSubject
+            }
+        ) {
+            issues += function.issue(
+                "JMIX-KOTLIN-SUBSCRIBE-SUBJECT",
+                "@Subscribe subject '$explicitSubject' is not available for " +
+                    "${eventClass.name} on " +
+                    targetClasses.joinToString { target ->
+                        target.qualifiedName ?: target.name.orEmpty()
+                    },
+            )
+        }
+        return
+    }
+    when {
+        subjects.isEmpty() -> {
+            issues += function.issue(
+                "JMIX-KOTLIN-SUBSCRIBE-TARGET-EVENT",
+                "@Subscribe target '${annotation.target}' does not expose a " +
+                    "listener for ${eventClass.name}",
+            )
+        }
+
+        subjects.map(JmixSubscribeSubject::logicalName).distinct().size > 1 -> {
+            issues += JmixFlowUiControllerIssue(
+                element = function,
+                code = "JMIX-KOTLIN-SUBSCRIBE-SUBJECT-AMBIGUOUS",
+                message = "@Subscribe target '${annotation.target}' exposes " +
+                    "multiple listeners for ${eventClass.name}; declare " +
+                    "'subject' explicitly",
+                severity = ProblemHighlightType.GENERIC_ERROR_OR_WARNING,
+            )
+        }
+    }
+}
+
+private fun kotlinFlowUiDescriptorFiles(
+    controller: PsiElement,
+): List<com.intellij.psi.xml.XmlFile> {
+    val path = JMIX_KOTLIN_VIEW_DESCRIPTOR.find(controller.text)
+        ?.groupValues
+        ?.get(1)
+        ?: return emptyList()
+    return findJmixDescriptorFiles(controller, path)
 }
 
 private data class KotlinHandlerAnnotation(
@@ -748,6 +1155,12 @@ private fun matchingKotlinDelimiter(source: String, open: Int): Int {
     return -1
 }
 
+private fun String.substringBeforeKotlinFunctionDeclaration(): String {
+    val declaration = Regex("""\bfun\b""").find(this)
+        ?: return this
+    return substring(0, declaration.range.first)
+}
+
 private fun PsiElement.nearestKotlinController(): PsiElement? =
     generateSequence(parent) { it.parent }
         .firstOrNull { it.javaClass.simpleName in KOTLIN_CONTROLLER_TYPES }
@@ -756,28 +1169,25 @@ private fun isResolvedKotlinNonEventObject(
     context: PsiElement,
     sourceType: String,
 ): Boolean? {
-    val simpleName = sourceType
-        .substringBefore('<')
-        .removeSuffix("?")
-        .substringAfterLast('.')
-        .substringAfterLast('$')
-    if (simpleName.isBlank()) return null
-    val classes = PsiShortNamesCache.getInstance(context.project)
-        .getClassesByName(
-            simpleName,
-            GlobalSearchScope.projectScope(context.project),
-        )
-    if (classes.isEmpty()) return null
-    return classes.none { candidate ->
-        candidate.qualifiedName == "java.util.EventObject" ||
-            InheritanceUtil.isInheritor(candidate, "java.util.EventObject")
-    }
+    val candidate = JmixFlowUiMetadata.resolveKotlinClass(
+        context,
+        sourceType,
+    ) ?: return null
+    return candidate.qualifiedName != "java.util.EventObject" &&
+        !InheritanceUtil.isInheritor(candidate, "java.util.EventObject")
 }
 
 private val JMIX_CONTROLLER_ANNOTATIONS =
     setOf("ViewController", "UiController", "FragmentDescriptor")
 private val KNOWN_NON_EVENT_OBJECT_TYPES =
     setOf("String", "Object", "Number", "Boolean", "Character")
+private val JMIX_KOTLIN_VIEW_COMPONENT = Regex(
+    """@(?:[\w.]+\.)?ViewComponent(?:\s*\(([^)]*)\))?""",
+)
+private val JMIX_KOTLIN_VIEW_DESCRIPTOR = Regex(
+    "@(?:[\\w.]+\\.)?(?:ViewDescriptor|FragmentDescriptor)\\s*\\(\\s*" +
+        "(?:(?:value|path)\\s*=\\s*)?\"([^\"$]+)\"",
+)
 private val JMIX_HANDLER_ANNOTATIONS = setOf("Subscribe", "Install", "Supply")
 private val KOTLIN_CONTROLLER_TYPES =
     setOf("KtClass", "KtObjectDeclaration")

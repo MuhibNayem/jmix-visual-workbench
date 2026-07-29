@@ -2213,17 +2213,16 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                       {workspace.controllerModel.message}
                     </p>
                   )}
+                  <div className={`mt-2 rounded border px-2 py-1.5 text-[9px] ${
+                    controllerIssueCount > 0
+                      ? 'border-red-500/40 bg-red-500/10 text-red-200'
+                      : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                  }`}>
+                    {controllerIssueCount > 0
+                      ? `${controllerIssueCount} native controller contract issue${controllerIssueCount === 1 ? '' : 's'}`
+                      : 'Native controller contracts verified'}
+                  </div>
                   {workspace.controllerModel.psiSupported && (
-                    <>
-                      <div className={`mt-2 rounded border px-2 py-1.5 text-[9px] ${
-                        controllerIssueCount > 0
-                          ? 'border-red-500/40 bg-red-500/10 text-red-200'
-                          : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                      }`}>
-                        {controllerIssueCount > 0
-                          ? `${controllerIssueCount} native controller contract issue${controllerIssueCount === 1 ? '' : 's'}`
-                          : 'Native controller contracts verified'}
-                      </div>
                       <div className="mt-2 grid grid-cols-2 gap-1">
                         {([
                           ['VIEW_INIT', 'Init'],
@@ -2245,7 +2244,6 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                           </button>
                         ))}
                       </div>
-                    </>
                   )}
                 </div>
               )}

@@ -4,6 +4,7 @@ import com.intellij.codeInsight.lookup.LookupElementBuilder
 import com.intellij.openapi.util.TextRange
 import com.intellij.patterns.PlatformPatterns
 import com.intellij.psi.ElementManipulators
+import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiElementResolveResult
 import com.intellij.psi.PsiLanguageInjectionHost
@@ -59,6 +60,17 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
             ?.let { return it }
         if (value.isBlank()) return PsiReference.EMPTY_ARRAY
         annotation ?: return PsiReference.EMPTY_ARRAY
+        if (annotation.name == "Subscribe" &&
+            annotation.attributeName == "subject"
+        ) {
+            return arrayOf(
+                JmixKotlinSubscribeSubjectReference(
+                    host,
+                    valueRange,
+                    value,
+                ),
+            )
+        }
         if (annotation.name == "ViewDescriptor" &&
             (annotation.attributeName == "value" || annotation.attributeName == null)
         ) {
@@ -131,6 +143,83 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
     }
 }
 
+internal class JmixKotlinSubscribeSubjectReference(
+    element: PsiLanguageInjectionHost,
+    range: TextRange,
+    private val subject: String,
+) : PsiPolyVariantReferenceBase<PsiLanguageInjectionHost>(element, range, false) {
+    override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> =
+        candidates()
+            .filter { candidate ->
+                candidate.logicalName == subject ||
+                    candidate.method.name == subject
+            }
+            .map(JmixSubscribeSubject::method)
+            .map(::PsiElementResolveResult)
+            .toTypedArray()
+
+    override fun getVariants(): Array<Any> =
+        candidates()
+            .map { candidate ->
+                LookupElementBuilder.create(
+                    candidate.method,
+                    candidate.logicalName,
+                ).withTypeText(
+                    candidate.method.containingClass?.qualifiedName.orEmpty(),
+                    true,
+                )
+            }
+            .distinctBy { it.lookupString }
+            .toTypedArray()
+
+    override fun handleElementRename(newElementName: String): PsiElement {
+        val logicalName = newElementName
+            .removePrefix("add")
+            .removePrefix("set")
+            .replaceFirstChar(Char::lowercaseChar)
+        return ElementManipulators.handleContentChange(
+            element,
+            rangeInElement,
+            logicalName,
+        )
+    }
+
+    private fun candidates(): List<JmixSubscribeSubject> {
+        val annotation = generateSequence(element.parent) { it.parent }
+            .firstOrNull { it.javaClass.simpleName == "KtAnnotationEntry" }
+            ?: return emptyList()
+        val function = generateSequence(annotation.parent) { it.parent }
+            .firstOrNull { it.javaClass.simpleName == "KtNamedFunction" }
+            ?: return emptyList()
+        val eventTypeName = function.kotlinSubscribeEventTypeName()
+            ?: return emptyList()
+        val eventClass = JmixFlowUiMetadata.resolveKotlinClass(
+            function,
+            eventTypeName,
+        ) ?: return emptyList()
+        val target = annotation.kotlinControllerTargetPath()
+        if (target.isBlank()) return emptyList()
+        val targetScope = KOTLIN_CONTROLLER_TARGET.find(annotation.text)
+            ?.groupValues
+            ?.get(1)
+            ?: "COMPONENT"
+        val tags = JmixFlowUiMetadata.targetTags(
+            element.kotlinAssociatedDescriptorFiles(),
+            target,
+            targetScope,
+        )
+        if (tags.size != 1) return emptyList()
+        val targetClasses = JmixFlowUiMetadata.expectedClasses(
+            element.project,
+            tags.single(),
+        )
+        if (targetClasses.isEmpty()) return emptyList()
+        val eventType = JavaPsiFacade.getElementFactory(element.project)
+            .createType(eventClass)
+        return JmixFlowUiMetadata.subscribeSubjects(targetClasses, eventType)
+    }
+}
+
 internal class JmixKotlinDescriptorReference(
     element: PsiLanguageInjectionHost,
     range: TextRange,
@@ -189,13 +278,18 @@ internal class JmixKotlinFlowUiIdReference(
         element.kotlinAssociatedDescriptorFiles().flatMap { file ->
             val allTags = PsiTreeUtil.findChildrenOfType(file, XmlTag::class.java)
             val owner = ownerId?.let { expectedOwner ->
-                allTags.firstOrNull { it.getAttributeValue("id") == expectedOwner }
+                allTags.firstOrNull { tag ->
+                    JmixFlowUiMetadata.injectionIdentifierAttributes(tag)
+                        .any { attribute -> attribute.value == expectedOwner }
+                }
             }
             val scope = owner?.let { PsiTreeUtil.findChildrenOfType(it, XmlTag::class.java) } ?: allTags
             scope.asSequence()
                 .filter { acceptedTags == null || it.localName in acceptedTags }
-                .mapNotNull { it.getAttribute("id") }
-                .filter { !it.value.isNullOrBlank() }
+                .flatMap { tag ->
+                    JmixFlowUiMetadata.injectionIdentifierAttributes(tag)
+                        .asSequence()
+                }
                 .toList()
         }
 }
@@ -229,6 +323,49 @@ private fun PsiLanguageInjectionHost.kotlinControllerTargetTags(): Set<String>? 
         ?.groupValues
         ?.get(1)
     return jmixControllerTargetTags(target)
+}
+
+internal fun PsiElement.kotlinControllerTargetPath(): String {
+    val arguments = text.substringAfter('(', "")
+        .substringBeforeLast(')', "")
+    return Regex("""\b(?:id|value)\s*=\s*"([^"$]+)"""")
+        .find(arguments)
+        ?.groupValues
+        ?.get(1)
+        ?: Regex("""^\s*"([^"$]+)"""")
+            .find(arguments)
+            ?.groupValues
+            ?.get(1)
+            .orEmpty()
+}
+
+internal fun PsiElement.kotlinSubscribeEventTypeName(): String? {
+    val source = text
+    val function = Regex("""\bfun\s+[A-Za-z_][A-Za-z0-9_]*\s*\(""")
+        .find(source)
+        ?: return null
+    val open = source.indexOf('(', function.range.first)
+    if (open < 0) return null
+    var depth = 0
+    var close = -1
+    for (index in open until source.length) {
+        when (source[index]) {
+            '(' -> depth++
+            ')' -> {
+                depth--
+                if (depth == 0) {
+                    close = index
+                    break
+                }
+            }
+        }
+    }
+    if (close <= open) return null
+    return source.substring(open + 1, close)
+        .substringAfter(':', "")
+        .substringBefore('=')
+        .trim()
+        .takeIf(String::isNotBlank)
 }
 
 internal fun PsiLanguageInjectionHost.kotlinAssociatedDescriptorFiles(): List<XmlFile> {

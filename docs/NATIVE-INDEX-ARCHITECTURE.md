@@ -20,6 +20,7 @@ for:
 | Shared fetch plans | XML descriptors whose root is `fetchPlans` or `fetch-plans` |
 | FlowUI descriptors | XML descriptors whose root is `view` or `fragment` |
 | Message bundles | `messages.properties` and locale variants |
+| Jmix Studio metadata | Java and Kotlin declarations containing `StudioComponent`, `StudioDataComponent`, `StudioFacet` or `StudioElement` |
 
 Indexers inspect text only and never construct PSI. Classification is
 conservative: the native services validate returned candidates with real PSI,
@@ -48,6 +49,12 @@ Native symbol access follows this sequence:
 Project-root changes are included because dependency and included-build changes
 can introduce symbols without editing an existing source file.
 
+FlowUI component metadata is resolved through IntelliJ's annotation stub index
+against project and library scope, then cached against the dedicated Studio
+metadata content stamp and project-root stamp. This makes the exact Jmix/add-on
+dependency versions authoritative for XML injection types and custom
+subscriptions without querying the annotation index again on unrelated typing.
+
 Project and dependency discovery uses the union of IntelliJ project-content and
 library scopes. It does not use the broader everything/scratch scope. A cold
 view-cache fill validates only view-controller files returned by its candidate
@@ -69,7 +76,7 @@ in smart mode. Remaining synchronous read scopes use cancellable read actions.
 
 `verifyNativeIndexArchitecture` enforces this contract in every aggregate
 gate. It scans native IDE sources for prohibited APIs and verifies that the
-same eight index implementations are registered in the shared, IntelliJ
+same nine index implementations are registered in the shared, IntelliJ
 2025.3 and IntelliJ 2026.2 descriptors. A broad-scan or registration regression
 therefore fails the build before packaging.
 
@@ -81,12 +88,16 @@ messages, fetch plans, permissions and Spring menu beans. It proves that:
 
 - every real symbol remains discoverable;
 - FlowUI discovery excludes unrelated XML;
-- 100 repeated warm reads reuse the exact seven cached inventories;
+- 100 repeated warm reads reuse the exact seven symbol inventories and Studio
+  metadata snapshot;
 - adding unrelated files does not evict any inventory;
 - 20 consecutive in-place typing cycles across unrelated XML, properties and
-  Java files preserve the identity of all seven inventories;
+  Java files preserve the identity of all seven inventories and the metadata
+  snapshot;
 - editing a real message bundle replaces only the message inventory while all
   other inventories retain object identity;
+- editing a real Studio metadata declaration replaces only the metadata
+  snapshot while all symbol inventories retain object identity;
 - warm and typing-cycle p50/p95/p99 latency stays within explicit budgets;
 - warm and incremental lookup stay below the explicit two-second ceiling and
   the repeated-typing loop stays below its five-second ceiling on both
@@ -96,8 +107,8 @@ Observed in the 2026-07-29 milestone run:
 
 | Host | 100 warm reads total (p95/p99) | Lookup after unrelated edits | 20 three-file typing cycles total (p95/p99) | Relevant message edit |
 |---|---:|---:|---:|---:|
-| IntelliJ IDEA 2025.3 | 12 ms (0/0 ms) | 3 ms | 136 ms (19/19 ms) | 55 ms |
-| IntelliJ IDEA 2026.2 | 15 ms (0/0 ms) | 3 ms | 217 ms (32/32 ms) | 77 ms |
+| IntelliJ IDEA 2025.3 | 5 ms (0/0 ms) | 2 ms | 84 ms (6/6 ms) | 5 ms |
+| IntelliJ IDEA 2026.2 | 9 ms (0/0 ms) | 4 ms | 134 ms (12/12 ms) | 8 ms |
 
 The light-fixture gate is a deterministic regression, not a substitute for an
 installed-IDE benchmark. Release certification must additionally publish cold

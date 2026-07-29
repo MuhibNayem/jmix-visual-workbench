@@ -2,9 +2,20 @@ package org.jmixworkbench.ide
 
 import com.intellij.codeInsight.lookup.LookupElement
 import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.psi.PsiLiteralExpression
+import com.intellij.psi.PsiMethod
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.testFramework.fixtures.LightJavaCodeInsightFixtureTestCase
+import org.jmixworkbench.discovery.model.ArtifactKind
+import org.jmixworkbench.discovery.model.ArtifactOrigin
+import org.jmixworkbench.discovery.model.ArtifactOwner
+import org.jmixworkbench.discovery.model.ArtifactSnapshot
+import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
+import org.jmixworkbench.discovery.model.SourceLocator
+import org.jmixworkbench.services.FlowUiControllerPsiReader
+import org.jmixworkbench.services.FlowUiControllerWorkspaceSnapshot
+import org.jmixworkbench.services.ProjectFileResolver
 
 class JmixNativeFlowUiControllerInspectionTest :
     LightJavaCodeInsightFixtureTestCase() {
@@ -320,6 +331,562 @@ class JmixNativeFlowUiControllerInspectionTest :
         )
     }
 
+    fun testStudioMetadataEnforcesExactDescriptorInjectionType() {
+        addFlowUiAnnotations()
+        addStudioMetadataAnnotations()
+        addVaadinListenerTypes()
+        addMetadataBackedButtons(includeSecondClickSubject = false)
+        myFixture.addClass(
+            """
+            package com.company.ui;
+            public class WrongButton extends com.vaadin.flow.component.Component {
+            }
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/employee-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout>
+                    <button id="saveButton"/>
+                    <button id="cancelButton"/>
+                </layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(JmixJavaFlowUiControllerInspection())
+        myFixture.configureByText(
+            "EmployeeView.java",
+            """
+            package com.company.payroll;
+
+            import com.company.ui.JmixButton;
+            import com.company.ui.WrongButton;
+            import io.jmix.flowui.view.ViewComponent;
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("Employee.list")
+            @ViewDescriptor("employee-view.xml")
+            public class EmployeeView {
+                @ViewComponent
+                private JmixButton saveButton;
+
+                @ViewComponent
+                private WrongButton cancelButton;
+            }
+            """.trimIndent(),
+        )
+
+        val descriptions = controllerProblems().mapNotNull { it.description }
+        assertEquals(
+            descriptions.joinToString("\n"),
+            1,
+            descriptions.count {
+                "@ViewComponent 'cancelButton' has type WrongButton" in it
+            },
+        )
+        assertFalse(
+            descriptions.any { "@ViewComponent 'saveButton'" in it },
+        )
+    }
+
+    fun testSubscribeSubjectCompletesNavigatesRenamesAndValidatesEventContract() {
+        addFlowUiAnnotations()
+        addStudioMetadataAnnotations()
+        addVaadinListenerTypes()
+        addMetadataBackedButtons(includeSecondClickSubject = false)
+        myFixture.addFileToProject(
+            "com/company/payroll/employee-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout>
+                    <button id="saveButton"/>
+                </layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(JmixJavaFlowUiControllerInspection())
+        myFixture.configureByText(
+            "EmployeeView.java",
+            """
+            package com.company.payroll;
+
+            import com.company.ui.ClickEvent;
+            import io.jmix.flowui.view.Subscribe;
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("Employee.list")
+            @ViewDescriptor("employee-view.xml")
+            public class EmployeeView {
+                @Subscribe(id = "saveButton", subject = "click<caret>Listener")
+                public void onSave(ClickEvent event) {
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val literal = PsiTreeUtil.getParentOfType(
+            myFixture.file.findElementAt(myFixture.caretOffset - 1),
+            PsiLiteralExpression::class.java,
+            false,
+        )!!
+        val reference = literal.references
+            .filterIsInstance<JmixJavaSubscribeSubjectReference>()
+            .single()
+        val resolved = reference.resolve() as PsiMethod
+        assertEquals("addClickListener", resolved.name)
+        assertEquals(
+            listOf("clickListener"),
+            reference.variants
+                .filterIsInstance<LookupElement>()
+                .map(LookupElement::getLookupString),
+        )
+        WriteCommandAction.runWriteCommandAction(project) {
+            reference.handleElementRename("addPressedListener")
+        }
+        assertTrue(myFixture.file.text.contains("subject = \"pressedListener\""))
+
+        myFixture.configureByText(
+            "EmployeeView.java",
+            """
+            package com.company.payroll;
+
+            import com.company.ui.ClickEvent;
+            import io.jmix.flowui.view.Subscribe;
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("Employee.list")
+            @ViewDescriptor("employee-view.xml")
+            public class EmployeeView {
+                @Subscribe(id = "saveButton", subject = "missingListener")
+                public void onSave(ClickEvent event) {
+                }
+            }
+            """.trimIndent(),
+        )
+        assertTrue(
+            controllerProblems().any {
+                it.description?.contains(
+                    "@Subscribe subject 'missingListener' is not available",
+                ) == true
+            },
+        )
+    }
+
+    fun testSubscribeWithoutSubjectFailsClosedWhenEventHasMultipleListeners() {
+        addFlowUiAnnotations()
+        addStudioMetadataAnnotations()
+        addVaadinListenerTypes()
+        addMetadataBackedButtons(includeSecondClickSubject = true)
+        myFixture.addFileToProject(
+            "com/company/payroll/employee-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout>
+                    <button id="saveButton"/>
+                </layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(JmixJavaFlowUiControllerInspection())
+        myFixture.configureByText(
+            "EmployeeView.java",
+            """
+            package com.company.payroll;
+
+            import com.company.ui.ClickEvent;
+            import io.jmix.flowui.view.Subscribe;
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("Employee.list")
+            @ViewDescriptor("employee-view.xml")
+            public class EmployeeView {
+                @Subscribe("saveButton")
+                public void onSave(ClickEvent event) {
+                }
+            }
+            """.trimIndent(),
+        )
+
+        assertTrue(
+            controllerProblems().any {
+                it.description?.contains(
+                    "exposes multiple listeners for ClickEvent",
+                ) == true
+            },
+        )
+    }
+
+    fun testKotlinMetadataTypingAndSubscribeSubjectReferenceMatchJava() {
+        addFlowUiAnnotations()
+        addStudioMetadataAnnotations()
+        addVaadinListenerTypes()
+        addMetadataBackedButtons(includeSecondClickSubject = false)
+        myFixture.addClass(
+            """
+            package com.company.ui;
+            public class WrongButton extends com.vaadin.flow.component.Component {
+            }
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/employee-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout>
+                    <button id="saveButton"/>
+                    <button id="cancelButton"/>
+                </layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(JmixKotlinFlowUiControllerInspection())
+        myFixture.configureByText(
+            "EmployeeView.kt",
+            """
+            package com.company.payroll
+
+            import com.company.ui.ClickEvent
+            import com.company.ui.JmixButton
+            import com.company.ui.WrongButton
+            import io.jmix.flowui.view.Subscribe
+            import io.jmix.flowui.view.ViewComponent
+            import io.jmix.flowui.view.ViewController
+            import io.jmix.flowui.view.ViewDescriptor
+
+            @ViewController("Employee.list")
+            @ViewDescriptor("employee-view.xml")
+            class EmployeeView {
+                @ViewComponent
+                lateinit var saveButton: JmixButton
+
+                @ViewComponent
+                lateinit var cancelButton: WrongButton
+
+                @Subscribe(id = "saveButton", subject = "click<caret>Listener")
+                fun onSave(event: ClickEvent) {
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val host = generateSequence(
+            myFixture.file.findElementAt(myFixture.caretOffset - 1),
+        ) { it.parent }.first {
+            it.javaClass.simpleName == "KtStringTemplateExpression"
+        }
+        val reference = host.references
+            .filterIsInstance<JmixKotlinSubscribeSubjectReference>()
+            .single()
+        assertEquals(
+            "addClickListener",
+            (reference.resolve() as PsiMethod).name,
+        )
+        assertEquals(
+            listOf("clickListener"),
+            reference.variants
+                .filterIsInstance<LookupElement>()
+                .map(LookupElement::getLookupString),
+        )
+
+        val descriptions = controllerProblems().mapNotNull { it.description }
+        assertEquals(
+            descriptions.joinToString("\n"),
+            1,
+            descriptions.count {
+                "@ViewComponent 'cancelButton' has type WrongButton" in it
+            },
+        )
+        assertFalse(
+            descriptions.any { "@ViewComponent 'saveButton'" in it },
+        )
+        assertFalse(
+            descriptions.any { "@Subscribe subject 'clickListener'" in it },
+        )
+
+        val virtualFile = myFixture.file.virtualFile
+        val relativePath = ProjectFileResolver.getInstance(project)
+            .locatorPath(virtualFile)
+        assertNotNull(relativePath)
+        val fingerprint = CanonicalDiscoveryJson.sha256(myFixture.file.text)
+        val visualSnapshot = FlowUiControllerPsiReader.read(
+            project,
+            listOf(
+                ArtifactSnapshot(
+                    id = "controller",
+                    kind = ArtifactKind.VIEW_CONTROLLER,
+                    semanticKey = "com.company.payroll.EmployeeView",
+                    owner = ArtifactOwner("build", "app", "main"),
+                    sourceLocator = SourceLocator(
+                        relativePath = relativePath!!,
+                        revisionFingerprint = fingerprint,
+                    ),
+                    origin = ArtifactOrigin.SOURCE,
+                    fingerprint = fingerprint,
+                    displayName = "EmployeeView",
+                    summary = null,
+                ),
+            ),
+        )
+        assertNotNull(visualSnapshot)
+        assertFalse(visualSnapshot!!.psiSupported)
+        assertEquals("kotlin", visualSnapshot.language)
+        assertEquals(2, visualSnapshot.injections.size)
+        assertEquals(1, visualSnapshot.handlers.size)
+        assertTrue(
+            visualSnapshot.injections
+                .single { it.fieldName == "cancelButton" }
+                .issues
+                .any { it.code == "JMIX-KOTLIN-VIEW-COMPONENT-TYPE" },
+        )
+    }
+
+    fun testAddonCustomSubscriptionMetadataParticipatesInNativeResolution() {
+        addFlowUiAnnotations()
+        addStudioMetadataAnnotations()
+        addVaadinListenerTypes()
+        addMetadataBackedButtons(includeSecondClickSubject = false)
+        myFixture.addClass(
+            """
+            package com.company.ui;
+            public class AuditEvent extends java.util.EventObject {
+                public AuditEvent(Object source) {
+                    super(source);
+                }
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package com.company.ui;
+            public interface AddonFlowUiMetadata {
+                @io.jmix.flowui.kit.meta.StudioComponent(
+                    classFqn = "com.company.ui.JmixButton",
+                    xmlElement = "button",
+                    injectionIdentifier = "name",
+                    customSubscriptions =
+                        @io.jmix.flowui.kit.meta.StudioCustomSubscription(
+                            methodName = "auditListener",
+                            eventClassFqn = "com.company.ui.AuditEvent"
+                        )
+                )
+                Object auditedButton();
+            }
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/employee-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout>
+                    <button name="auditButton"/>
+                </layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(JmixJavaFlowUiControllerInspection())
+        myFixture.configureByText(
+            "EmployeeView.java",
+            """
+            package com.company.payroll;
+
+            import com.company.ui.AuditEvent;
+            import io.jmix.flowui.view.Subscribe;
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("Employee.list")
+            @ViewDescriptor("employee-view.xml")
+            public class EmployeeView {
+                @Subscribe(id = "auditButton", subject = "audit<caret>Listener")
+                public void onAudit(AuditEvent event) {
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val literal = PsiTreeUtil.getParentOfType(
+            myFixture.file.findElementAt(myFixture.caretOffset - 1),
+            PsiLiteralExpression::class.java,
+            false,
+        )!!
+        val reference = literal.references
+            .filterIsInstance<JmixJavaSubscribeSubjectReference>()
+            .single()
+        assertEquals(
+            "auditedButton",
+            (reference.resolve() as PsiMethod).name,
+        )
+        val targetLiteral = PsiTreeUtil.findChildrenOfType(
+            myFixture.file,
+            PsiLiteralExpression::class.java,
+        ).single { it.value == "auditButton" }
+        val targetReference = targetLiteral.references
+            .filterIsInstance<JmixJavaFlowUiIdReference>()
+            .single()
+        val targetDeclaration = targetReference.resolve() as JmixFlowUiIdElement
+        assertEquals("name", targetDeclaration.declaration.localName)
+        val xmlIdentifier = targetDeclaration.declaration.valueElement!!
+        assertTrue(
+            xmlIdentifier.references
+                .filterIsInstance<JmixFlowUiIdDeclarationReference>()
+                .single()
+                .resolve() is JmixFlowUiIdElement,
+        )
+        val problems = controllerProblems()
+        assertTrue(
+            problems.joinToString("\n") { it.description.orEmpty() },
+            problems.isEmpty(),
+        )
+    }
+
+    fun testViewComponentSetterInjectionContractsMatchRuntimeInJavaAndKotlin() {
+        addFlowUiAnnotations()
+        addStudioMetadataAnnotations()
+        addVaadinListenerTypes()
+        addMetadataBackedButtons(includeSecondClickSubject = false)
+        myFixture.addClass(
+            """
+            package com.company.ui;
+            public class WrongButton extends com.vaadin.flow.component.Component {
+            }
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/employee-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout>
+                    <button id="saveButton"/>
+                    <button id="cancelButton"/>
+                </layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(JmixJavaFlowUiControllerInspection())
+        myFixture.configureByText(
+            "EmployeeView.java",
+            """
+            package com.company.payroll;
+
+            import com.company.ui.JmixButton;
+            import com.company.ui.WrongButton;
+            import io.jmix.flowui.view.ViewComponent;
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("Employee.list")
+            @ViewDescriptor("employee-view.xml")
+            public class EmployeeView {
+                @ViewComponent
+                private void setSaveButton(JmixButton button) {
+                }
+
+                @ViewComponent("cancelButton")
+                private String injectCancel(WrongButton button) {
+                    return "invalid";
+                }
+
+                @ViewComponent
+                private void brokenSignature() {
+                }
+            }
+            """.trimIndent(),
+        )
+        val javaProblems = controllerProblems().mapNotNull { it.description }
+        assertFalse(javaProblems.any { "setSaveButton()" in it })
+        assertTrue(javaProblems.any { "injectCancel()' has type WrongButton" in it })
+        assertFalse(javaProblems.any { "must return void" in it })
+        assertTrue(javaProblems.any { "must declare exactly one parameter" in it })
+        val javaSnapshot = visualSnapshotForCurrentController()
+        assertTrue(javaSnapshot.psiSupported)
+        assertEquals("java", javaSnapshot.language)
+        assertEquals(3, javaSnapshot.injections.size)
+        assertTrue(
+            javaSnapshot.injections
+                .single { it.fieldName == "injectCancel()" }
+                .issues
+                .any { it.code == "JMIX-VIEW-COMPONENT-TYPE" },
+        )
+
+        myFixture.enableInspections(JmixKotlinFlowUiControllerInspection())
+        myFixture.configureByText(
+            "EmployeeView.kt",
+            """
+            package com.company.payroll
+
+            import com.company.ui.JmixButton
+            import com.company.ui.WrongButton
+            import io.jmix.flowui.view.ViewComponent
+            import io.jmix.flowui.view.ViewController
+            import io.jmix.flowui.view.ViewDescriptor
+
+            @ViewController("Employee.list")
+            @ViewDescriptor("employee-view.xml")
+            class EmployeeView {
+                @ViewComponent
+                fun setSaveButton(button: JmixButton) {
+                }
+
+                @ViewComponent("cancelButton")
+                fun injectCancel(button: WrongButton): String = "invalid"
+
+                @ViewComponent
+                fun brokenSignature() {
+                }
+            }
+            """.trimIndent(),
+        )
+        val kotlinProblems = controllerProblems().mapNotNull { it.description }
+        assertFalse(kotlinProblems.any { "setSaveButton()" in it })
+        assertTrue(kotlinProblems.any { "injectCancel()' has type WrongButton" in it })
+        assertFalse(kotlinProblems.any { "must return Unit" in it })
+        assertTrue(kotlinProblems.any { "must declare exactly one parameter" in it })
+        val kotlinSnapshot = visualSnapshotForCurrentController()
+        assertFalse(kotlinSnapshot.psiSupported)
+        assertEquals("kotlin", kotlinSnapshot.language)
+        assertEquals(3, kotlinSnapshot.injections.size)
+        assertTrue(
+            kotlinSnapshot.injections
+                .single { it.fieldName == "injectCancel()" }
+                .issues
+                .any {
+                    it.code == "JMIX-KOTLIN-VIEW-COMPONENT-METHOD-TYPE"
+                },
+        )
+    }
+
+    private fun visualSnapshotForCurrentController():
+        FlowUiControllerWorkspaceSnapshot {
+        val relativePath = ProjectFileResolver.getInstance(project)
+            .locatorPath(myFixture.file.virtualFile)
+        assertNotNull(relativePath)
+        val fingerprint = CanonicalDiscoveryJson.sha256(myFixture.file.text)
+        return FlowUiControllerPsiReader.read(
+            project,
+            listOf(
+                ArtifactSnapshot(
+                    id = "controller",
+                    kind = ArtifactKind.VIEW_CONTROLLER,
+                    semanticKey = myFixture.file.name,
+                    owner = ArtifactOwner("build", "app", "main"),
+                    sourceLocator = SourceLocator(
+                        relativePath = relativePath!!,
+                        revisionFingerprint = fingerprint,
+                    ),
+                    origin = ArtifactOrigin.SOURCE,
+                    fingerprint = fingerprint,
+                    displayName = myFixture.file.name,
+                    summary = null,
+                ),
+            ),
+        )!!
+    }
+
     private fun controllerProblems() =
         myFixture.doHighlighting()
             .filter { info ->
@@ -361,6 +928,139 @@ class JmixNativeFlowUiControllerInspectionTest :
                 public ValueChangeEvent(Object source) {
                     super(source);
                 }
+            }
+            """.trimIndent(),
+        )
+    }
+
+    private fun addStudioMetadataAnnotations() {
+        myFixture.addClass(
+            """
+            package io.jmix.flowui.kit.meta;
+            public @interface StudioCustomSubscription {
+                String methodName();
+                String eventClassFqn();
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package io.jmix.flowui.kit.meta;
+            public @interface StudioComponent {
+                String classFqn() default "";
+                String xmlElement() default "";
+                String xmlns() default "";
+                String injectionIdentifier() default "id";
+                boolean isInjectable() default true;
+                StudioCustomSubscription[] customSubscriptions() default {};
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package io.jmix.flowui.kit.meta;
+            public @interface StudioDataComponent {
+                String classFqn() default "";
+                String xmlElement() default "";
+                String xmlns() default "";
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package io.jmix.flowui.kit.meta;
+            public @interface StudioFacet {
+                String classFqn() default "";
+                String xmlElement() default "";
+                String xmlns() default "";
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package io.jmix.flowui.kit.meta;
+            public @interface StudioElement {
+                String classFqn() default "";
+                String xmlElement() default "";
+                String xmlns() default "";
+                String injectionIdentifier() default "id";
+                boolean isInjectable() default true;
+            }
+            """.trimIndent(),
+        )
+    }
+
+    private fun addVaadinListenerTypes() {
+        myFixture.addClass(
+            """
+            package com.vaadin.flow.component;
+            public class Component {
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package com.vaadin.flow.component;
+            public interface ComponentEventListener<E extends java.util.EventObject> {
+                void onComponentEvent(E event);
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package com.vaadin.flow.shared;
+            public interface Registration {
+                void remove();
+            }
+            """.trimIndent(),
+        )
+    }
+
+    private fun addMetadataBackedButtons(
+        includeSecondClickSubject: Boolean,
+    ) {
+        myFixture.addClass(
+            """
+            package com.company.ui;
+            public class ClickEvent extends java.util.EventObject {
+                public ClickEvent(Object source) {
+                    super(source);
+                }
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package com.company.ui;
+            public class JmixButton extends com.vaadin.flow.component.Component {
+                public com.vaadin.flow.shared.Registration addClickListener(
+                        com.vaadin.flow.component.ComponentEventListener<ClickEvent> listener) {
+                    return null;
+                }
+                ${
+                if (includeSecondClickSubject) {
+                    """
+                    public com.vaadin.flow.shared.Registration addPrimaryClickListener(
+                            com.vaadin.flow.component.ComponentEventListener<ClickEvent> listener) {
+                        return null;
+                    }
+                    """.trimIndent()
+                } else {
+                    ""
+                }
+                }
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package com.company.ui;
+            public interface FlowUiMetadata {
+                @io.jmix.flowui.kit.meta.StudioComponent(
+                    classFqn = "com.company.ui.JmixButton",
+                    xmlElement = "button"
+                )
+                Object button();
             }
             """.trimIndent(),
         )

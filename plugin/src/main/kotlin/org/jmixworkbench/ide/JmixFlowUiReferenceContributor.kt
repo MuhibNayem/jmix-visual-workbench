@@ -50,10 +50,19 @@ internal object JmixFlowUiReferenceProvider : PsiReferenceProvider() {
 
         val rawValue = value.value
         if (rawValue.isBlank()) return PsiReference.EMPTY_ARRAY
+        val identifierDeclaration =
+            JmixFlowUiMetadata.injectionIdentifierAttributes(attribute.parent)
+                .any { candidate -> candidate === attribute }
+        if (identifierDeclaration) {
+            return arrayOf(
+                JmixFlowUiIdDeclarationReference(
+                    value,
+                    valueRange(rawValue),
+                    attribute,
+                ),
+            )
+        }
         return when (attribute.localName) {
-            "id" ->
-                arrayOf(JmixFlowUiIdDeclarationReference(value, valueRange(rawValue), attribute))
-
             in DIRECT_ID_REFERENCE_ATTRIBUTES ->
                 arrayOf(JmixFlowUiIdReference(value, valueRange(rawValue), rawValue))
 
@@ -144,13 +153,18 @@ internal class JmixFlowUiIdReference(
         val file = element.containingFile as? XmlFile ?: return emptyList()
         val allTags = PsiTreeUtil.findChildrenOfType(file, XmlTag::class.java)
         val owner = ownerId?.let { expectedOwner ->
-            allTags.firstOrNull { it.getAttributeValue("id") == expectedOwner }
+            allTags.firstOrNull { tag ->
+                JmixFlowUiMetadata.injectionIdentifierAttributes(tag)
+                    .any { attribute -> attribute.value == expectedOwner }
+            }
         }
         val scope = owner?.let { PsiTreeUtil.findChildrenOfType(it, XmlTag::class.java) } ?: allTags
         return scope.asSequence()
             .filter { requiredTag == null || it.localName == requiredTag }
-            .mapNotNull { it.getAttribute("id") }
-            .filter { !it.value.isNullOrBlank() }
+            .flatMap { tag ->
+                JmixFlowUiMetadata.injectionIdentifierAttributes(tag)
+                    .asSequence()
+            }
             .toList()
     }
 

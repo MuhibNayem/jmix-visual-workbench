@@ -304,8 +304,8 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
         val indexClasses = Regex(
             """class\s+(Jmix\w+CandidateFileIndex)\s*:\s*JmixCandidateFileIndex""",
         ).findAll(indexSource).map { it.groupValues[1] }.toSet()
-        check(indexClasses.size == 8) {
-            "Expected eight independent native candidate indexes, found " +
+        check(indexClasses.size == 9) {
+            "Expected nine independent native candidate indexes, found " +
                 "${indexClasses.size}: ${indexClasses.sorted()}"
         }
         pluginDescriptors.files.forEach { descriptor ->

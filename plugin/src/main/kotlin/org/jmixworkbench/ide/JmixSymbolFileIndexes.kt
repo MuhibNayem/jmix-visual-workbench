@@ -213,6 +213,21 @@ class JmixMessageBundleCandidateFileIndex : JmixCandidateFileIndex(
     }
 }
 
+class JmixStudioMetadataCandidateFileIndex : JmixCandidateFileIndex(
+    NAME,
+    JVM_EXTENSIONS,
+) {
+    override fun isCandidate(file: VirtualFile, text: CharSequence): Boolean =
+        STUDIO_METADATA_ANNOTATIONS.any(text::containsAnnotation) ||
+            STUDIO_METADATA_QUALIFIED_MARKERS.any(text::contains)
+
+    companion object {
+        @JvmField
+        val NAME: ID<String, Long> =
+            ID.create("org.jmixworkbench.studioMetadataCandidateFile")
+    }
+}
+
 private val JVM_EXTENSIONS = setOf("java", "kt")
 private val XML_EXTENSIONS = setOf("xml")
 private val PROPERTIES_EXTENSIONS = setOf("properties")
@@ -239,6 +254,15 @@ private val SPRING_BEAN_QUALIFIED_MARKERS = setOf(
 )
 private val MESSAGE_BUNDLE_NAME =
     Regex("""messages(?:_[A-Za-z0-9_-]+)?\.properties""")
+private val STUDIO_METADATA_ANNOTATIONS = setOf(
+    "StudioComponent",
+    "StudioDataComponent",
+    "StudioFacet",
+    "StudioElement",
+)
+private val STUDIO_METADATA_QUALIFIED_MARKERS = STUDIO_METADATA_ANNOTATIONS.map {
+    "io.jmix.flowui.kit.meta.$it"
+}
 
 /**
  * Returns the first real element name without constructing DOM/PSI. XML
