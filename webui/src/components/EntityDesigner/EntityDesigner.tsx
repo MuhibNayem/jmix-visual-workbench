@@ -79,6 +79,7 @@ export default function EntityDesigner() {
   const [renameDraft, setRenameDraft] = useState('')
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameLaunched, setRenameLaunched] = useState(false)
+  const [safeDeleteBusy, setSafeDeleteBusy] = useState(false)
   const [databaseInspection, setDatabaseInspection] =
     useState<DatabaseEntityTableInspectionResponse | null>(null)
   const [databaseColumnDrafts, setDatabaseColumnDrafts] =
@@ -220,6 +221,24 @@ export default function EntityDesigner() {
       addToast(`Native rename failed: ${error.message}`, 'error')
     } finally {
       setRenameBusy(false)
+    }
+  }
+
+  const handleNativeAttributeSafeDelete = async (attributeName: string) => {
+    if (!existingEntity) return
+    setSafeDeleteBusy(true)
+    try {
+      const response = await bridge.launchEntityAttributeSafeDelete({
+        sourceLocator: existingEntity.sourceLocator,
+        entityClassName: existingEntity.className,
+        attributeName,
+      })
+      addToast(response.message, response.success ? 'info' : 'error')
+      if (response.success) setRenameLaunched(true)
+    } catch (error: any) {
+      addToast(`Native Safe Delete failed: ${error.message}`, 'error')
+    } finally {
+      setSafeDeleteBusy(false)
     }
   }
 
@@ -1789,6 +1808,28 @@ export default function EntityDesigner() {
                               Refresh after apply
                             </button>
                           )}
+                        </div>
+                        <div className="mt-4 border-t border-surface-border pt-3">
+                          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                                Dependency-aware removal
+                              </div>
+                              <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+                                Opens IntelliJ Safe Delete and shows source, FlowUI, fetch-plan, JPQL, security, and
+                                relationship usages before anything is removed. The database column is deliberately
+                                retained until a separate data-audited migration is approved.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={safeDeleteBusy}
+                              onClick={() => handleNativeAttributeSafeDelete(selected.name)}
+                              className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-500/20 disabled:opacity-50"
+                            >
+                              {safeDeleteBusy ? 'Resolving dependencies…' : 'Open Safe Delete preview'}
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}

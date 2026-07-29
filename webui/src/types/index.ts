@@ -450,6 +450,19 @@ export interface EntityAttributeRenameLaunchResponse {
   message: string
 }
 
+export interface EntityAttributeSafeDeleteRequest {
+  sourceLocator: GraphSourceLocator
+  entityClassName: string
+  attributeName: string
+}
+
+export interface EntityAttributeSafeDeleteLaunchResponse {
+  success: boolean
+  code?: string
+  message: string
+  retainedColumnName?: string
+}
+
 export interface DatabaseEntityTableInspectionRequest {
   storeId: string
   tableName: string

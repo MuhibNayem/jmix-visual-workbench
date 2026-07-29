@@ -10,6 +10,7 @@ import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.refactoring.rename.RenameProcessor
+import com.intellij.refactoring.safeDelete.SafeDeleteProcessor
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
@@ -30,6 +31,9 @@ import org.jmixworkbench.services.EntityAttributeRefactorService
 import org.jmixworkbench.services.EntityAttributeRenameLaunchResponse
 import org.jmixworkbench.services.EntityAttributeRenameRequest
 import org.jmixworkbench.services.PreparedEntityAttributeRename
+import org.jmixworkbench.services.EntityAttributeSafeDeleteLaunchResponse
+import org.jmixworkbench.services.EntityAttributeSafeDeleteRequest
+import org.jmixworkbench.services.PreparedEntityAttributeSafeDelete
 import org.jmixworkbench.services.EntityAttributePropagationApplyRequest
 import org.jmixworkbench.services.EntityAttributePropagationChangeRequest
 import org.jmixworkbench.services.EntityAttributePropagationInspectionRequest
@@ -326,6 +330,10 @@ class JcefBridge(
             }
             if (action == "launchEntityAttributeRename") {
                 handleLaunchEntityAttributeRename(action, requestId, payload)
+                return
+            }
+            if (action == "launchEntityAttributeSafeDelete") {
+                handleLaunchEntityAttributeSafeDelete(action, requestId, payload)
                 return
             }
             if (action == "inspectDatabaseEntityTable") {
@@ -1297,6 +1305,70 @@ class JcefBridge(
                     ).apply {
                         setPreviewUsages(true)
                     }.run()
+                }, ModalityState.nonModal())
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleLaunchEntityAttributeSafeDelete(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeSafeDeleteRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedEntityAttributeSafeDelete> {
+            EntityAttributeRefactorService.getInstance(project).prepareSafeDelete(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val element = prepared.element
+                if (!prepared.accepted || element == null) {
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(
+                            EntityAttributeSafeDeleteLaunchResponse(
+                                success = false,
+                                code = prepared.code,
+                                message = prepared.message,
+                            ),
+                        ),
+                    )
+                    return@finishOnUiThread
+                }
+                sendResponse(
+                    action,
+                    requestId,
+                    gson.toJson(
+                        EntityAttributeSafeDeleteLaunchResponse(
+                            success = true,
+                            message = buildString {
+                                append("IntelliJ Safe Delete usage preview opened for ")
+                                    .append(request.attributeName)
+                                    .append(".")
+                                prepared.retainedColumnName?.let {
+                                    append(" Database column ").append(it)
+                                        .append(" is retained for separate migration review.")
+                                }
+                            },
+                            retainedColumnName = prepared.retainedColumnName,
+                        ),
+                    ),
+                )
+                ApplicationManager.getApplication().invokeLater({
+                    SafeDeleteProcessor.createInstance(
+                        project,
+                        null,
+                        arrayOf(element),
+                        true,
+                        true,
+                    ).run()
                 }, ModalityState.nonModal())
             }
             .submit(AppExecutorUtil.getAppExecutorService())

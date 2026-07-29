@@ -151,6 +151,124 @@ class EntityAttributeRefactorService(
         )
     }
 
+    /**
+     * Resolves a property for IntelliJ Safe Delete without mutating source or
+     * database state. The database mapping is intentionally retained: after
+     * Safe Delete is applied, the schema workspace can review the now-unmapped
+     * column and generate a separate, data-audited retirement migration.
+     */
+    fun prepareSafeDelete(
+        request: EntityAttributeSafeDeleteRequest,
+    ): PreparedEntityAttributeSafeDelete {
+        val resolved = ProjectFileResolver.getInstance(project)
+            .resolveFile(request.sourceLocator.relativePath)
+            ?: return PreparedEntityAttributeSafeDelete.failure(
+                "JVW-ENTITY-SAFE-DELETE-SOURCE-MISSING",
+                "The indexed entity source no longer exists.",
+            )
+        val file = resolved.file
+        if (
+            file.isDirectory ||
+            file.extension !in setOf("java", "kt") ||
+            !VfsUtilCore.isAncestor(resolved.root, file, false)
+        ) {
+            return PreparedEntityAttributeSafeDelete.failure(
+                "JVW-ENTITY-SAFE-DELETE-SOURCE-INVALID",
+                "Native safe delete requires a Java or Kotlin source inside project content.",
+            )
+        }
+        val current = runCatching { ProjectSourceText.read(file) }.getOrElse {
+            return PreparedEntityAttributeSafeDelete.failure(
+                "JVW-ENTITY-SAFE-DELETE-SOURCE-UNREADABLE",
+                "The current entity document cannot be read.",
+            )
+        }
+        if (request.sourceLocator.revisionFingerprint != CanonicalDiscoveryJson.sha256(current)) {
+            return PreparedEntityAttributeSafeDelete.failure(
+                "JVW-ENTITY-SAFE-DELETE-SOURCE-STALE",
+                "The entity changed after indexing. Refresh Entity Designer before deleting.",
+            )
+        }
+        val snapshot = SchemaWorkspaceService.getInstance(project).load().entities.firstOrNull {
+            it.className == request.entityClassName &&
+                it.sourceLocator.relativePath == request.sourceLocator.relativePath
+        } ?: return PreparedEntityAttributeSafeDelete.failure(
+            "JVW-ENTITY-SAFE-DELETE-SNAPSHOT-MISSING",
+            "The exact entity metadata snapshot is unavailable.",
+        )
+        val attribute = snapshot.attributes.firstOrNull { it.name == request.attributeName }
+            ?: return PreparedEntityAttributeSafeDelete.failure(
+                "JVW-ENTITY-SAFE-DELETE-ATTRIBUTE-MISSING",
+                "Property ${request.attributeName} is no longer declared by ${request.entityClassName}.",
+            )
+        val psiFile = PsiManager.getInstance(project).findFile(file)
+            ?: return PreparedEntityAttributeSafeDelete.failure(
+                "JVW-ENTITY-SAFE-DELETE-PSI-MISSING",
+                "IntelliJ could not create live PSI for the entity source.",
+            )
+        val declaration = when (psiFile) {
+            is PsiJavaFile -> psiFile.classes
+                .singleOrNull { it.name == request.entityClassName }
+                ?.fields
+                ?.singleOrNull {
+                    it.name == request.attributeName &&
+                        !it.hasModifierProperty(PsiModifier.STATIC)
+                }
+            else -> {
+                val entityClass = PsiTreeUtil.findChildrenOfType(
+                    psiFile,
+                    PsiNamedElement::class.java,
+                ).singleOrNull {
+                    it.javaClass.simpleName == "KtClass" &&
+                        it.name == request.entityClassName
+                }
+                entityClass?.let { owner ->
+                    PsiTreeUtil.findChildrenOfType(owner, PsiNamedElement::class.java)
+                        .singleOrNull {
+                            it.javaClass.simpleName == "KtProperty" &&
+                                it.name == request.attributeName &&
+                                it.nearestKotlinEntityClass() === owner
+                        }
+                }
+            }
+        } ?: return PreparedEntityAttributeSafeDelete.failure(
+            "JVW-ENTITY-SAFE-DELETE-DECLARATION-MISSING",
+            "The live property declaration cannot be resolved unambiguously.",
+        )
+        if (!declaration.isWritable) {
+            return PreparedEntityAttributeSafeDelete.failure(
+                "JVW-ENTITY-SAFE-DELETE-READONLY",
+                "The property declaration is not writable.",
+            )
+        }
+        if (attribute.association) {
+            stableRelationshipMapping(attribute, declaration.text)?.let {
+                return PreparedEntityAttributeSafeDelete.failure(
+                    it.code
+                        ?.replace("JVW-ENTITY-RENAME-", "JVW-ENTITY-SAFE-DELETE-")
+                        ?: "JVW-ENTITY-SAFE-DELETE-RELATIONSHIP-MAPPING-UNSTABLE",
+                    it.message,
+                )
+            }
+        } else if (
+            attribute.persistent &&
+            !EXPLICIT_COLUMN_NAME.containsMatchIn(declaration.text)
+        ) {
+            return PreparedEntityAttributeSafeDelete.failure(
+                "JVW-ENTITY-SAFE-DELETE-INFERRED-COLUMN",
+                "The persistent property uses an inferred column. Declare @Column(name = " +
+                    "\"${attribute.columnName}\") before Safe Delete so the retained database mapping is explicit.",
+            )
+        }
+        return PreparedEntityAttributeSafeDelete(
+            accepted = true,
+            code = null,
+            message = "IntelliJ Safe Delete usage preview is ready. The physical schema remains unchanged.",
+            element = declaration,
+            retainedColumnName = attribute.columnName.takeIf { attribute.persistent },
+        )
+    }
+
     companion object {
         private val IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")
         private val EXPLICIT_COLUMN_NAME = Regex(
@@ -238,6 +356,32 @@ data class EntityAttributeRenameLaunchResponse(
     val success: Boolean,
     val code: String? = null,
     val message: String,
+)
+
+data class EntityAttributeSafeDeleteRequest(
+    val sourceLocator: SourceLocator,
+    val entityClassName: String,
+    val attributeName: String,
+)
+
+data class PreparedEntityAttributeSafeDelete(
+    val accepted: Boolean,
+    val code: String?,
+    val message: String,
+    val element: PsiNamedElement?,
+    val retainedColumnName: String?,
+) {
+    companion object {
+        fun failure(code: String, message: String): PreparedEntityAttributeSafeDelete =
+            PreparedEntityAttributeSafeDelete(false, code, message, null, null)
+    }
+}
+
+data class EntityAttributeSafeDeleteLaunchResponse(
+    val success: Boolean,
+    val code: String? = null,
+    val message: String,
+    val retainedColumnName: String? = null,
 )
 
 private fun com.intellij.psi.PsiElement.nearestKotlinEntityClass(): com.intellij.psi.PsiElement? =

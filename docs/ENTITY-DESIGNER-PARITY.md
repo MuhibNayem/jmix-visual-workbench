@@ -72,6 +72,12 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   usage preview also includes plugin-contributed FlowUI, fetch-plan, JPQL and
   security references. A missing existing property in the normal update request
   is rejected rather than being misread as an addition.
+- Existing Java/Kotlin attributes can launch IntelliJ Safe Delete directly from
+  Entity Designer after exact-revision, writable-declaration and stable physical
+  mapping checks. IntelliJ and plugin-contributed Jmix references participate in
+  the usage preview. The physical column is deliberately retained after source
+  deletion so production data cannot be silently dropped; the UI explains the
+  two-stage retirement and requires a later schema/data audit.
 - Existing entities can inspect their live mapped table through the
   project-owned JDBC driver and the active profile configuration. The backend
   supports datasource-only stores with Liquibase intentionally disabled,
@@ -119,7 +125,8 @@ blocked until all of the following pass:
    to IntelliJ usage preview, including native `mappedBy` references, and
    explicit scalar and owning to-one join-column physical rename is atomic
    with checked Liquibase rollback. Combined property-and-physical mapping
-   changes, relationship shape changes, type change and removal remain.
+   changes, relationship shape changes, type change and the data-audited
+   physical retirement stage after native Safe Delete remain.
    Additive and managed-mapping Java/Kotlin round trip is implemented.
 2. The first partial live-database merge is implemented for a selected
    existing entity/table and missing columns. Complete table/view selection,

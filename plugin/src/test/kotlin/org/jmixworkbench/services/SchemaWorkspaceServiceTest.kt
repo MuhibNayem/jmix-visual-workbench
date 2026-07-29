@@ -805,6 +805,18 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             ),
         )
         assertTrue(javaRename.accepted, "${javaRename.code}: ${javaRename.message}")
+        val javaSafeDelete = refactors.prepareSafeDelete(
+            EntityAttributeSafeDeleteRequest(
+                employee.sourceLocator,
+                employee.className,
+                "department",
+            ),
+        )
+        assertTrue(
+            javaSafeDelete.accepted,
+            "${javaSafeDelete.code}: ${javaSafeDelete.message}",
+        )
+        assertEquals("DEPARTMENT_ID", javaSafeDelete.retainedColumnName)
 
         val kotlinEmployee = workspace.entities.single { it.className == "KotlinEmployee" }
         val kotlinRename = refactors.prepareRename(
@@ -817,6 +829,18 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
         assertTrue(kotlinRename.accepted, "${kotlinRename.code}: ${kotlinRename.message}")
         assertEquals("KtProperty", kotlinRename.element?.javaClass?.simpleName)
+        val kotlinSafeDelete = refactors.prepareSafeDelete(
+            EntityAttributeSafeDeleteRequest(
+                kotlinEmployee.sourceLocator,
+                kotlinEmployee.className,
+                "department",
+            ),
+        )
+        assertTrue(
+            kotlinSafeDelete.accepted,
+            "${kotlinSafeDelete.code}: ${kotlinSafeDelete.message}",
+        )
+        assertEquals("DEPARTMENT_ID", kotlinSafeDelete.retainedColumnName)
 
         val unsafe = workspace.entities.single { it.className == "UnsafeEmployee" }
         val rejected = refactors.prepareRename(
@@ -829,6 +853,18 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
         assertFalse(rejected.accepted)
         assertEquals("JVW-ENTITY-RENAME-INFERRED-RELATIONSHIP-MAPPING", rejected.code)
+        val unsafeSafeDelete = refactors.prepareSafeDelete(
+            EntityAttributeSafeDeleteRequest(
+                unsafe.sourceLocator,
+                unsafe.className,
+                "department",
+            ),
+        )
+        assertFalse(unsafeSafeDelete.accepted)
+        assertEquals(
+            "JVW-ENTITY-SAFE-DELETE-INFERRED-RELATIONSHIP-MAPPING",
+            unsafeSafeDelete.code,
+        )
     }
 
     fun testExistingJavaAndKotlinOwningJoinColumnRenameIsSourceSafeAndRollbackChecked() {

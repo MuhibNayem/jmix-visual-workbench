@@ -18,6 +18,8 @@ import type {
   EntityAttributePropagationInspectionResponse,
   EntityAttributeRenameRequest,
   EntityAttributeRenameLaunchResponse,
+  EntityAttributeSafeDeleteRequest,
+  EntityAttributeSafeDeleteLaunchResponse,
   GenerationResult,
   GraphSourceLocator,
   IntegrationConnectorModel,
@@ -744,6 +746,14 @@ class ${scenario.className} {
                 return {
                   success: true,
                   message: `IntelliJ usage preview opened for ${payload.attributeName} → ${payload.newName}.`,
+                }
+              case 'launchEntityAttributeSafeDelete':
+                return {
+                  success: true,
+                  message: `IntelliJ Safe Delete usage preview opened for ${payload.attributeName}. Database mapping is retained for separate migration review.`,
+                  retainedColumnName: payload.attributeName
+                    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+                    .toUpperCase(),
                 }
               case 'inspectDatabaseEntityTable':
                 return {
@@ -1554,6 +1564,13 @@ class ${scenario.className} {
   launchEntityAttributeRename(change: EntityAttributeRenameRequest) {
     return this.request<EntityAttributeRenameLaunchResponse>(
       'launchEntityAttributeRename',
+      change,
+    )
+  }
+
+  launchEntityAttributeSafeDelete(change: EntityAttributeSafeDeleteRequest) {
+    return this.request<EntityAttributeSafeDeleteLaunchResponse>(
+      'launchEntityAttributeSafeDelete',
       change,
     )
   }
