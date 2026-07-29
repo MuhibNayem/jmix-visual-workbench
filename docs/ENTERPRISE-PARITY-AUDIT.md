@@ -32,7 +32,7 @@ signed distribution remain explicit requirements rather than implied backlog.
 | Safe visual changes | Strong | Typed models, immutable digest-bound previews, stale-source rejection, atomic workspace changes, history/undo, read-only lock for unsupported BPMN/source constructs | Broaden PSI/source patchers to every supported language construct while retaining formatting |
 | Entity and schema studio | Substantial | Entity creation, associations/compositions/enums, constraints/indexes, additive existing-entity editing, datastore-aware Liquibase proposals, include-chain protection and schema diagnostics | Full inheritance/embeddable/projection editing, destructive migration choreography and live populated-schema rehearsal |
 | FlowUI designer | Substantial | Responsive permanent three-pane layout; palette-to-canvas and canvas-to-canvas drag/drop with before/inside/after targets; click insertion; immediate digest-guarded XML synchronization; global undo/redo; source-safe copy/cut/paste/clone, responsive wrapping and namespace-preserving layout conversion; subtree ID/reference rewriting; selection stability; desktop/tablet/mobile and zoom previews; Jmix-native form/grid/flex responsiveness; component tree/properties; bindings/loaders/fetch plans/actions; controller discovery and guarded controller changes | Genuine runtime hot reload for all views, reusable component templates, complete custom-component/theme/accessibility authoring and all handwritten-controller constructs |
-| Native IntelliJ editor intelligence | Substantial | Native PSI references for FlowUI XML IDs, Java/Kotlin controller annotations, Jmix/JPA entity classes, metadata aliases, inherited/nested Java and Kotlin entity properties, property containers, inline fetch plans and shared fetch plans; completion; Ctrl/Cmd+B navigation; Find Usages; private-field project-use-scope enlargement; declaration-side, cross-file safe rename; unresolved/ambiguous-reference inspections with nearest-symbol fixes; duplicate and invalid fetch-plan diagnostics; modification-aware uncapped project symbol discovery; descriptor-file rename tracking; bidirectional controller/descriptor gutter navigation; and explicit Kotlin K2-mode compatibility | Expand the semantic surface to messages, menus, security, services, events and configuration; add fetch-plan coverage analysis, injections, handler-signature validation, snippets and intentions; prove installed-IDE, heavy-fixture, dumb-mode and representative large-project latency |
+| Native IntelliJ editor intelligence | Substantial | Native PSI references for FlowUI XML IDs, Java/Kotlin controller annotations, view/screen IDs, nested menu IDs, message keys in XML and Java/Kotlin APIs, resource-policy entity metadata aliases, inherited/nested entity-attribute paths, JPQL row-policy paths, specific permissions, Jmix/JPA entity classes, property containers, inline fetch plans and shared fetch plans; completion; Ctrl/Cmd+B navigation; Find Usages; private-field project-use-scope enlargement; declaration-side, cross-file safe rename; unresolved/ambiguous-reference inspections with nearest-symbol fixes; duplicate menu and invalid fetch-plan diagnostics; modification-aware uncapped project symbol discovery; descriptor-file rename tracking; bidirectional controller/descriptor gutter navigation; legacy `ScreenPolicy` compatibility; and explicit Kotlin K2-mode compatibility | Expand the remaining semantic surface to service methods, events, configuration, menu bean methods and UI component policies; add fetch-plan coverage analysis, injections, handler-signature validation, snippets and intentions; prove installed-IDE, heavy-fixture, dumb-mode and representative large-project latency |
 | Visual programming language | Strong | Typed Java 17+ service model; permanent palette/canvas/inspector; structured literals/parameters/variables; constrained Jmix entity CRUD/query/property operations; indexed service calls; conditions, requirements, returns, exceptions and logs; explicit CRUD authorization; transaction propagation/isolation/read-only/timeout; reusable typed private subflows; typed collection iteration with ITEM/DONE routes and index variables; structured try/catch/finally subflow boundaries; bounded cyclic execution; recursion, argument/result type, exception signature and transitive read-only-write rejection; deterministic side-effect-free path tracing; deterministic source-owned round trip; first-class subflow/caller impact edges | Event/queue primitives, richer formulas/pattern matching, cross-service visual composition and semantic compilation against every target-project dependency |
 | Formula, decision and rules | Substantial | Responsive permanent palette/tree/inspector expression workspace plus a responsive three-region Jmix/Flowable DMN editor; typed inputs/outputs and conditions; UNIQUE/FIRST/ANY/PRIORITY/OUTPUT_ORDER/RULE_ORDER/COLLECT hit policies; SUM/MIN/MAX/COUNT aggregation; ordered output priorities; overlap/conflict/shadow analysis; authoring version/status/effective dates; typed simulation with matched-rule highlighting; deterministic `.dmn` generation under production resource roots; standard-DMN read-only parsing; exact owned-source round trip and manual-source lock; first-class decision/input/output/rule graph artifacts and BPMN decision-task impact links | Decision trees and reusable rule sets, bulk/cross-version simulation, deployed-version activation/retirement/migration, tenant-aware rollout and semantic compilation against every target-project dependency |
 | Workflow and case management | Substantial | BPMN states/transitions, roles, forms, listeners, mappings, timers, messages, signals, retries, multi-instance/quorum, compensation, embedded/event/transaction subprocesses, cancel/terminate/error semantics, Jmix email task, Flowable DMN business-rule tasks linked to indexed decision keys, unresolved-decision diagnostics, deterministic simulation and UI-transition bypass diagnostics | Live process-instance trace, assignee hierarchy/delegation resolution, deployed version migration and ad-hoc case management |
@@ -69,8 +69,8 @@ signed distribution remain explicit requirements rather than implied backlog.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 152 tests passed.
-- IntelliJ 2026.2: 152 tests passed.
+- IntelliJ 2025.3: 161 tests passed.
+- IntelliJ 2026.2: 161 tests passed.
 - Platform-independent discovery/parser contracts: 69 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
   covering FlowUI XML, Java and Kotlin completion, navigation, Find Usages,
@@ -81,6 +81,12 @@ signed distribution remain explicit requirements rather than implied backlog.
   built-ins, cross-file rename,
   modification-aware cache invalidation and fail-closed duplicate/ambiguity
   diagnostics.
+- Nine native UI/security-assistance scenarios pass on both IntelliJ hosts,
+  covering XML/Java/Kotlin message keys, view and legacy screen IDs, nested
+  menu declarations, view/menu policies, entity metadata aliases, nested
+  entity-attribute paths, JPQL row-policy paths, specific permissions,
+  completion, navigation, cross-language Find Usages, safe rename,
+  inspections and quick fixes.
 - Typed server-logic node creation, branch connection, edge selection, local
   undo, Java preview and 1440/1000/640-pixel adaptive layouts were exercised in
   Chrome without horizontal page overflow or current-run console errors.
@@ -156,9 +162,10 @@ signed distribution remain explicit requirements rather than implied backlog.
 
 ## Release blockers for the full product promise
 
-1. Complete native Jmix editor intelligence across messages, menus, security,
-   services, events and configuration, add fetch-plan coverage analysis,
-   then add installed-IDE and enterprise-scale performance proof.
+1. Complete native Jmix editor intelligence across service methods, events,
+   configuration, menu bean methods and UI component policies, add fetch-plan
+   coverage analysis, then add installed-IDE and enterprise-scale performance
+   proof.
 2. Advance DMN into reusable rule sets/trees, bulk cross-version simulation
    and deployed-version rollout/migration governance; add event/queue
    primitives and richer expression semantics to typed visual logic.

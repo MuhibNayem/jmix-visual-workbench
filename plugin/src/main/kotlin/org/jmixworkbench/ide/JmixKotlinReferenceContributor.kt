@@ -45,7 +45,10 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
         val valueRange = host.kotlinStringContentRange() ?: return PsiReference.EMPTY_ARRAY
         val value = valueRange.substring(host.text)
         if (value.isBlank() || '$' in value) return PsiReference.EMPTY_ARRAY
-        val annotation = host.kotlinAnnotationContext() ?: return PsiReference.EMPTY_ARRAY
+        val annotation = host.kotlinAnnotationContext()
+        jmixKotlinUiSecurityReferences(host, valueRange, value, annotation)
+            ?.let { return it }
+        annotation ?: return PsiReference.EMPTY_ARRAY
         if (annotation.name == "ViewDescriptor" &&
             (annotation.attributeName == "value" || annotation.attributeName == null)
         ) {
@@ -169,12 +172,12 @@ internal class JmixKotlinFlowUiIdReference(
         }
 }
 
-private data class KotlinAnnotationContext(
+internal data class KotlinAnnotationContext(
     val name: String,
     val attributeName: String?,
 )
 
-private fun PsiLanguageInjectionHost.kotlinAnnotationContext(): KotlinAnnotationContext? {
+internal fun PsiLanguageInjectionHost.kotlinAnnotationContext(): KotlinAnnotationContext? {
     val annotation = generateSequence(parent) { it.parent }
         .firstOrNull { it.javaClass.simpleName == "KtAnnotationEntry" }
         ?: return null
@@ -183,7 +186,8 @@ private fun PsiLanguageInjectionHost.kotlinAnnotationContext(): KotlinAnnotation
     val relativeStart = textRange.startOffset - annotation.textRange.startOffset
     if (relativeStart !in 0..annotation.textLength) return null
     val prefix = annotation.text.substring(0, relativeStart)
-    val attributeName = KOTLIN_NAMED_ARGUMENT.find(prefix.substringAfterLast('('))
+    val attributeName = KOTLIN_NAMED_ARGUMENT.findAll(prefix)
+        .lastOrNull()
         ?.groupValues
         ?.get(1)
     return KotlinAnnotationContext(name, attributeName)
@@ -201,7 +205,7 @@ private fun PsiLanguageInjectionHost.kotlinAssociatedDescriptorFiles(): List<Xml
     return findJmixDescriptorFiles(this, path)
 }
 
-private fun PsiLanguageInjectionHost.kotlinStringContentRange(): TextRange? {
+internal fun PsiLanguageInjectionHost.kotlinStringContentRange(): TextRange? {
     val source = text
     return when {
         source.length >= 6 && source.startsWith("\"\"\"") && source.endsWith("\"\"\"") ->
@@ -215,7 +219,7 @@ private fun PsiLanguageInjectionHost.kotlinStringContentRange(): TextRange? {
 }
 
 private val KOTLIN_ANNOTATION_NAME = Regex("""@(?:[\w.]+\.)?(\w+)""")
-private val KOTLIN_NAMED_ARGUMENT = Regex("""(\w+)\s*=\s*$""")
+private val KOTLIN_NAMED_ARGUMENT = Regex("""\b(\w+)\s*=""")
 private val KOTLIN_VIEW_DESCRIPTOR =
     Regex("@(?:[\\w.]+\\.)?ViewDescriptor\\s*\\(\\s*(?:value\\s*=\\s*)?\"([^\"$]+)\"")
 private const val JMIX_KOTLIN_MAX_COMPLETION_FILES = 2_000

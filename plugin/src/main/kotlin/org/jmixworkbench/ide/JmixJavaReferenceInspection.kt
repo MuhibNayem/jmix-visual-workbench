@@ -1,5 +1,6 @@
 package org.jmixworkbench.ide
 
+import com.intellij.codeInsight.lookup.LookupElement
 import com.intellij.codeInspection.LocalInspectionTool
 import com.intellij.codeInspection.LocalQuickFix
 import com.intellij.codeInspection.ProblemDescriptor
@@ -11,16 +12,15 @@ import com.intellij.psi.PsiLiteralExpression
 import com.intellij.psi.PsiReference
 
 /**
- * Native, on-the-fly validation for Jmix controller annotations. It covers
- * descriptor paths and component/action IDs used by @ViewComponent,
- * @Subscribe, @Install and @Supply.
+ * Native, on-the-fly validation for Jmix controller, localization and
+ * security references.
  */
 class JmixJavaReferenceInspection : LocalInspectionTool() {
     override fun buildVisitor(holder: ProblemsHolder, isOnTheFly: Boolean): PsiElementVisitor =
         object : JavaElementVisitor() {
             override fun visitLiteralExpression(expression: PsiLiteralExpression) {
                 expression.references.asSequence()
-                    .filter { it is JmixViewDescriptorReference || it is JmixJavaFlowUiIdReference }
+                    .filter(PsiReference::isJmixJavaReference)
                     .filter { it.resolve() == null }
                     .forEach { reference ->
                         val unresolved = reference.rangeInElement
@@ -47,15 +47,47 @@ class JmixJavaReferenceInspection : LocalInspectionTool() {
 }
 
 private fun PsiReference.completionCandidates(): Sequence<String> =
-    when (this) {
+    (when (this) {
         is JmixJavaFlowUiIdReference ->
             candidateAttributes().asSequence().mapNotNull { it.value }
 
         is JmixViewDescriptorReference ->
             findAllJmixDescriptorFiles(element).asSequence().map { it.name }
 
+        is JmixJavaViewIdReference ->
+            candidateDeclarations().asSequence().map { it.id }
+
+        is JmixJavaMenuIdReference ->
+            candidateDeclarations().asSequence().map { it.id }
+
+        is JmixJavaEntityNameReference -> candidateNames()
+
+        is JmixJavaEntityPropertyReference ->
+            candidateProperties().asSequence().map { it.name }
+
+        is JmixJavaMessageReference ->
+            candidateDeclarations().asSequence()
+                .flatMap { it.lookupKeys.asSequence() }
+
+        is JmixJavaSpecificPolicyReference ->
+            candidateDeclarations().asSequence().map { it.resource }
+
         else -> emptySequence()
-    }.filter(String::isNotBlank).distinct()
+    } + variants.asSequence()
+        .filterIsInstance<LookupElement>()
+        .map(LookupElement::getLookupString))
+        .filter(String::isNotBlank)
+        .distinct()
+
+private fun PsiReference.isJmixJavaReference(): Boolean =
+    this is JmixViewDescriptorReference ||
+        this is JmixJavaFlowUiIdReference ||
+        this is JmixJavaViewIdReference ||
+        this is JmixJavaMenuIdReference ||
+        this is JmixJavaEntityNameReference ||
+        this is JmixJavaEntityPropertyReference ||
+        this is JmixJavaMessageReference ||
+        this is JmixJavaSpecificPolicyReference
 
 private class ReplaceJmixJavaReferenceQuickFix(
     private val replacement: String,
@@ -67,7 +99,7 @@ private class ReplaceJmixJavaReferenceQuickFix(
     override fun applyFix(project: Project, descriptor: ProblemDescriptor) {
         val literal = descriptor.psiElement as? PsiLiteralExpression ?: return
         val reference = literal.references.firstOrNull { candidate ->
-            (candidate is JmixViewDescriptorReference || candidate is JmixJavaFlowUiIdReference) &&
+            candidate.isJmixJavaReference() &&
                 candidate.rangeInElement == descriptor.textRangeInElement
         } ?: return
         reference.handleElementRename(replacement)

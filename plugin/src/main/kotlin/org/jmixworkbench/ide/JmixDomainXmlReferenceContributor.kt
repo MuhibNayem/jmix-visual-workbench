@@ -492,7 +492,7 @@ internal fun PsiClass.isJmixEntity(): Boolean =
                 annotation.qualifiedName?.substringAfterLast('.') in JMIX_ENTITY_ANNOTATION_SHORT_NAMES
         }
 
-private fun PsiClass.jmixEntityAliases(): Set<String> = buildSet {
+internal fun PsiClass.jmixEntityAliases(): Set<String> = buildSet {
     qualifiedName?.let(::add)
     name?.let(::add)
     annotations.forEach { annotation ->
@@ -505,7 +505,7 @@ private fun PsiClass.jmixEntityAliases(): Set<String> = buildSet {
     }
 }
 
-private fun PsiClass.preferredMetadataName(): String =
+internal fun PsiClass.preferredMetadataName(): String =
     annotations.asSequence()
         .filter { annotation ->
             annotation.qualifiedName in JMIX_ENTITY_ANNOTATIONS ||
@@ -641,7 +641,7 @@ internal fun entityClassForFetchPlanTag(fetchPlan: XmlTag): PsiClass? {
     return entityClassForDataContainer(container)
 }
 
-private fun entityClassAtPath(root: PsiClass, path: List<String>): PsiClass? {
+internal fun entityClassAtPath(root: PsiClass, path: List<String>): PsiClass? {
     var current = root
     path.filter(String::isNotBlank).forEach { segment ->
         val property = jmixEntityProperties(current).firstOrNull { it.name == segment }
@@ -673,7 +673,7 @@ internal fun entityClassForType(type: PsiType): PsiClass? =
         else -> null
     }
 
-private fun jmixEntityProperties(entityClass: PsiClass): List<JmixEntityProperty> {
+internal fun jmixEntityProperties(entityClass: PsiClass): List<JmixEntityProperty> {
     val properties = linkedMapOf<String, JmixEntityProperty>()
     entityClass.allFields.asSequence()
         .filterNot { it.hasModifierProperty(PsiModifier.STATIC) }

@@ -12,6 +12,7 @@
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
     <depends>com.intellij.modules.xml</depends>
+    <depends>com.intellij.properties</depends>
     <depends optional="true" config-file="jmix-kotlin.xml">org.jetbrains.kotlin</depends>
 
     <extensions defaultExtensionNs="com.intellij">
@@ -33,11 +34,14 @@
         <projectService serviceImplementation="org.jmixworkbench.services.JmixRuntimeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixDomainSymbolService"/>
+        <projectService serviceImplementation="org.jmixworkbench.ide.JmixUiSecuritySymbolService"/>
 
         <psi.referenceContributor language="XML"
                                   implementation="org.jmixworkbench.ide.JmixFlowUiReferenceContributor"/>
         <psi.referenceContributor language="XML"
                                   implementation="org.jmixworkbench.ide.JmixDomainXmlReferenceContributor"/>
+        <psi.referenceContributor language="XML"
+                                  implementation="org.jmixworkbench.ide.JmixUiXmlReferenceContributor"/>
         <psi.referenceContributor language="JAVA"
                                   implementation="org.jmixworkbench.ide.JmixJavaReferenceContributor"/>
         <psi.referenceContributor language="kotlin"
@@ -61,16 +65,23 @@
                          enabledByDefault="true"
                          level="ERROR"
                          implementationClass="org.jmixworkbench.ide.JmixDomainXmlReferenceInspection"/>
+        <localInspection language="XML"
+                         shortName="JmixUiXmlReference"
+                         displayName="Unresolved Jmix menu, view, or message reference"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixUiXmlReferenceInspection"/>
         <localInspection language="JAVA"
                          shortName="JmixJavaReference"
-                         displayName="Unresolved Jmix controller reference"
+                         displayName="Unresolved Jmix Java reference"
                          groupName="Jmix"
                          enabledByDefault="true"
                          level="ERROR"
                          implementationClass="org.jmixworkbench.ide.JmixJavaReferenceInspection"/>
         <localInspection language="kotlin"
                          shortName="JmixKotlinReference"
-                         displayName="Unresolved Jmix controller reference"
+                         displayName="Unresolved Jmix Kotlin reference"
                          groupName="Jmix"
                          enabledByDefault="true"
                          level="ERROR"

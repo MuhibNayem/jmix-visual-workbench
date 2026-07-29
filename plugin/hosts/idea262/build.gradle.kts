@@ -140,6 +140,7 @@ dependencies {
         }
         bundledModule("intellij.java.psi")
         bundledPlugin("org.jetbrains.kotlin")
+        bundledPlugin("com.intellij.properties")
         bundledModule("intellij.libraries.jcef")
         bundledModule("intellij.platform.ui.jcef")
         testFramework(TestFrameworkType.Platform)

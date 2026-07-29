@@ -47,6 +47,7 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
         val literal = element as? PsiLiteralExpression ?: return PsiReference.EMPTY_ARRAY
         val value = literal.value as? String ?: return PsiReference.EMPTY_ARRAY
         if (value.isBlank()) return PsiReference.EMPTY_ARRAY
+        jmixJavaUiSecurityReferences(literal, value)?.let { return it }
         if (literal.isViewDescriptorValue()) {
             return arrayOf(
                 JmixViewDescriptorReference(

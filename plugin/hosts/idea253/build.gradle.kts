@@ -140,6 +140,7 @@ dependencies {
         }
         bundledModule("intellij.java.psi")
         bundledPlugin("org.jetbrains.kotlin")
+        bundledPlugin("com.intellij.properties")
         testFramework(TestFrameworkType.Platform)
         testFramework(TestFrameworkType.Plugin.Java)
         pluginVerifier()
