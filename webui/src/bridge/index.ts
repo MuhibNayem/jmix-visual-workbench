@@ -385,6 +385,27 @@ class ${scenario.className} {
                 return {
                   sources: [],
                   warnings: [],
+                  springBeans: [
+                    {
+                      name: 'PayrollMenu',
+                      declarationName: 'PayrollMenu',
+                      sourcePath: 'src/main/java/com/company/payroll/menu/PayrollMenu.java',
+                      language: 'JAVA',
+                      ambiguous: false,
+                      methods: [
+                        {
+                          name: 'closePeriod',
+                          signature: 'closePeriod()',
+                          callable: true,
+                        },
+                        {
+                          name: 'openReport',
+                          signature: 'openReport(Map<String, Object>)',
+                          callable: true,
+                        },
+                      ],
+                    },
+                  ],
                 }
               case 'getSchemaWorkspace':
                 return developmentSchemaWorkspace

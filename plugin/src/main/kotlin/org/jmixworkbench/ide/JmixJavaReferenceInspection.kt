@@ -87,7 +87,8 @@ private fun PsiReference.isJmixJavaReference(): Boolean =
         this is JmixJavaEntityNameReference ||
         this is JmixJavaEntityPropertyReference ||
         this is JmixJavaMessageReference ||
-        this is JmixJavaSpecificPolicyReference
+        this is JmixJavaSpecificPolicyReference ||
+        this is JmixJavaSpringBeanDeclarationReference
 
 private class ReplaceJmixJavaReferenceQuickFix(
     private val replacement: String,

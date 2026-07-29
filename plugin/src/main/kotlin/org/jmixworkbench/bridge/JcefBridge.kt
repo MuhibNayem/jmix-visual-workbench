@@ -168,6 +168,10 @@ class JcefBridge(
                 handleGetApplicationGraph(action, requestId, payload)
                 return
             }
+            if (action == "getMenuWorkspace") {
+                handleGetMenuWorkspace(action, requestId)
+                return
+            }
             if (action == "getScenarioWorkspace") {
                 handleGetScenarioWorkspace(action, requestId, payload)
                 return
@@ -454,7 +458,6 @@ class JcefBridge(
                 "generateMigration" -> handleGenerateMigration(payload)
                 "generateRole" -> handleGenerateRole(payload)
                 "generateMenu" -> handleGenerateMenu(payload)
-                "getMenuWorkspace" -> gson.toJson(MenuWorkspaceService.getInstance(project).load())
                 "generateBpm" -> handleGenerateBpm(payload)
                 "getProjectConfig" -> handleGetProjectConfig()
                 "getEntities" -> handleGetEntities()
@@ -571,6 +574,21 @@ class JcefBridge(
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
         ReadAction.nonBlocking<org.jmixworkbench.services.ApplicationGraphResponse> {
             ApplicationGraphService.getInstance(project).graph(forceRefresh)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { result ->
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleGetMenuWorkspace(
+        action: String,
+        requestId: String?,
+    ) {
+        ReadAction.nonBlocking<org.jmixworkbench.services.MenuWorkspaceResponse> {
+            MenuWorkspaceService.getInstance(project).load()
         }
             .inSmartMode(project)
             .expireWith(project)

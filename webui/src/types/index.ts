@@ -596,6 +596,23 @@ export interface MenuSourceSnapshot {
 export interface MenuWorkspaceResponse {
   sources: MenuSourceSnapshot[]
   warnings: string[]
+  springBeans: MenuSpringBeanSnapshot[]
+}
+
+export interface MenuSpringBeanSnapshot {
+  name: string
+  declarationName: string
+  sourcePath: string
+  language: string
+  ambiguous: boolean
+  methods: MenuSpringBeanMethodSnapshot[]
+}
+
+export interface MenuSpringBeanMethodSnapshot {
+  name: string
+  signature: string
+  callable: boolean
+  issue?: string
 }
 
 export interface GraphDiagnostic {

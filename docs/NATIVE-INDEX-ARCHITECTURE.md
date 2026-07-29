@@ -15,6 +15,7 @@ for:
 | Entity declarations | Java and Kotlin files containing a Jmix/JPA entity annotation marker |
 | View controller declarations | Java and Kotlin files containing `ViewController` or legacy `UiController` markers |
 | Specific permissions | Java and Kotlin files containing `SpecificPolicy` markers |
+| Spring menu beans | Java and Kotlin files containing supported Spring/Jakarta bean annotation markers |
 | Menu declarations | XML descriptors whose root is `menu-config` or `menu` |
 | Shared fetch plans | XML descriptors whose root is `fetchPlans` or `fetch-plans` |
 | FlowUI descriptors | XML descriptors whose root is `view` or `fragment` |
@@ -47,6 +48,11 @@ Native symbol access follows this sequence:
 Project-root changes are included because dependency and included-build changes
 can introduce symbols without editing an existing source file.
 
+Project and dependency discovery uses the union of IntelliJ project-content and
+library scopes. It does not use the broader everything/scratch scope. A cold
+view-cache fill validates only view-controller files returned by its candidate
+index; it does not perform a second global annotation traversal.
+
 The following are prohibited in editor hot paths:
 
 - `FilenameIndex.getAllFilesByExt(...)`;
@@ -62,22 +68,25 @@ in smart mode. Remaining synchronous read scopes use cancellable read actions.
 ## Scale regression
 
 `JmixNativeIndexScaleTest` creates 3,000 unrelated XML, properties and Java
-files alongside real entities, views, menus, messages, fetch plans and
-permissions. It proves that:
+files alongside real entities, views, menus, messages, fetch plans,
+permissions and Spring menu beans. It proves that:
 
 - every real symbol remains discoverable;
 - FlowUI discovery excludes unrelated XML;
-- 25 repeated warm reads reuse the exact six cached inventories;
+- 25 repeated warm reads reuse the exact seven cached inventories;
 - adding unrelated files does not evict any inventory;
-- warm and incremental lookup stay below the explicit two-second failure
-  ceiling on both supported IntelliJ hosts.
+- 20 consecutive in-place typing cycles across unrelated XML, properties and
+  Java files preserve the identity of all seven inventories;
+- warm and incremental lookup stay below the explicit two-second ceiling and
+  the repeated-typing loop stays below its five-second ceiling on both
+  supported IntelliJ hosts.
 
 Observed in the 2026-07-29 milestone run:
 
-| Host | 25 warm reads | Lookup after three unrelated edits |
-|---|---:|---:|
-| IntelliJ IDEA 2025.3 | 1 ms | 2 ms |
-| IntelliJ IDEA 2026.2 | 1 ms | 1 ms |
+| Host | 25 warm reads | Lookup after three unrelated edits | 20 three-file typing cycles |
+|---|---:|---:|---:|
+| IntelliJ IDEA 2025.3 | 2 ms | 2 ms | 78 ms |
+| IntelliJ IDEA 2026.2 | 2 ms | 1 ms | 95 ms |
 
 The light-fixture gate is a deterministic regression, not a substitute for an
 installed-IDE benchmark. Release certification must additionally publish cold

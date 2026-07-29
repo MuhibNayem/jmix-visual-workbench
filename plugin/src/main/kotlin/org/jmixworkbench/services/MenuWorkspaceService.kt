@@ -4,16 +4,35 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import org.jmixworkbench.discovery.model.ArtifactKind
 import org.jmixworkbench.discovery.model.SourceLocator
+import org.jmixworkbench.ide.JmixSpringBeanSymbolService
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 import org.xml.sax.InputSource
 import java.io.StringReader
+import java.util.Locale
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 
 data class MenuWorkspaceResponse(
     val sources: List<MenuSourceSnapshot>,
     val warnings: List<String> = emptyList(),
+    val springBeans: List<MenuSpringBeanSnapshot> = emptyList(),
+)
+
+data class MenuSpringBeanSnapshot(
+    val name: String,
+    val declarationName: String,
+    val sourcePath: String,
+    val language: String,
+    val ambiguous: Boolean,
+    val methods: List<MenuSpringBeanMethodSnapshot>,
+)
+
+data class MenuSpringBeanMethodSnapshot(
+    val name: String,
+    val signature: String,
+    val callable: Boolean,
+    val issue: String? = null,
 )
 
 data class MenuSourceSnapshot(
@@ -106,7 +125,48 @@ class MenuWorkspaceService(private val project: Project) {
                 warnings = sourceWarnings.distinct(),
             )
         }
-        return MenuWorkspaceResponse(sources = sources, warnings = warnings.distinct())
+        val beanDeclarations = JmixSpringBeanSymbolService.getInstance(project).beans()
+        val beanNameCounts = beanDeclarations.groupingBy { it.name }.eachCount()
+        val springBeans = beanDeclarations.map { declaration ->
+            val methodNameCounts = declaration.methods.groupingBy { it.name }.eachCount()
+            val source = declaration.navigationElement.containingFile?.virtualFile
+            val sourcePath = project.basePath?.let { basePath ->
+                source?.path
+                    ?.takeIf { path -> path == basePath || path.startsWith("$basePath/") }
+                    ?.removePrefix(basePath)
+                    ?.trimStart('/')
+            } ?: source?.name.orEmpty()
+            MenuSpringBeanSnapshot(
+                name = declaration.name,
+                declarationName = declaration.classElement.name.orEmpty(),
+                sourcePath = sourcePath,
+                language = source?.extension?.uppercase(Locale.ROOT).orEmpty(),
+                ambiguous = beanNameCounts[declaration.name] != 1,
+                methods = declaration.methods.map { method ->
+                    val overloaded = methodNameCounts[method.name] != 1
+                    MenuSpringBeanMethodSnapshot(
+                        name = method.name,
+                        signature = method.signature,
+                        callable = method.isMenuCallable && !overloaded,
+                        issue = when {
+                            overloaded ->
+                                "Overloaded menu methods are ambiguous at runtime"
+
+                            else -> method.invalidReason
+                        },
+                    )
+                },
+            )
+        }
+        beanNameCounts.filterValues { it > 1 }.keys.sorted().forEach { name ->
+            warnings += "Ambiguous Spring bean name '$name' has " +
+                "${beanNameCounts.getValue(name)} project declarations."
+        }
+        return MenuWorkspaceResponse(
+            sources = sources,
+            warnings = warnings.distinct(),
+            springBeans = springBeans,
+        )
     }
 
     private fun parseChildren(

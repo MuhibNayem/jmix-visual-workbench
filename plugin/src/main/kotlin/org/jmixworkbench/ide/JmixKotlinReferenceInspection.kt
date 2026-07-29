@@ -83,7 +83,8 @@ private fun PsiReference.isJmixKotlinReference(): Boolean =
         this is JmixKotlinEntityNameReference ||
         this is JmixKotlinEntityPropertyReference ||
         this is JmixKotlinMessageReference ||
-        this is JmixKotlinSpecificPolicyReference
+        this is JmixKotlinSpecificPolicyReference ||
+        this is JmixKotlinSpringBeanDeclarationReference
 
 private class ReplaceJmixKotlinReferenceQuickFix(
     private val replacement: String,

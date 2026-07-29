@@ -9,7 +9,12 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
-import type { GenerationResult, MenuSourceSnapshot, MenuWorkspaceResponse } from '../../types'
+import type {
+  GenerationResult,
+  MenuSourceSnapshot,
+  MenuSpringBeanSnapshot,
+  MenuWorkspaceResponse,
+} from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
 type MenuNodeKind = 'menu' | 'view' | 'bean' | 'separator'
@@ -301,6 +306,7 @@ export default function MenuDesigner() {
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [activePane, setActivePane] = useState<'structure' | 'preview' | 'properties'>('preview')
   const [menuSources, setMenuSources] = useState<MenuSourceSnapshot[]>([])
+  const [springBeans, setSpringBeans] = useState<MenuSpringBeanSnapshot[]>([])
   const [selectedSourcePath, setSelectedSourcePath] = useState('')
   const [workspaceLoading, setWorkspaceLoading] = useState(true)
   const uid = useRef(1)
@@ -312,6 +318,19 @@ export default function MenuDesigner() {
   const depth = maximumDepth(items)
   const rows = useMemo(() => visibleMenuRows(items, collapsed), [items, collapsed])
   const containers = useMemo(() => allMenuContainers(items), [items])
+  const selectedBeanMatches = useMemo(
+    () => selected?.kind === 'bean'
+      ? springBeans.filter((bean) => bean.name === selected.bean)
+      : [],
+    [selected, springBeans],
+  )
+  const selectedIndexedBean = selectedBeanMatches.length === 1 &&
+    !selectedBeanMatches[0].ambiguous
+    ? selectedBeanMatches[0]
+    : null
+  const selectedMethodMatches = selectedIndexedBean && selected?.kind === 'bean'
+    ? selectedIndexedBean.methods.filter((method) => method.name === selected.beanMethod)
+    : []
 
   useEffect(() => {
     let active = true
@@ -319,6 +338,7 @@ export default function MenuDesigner() {
       .then((workspace) => {
         if (!active) return
         setMenuSources(workspace.sources)
+        setSpringBeans(workspace.springBeans ?? [])
         if (workspace.sources.length > 0) {
           const first = workspace.sources[0]
           setSelectedSourcePath(first.relativePath)
@@ -466,6 +486,21 @@ export default function MenuDesigner() {
     )
     if (invalidBean) {
       addToast(`Bean item "${invalidBean.id}" needs both bean and method.`, 'error')
+      return
+    }
+    const unsafeIndexedBean = entries.find((entry) => {
+      if (entry.type !== 'BEAN') return false
+      const matches = springBeans.filter((bean) => bean.name === entry.bean)
+      if (matches.length > 1 || matches.some((bean) => bean.ambiguous)) return true
+      if (matches.length === 0) return false
+      const methods = matches[0].methods.filter((method) => method.name === entry.beanMethod)
+      return methods.length !== 1 || !methods[0].callable
+    })
+    if (unsafeIndexedBean) {
+      addToast(
+        `Bean item "${unsafeIndexedBean.id}" has an ambiguous, missing, overloaded, or unsafe indexed method.`,
+        'error',
+      )
       return
     }
 
@@ -852,13 +887,103 @@ export default function MenuDesigner() {
                 </Field>
               )}
               {selected.kind === 'bean' && (
-                <div className="grid grid-cols-2 gap-2">
-                  <Field label="Spring bean">
-                    <input value={selected.bean} onChange={(event) => handleUpdate({ bean: event.target.value })} className="w-full py-1 font-mono text-xs" />
-                  </Field>
-                  <Field label="Bean method">
-                    <input value={selected.beanMethod} onChange={(event) => handleUpdate({ beanMethod: event.target.value })} className="w-full py-1 font-mono text-xs" />
-                  </Field>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-1 gap-2">
+                    <Field label="Spring bean">
+                      <input
+                        list="jvw-menu-spring-beans"
+                        value={selected.bean}
+                        onChange={(event) => {
+                          const bean = event.target.value
+                          handleUpdate({
+                            bean,
+                            beanMethod: bean === selected.bean ? selected.beanMethod : '',
+                          })
+                        }}
+                        className="w-full py-1 font-mono text-xs"
+                        placeholder="Select or enter a bean"
+                        autoComplete="off"
+                      />
+                      <datalist id="jvw-menu-spring-beans">
+                        {springBeans.map((bean) => (
+                          <option
+                            key={`${bean.name}:${bean.sourcePath}:${bean.declarationName}`}
+                            value={bean.name}
+                          >
+                            {bean.ambiguous
+                              ? `Ambiguous · ${bean.sourcePath}`
+                              : `${bean.declarationName} · ${bean.sourcePath}`}
+                          </option>
+                        ))}
+                      </datalist>
+                    </Field>
+                    <Field label="Bean method">
+                      <input
+                        list="jvw-menu-bean-methods"
+                        value={selected.beanMethod}
+                        onChange={(event) => handleUpdate({ beanMethod: event.target.value })}
+                        className="w-full py-1 font-mono text-xs"
+                        placeholder="Select a callable method"
+                        autoComplete="off"
+                      />
+                      <datalist id="jvw-menu-bean-methods">
+                        {(selectedIndexedBean?.methods ?? [])
+                          .filter((method) => method.callable)
+                          .map((method) => (
+                            <option
+                              key={method.signature}
+                              value={method.name}
+                            >
+                              {method.signature}
+                            </option>
+                          ))}
+                      </datalist>
+                    </Field>
+                  </div>
+                  {selected.bean && selectedBeanMatches.length === 0 && (
+                    <p
+                      className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-amber-200"
+                      role="status"
+                    >
+                      This bean is not in the current project index. It is preserved for custom
+                      Spring configurations, but verify it in the native XML editor before apply.
+                    </p>
+                  )}
+                  {selectedBeanMatches.length > 1 && (
+                    <p
+                      className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-red-200"
+                      role="alert"
+                    >
+                      Multiple Spring declarations use this bean name. Resolve the ambiguity
+                      before generating the menu.
+                    </p>
+                  )}
+                  {selectedIndexedBean && (
+                    <div className="rounded border border-emerald-500/20 bg-emerald-500/5 px-2 py-1.5 text-[10px] leading-relaxed text-gray-400">
+                      <p className="font-medium text-emerald-300">
+                        Indexed {selectedIndexedBean.language || 'source'} bean
+                      </p>
+                      <p className="mt-0.5 break-all font-mono">
+                        {selectedIndexedBean.sourcePath || selectedIndexedBean.declarationName}
+                      </p>
+                      {selected.beanMethod && selectedMethodMatches.length === 0 && (
+                        <p className="mt-1 text-red-300" role="alert">
+                          Method not found on this bean.
+                        </p>
+                      )}
+                      {selectedMethodMatches.length > 1 && (
+                        <p className="mt-1 text-red-300" role="alert">
+                          Overloaded menu methods are ambiguous.
+                        </p>
+                      )}
+                      {selectedMethodMatches.length === 1 &&
+                        !selectedMethodMatches[0].callable && (
+                          <p className="mt-1 text-red-300" role="alert">
+                            {selectedMethodMatches[0].issue ?? 'Method is not menu-callable.'}
+                          </p>
+                        )}
+                    </div>
+                  )}
                 </div>
               )}
               {selected.kind !== 'separator' && (

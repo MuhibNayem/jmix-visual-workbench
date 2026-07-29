@@ -26,10 +26,15 @@ class JmixUiXmlReferenceInspection : LocalInspectionTool() {
                 value.references.asSequence()
                     .filter {
                         it is JmixXmlViewIdReference ||
-                            it is JmixXmlMessageReference
+                            it is JmixXmlMessageReference ||
+                            it is JmixXmlSpringBeanReference ||
+                            it is JmixXmlSpringBeanMethodReference
                     }
-                    .filter { it.resolve() == null }
                     .forEach { reference ->
+                        if (reference.registerSpringBeanProblem(holder, value)) {
+                            return@forEach
+                        }
+                        if (reference.resolve() != null) return@forEach
                         val unresolved = reference.rangeInElement.substring(value.text)
                         val closest = reference.xmlUiCandidates()
                             .map { candidate ->
@@ -43,6 +48,10 @@ class JmixUiXmlReferenceInspection : LocalInspectionTool() {
                             ?.first
                         val kind = if (reference is JmixXmlMessageReference) {
                             "message"
+                        } else if (reference is JmixXmlSpringBeanReference) {
+                            "Spring bean"
+                        } else if (reference is JmixXmlSpringBeanMethodReference) {
+                            "Spring bean method"
                         } else {
                             "view"
                         }
@@ -59,12 +68,24 @@ class JmixUiXmlReferenceInspection : LocalInspectionTool() {
                 val attribute = value.parent as? XmlAttribute ?: return
                 val file = value.containingFile as? XmlFile ?: return
                 val tag = attribute.parent
-                if (!file.isJmixMenuDescriptor() ||
-                    attribute.localName != "id" ||
-                    tag.localName !in setOf("menu", "item")
+                if (!file.isJmixMenuDescriptor()) return
+
+                if (tag.localName == "item" &&
+                    attribute.localName in setOf("bean", "beanMethod")
                 ) {
-                    return
+                    val bean = tag.getAttributeValue("bean").orEmpty()
+                    val method = tag.getAttributeValue("beanMethod").orEmpty()
+                    if (bean.isBlank() || method.isBlank()) {
+                        holder.registerProblem(
+                            value,
+                            "Jmix menu item requires both bean and beanMethod",
+                        )
+                    }
                 }
+
+                if (attribute.localName != "id" ||
+                    tag.localName !in setOf("menu", "item")
+                ) return
                 val id = attribute.value?.takeIf(String::isNotBlank) ?: return
                 val duplicates = PsiTreeUtil.findChildrenOfType(file, XmlTag::class.java)
                     .asSequence()
@@ -91,12 +112,73 @@ private fun PsiReference.xmlUiCandidates(): Sequence<String> {
             candidateDeclarations().asSequence()
                 .flatMap { it.lookupKeys.asSequence() }
 
+        is JmixXmlSpringBeanReference ->
+            candidateDeclarations().asSequence().map { it.name }
+
+        is JmixXmlSpringBeanMethodReference ->
+            candidateMethods().asSequence()
+                .filter(JmixSpringBeanMethodDeclaration::isMenuCallable)
+                .map { it.name }
+
         else -> emptySequence()
     }
     val lookup = variants.asSequence()
         .filterIsInstance<LookupElement>()
         .map(LookupElement::getLookupString)
     return (explicit + lookup).filter(String::isNotBlank).distinct()
+}
+
+private fun PsiReference.registerSpringBeanProblem(
+    holder: ProblemsHolder,
+    value: XmlAttributeValue,
+): Boolean {
+    when (this) {
+        is JmixXmlSpringBeanReference -> {
+            val matches = multiResolve(false)
+            if (matches.size > 1) {
+                val name = rangeInElement.substring(value.text)
+                holder.registerProblem(
+                    value,
+                    rangeInElement,
+                    "Ambiguous Jmix Spring bean '$name': " +
+                        "${matches.size} declarations use this name",
+                )
+                return true
+            }
+        }
+
+        is JmixXmlSpringBeanMethodReference -> {
+            val beanMatches = candidateBeans()
+            if (beanMatches.size > 1) {
+                holder.registerProblem(
+                    value,
+                    rangeInElement,
+                    "Cannot resolve Jmix menu method because the Spring bean name is ambiguous",
+                )
+                return true
+            }
+            val name = rangeInElement.substring(value.text)
+            val methods = candidateMethods().filter { it.name == name }
+            if (methods.size > 1) {
+                holder.registerProblem(
+                    value,
+                    rangeInElement,
+                    "Ambiguous Jmix menu bean method '$name': overloaded methods are not safe",
+                )
+                return true
+            }
+            val invalid = methods.singleOrNull()?.invalidReason
+            if (invalid != null) {
+                holder.registerProblem(
+                    value,
+                    rangeInElement,
+                    "$invalid for Jmix menu invocation",
+                )
+                return true
+            }
+        }
+    }
+    return false
 }
 
 private class ReplaceJmixXmlUiReferenceQuickFix(
@@ -110,7 +192,9 @@ private class ReplaceJmixXmlUiReferenceQuickFix(
         val value = descriptor.psiElement as? XmlAttributeValue ?: return
         val reference = value.references.firstOrNull { candidate ->
             (candidate is JmixXmlViewIdReference ||
-                candidate is JmixXmlMessageReference) &&
+                candidate is JmixXmlMessageReference ||
+                candidate is JmixXmlSpringBeanReference ||
+                candidate is JmixXmlSpringBeanMethodReference) &&
                 candidate.rangeInElement == descriptor.textRangeInElement
         } ?: return
         reference.handleElementRename(replacement)

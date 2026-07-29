@@ -7,6 +7,7 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.testFramework.HeavyPlatformTestCase
+import com.intellij.testFramework.IndexingTestUtil
 import org.jmixworkbench.model.MenuEntryModel
 import org.jmixworkbench.model.MenuEntryType
 import org.jmixworkbench.model.ProjectConfig
@@ -64,11 +65,64 @@ class MenuWorkspaceServiceTest : HeavyPlatformTestCase() {
                 </view>
                 """.trimIndent(),
             )
+            write(
+                root,
+                "loan/src/main/java/com/acme/menu/PayrollMenu.java",
+                """
+                package com.acme.menu;
+
+                import org.springframework.stereotype.Component;
+                import java.util.Map;
+
+                @Component("payrollMenu")
+                public class PayrollMenu {
+                    public void closeMonth() {
+                    }
+
+                    public void openReport(Map<String, Object> properties) {
+                    }
+
+                    private void internalOnly() {
+                    }
+                }
+                """.trimIndent(),
+            )
+            val sourceRoot = requireNotNull(
+                root.findFileByRelativePath("loan/src/main/java"),
+            )
+            val sourceModel = ModuleRootManager.getInstance(module).modifiableModel
+            val contentEntry = sourceModel.contentEntries
+                .firstOrNull { it.file == root }
+                ?: sourceModel.addContentEntry(root)
+            contentEntry.addSourceFolder(sourceRoot, false)
+            sourceModel.commit()
         }
 
+        IndexingTestUtil.waitUntilIndexesAreReady(project)
         ApplicationGraphService.getInstance(project).graph(forceRefresh = true)
         val workspace = MenuWorkspaceService.getInstance(project).load()
         assertTrue(workspace.warnings.isEmpty(), workspace.warnings.joinToString())
+        val indexedBean = workspace.springBeans.single()
+        assertEquals("payrollMenu", indexedBean.name)
+        assertEquals("PayrollMenu", indexedBean.declarationName)
+        assertEquals(
+            "loan/src/main/java/com/acme/menu/PayrollMenu.java",
+            indexedBean.sourcePath,
+        )
+        assertEquals("JAVA", indexedBean.language)
+        assertFalse(indexedBean.ambiguous)
+        assertEquals(
+            listOf("closeMonth", "internalOnly", "openReport"),
+            indexedBean.methods.map { it.name },
+        )
+        assertEquals(
+            listOf("closeMonth", "openReport"),
+            indexedBean.methods.filter { it.callable }.map { it.name },
+        )
+        assertEquals(
+            "Menu bean method must be public",
+            indexedBean.methods.single { it.name == "internalOnly" }.issue,
+        )
         val source = workspace.sources.single()
         assertEquals("loan/src/main/resources/com/acme/menu.xml", source.relativePath)
         assertEquals(6, source.nodeCount)

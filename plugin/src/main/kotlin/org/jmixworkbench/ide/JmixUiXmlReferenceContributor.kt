@@ -39,7 +39,10 @@ internal object JmixUiXmlReferenceProvider : PsiReferenceProvider() {
         val attribute = value.parent as? XmlAttribute ?: return PsiReference.EMPTY_ARRAY
         val file = value.containingFile as? XmlFile ?: return PsiReference.EMPTY_ARRAY
         val raw = value.value
-        if (raw.isBlank()) return PsiReference.EMPTY_ARRAY
+        val menuBeanAttribute = file.isJmixMenuDescriptor() &&
+            attribute.parent.localName == "item" &&
+            attribute.localName in setOf("bean", "beanMethod")
+        if (raw.isBlank() && !menuBeanAttribute) return PsiReference.EMPTY_ARRAY
 
         if ((file.isJmixFlowUiDescriptor() ||
                 file.rootTag?.localName == "window" ||
@@ -95,6 +98,25 @@ internal object JmixUiXmlReferenceProvider : PsiReferenceProvider() {
                     value,
                     quotedXmlRange(raw),
                     raw,
+                ),
+            )
+        }
+        if (attribute.localName == "bean" && tag.localName == "item") {
+            return arrayOf(
+                JmixXmlSpringBeanReference(
+                    value,
+                    quotedXmlRange(raw),
+                    raw,
+                ),
+            )
+        }
+        if (attribute.localName == "beanMethod" && tag.localName == "item") {
+            return arrayOf(
+                JmixXmlSpringBeanMethodReference(
+                    value,
+                    quotedXmlRange(raw),
+                    raw,
+                    tag.getAttributeValue("bean").orEmpty(),
                 ),
             )
         }
@@ -160,6 +182,100 @@ internal class JmixXmlMenuIdDeclarationReference(
         declaration.setValue(newElementName)
         return declaration.valueElement ?: element
     }
+}
+
+internal class JmixXmlSpringBeanReference(
+    element: XmlAttributeValue,
+    range: TextRange,
+    private val beanName: String,
+) : PsiPolyVariantReferenceBase<XmlAttributeValue>(element, range, false) {
+    override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> =
+        candidateDeclarations()
+            .filter { it.name == beanName }
+            .map(::JmixSpringBeanElement)
+            .map(::PsiElementResolveResult)
+            .toTypedArray()
+
+    override fun getVariants(): Array<Any> =
+        candidateDeclarations()
+            .asSequence()
+            .take(JMIX_UI_COMPLETION_LIMIT)
+            .map { declaration ->
+                LookupElementBuilder.create(
+                    JmixSpringBeanElement(declaration),
+                    declaration.name,
+                ).withTypeText(
+                    declaration.classElement.containingFile?.name.orEmpty(),
+                    true,
+                )
+            }
+            .distinctBy { it.lookupString }
+            .toList()
+            .toTypedArray()
+
+    override fun handleElementRename(newElementName: String): PsiElement {
+        val attribute = element.parent as? XmlAttribute ?: return element
+        val declarations = candidateDeclarations()
+        val declaration = declarations.singleOrNull { it.name == beanName }
+            ?: declarations.singleOrNull {
+                it.explicitNameElement == null &&
+                    it.classElement.name == newElementName
+            }
+        val replacement = if (declaration?.explicitNameElement == null &&
+            declaration != null
+        ) {
+            declaration.implicitNameKind.beanNameAfterBackingRename(
+                newElementName,
+            )
+        } else {
+            newElementName
+        }
+        attribute.setValue(replacement)
+        return attribute.valueElement ?: element
+    }
+
+    internal fun candidateDeclarations(): List<JmixSpringBeanDeclaration> =
+        jmixSpringBeanDeclarations(element)
+}
+
+internal class JmixXmlSpringBeanMethodReference(
+    element: XmlAttributeValue,
+    range: TextRange,
+    private val methodName: String,
+    private val beanName: String,
+) : PsiPolyVariantReferenceBase<XmlAttributeValue>(element, range, false) {
+    override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> =
+        candidateMethods()
+            .filter { it.name == methodName }
+            .map { PsiElementResolveResult(it.element) }
+            .toTypedArray()
+
+    override fun getVariants(): Array<Any> =
+        candidateMethods()
+            .asSequence()
+            .filter(JmixSpringBeanMethodDeclaration::isMenuCallable)
+            .map { declaration ->
+                LookupElementBuilder.create(
+                    declaration.element,
+                    declaration.name,
+                ).withTypeText(declaration.signature, true)
+            }
+            .distinctBy { it.lookupString }
+            .take(JMIX_UI_COMPLETION_LIMIT)
+            .toList()
+            .toTypedArray()
+
+    override fun handleElementRename(newElementName: String): PsiElement {
+        val attribute = element.parent as? XmlAttribute ?: return element
+        attribute.setValue(newElementName)
+        return attribute.valueElement ?: element
+    }
+
+    internal fun candidateBeans(): List<JmixSpringBeanDeclaration> =
+        jmixSpringBeanDeclarations(element).filter { it.name == beanName }
+
+    internal fun candidateMethods(): List<JmixSpringBeanMethodDeclaration> =
+        candidateBeans().flatMap(JmixSpringBeanDeclaration::methods)
 }
 
 internal class JmixXmlMessageReference(

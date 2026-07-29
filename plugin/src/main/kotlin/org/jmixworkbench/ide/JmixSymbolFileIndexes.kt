@@ -142,6 +142,21 @@ class JmixSpecificPolicyCandidateFileIndex : JmixCandidateFileIndex(
     }
 }
 
+class JmixSpringBeanCandidateFileIndex : JmixCandidateFileIndex(
+    NAME,
+    JVM_EXTENSIONS,
+) {
+    override fun isCandidate(file: VirtualFile, text: CharSequence): Boolean =
+        SPRING_BEAN_ANNOTATIONS.any(text::containsAnnotation) ||
+            SPRING_BEAN_QUALIFIED_MARKERS.any(text::contains)
+
+    companion object {
+        @JvmField
+        val NAME: ID<String, Long> =
+            ID.create("org.jmixworkbench.springBeanCandidateFile")
+    }
+}
+
 class JmixMenuCandidateFileIndex : JmixCandidateFileIndex(
     NAME,
     XML_EXTENSIONS,
@@ -201,6 +216,27 @@ class JmixMessageBundleCandidateFileIndex : JmixCandidateFileIndex(
 private val JVM_EXTENSIONS = setOf("java", "kt")
 private val XML_EXTENSIONS = setOf("xml")
 private val PROPERTIES_EXTENSIONS = setOf("properties")
+private val SPRING_BEAN_ANNOTATIONS = setOf(
+    "Component",
+    "Service",
+    "Repository",
+    "Controller",
+    "RestController",
+    "Configuration",
+    "Bean",
+    "Named",
+)
+private val SPRING_BEAN_QUALIFIED_MARKERS = setOf(
+    "org.springframework.stereotype.Component",
+    "org.springframework.stereotype.Service",
+    "org.springframework.stereotype.Repository",
+    "org.springframework.stereotype.Controller",
+    "org.springframework.web.bind.annotation.RestController",
+    "org.springframework.context.annotation.Configuration",
+    "org.springframework.context.annotation.Bean",
+    "jakarta.inject.Named",
+    "javax.inject.Named",
+)
 private val MESSAGE_BUNDLE_NAME =
     Regex("""messages(?:_[A-Za-z0-9_-]+)?\.properties""")
 

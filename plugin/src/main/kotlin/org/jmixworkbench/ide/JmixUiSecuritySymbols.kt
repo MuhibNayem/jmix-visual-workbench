@@ -21,8 +21,8 @@ import com.intellij.psi.PsiNameValuePair
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.impl.FakePsiElement
 import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.ProjectScope
 import com.intellij.psi.search.SearchScope
-import com.intellij.psi.search.searches.AnnotatedElementsSearch
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.xml.XmlAttribute
 import com.intellij.psi.xml.XmlFile
@@ -54,7 +54,7 @@ internal class JmixUiSecuritySymbolService(
         cached(
             current = { viewCache },
             indexId = JmixViewControllerCandidateFileIndex.NAME,
-            scope = GlobalSearchScope.allScope(project),
+            scope = jmixProjectAndLibrariesScope(),
             compute = ::computeViewIds,
             store = { viewCache = it },
         )
@@ -63,7 +63,7 @@ internal class JmixUiSecuritySymbolService(
         cached(
             current = { menuCache },
             indexId = JmixMenuCandidateFileIndex.NAME,
-            scope = GlobalSearchScope.allScope(project),
+            scope = jmixProjectAndLibrariesScope(),
             compute = ::computeMenuIds,
             store = { menuCache = it },
         )
@@ -72,7 +72,7 @@ internal class JmixUiSecuritySymbolService(
         cached(
             current = { messageCache },
             indexId = JmixMessageBundleCandidateFileIndex.NAME,
-            scope = GlobalSearchScope.allScope(project),
+            scope = jmixProjectAndLibrariesScope(),
             compute = ::computeMessages,
             store = { messageCache = it },
         )
@@ -106,22 +106,15 @@ internal class JmixUiSecuritySymbolService(
         return values
     }
 
+    private fun jmixProjectAndLibrariesScope(): GlobalSearchScope =
+        ProjectScope.getContentScope(project)
+            .uniteWith(ProjectScope.getLibrariesScope(project))
+
     private fun computeViewIds(
         candidates: List<VirtualFile>,
     ): List<JmixViewIdDeclaration> {
-        val allScope = GlobalSearchScope.allScope(project)
-        val facade = JavaPsiFacade.getInstance(project)
         val manager = PsiManager.getInstance(project)
         val declarations = mutableListOf<JmixViewIdDeclaration>()
-
-        JMIX_VIEW_CONTROLLER_ANNOTATIONS.forEach { annotationName ->
-            ProgressManager.checkCanceled()
-            val annotationClass = facade.findClass(annotationName, allScope)
-                ?: return@forEach
-            declarations += AnnotatedElementsSearch.searchPsiClasses(annotationClass, allScope)
-                .findAll()
-                .mapNotNull(PsiClass::jmixViewIdDeclaration)
-        }
 
         val sourceFiles = candidates
             .asSequence()

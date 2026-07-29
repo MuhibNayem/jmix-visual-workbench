@@ -36,10 +36,12 @@
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixDomainSymbolService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixUiSecuritySymbolService"/>
+        <projectService serviceImplementation="org.jmixworkbench.ide.JmixSpringBeanSymbolService"/>
 
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixEntityCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixViewControllerCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpecificPolicyCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpringBeanCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMenuCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFetchPlanCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFlowUiDescriptorCandidateFileIndex"/>
@@ -56,6 +58,7 @@
         <psi.referenceContributor language="kotlin"
                                   implementation="org.jmixworkbench.ide.JmixKotlinReferenceContributor"/>
         <useScopeEnlarger implementation="org.jmixworkbench.ide.JmixEntityUseScopeEnlarger"/>
+        <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixSpringBeanRenameProcessor"/>
         <codeInsight.lineMarkerProvider language="JAVA"
                                         implementationClass="org.jmixworkbench.ide.JmixViewDescriptorLineMarkerProvider"/>
         <codeInsight.lineMarkerProvider language="XML"
