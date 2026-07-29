@@ -27,7 +27,9 @@ import com.intellij.psi.PsiTypes
 import com.intellij.psi.ResolveResult
 import com.intellij.psi.impl.FakePsiElement
 import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.ProjectScope
 import com.intellij.psi.search.SearchScope
+import com.intellij.psi.search.PsiShortNamesCache
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.util.PsiUtil
 import java.util.Locale
@@ -123,15 +125,25 @@ internal class JmixSpringBeanSymbolService(
         }
 
     private fun kotlinBeans(file: PsiElement): List<JmixSpringBeanDeclaration> =
-        PsiTreeUtil.findChildrenOfType(file, PsiNamedElement::class.java)
-            .asSequence()
-            .onEach { ProgressManager.checkCanceled() }
-            .filter {
-                it.javaClass.simpleName == "KtClass" ||
-                    it.javaClass.simpleName == "KtObjectDeclaration"
-            }
-            .mapNotNull(PsiNamedElement::jmixKotlinSpringBeanDeclaration)
-            .toList()
+        buildList {
+            val declarations = PsiTreeUtil.findChildrenOfType(
+                file,
+                PsiNamedElement::class.java,
+            )
+            declarations.asSequence()
+                .onEach { ProgressManager.checkCanceled() }
+                .filter {
+                    it.javaClass.simpleName == "KtClass" ||
+                        it.javaClass.simpleName == "KtObjectDeclaration"
+                }
+                .mapNotNull(PsiNamedElement::jmixKotlinSpringBeanDeclaration)
+                .forEach(::add)
+            declarations.asSequence()
+                .onEach { ProgressManager.checkCanceled() }
+                .filter { it.javaClass.simpleName == "KtNamedFunction" }
+                .flatMap(PsiNamedElement::jmixKotlinBeanFactoryDeclarations)
+                .forEach(::add)
+        }
 
     companion object {
         fun getInstance(project: Project): JmixSpringBeanSymbolService =
@@ -163,10 +175,22 @@ internal data class JmixSpringBeanMethodDeclaration(
     val element: PsiNamedElement,
     val signature: String,
     val invalidReason: String?,
+    val restInvalidReason: String?,
+    val parameters: List<JmixSpringBeanMethodParameterDeclaration>,
 ) {
     val isMenuCallable: Boolean
         get() = invalidReason == null
+
+    val isRestCallable: Boolean
+        get() = restInvalidReason == null
 }
+
+internal data class JmixSpringBeanMethodParameterDeclaration(
+    val name: String,
+    val element: PsiNamedElement,
+    val canonicalType: String,
+    val presentableType: String,
+)
 
 internal class JmixSpringBeanElement(
     internal val declaration: JmixSpringBeanDeclaration,
@@ -485,11 +509,27 @@ private fun PsiMethod.jmixMenuMethodDeclaration(): JmixSpringBeanMethodDeclarati
 
         else -> null
     }
+    val restReason = when {
+        !hasModifierProperty(PsiModifier.PUBLIC) ->
+            "REST service method must be public"
+
+        else -> null
+    }
+    val parameters = parameterList.parameters.map { parameter ->
+        JmixSpringBeanMethodParameterDeclaration(
+            name = parameter.name,
+            element = parameter,
+            canonicalType = parameter.type.canonicalText,
+            presentableType = parameter.type.presentableText,
+        )
+    }
     return JmixSpringBeanMethodDeclaration(
         name = name,
         element = this,
         signature = formatJavaMenuSignature(),
         invalidReason = reason,
+        restInvalidReason = restReason,
+        parameters = parameters,
     )
 }
 
@@ -539,7 +579,117 @@ private fun PsiNamedElement.jmixKotlinSpringBeanDeclaration(): JmixSpringBeanDec
         ?.substring(explicitHost.text)
         ?.takeIf(String::isNotBlank)
     val navigation = explicitHost ?: this
-    val methods = PsiTreeUtil.findChildrenOfType(
+    val methods = jmixKotlinProducedMethods()
+    return JmixSpringBeanDeclaration(
+        name = explicitName ?: springDefaultBeanName(className),
+        navigationElement = navigation,
+        classElement = this,
+        explicitNameElement = explicitHost,
+        methods = methods,
+        implicitNameKind = JmixSpringBeanImplicitNameKind.CLASS,
+    )
+}
+
+private fun PsiNamedElement.jmixKotlinBeanFactoryDeclarations():
+    Sequence<JmixSpringBeanDeclaration> {
+    val functionName = name?.takeIf(String::isNotBlank)
+        ?: return emptySequence()
+    val header = text.substringBefore('{')
+    if (KOTLIN_BEAN_FACTORY_ANNOTATION.find(header) == null) {
+        return emptySequence()
+    }
+    val signature = kotlinFunctionSignature(text, functionName)
+    val returnTypeName = signature.returnType
+        ?.removeSuffix("?")
+        ?.takeIf(String::isNotBlank)
+        ?: return emptySequence()
+    val explicitNames = PsiTreeUtil.findChildrenOfType(
+        this,
+        PsiLanguageInjectionHost::class.java,
+    ).asSequence()
+        .filter { it.javaClass.simpleName == "KtStringTemplateExpression" }
+        .mapNotNull { host ->
+            val context = host.kotlinAnnotationContext() ?: return@mapNotNull null
+            if (context.name != "Bean" ||
+                context.attributeName !in setOf(null, "value", "name")
+            ) {
+                return@mapNotNull null
+            }
+            host.kotlinStringContentRange()
+                ?.substring(host.text)
+                ?.takeIf(String::isNotBlank)
+                ?.let { name -> name to host }
+        }
+        .toList()
+    val producedSourceClass = containingFile?.let { file ->
+        PsiTreeUtil.findChildrenOfType(
+            file,
+            PsiNamedElement::class.java,
+        ).firstOrNull { candidate ->
+            candidate.name == returnTypeName.substringAfterLast('.') &&
+                (candidate.javaClass.simpleName == "KtClass" ||
+                    candidate.javaClass.simpleName == "KtObjectDeclaration")
+        }
+    }
+    val producedPsiClass = when {
+        producedSourceClass != null -> null
+        '.' in returnTypeName ->
+            JavaPsiFacade.getInstance(project).findClass(
+                returnTypeName,
+                ProjectScope.getAllScope(project),
+            )
+
+        else ->
+            PsiShortNamesCache.getInstance(project)
+                .getClassesByName(
+                    returnTypeName,
+                    ProjectScope.getAllScope(project),
+                )
+                .singleOrNull()
+    }
+    val methods = when {
+        producedSourceClass != null ->
+            producedSourceClass.jmixKotlinProducedMethods()
+
+        producedPsiClass != null ->
+            producedPsiClass.allMethods.asSequence()
+                .filterNot(PsiMethod::isConstructor)
+                .filterNot { method ->
+                    method.containingClass?.qualifiedName == "java.lang.Object"
+                }
+                .map(PsiMethod::jmixMenuMethodDeclaration)
+                .distinctBy { declaration ->
+                    val owner = declaration.element.containingFile
+                        ?.virtualFile
+                        ?.path
+                        .orEmpty()
+                    "$owner:${declaration.element.textOffset}:${declaration.signature}"
+                }
+                .sortedWith(
+                    compareBy<JmixSpringBeanMethodDeclaration> { it.name }
+                        .thenBy { it.signature },
+                )
+                .toList()
+
+        else -> emptyList()
+    }
+    val names: List<Pair<String, PsiElement?>> =
+        explicitNames.ifEmpty { listOf(functionName to null) }
+    return names.asSequence().map { (beanName, explicit) ->
+        JmixSpringBeanDeclaration(
+            name = beanName,
+            navigationElement = explicit ?: this,
+            classElement = this,
+            explicitNameElement = explicit,
+            methods = methods,
+            implicitNameKind = JmixSpringBeanImplicitNameKind.FACTORY_METHOD,
+        )
+    }
+}
+
+private fun PsiNamedElement.jmixKotlinProducedMethods():
+    List<JmixSpringBeanMethodDeclaration> =
+    PsiTreeUtil.findChildrenOfType(
         this,
         PsiNamedElement::class.java,
     ).asSequence()
@@ -551,15 +701,6 @@ private fun PsiNamedElement.jmixKotlinSpringBeanDeclaration(): JmixSpringBeanDec
                 .thenBy { it.signature },
         )
         .toList()
-    return JmixSpringBeanDeclaration(
-        name = explicitName ?: springDefaultBeanName(className),
-        navigationElement = navigation,
-        classElement = this,
-        explicitNameElement = explicitHost,
-        methods = methods,
-        implicitNameKind = JmixSpringBeanImplicitNameKind.CLASS,
-    )
-}
 
 private fun PsiElement.nearestKotlinClass(): PsiElement? =
     generateSequence(parent) { it.parent }
@@ -594,12 +735,135 @@ private fun PsiNamedElement.jmixKotlinMenuMethodDeclaration():
 
         else -> null
     }
+    val restReason = when {
+        KOTLIN_NON_PUBLIC_MODIFIER.containsMatchIn(signature.header) ->
+            "REST service method must be public"
+
+        KOTLIN_SUSPEND_MODIFIER.containsMatchIn(signature.header) ->
+            "REST service method cannot be suspend"
+
+        else -> null
+    }
+    val parameterElements = PsiTreeUtil.findChildrenOfType(
+        this,
+        PsiNamedElement::class.java,
+    ).asSequence()
+        .filter { it.javaClass.simpleName == "KtParameter" }
+        .filter { parameter -> parameter.nearestKotlinFunction() === this }
+        .mapNotNull { parameter ->
+            val parameterName = parameter.name?.takeIf(String::isNotBlank)
+                ?: return@mapNotNull null
+            val parameterText = parameter.text.trim()
+            val isVararg = parameterText.startsWith("vararg ")
+            val declaredType = parameterText
+                .removePrefix("vararg ")
+                .substringAfter(':', "")
+                .substringBefore('=')
+                .trim()
+            val canonicalType = parameter.kotlinJvmCanonicalType(
+                declaredType,
+                isVararg,
+            )
+            JmixSpringBeanMethodParameterDeclaration(
+                name = parameterName,
+                element = parameter,
+                canonicalType = canonicalType,
+                presentableType = if (isVararg) {
+                    "vararg $declaredType"
+                } else {
+                    declaredType
+                },
+            )
+        }
+        .toList()
     return JmixSpringBeanMethodDeclaration(
         name = functionName,
         element = this,
         signature = signature.display,
         invalidReason = reason,
+        restInvalidReason = restReason,
+        parameters = parameterElements,
     )
+}
+
+private fun PsiElement.nearestKotlinFunction(): PsiElement? =
+    generateSequence(parent) { it.parent }
+        .firstOrNull { it.javaClass.simpleName == "KtNamedFunction" }
+
+private fun PsiNamedElement.kotlinJvmCanonicalType(
+    declaredType: String,
+    isVararg: Boolean,
+): String {
+    val normalized = declaredType.replace(Regex("""\s+"""), "")
+    val nullable = normalized.endsWith('?')
+    val withoutNullable = normalized.removeSuffix("?")
+    val arrayElement = withoutNullable
+        .takeIf { it.startsWith("Array<") && it.endsWith('>') }
+        ?.substringAfter('<')
+        ?.dropLast(1)
+    val canonical = when {
+        arrayElement != null -> {
+            val elementType = kotlinJvmCanonicalType(arrayElement, false)
+            "${JVM_PRIMITIVE_WRAPPERS[elementType] ?: elementType}[]"
+        }
+
+        withoutNullable in KOTLIN_PRIMITIVE_ARRAY_TYPES ->
+            requireNotNull(KOTLIN_PRIMITIVE_ARRAY_TYPES[withoutNullable])
+
+        else -> {
+            val rawType = withoutNullable.substringBefore('<')
+            val builtIn = if (nullable) {
+                KOTLIN_NULLABLE_JVM_TYPES[rawType] ?: KOTLIN_JVM_TYPES[rawType]
+            } else {
+                KOTLIN_JVM_TYPES[rawType]
+            }
+            builtIn ?: resolveKotlinJvmClassName(rawType) ?: rawType
+        }
+    }
+    return if (isVararg) "$canonical[]" else canonical
+}
+
+private fun PsiNamedElement.resolveKotlinJvmClassName(
+    typeName: String,
+): String? {
+    if (typeName.isBlank()) return null
+    val projectScope = ProjectScope.getAllScope(project)
+    if ('.' in typeName) {
+        JavaPsiFacade.getInstance(project)
+            .findClass(typeName, projectScope)
+            ?.qualifiedName
+            ?.let { return it }
+    }
+    val simpleName = typeName.substringAfterLast('.')
+    val fileText = containingFile?.text.orEmpty()
+    val imported = KOTLIN_IMPORT_DIRECTIVE.findAll(fileText)
+        .mapNotNull { match ->
+            val qualifiedName = match.groupValues[1]
+            val alias = match.groupValues[2].takeIf(String::isNotBlank)
+            if ((alias ?: qualifiedName.substringAfterLast('.')) == simpleName) {
+                qualifiedName
+            } else {
+                null
+            }
+        }
+        .firstOrNull()
+    if (imported != null) return imported
+
+    val packageName = KOTLIN_PACKAGE_DIRECTIVE.find(fileText)
+        ?.groupValues
+        ?.get(1)
+        .orEmpty()
+    if (packageName.isNotBlank()) {
+        JavaPsiFacade.getInstance(project)
+            .findClass("$packageName.$simpleName", projectScope)
+            ?.qualifiedName
+            ?.let { return it }
+    }
+    return PsiShortNamesCache.getInstance(project)
+        .getClassesByName(simpleName, projectScope)
+        .mapNotNull(PsiClass::getQualifiedName)
+        .distinct()
+        .singleOrNull()
 }
 
 private data class KotlinFunctionSignature(
@@ -614,7 +878,25 @@ private fun kotlinFunctionSignature(
     source: String,
     name: String,
 ): KotlinFunctionSignature {
-    val open = source.indexOf('(')
+    val functionStart = Regex("""\bfun\b""").find(source)
+        ?.range
+        ?.last
+        ?.plus(1)
+        ?: -1
+    val nameStart = if (functionStart >= 0) {
+        Regex("""\b${Regex.escape(name)}\s*\(""")
+            .find(source, functionStart)
+            ?.range
+            ?.first
+            ?: -1
+    } else {
+        -1
+    }
+    val open = if (nameStart >= 0) {
+        source.indexOf('(', nameStart + name.length)
+    } else {
+        -1
+    }
     val close = if (open >= 0) matchingDelimiter(source, open, '(', ')') else -1
     val header = if (close >= 0) source.substring(0, close + 1) else source
     val parameterSource = if (open >= 0 && close > open) {
@@ -727,6 +1009,7 @@ private fun escapeSpringBeanString(value: String): String =
 internal val SPRING_BEAN_STEREOTYPES = setOf(
     "Component",
     "Service",
+    "RestService",
     "Repository",
     "Controller",
     "RestController",
@@ -735,9 +1018,103 @@ internal val SPRING_BEAN_STEREOTYPES = setOf(
 )
 private val KOTLIN_SPRING_STEREOTYPE =
     Regex("""@(?:[\w.]+\.)?(?:${SPRING_BEAN_STEREOTYPES.joinToString("|")})\b""")
+private val KOTLIN_BEAN_FACTORY_ANNOTATION =
+    Regex("""@(?:[\w.]+\.)?Bean\b""")
 private val KOTLIN_NON_PUBLIC_MODIFIER =
     Regex("""\b(?:private|protected|internal)\b""")
 private val KOTLIN_SUSPEND_MODIFIER = Regex("""\bsuspend\b""")
+private val KOTLIN_PACKAGE_DIRECTIVE =
+    Regex("""(?m)^\s*package\s+([\w.]+)\s*$""")
+private val KOTLIN_IMPORT_DIRECTIVE =
+    Regex("""(?m)^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?\s*$""")
+private val KOTLIN_JVM_TYPES = mapOf(
+    "Any" to "java.lang.Object",
+    "kotlin.Any" to "java.lang.Object",
+    "Boolean" to "boolean",
+    "kotlin.Boolean" to "boolean",
+    "Byte" to "byte",
+    "kotlin.Byte" to "byte",
+    "Char" to "char",
+    "kotlin.Char" to "char",
+    "Double" to "double",
+    "kotlin.Double" to "double",
+    "Float" to "float",
+    "kotlin.Float" to "float",
+    "Int" to "int",
+    "kotlin.Int" to "int",
+    "Long" to "long",
+    "kotlin.Long" to "long",
+    "Short" to "short",
+    "kotlin.Short" to "short",
+    "String" to "java.lang.String",
+    "kotlin.String" to "java.lang.String",
+    "Unit" to "void",
+    "kotlin.Unit" to "void",
+    "Collection" to "java.util.Collection",
+    "kotlin.collections.Collection" to "java.util.Collection",
+    "MutableCollection" to "java.util.Collection",
+    "kotlin.collections.MutableCollection" to "java.util.Collection",
+    "Iterable" to "java.lang.Iterable",
+    "kotlin.collections.Iterable" to "java.lang.Iterable",
+    "List" to "java.util.List",
+    "kotlin.collections.List" to "java.util.List",
+    "MutableList" to "java.util.List",
+    "kotlin.collections.MutableList" to "java.util.List",
+    "Map" to "java.util.Map",
+    "kotlin.collections.Map" to "java.util.Map",
+    "MutableMap" to "java.util.Map",
+    "kotlin.collections.MutableMap" to "java.util.Map",
+    "Set" to "java.util.Set",
+    "kotlin.collections.Set" to "java.util.Set",
+    "MutableSet" to "java.util.Set",
+    "kotlin.collections.MutableSet" to "java.util.Set",
+)
+private val KOTLIN_NULLABLE_JVM_TYPES = mapOf(
+    "Boolean" to "java.lang.Boolean",
+    "kotlin.Boolean" to "java.lang.Boolean",
+    "Byte" to "java.lang.Byte",
+    "kotlin.Byte" to "java.lang.Byte",
+    "Char" to "java.lang.Character",
+    "kotlin.Char" to "java.lang.Character",
+    "Double" to "java.lang.Double",
+    "kotlin.Double" to "java.lang.Double",
+    "Float" to "java.lang.Float",
+    "kotlin.Float" to "java.lang.Float",
+    "Int" to "java.lang.Integer",
+    "kotlin.Int" to "java.lang.Integer",
+    "Long" to "java.lang.Long",
+    "kotlin.Long" to "java.lang.Long",
+    "Short" to "java.lang.Short",
+    "kotlin.Short" to "java.lang.Short",
+)
+private val KOTLIN_PRIMITIVE_ARRAY_TYPES = mapOf(
+    "BooleanArray" to "boolean[]",
+    "kotlin.BooleanArray" to "boolean[]",
+    "ByteArray" to "byte[]",
+    "kotlin.ByteArray" to "byte[]",
+    "CharArray" to "char[]",
+    "kotlin.CharArray" to "char[]",
+    "DoubleArray" to "double[]",
+    "kotlin.DoubleArray" to "double[]",
+    "FloatArray" to "float[]",
+    "kotlin.FloatArray" to "float[]",
+    "IntArray" to "int[]",
+    "kotlin.IntArray" to "int[]",
+    "LongArray" to "long[]",
+    "kotlin.LongArray" to "long[]",
+    "ShortArray" to "short[]",
+    "kotlin.ShortArray" to "short[]",
+)
+private val JVM_PRIMITIVE_WRAPPERS = mapOf(
+    "boolean" to "java.lang.Boolean",
+    "byte" to "java.lang.Byte",
+    "char" to "java.lang.Character",
+    "double" to "java.lang.Double",
+    "float" to "java.lang.Float",
+    "int" to "java.lang.Integer",
+    "long" to "java.lang.Long",
+    "short" to "java.lang.Short",
+)
 private val KOTLIN_RETURN_TYPE =
     Regex("""^\s*:\s*([A-Za-z_][\w.]*)""")
 private val KOTLIN_MAP_PARAMETER =

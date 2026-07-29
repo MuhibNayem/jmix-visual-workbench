@@ -42,6 +42,8 @@ Implemented workspaces currently include:
 
 - connected multi-build/multi-module application mapping and impact analysis;
 - entity, CRUD, menu, resource/row security, REST and Liquibase tooling;
+- native Java/Kotlin REST-service, configuration-resource and entity-event
+  intelligence with safe refactoring and fail-closed inspections;
 - a permanent three-region FlowUI round-trip designer;
 - advanced BPMN authoring and deterministic workflow simulation;
 - typed transactional server logic and reusable server-enforced formulas;
@@ -94,6 +96,7 @@ host toolchains and runs the shared IDEA 253/262 test lanes.
 - [IntelliJ host and target-project compatibility matrices](docs/COMPATIBILITY.md)
 - [Native FlowUI Design/XML editor and round-trip contract](docs/NATIVE-FLOWUI-EDITOR.md)
 - [Native persistent-index, cache-isolation, and threading contract](docs/NATIVE-INDEX-ARCHITECTURE.md)
+- [Native REST service, configuration, and event intelligence](docs/NATIVE-SERVICE-EVENT-CONFIGURATION-INTELLIGENCE.md)
 - [Dependency, checksum, CI, and future signing/SBOM policy](docs/RELEASE-INTEGRITY.md)
 
 Java 17, Java 21 and current-JDK target projects are the compatibility

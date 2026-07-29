@@ -1,6 +1,6 @@
 # Enterprise Parity Audit
 
-Audit date: 2026-07-29
+Audit date: 2026-07-30
 
 This audit compares the implemented workbench with
 `FULL-GUI-DEVELOPMENT-REQUIREMENTS.md`,
@@ -40,6 +40,17 @@ and
 The project dependency graph, rather than a plugin-bundled tag table, supplies
 the authoritative XML element, injection class and custom-subscription
 metadata, so supported add-ons participate in the same native contracts.
+REST service mapping follows the official Jmix
+[Services API contract](https://docs.jmix.io/jmix/2.7/rest/business-logic.html)
+and
+[REST configuration properties](https://docs.jmix.io/jmix/2.7/rest/app-properties.html):
+XML parameter names are public request names, parameter types are optional
+unless same-arity overloads require disambiguation, and configuration resources
+are classpath-relative. Entity-event transaction diagnostics follow the
+official
+[Jmix entity-event contract](https://docs.jmix.io/jmix/2.7/data-access/entity-events.html).
+Spring `@Bean` aliases and factory products follow the public
+[Spring bean naming contract](https://docs.spring.io/spring-framework/reference/core/beans/java/bean-annotation.html).
 
 | Requirement area | Status | Implemented evidence | Remaining enterprise gap |
 |---|---|---|---|
@@ -48,7 +59,7 @@ metadata, so supported add-ons participate in the same native contracts.
 | Safe visual changes | Strong | Typed models, immutable digest-bound previews, stale-source rejection, atomic workspace changes, history/undo, read-only lock for unsupported BPMN/source constructs | Broaden PSI/source patchers to every supported language construct while retaining formatting |
 | Entity and schema studio | Substantial | Entity creation, associations/compositions/enums, constraints/indexes, additive existing-entity editing, datastore-aware Liquibase proposals, include-chain protection and schema diagnostics | Full inheritance/embeddable/projection editing, destructive migration choreography and live populated-schema rehearsal |
 | FlowUI designer | Substantial | Native IntelliJ Design/XML `FileEditor` for project-contained `view` and `fragment` descriptors; current unsaved IntelliJ documents are the source of truth for load, digest-bound preview, apply, undo and redo; switching back to Design republishes the current manual revision; clean unopened files still persist through the VFS; safe external composite-root aliases and a private-origin launch context avoid absolute-path exposure. The isolated editor route removes the global workbench navigation and retains the responsive permanent three-pane layout; palette-to-canvas and canvas-to-canvas drag/drop with before/inside/after targets; click insertion; immediate digest-guarded XML synchronization; global undo/redo; source-safe copy/cut/paste/clone, responsive wrapping and namespace-preserving layout conversion; subtree ID/reference rewriting; selection stability; desktop/tablet/mobile and zoom previews; Jmix-native form/grid/flex responsiveness; component tree/properties; bindings/loaders/fetch plans/actions; controller discovery and guarded controller changes | Runtime-fidelity fixtures for custom/add-on components, reusable templates, themes, accessibility authoring, every handwritten-controller construct and genuine hot reload; installed-IDE JCEF interaction, memory and leak proof |
-| Native IntelliJ editor intelligence | Substantial | Native PSI references for FlowUI XML IDs, Java/Kotlin controller annotations, view/screen IDs, nested menu IDs, Spring menu bean names and callable bean methods, message keys in XML and Java/Kotlin APIs, resource-policy entity metadata aliases, inherited/nested entity-attribute paths, JPQL row-policy paths, specific permissions, Jmix/JPA entity classes, property containers, inline fetch plans and shared fetch plans; completion; Ctrl/Cmd+B navigation; Find Usages; private-field project-use-scope enlargement; declaration-side, cross-file safe rename; derived Spring bean rename propagation; unresolved/ambiguous/unsafe-reference inspections with nearest-symbol fixes; duplicate menu and invalid fetch-plan diagnostics; descriptor-file rename tracking; bidirectional controller/descriptor gutter navigation; legacy `ScreenPolicy` compatibility; and explicit Kotlin K2-mode compatibility. Localized message keys are treated as valid polyvariant symbols and a declaration rename updates the base bundle, every writable locale sibling and XML/Java/Kotlin usages. Menu bean methods enforce the exact Java `Map<String, Object>` or Kotlin `Map<String, Any>` contract instead of accepting arbitrary/raw maps. Java/Kotlin `@ViewComponent`, `@Subscribe`, `@Install` and `@Supply` contracts receive controller-placement, instance-member, EventObject/return/parameter, target, duplicate-installation, delegate-SAM and generic-injection diagnostics. `@ViewComponent` fields and one-parameter injection methods are checked against the exact XML tag type declared by the opened project's Jmix/add-on `StudioComponent`, `StudioDataComponent`, `StudioFacet` and `StudioElement` metadata, including generic `component class="…"` and nonvisual data/action fallbacks. `@Subscribe(subject)` has native completion, navigation and rename to compatible add/set listener methods, validates event compatibility and ambiguous listener selection, and consumes add-on `customSubscriptions` metadata. Target-kind completion is scoped to components, data containers, data loaders or actions. The visual View Designer exposes the same Java issues and Kotlin read-only issue inventory. Premium-style `@UiComponentPolicy` intelligence is native in Java and Kotlin: `viewClass`/`viewId` scoped completion, navigation, Find Usages, safe XML-policy rename, nearest-ID fixes and contract diagnostics cover view actions, component-owned actions and recursively nested fragments. The same composed paths are resolved in the application graph and visual Security Workspace, which reports missing/conflicting view selectors, empty/duplicate IDs and unresolved component paths. Entity, view, Spring bean, menu, message, permission, fetch-plan, FlowUI descriptor and Studio metadata discovery uses nine independent persistent content-sensitive indexes instead of global PSI invalidation or extension-wide scans; cache hits avoid candidate enumeration, PSI validation is cancellable, a build guard prohibits broad-scope regressions, and all 50 JCEF non-blocking reads are smart-mode/project-expiry guarded | Expand the remaining semantic surface to service methods, application/entity events and configuration; add custom composed-stereotype and Kotlin `@Bean` factory coverage, fetch-plan coverage analysis, language injections, snippets and more intentions; prove installed-IDE, dumb-mode, cold-index, completion/navigation latency, memory and leak budgets on representative customer repositories |
+| Native IntelliJ editor intelligence | Substantial | Native PSI references for FlowUI XML IDs, Java/Kotlin controller annotations, view/screen IDs, nested menu IDs, Spring menu bean names and callable bean methods, message keys in XML and Java/Kotlin APIs, resource-policy entity metadata aliases, inherited/nested entity-attribute paths, JPQL row-policy paths, specific permissions, Jmix/JPA entity classes, property containers, inline fetch plans and shared fetch plans; completion; Ctrl/Cmd+B navigation; Find Usages; private-field project-use-scope enlargement; declaration-side, cross-file safe rename; derived Spring bean rename propagation; unresolved/ambiguous/unsafe-reference inspections with nearest-symbol fixes; duplicate menu and invalid fetch-plan diagnostics; descriptor-file rename tracking; bidirectional controller/descriptor gutter navigation; legacy `ScreenPolicy` compatibility; and explicit Kotlin K2-mode compatibility. Localized message keys are valid polyvariant symbols and declaration rename updates the base bundle, writable locale siblings and XML/Java/Kotlin usages. Menu bean methods enforce exact Java `Map<String, Object>` or Kotlin `Map<String, Any>` contracts. Jmix `rest-services.xml` resolves indexed Java/Kotlin Spring services, methods, overloads and positional public payload parameters; completes and navigates JVM parameter types; preserves intentional public aliases; refactors coupled bean/method/parameter/type declarations; and diagnoses unresolved, ambiguous, non-public, wrong-arity/type and duplicate mappings. `@RestService` classes and Java/Kotlin `@Bean` factory products share the inventory, including explicit aliases and derived factory-method rename. Profile-specific `jmix.rest.services-config` and `jmix.rest.queries-config` values resolve comma-separated classpath resources, preserve prefixes during rename, distinguish descriptor kinds and fail closed on missing, duplicate or multi-module-ambiguous paths while leaving external and placeholder resources runtime-owned. Java/Kotlin event-listener inspections validate Spring-bean ownership, listener arity, exact Jmix entity generic binding, pre-store listener choice and after-commit `REQUIRES_NEW` data access. Java/Kotlin `@ViewComponent`, `@Subscribe`, `@Install` and `@Supply` contracts receive placement, instance-member, EventObject/return/parameter, target, duplicate-installation, delegate-SAM and generic-injection diagnostics. Exact XML injection types come from opened-project Jmix/add-on Studio metadata, including generic components, nonvisual elements and custom subscriptions. Premium-style `@UiComponentPolicy` intelligence resolves selected views, view actions, component actions and recursively nested fragments in Java/Kotlin; dotted paths support completion, navigation, Find Usages, nearest-ID fixes and safe XML-policy refactoring, and the visual Security Workspace consumes the same composed graph. Entity, view, Spring bean, menu, message, permission, fetch-plan, FlowUI descriptor, REST descriptor and Studio metadata discovery uses ten independent persistent content-sensitive indexes; cache hits avoid candidate enumeration, PSI validation is cancellable, a build guard prohibits broad-scope regressions, and all 50 JCEF non-blocking reads are smart-mode/project-expiry guarded | Add custom composed-stereotype and alias support; link application-event publishers to listeners; extend native service intelligence to BPMN/expressions and other consumers; cover the full configuration catalog, YAML, placeholders and `.env`; add fetch-plan coverage analysis, language injections, snippets and more intentions; prove installed-IDE dumb-mode, cold-index, completion/navigation latency, memory and leak budgets on representative customer repositories |
 | Visual programming language | Strong | Typed Java 17+ service model; permanent palette/canvas/inspector; structured literals/parameters/variables; constrained Jmix entity CRUD/query/property operations; indexed service calls; conditions, requirements, returns, exceptions and logs; explicit CRUD authorization; transaction propagation/isolation/read-only/timeout; reusable typed private subflows; typed collection iteration with ITEM/DONE routes and index variables; structured try/catch/finally subflow boundaries; bounded cyclic execution; recursion, argument/result type, exception signature and transitive read-only-write rejection; deterministic side-effect-free path tracing; deterministic source-owned round trip; first-class subflow/caller impact edges | Event/queue primitives, richer formulas/pattern matching, cross-service visual composition and semantic compilation against every target-project dependency |
 | Formula, decision and rules | Substantial | Responsive permanent palette/tree/inspector expression workspace plus a responsive three-region Jmix/Flowable DMN editor; typed inputs/outputs and conditions; UNIQUE/FIRST/ANY/PRIORITY/OUTPUT_ORDER/RULE_ORDER/COLLECT hit policies; SUM/MIN/MAX/COUNT aggregation; ordered output priorities; overlap/conflict/shadow analysis; authoring version/status/effective dates; typed simulation with matched-rule highlighting; deterministic `.dmn` generation under production resource roots; standard-DMN read-only parsing; exact owned-source round trip and manual-source lock; first-class decision/input/output/rule graph artifacts and BPMN decision-task impact links | Decision trees and reusable rule sets, bulk/cross-version simulation, deployed-version activation/retirement/migration, tenant-aware rollout and semantic compilation against every target-project dependency |
 | Workflow and case management | Substantial | BPMN states/transitions, roles, forms, listeners, mappings, timers, messages, signals, retries, multi-instance/quorum, compensation, embedded/event/transaction subprocesses, cancel/terminate/error semantics, Jmix email task, Flowable DMN business-rule tasks linked to indexed decision keys, unresolved-decision diagnostics, deterministic simulation and UI-transition bypass diagnostics | Live process-instance trace, assignee hierarchy/delegation resolution, deployed version migration and ad-hoc case management |
@@ -85,9 +96,9 @@ metadata, so supported add-ons participate in the same native contracts.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 194 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 209 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 194 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 209 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -118,6 +129,13 @@ metadata, so supported add-ons participate in the same native contracts.
   completion/navigation, Find Usages, cross-XML method rename, explicit and
   derived bean rename propagation, ambiguity and unsafe-signature diagnostics,
   exact generic map contracts, and artifact-specific cache invalidation.
+- Fifteen native REST/configuration/event scenarios pass on both IntelliJ
+  hosts. They cover Java/Kotlin services, `@RestService`, Java/Kotlin `@Bean`
+  factory products, overload and JVM-type disambiguation, public payload
+  aliases, completion, navigation, Find Usages and safe rename; profile-aware
+  services/query resource references; duplicate, ambiguity and wrong-kind
+  diagnostics; entity-event generic, listener and transaction safety; and
+  artifact-specific REST descriptor cache invalidation.
 - Thirteen native FlowUI controller-contract scenarios pass on both IntelliJ
   hosts, covering valid and invalid Java/Kotlin `@ViewComponent`, `@Subscribe`,
   `@Install` and `@Supply` declarations, raw-generic repair, target-kind
@@ -129,13 +147,14 @@ metadata, so supported add-ons participate in the same native contracts.
 - A 3,000-unrelated-file native index fixture passes on both IntelliJ hosts.
   It combines XML, properties and Java noise with real entity, view, menu,
   message, fetch-plan, specific-permission and Spring-bean declarations; every
-  symbol remains discoverable, FlowUI discovery excludes unrelated XML, and
+  symbol remains discoverable, FlowUI/REST discovery excludes unrelated XML, and
   edits to one artifact family do not evict another. One hundred warm reads
-  measured 5/9 ms total on IDEA 2025.3/2026.2; access after unrelated edits
-  measured 2/4 ms; twenty consecutive three-file typing cycles measured
-  84/134 ms total while preserving every cache identity. A relevant message
-  edit replaced only the message inventory in 5/8 ms, and a relevant Studio
-  metadata edit replaced only its project-version metadata snapshot. The architectural
+  measured 6/5 ms total on IDEA 2025.3/2026.2; access after unrelated edits
+  measured 1/2 ms; twenty consecutive three-file typing cycles measured
+  68/87 ms total while preserving every cache identity. A relevant message
+  edit replaced only the message inventory in 5/4 ms, a relevant REST
+  descriptor edit replaced only its own inventory, and a relevant Studio
+  metadata edit replaced only its project-version snapshot. The architectural
   contract, p50/p95/p99 measurements and explicit remaining installed-IDE
   benchmark boundary are documented in `NATIVE-INDEX-ARCHITECTURE.md`.
 - The Menu Designer was exercised at 1440, 1024, 768 and 390 pixels. Indexed
@@ -232,10 +251,11 @@ metadata, so supported add-ons participate in the same native contracts.
 
 ## Release blockers for the full product promise
 
-1. Complete native Jmix editor intelligence across service methods, events
-   and configuration, add custom composed-stereotype and
-   Kotlin `@Bean` factory support, add fetch-plan
-   coverage analysis, then complete installed-IDE cold-index, latency, memory,
+1. Extend the native Jmix semantic surface from REST services into BPMN and
+   other service consumers, add application-event publisher/listener linking,
+   the complete configuration catalog/YAML/placeholder model, custom composed
+   Spring stereotype and alias support, and fetch-plan coverage analysis; then
+   complete installed-IDE cold-index, latency, memory,
    cancellation, dumb-mode and leak proof. The global-rescan/global-PSI-cache
    defect is removed and guarded by the 3,000-file dual-host fixture.
 2. Advance DMN into reusable rule sets/trees, bulk cross-version simulation

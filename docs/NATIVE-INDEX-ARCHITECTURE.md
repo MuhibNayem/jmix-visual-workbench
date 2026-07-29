@@ -15,10 +15,11 @@ for:
 | Entity declarations | Java and Kotlin files containing a Jmix/JPA entity annotation marker |
 | View controller declarations | Java and Kotlin files containing `ViewController` or legacy `UiController` markers |
 | Specific permissions | Java and Kotlin files containing `SpecificPolicy` markers |
-| Spring menu beans | Java and Kotlin files containing supported Spring/Jakarta bean annotation markers |
+| Spring beans and factory products | Java and Kotlin files containing supported Spring/Jakarta bean or `@Bean` markers |
 | Menu declarations | XML descriptors whose root is `menu-config` or `menu` |
 | Shared fetch plans | XML descriptors whose root is `fetchPlans` or `fetch-plans` |
 | FlowUI descriptors | XML descriptors whose root is `view` or `fragment` |
+| REST descriptors | XML descriptors whose root is `services` or `queries`, followed by Jmix namespace validation |
 | Message bundles | `messages.properties` and locale variants |
 | Jmix Studio metadata | Java and Kotlin declarations containing `StudioComponent`, `StudioDataComponent`, `StudioFacet` or `StudioElement` |
 
@@ -76,7 +77,7 @@ in smart mode. Remaining synchronous read scopes use cancellable read actions.
 
 `verifyNativeIndexArchitecture` enforces this contract in every aggregate
 gate. It scans native IDE sources for prohibited APIs and verifies that the
-same nine index implementations are registered in the shared, IntelliJ
+same ten index implementations are registered in the shared, IntelliJ
 2025.3 and IntelliJ 2026.2 descriptors. A broad-scan or registration regression
 therefore fails the build before packaging.
 
@@ -84,18 +85,21 @@ therefore fails the build before packaging.
 
 `JmixNativeIndexScaleTest` creates 3,000 unrelated XML, properties and Java
 files across sixteen module-shaped roots alongside real entities, views, menus,
-messages, fetch plans, permissions and Spring menu beans. It proves that:
+messages, fetch plans, permissions, Spring beans, REST descriptors and Studio
+metadata. It proves that:
 
 - every real symbol remains discoverable;
 - FlowUI discovery excludes unrelated XML;
-- 100 repeated warm reads reuse the exact seven symbol inventories and Studio
+- 100 repeated warm reads reuse the exact eight symbol inventories and Studio
   metadata snapshot;
 - adding unrelated files does not evict any inventory;
 - 20 consecutive in-place typing cycles across unrelated XML, properties and
-  Java files preserve the identity of all seven inventories and the metadata
+  Java files preserve the identity of all eight inventories and the metadata
   snapshot;
 - editing a real message bundle replaces only the message inventory while all
   other inventories retain object identity;
+- editing a real Jmix REST descriptor replaces only the REST descriptor
+  inventory while all other inventories retain object identity;
 - editing a real Studio metadata declaration replaces only the metadata
   snapshot while all symbol inventories retain object identity;
 - warm and typing-cycle p50/p95/p99 latency stays within explicit budgets;
@@ -103,12 +107,12 @@ messages, fetch plans, permissions and Spring menu beans. It proves that:
   the repeated-typing loop stays below its five-second ceiling on both
   supported IntelliJ hosts.
 
-Observed in the 2026-07-29 milestone run:
+Observed in the 2026-07-30 milestone run:
 
 | Host | 100 warm reads total (p95/p99) | Lookup after unrelated edits | 20 three-file typing cycles total (p95/p99) | Relevant message edit |
 |---|---:|---:|---:|---:|
-| IntelliJ IDEA 2025.3 | 5 ms (0/0 ms) | 2 ms | 84 ms (6/6 ms) | 5 ms |
-| IntelliJ IDEA 2026.2 | 9 ms (0/0 ms) | 4 ms | 134 ms (12/12 ms) | 8 ms |
+| IntelliJ IDEA 2025.3 | 6 ms (0/0 ms) | 1 ms | 68 ms (5/5 ms) | 5 ms |
+| IntelliJ IDEA 2026.2 | 5 ms (0/0 ms) | 2 ms | 87 ms (7/7 ms) | 4 ms |
 
 The light-fixture gate is a deterministic regression, not a substitute for an
 installed-IDE benchmark. Release certification must additionally publish cold

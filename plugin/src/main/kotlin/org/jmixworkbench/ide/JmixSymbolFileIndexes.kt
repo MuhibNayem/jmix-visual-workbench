@@ -199,6 +199,20 @@ class JmixFlowUiDescriptorCandidateFileIndex : JmixCandidateFileIndex(
     }
 }
 
+class JmixRestDescriptorCandidateFileIndex : JmixCandidateFileIndex(
+    NAME,
+    XML_EXTENSIONS,
+) {
+    override fun isCandidate(file: VirtualFile, text: CharSequence): Boolean =
+        firstXmlElementLocalName(text) in setOf("services", "queries")
+
+    companion object {
+        @JvmField
+        val NAME: ID<String, Long> =
+            ID.create("org.jmixworkbench.restDescriptorCandidateFile")
+    }
+}
+
 class JmixMessageBundleCandidateFileIndex : JmixCandidateFileIndex(
     NAME,
     PROPERTIES_EXTENSIONS,
@@ -234,6 +248,7 @@ private val PROPERTIES_EXTENSIONS = setOf("properties")
 private val SPRING_BEAN_ANNOTATIONS = setOf(
     "Component",
     "Service",
+    "RestService",
     "Repository",
     "Controller",
     "RestController",
@@ -244,6 +259,7 @@ private val SPRING_BEAN_ANNOTATIONS = setOf(
 private val SPRING_BEAN_QUALIFIED_MARKERS = setOf(
     "org.springframework.stereotype.Component",
     "org.springframework.stereotype.Service",
+    "io.jmix.rest.annotation.RestService",
     "org.springframework.stereotype.Repository",
     "org.springframework.stereotype.Controller",
     "org.springframework.web.bind.annotation.RestController",

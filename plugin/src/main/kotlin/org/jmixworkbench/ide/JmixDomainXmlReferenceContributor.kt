@@ -20,6 +20,7 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.PsiModifier
 import com.intellij.psi.PsiNamedElement
+import com.intellij.psi.PsiParameter
 import com.intellij.psi.PsiPolyVariantReferenceBase
 import com.intellij.psi.PsiReference
 import com.intellij.psi.PsiReferenceContributor
@@ -57,20 +58,74 @@ class JmixDomainXmlReferenceContributor : PsiReferenceContributor() {
 }
 
 /**
- * JPA/Jmix entity attributes are normally private, but their metadata names
- * are a public project-wide contract used from XML, JPQL, security and REST.
- * Enlarge the native use scope so IntelliJ rename and Find Usages do not stop
- * at the declaring Java file.
+ * JPA/Jmix entity attributes and Spring service parameters can participate in
+ * public, project-wide Jmix configuration contracts. Enlarge their native use
+ * scope so IntelliJ rename and Find Usages do not stop at the declaring JVM
+ * file. REST payload aliases that intentionally differ from the source
+ * parameter name remain stable because the platform's word search does not
+ * treat them as rename-coupled usages.
  */
 class JmixEntityUseScopeEnlarger : UseScopeEnlarger() {
     override fun getAdditionalUseScope(element: PsiElement): SearchScope? {
-        val entityClass = when (element) {
-            is com.intellij.psi.PsiField -> element.containingClass
-            is PsiMethod -> element.containingClass
-            else -> null
-        } ?: return null
+        val projectWideContract = when (element) {
+            is com.intellij.psi.PsiField ->
+                element.containingClass?.isJmixEntity() == true
+
+            is PsiMethod ->
+                element.containingClass?.isJmixEntity() == true
+
+            is PsiParameter ->
+                element.isIndexedJmixSpringBeanParameter()
+
+            else ->
+                element.isKotlinSpringBeanParameter()
+        }
         return GlobalSearchScope.projectScope(element.project)
-            .takeIf { entityClass.isJmixEntity() }
+            .takeIf { projectWideContract }
+    }
+}
+
+private fun PsiClass.isDirectJmixSpringBean(): Boolean =
+    annotations.any { annotation ->
+        val name = annotation.qualifiedName?.substringAfterLast('.')
+            ?: annotation.nameReferenceElement?.referenceName
+        name in SPRING_BEAN_STEREOTYPES
+    }
+
+private fun PsiParameter.isIndexedJmixSpringBeanParameter(): Boolean {
+    val method = declarationScope as? PsiMethod ?: return false
+    if (method.containingClass?.isDirectJmixSpringBean() == true) return true
+    return jmixSpringBeanDeclarations(this).any { bean ->
+        bean.methods.any { declaration ->
+            val candidate = declaration.element as? PsiMethod
+            candidate != null && manager.areElementsEquivalent(candidate, method)
+        }
+    }
+}
+
+private fun PsiElement.isKotlinSpringBeanParameter(): Boolean {
+    if (javaClass.simpleName != "KtParameter") return false
+    val function = generateSequence(parent) { it.parent }
+        .firstOrNull { it.javaClass.simpleName == "KtNamedFunction" }
+        ?: return false
+    val owner = generateSequence(function.parent) { it.parent }
+        .firstOrNull {
+            it.javaClass.simpleName == "KtClass" ||
+                it.javaClass.simpleName == "KtObjectDeclaration"
+        }
+        ?: return false
+    val header = owner.text.substringBefore('{')
+    if (SPRING_BEAN_STEREOTYPES.any { stereotype ->
+        Regex("""@(?:[\w.]+\.)?$stereotype\b""").containsMatchIn(header)
+    }) {
+        return true
+    }
+    return jmixSpringBeanDeclarations(this).any { bean ->
+        bean.methods.any { method ->
+            method.parameters.any { parameter ->
+                manager.areElementsEquivalent(parameter.element, this)
+            }
+        }
     }
 }
 

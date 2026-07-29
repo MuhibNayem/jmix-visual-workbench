@@ -37,6 +37,7 @@
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixDomainSymbolService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixUiSecuritySymbolService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixSpringBeanSymbolService"/>
+        <projectService serviceImplementation="org.jmixworkbench.ide.JmixRestConfigurationSymbolService"/>
 
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixEntityCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixViewControllerCandidateFileIndex"/>
@@ -45,6 +46,7 @@
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMenuCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFetchPlanCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFlowUiDescriptorCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixRestDescriptorCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMessageBundleCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixStudioMetadataCandidateFileIndex"/>
 
@@ -54,10 +56,14 @@
                                   implementation="org.jmixworkbench.ide.JmixDomainXmlReferenceContributor"/>
         <psi.referenceContributor language="XML"
                                   implementation="org.jmixworkbench.ide.JmixUiXmlReferenceContributor"/>
+        <psi.referenceContributor language="XML"
+                                  implementation="org.jmixworkbench.ide.JmixRestXmlReferenceContributor"/>
         <psi.referenceContributor language="JAVA"
                                   implementation="org.jmixworkbench.ide.JmixJavaReferenceContributor"/>
         <psi.referenceContributor language="kotlin"
                                   implementation="org.jmixworkbench.ide.JmixKotlinReferenceContributor"/>
+        <psi.referenceContributor language="Properties"
+                                  implementation="org.jmixworkbench.ide.JmixConfigurationReferenceContributor"/>
         <useScopeEnlarger implementation="org.jmixworkbench.ide.JmixEntityUseScopeEnlarger"/>
         <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixSpringBeanRenameProcessor"/>
         <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixMessageBundleRenameProcessor"
@@ -87,6 +93,13 @@
                          enabledByDefault="true"
                          level="ERROR"
                          implementationClass="org.jmixworkbench.ide.JmixUiXmlReferenceInspection"/>
+        <localInspection language="XML"
+                         shortName="JmixRestXmlReference"
+                         displayName="Invalid Jmix REST service mapping"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixRestXmlReferenceInspection"/>
         <localInspection language="JAVA"
                          shortName="JmixJavaReference"
                          displayName="Unresolved Jmix Java reference"
@@ -101,6 +114,13 @@
                          enabledByDefault="true"
                          level="ERROR"
                          implementationClass="org.jmixworkbench.ide.JmixKotlinReferenceInspection"/>
+        <localInspection language="Properties"
+                         shortName="JmixConfigurationReference"
+                         displayName="Invalid Jmix configuration resource"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixConfigurationReferenceInspection"/>
         <localInspection language="JAVA"
                          shortName="JmixUiComponentPolicy"
                          displayName="Invalid Jmix UI component policy"
@@ -129,6 +149,20 @@
                          enabledByDefault="true"
                          level="ERROR"
                          implementationClass="org.jmixworkbench.ide.JmixKotlinFlowUiControllerInspection"/>
+        <localInspection language="JAVA"
+                         shortName="JmixEventListener"
+                         displayName="Invalid Jmix event listener contract"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="WARNING"
+                         implementationClass="org.jmixworkbench.ide.JmixJavaEventListenerInspection"/>
+        <localInspection language="kotlin"
+                         shortName="JmixKotlinEventListener"
+                         displayName="Invalid Jmix Kotlin event listener contract"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="WARNING"
+                         implementationClass="org.jmixworkbench.ide.JmixKotlinEventListenerInspection"/>
     </extensions>
 
     <extensions defaultExtensionNs="org.jetbrains.kotlin">

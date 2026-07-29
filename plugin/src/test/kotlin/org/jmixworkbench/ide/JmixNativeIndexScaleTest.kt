@@ -13,9 +13,9 @@ import kotlin.system.measureNanoTime
  * The fixture deliberately contains 3,000 files spread over sixteen
  * module-shaped roots. They are accepted by the index input filters but
  * unrelated to Jmix symbols. A broad extension scan would revisit all of them
- * after every PSI modification. The persistent indexes must keep all seven
+ * after every PSI modification. The persistent indexes must keep all eight
  * cached symbol inventories and project-version Studio metadata stable while
- * descriptor discovery remains restricted to actual FlowUI files.
+ * descriptor discovery remains restricted to actual FlowUI and REST files.
  */
 class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
 
@@ -110,6 +110,12 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
             }
             """.trimIndent(),
         )
+        val restDescriptor = myFixture.addFileToProject(
+            "com/company/payroll/rest/rest-services.xml",
+            """
+            <services xmlns="http://jmix.io/schema/rest/services"/>
+            """.trimIndent(),
+        )
 
         repeat(1_000) { index ->
             val module = "module-${index % 16}"
@@ -149,6 +155,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         val domain = JmixDomainSymbolService.getInstance(project)
         val ui = JmixUiSecuritySymbolService.getInstance(project)
         val spring = JmixSpringBeanSymbolService.getInstance(project)
+        val rest = JmixRestConfigurationSymbolService.getInstance(project)
         val entities = domain.entityClasses()
         val fetchPlans = domain.fetchPlanDeclarations()
         val views = ui.viewIds()
@@ -156,6 +163,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         val messages = ui.messages()
         val policies = ui.specificPolicies()
         val beans = spring.beans()
+        val restDescriptors = rest.descriptors()
         val descriptors = findAllJmixDescriptorFiles(myFixture.file)
         val flowUiMetadata = JmixFlowUiMetadata.snapshot(project)
 
@@ -166,6 +174,10 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         assertEquals(listOf("EmployeeListView.title"), messages.map { it.key })
         assertEquals(listOf("payroll.execute"), policies.map { it.resource })
         assertEquals(listOf("PayrollMenu"), beans.map { it.name })
+        assertEquals(
+            listOf(JmixRestDescriptorKind.SERVICES),
+            restDescriptors.map { it.kind },
+        )
         assertEquals(listOf("employee-list-view.xml"), descriptors.map { it.name })
         assertEquals(
             listOf("payrollButton"),
@@ -181,6 +193,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
                 assertSame(messages, ui.messages())
                 assertSame(policies, ui.specificPolicies())
                 assertSame(beans, spring.beans())
+                assertSame(restDescriptors, rest.descriptors())
                 assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
             }
         }
@@ -229,6 +242,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
             assertSame(messages, ui.messages())
             assertSame(policies, ui.specificPolicies())
             assertSame(beans, spring.beans())
+            assertSame(restDescriptors, rest.descriptors())
             assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
         }
         assertTrue(
@@ -270,6 +284,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
                 assertSame(messages, ui.messages())
                 assertSame(policies, ui.specificPolicies())
                 assertSame(beans, spring.beans())
+                assertSame(restDescriptors, rest.descriptors())
                 assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
             }
         }
@@ -319,11 +334,38 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         assertSame(menus, ui.menuIds())
         assertSame(policies, ui.specificPolicies())
         assertSame(beans, spring.beans())
+        assertSame(restDescriptors, rest.descriptors())
         assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
         println(
             "JVW_INDEX_RELEVANT_MESSAGE_EDIT_COMMIT_MS=" +
                 messageEditNanos / 1_000_000,
         )
+
+        WriteCommandAction.runWriteCommandAction(project) {
+            VfsUtil.saveText(
+                restDescriptor.virtualFile,
+                """
+                <services xmlns="http://jmix.io/schema/rest/services">
+                    <service name="PayrollMenu"/>
+                </services>
+                """.trimIndent(),
+            )
+        }
+        PsiDocumentManager.getInstance(project).commitAllDocuments()
+        val updatedRestDescriptors = rest.descriptors()
+        assertNotSame(restDescriptors, updatedRestDescriptors)
+        assertEquals(
+            listOf(JmixRestDescriptorKind.SERVICES),
+            updatedRestDescriptors.map { it.kind },
+        )
+        assertSame(entities, domain.entityClasses())
+        assertSame(fetchPlans, domain.fetchPlanDeclarations())
+        assertSame(views, ui.viewIds())
+        assertSame(menus, ui.menuIds())
+        assertSame(updatedMessages, ui.messages())
+        assertSame(policies, ui.specificPolicies())
+        assertSame(beans, spring.beans())
+        assertSame(flowUiMetadata, JmixFlowUiMetadata.snapshot(project))
 
         WriteCommandAction.runWriteCommandAction(project) {
             VfsUtil.saveText(
@@ -363,6 +405,7 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         assertSame(updatedMessages, ui.messages())
         assertSame(policies, ui.specificPolicies())
         assertSame(beans, spring.beans())
+        assertSame(updatedRestDescriptors, rest.descriptors())
     }
 
     private fun LongArray.percentileMillis(percentile: Int): Long {
