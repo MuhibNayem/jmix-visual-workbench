@@ -30,6 +30,8 @@ import org.jmixworkbench.services.EntityAttributeRefactorService
 import org.jmixworkbench.services.EntityAttributeRenameLaunchResponse
 import org.jmixworkbench.services.EntityAttributeRenameRequest
 import org.jmixworkbench.services.PreparedEntityAttributeRename
+import org.jmixworkbench.services.DatabaseEntityTableInspectionRequest
+import org.jmixworkbench.services.DatabaseReverseEngineeringService
 import org.jmixworkbench.services.ApplicationGraphService
 import org.jmixworkbench.services.FlowUiPropertyChangeRequest
 import org.jmixworkbench.services.FlowUiPropertyApplyRequest
@@ -319,6 +321,10 @@ class JcefBridge(
             }
             if (action == "launchEntityAttributeRename") {
                 handleLaunchEntityAttributeRename(action, requestId, payload)
+                return
+            }
+            if (action == "inspectDatabaseEntityTable") {
+                handleInspectDatabaseEntityTable(action, requestId, payload)
                 return
             }
             if (action == "previewCrudGeneration") {
@@ -1277,6 +1283,43 @@ class JcefBridge(
                 }, ModalityState.nonModal())
             }
             .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleInspectDatabaseEntityTable(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            DatabaseEntityTableInspectionRequest(
+                storeId = payload.get("storeId")?.asString.orEmpty(),
+                tableName = payload.get("tableName")?.asString.orEmpty(),
+                schemaName = payload.get("schemaName")?.takeUnless { it.isJsonNull }?.asString,
+                connectTimeoutSeconds = payload.get("connectTimeoutSeconds")?.asInt ?: 10,
+                networkTimeoutSeconds = payload.get("networkTimeoutSeconds")?.asInt ?: 30,
+            )
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    org.jmixworkbench.services.DatabaseEntityTableInspectionResponse.failure(
+                        "JVW-DB-REQUEST-INVALID",
+                        error.message ?: "The database inspection request is malformed.",
+                    ),
+                ),
+            )
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().submit {
+            val response = DatabaseReverseEngineeringService.getInstance(project)
+                .inspectEntityTable(request)
+            ApplicationManager.getApplication().invokeLater({
+                if (!project.isDisposed) {
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+            }, ModalityState.any())
+        }
     }
 
     private fun handlePreviewCrudGeneration(action: String, requestId: String?, payload: JsonObject) {

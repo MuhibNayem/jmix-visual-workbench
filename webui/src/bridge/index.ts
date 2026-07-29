@@ -10,6 +10,9 @@ import type {
   FlowUiControllerHandlerRequest,
   FlowUiWorkspaceResponse,
   ExistingEntityAttributeAdditionRequest,
+  DatabaseEntityTableInspectionRequest,
+  DatabaseEntityTableInspectionResponse,
+  DatabaseColumnSnapshot,
   EntityAttributeRenameRequest,
   EntityAttributeRenameLaunchResponse,
   GenerationResult,
@@ -77,6 +80,38 @@ let developmentHistory: WorkspaceHistorySnapshot = {
   undoDepth: 0,
   canRedo: false,
   redoDepth: 0,
+}
+
+function developmentDatabaseColumn(
+  name: string,
+  typeName: string,
+  attributeType: DatabaseColumnSnapshot['suggestion']['attributeType'],
+  primaryKey: boolean,
+  alreadyMapped: boolean,
+  size?: number,
+  suggestionOverrides: Partial<DatabaseColumnSnapshot['suggestion']> = {},
+): DatabaseColumnSnapshot {
+  return {
+    name,
+    jdbcType: 0,
+    typeName,
+    size,
+    nullable: !primaryKey,
+    autoIncrement: false,
+    generated: false,
+    ordinal: 1,
+    primaryKey,
+    alreadyMapped,
+    suggestion: {
+      attributeName: name.toLowerCase().replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()),
+      attributeType,
+      javaType: suggestionOverrides.javaType ?? 'java.lang.String',
+      primaryKey,
+      mandatory: primaryKey,
+      length: size,
+      ...suggestionOverrides,
+    },
+  }
 }
 
 declare global {
@@ -707,6 +742,59 @@ class ${scenario.className} {
                   success: true,
                   message: `IntelliJ usage preview opened for ${payload.attributeName} → ${payload.newName}.`,
                 }
+              case 'inspectDatabaseEntityTable':
+                return {
+                  accepted: true,
+                  snapshotDigest: 'development-loan-app-database-snapshot',
+                  storeId: payload.storeId,
+                  existingEntityQualifiedName: 'com.company.loan.entity.LoanApp',
+                  database: {
+                    name: 'PostgreSQL',
+                    version: '17.2',
+                    driverName: 'PostgreSQL JDBC Driver',
+                    driverVersion: '42.7.5',
+                    urlFingerprint: '0a17f0a17f0a17f0',
+                  },
+                  table: {
+                    schema: payload.schemaName || 'public',
+                    name: payload.tableName || 'LOAN_APP',
+                    type: 'TABLE',
+                    primaryKeyColumns: ['ID'],
+                    dependencyTables: ['EMPLOYEE', 'LOAN_CATEGORY'],
+                    foreignKeys: [
+                      {
+                        name: 'FK_LOAN_APP_EMPLOYEE',
+                        columnName: 'EMPLOYEE_ID',
+                        referencedTableName: 'EMPLOYEE',
+                        referencedColumnName: 'ID',
+                        updateRule: 3,
+                        deleteRule: 3,
+                        sequence: 1,
+                      },
+                    ],
+                    indexes: [
+                      { name: 'IDX_LOAN_APP_EMPLOYEE', unique: false, columns: ['EMPLOYEE_ID'] },
+                      { name: 'UQ_LOAN_APP_NUMBER', unique: true, columns: ['APPLICATION_NO'] },
+                    ],
+                    columns: [
+                      developmentDatabaseColumn('ID', 'UUID', 'uuid', true, true),
+                      developmentDatabaseColumn('APPLICATION_NO', 'VARCHAR', 'string', false, true, 40),
+                      developmentDatabaseColumn('EMPLOYEE_ID', 'UUID', 'association', false, false, undefined, {
+                        attributeName: 'employee',
+                        javaType: 'com.company.hr.entity.Employee',
+                        relatedEntity: 'com.company.hr.entity.Employee',
+                        joinColumnName: 'EMPLOYEE_ID',
+                        referencedColumnName: 'ID',
+                      }),
+                      developmentDatabaseColumn('APPROVED_AMOUNT', 'NUMERIC', 'bigDecimal', false, false, 19, {
+                        precision: 19,
+                        scale: 2,
+                      }),
+                      developmentDatabaseColumn('LEGACY_RISK_SCORE', 'INTEGER', 'integer', false, false),
+                    ],
+                  },
+                  issues: [],
+                } satisfies DatabaseEntityTableInspectionResponse
               case 'previewCrudGeneration': {
                 const entity = payload.entity as any
                 const moduleId = entity.generationTarget?.moduleId ?? 'loan'
@@ -1362,6 +1450,13 @@ class ${scenario.className} {
     return this.request<EntityAttributeRenameLaunchResponse>(
       'launchEntityAttributeRename',
       change,
+    )
+  }
+
+  inspectDatabaseEntityTable(request: DatabaseEntityTableInspectionRequest) {
+    return this.request<DatabaseEntityTableInspectionResponse>(
+      'inspectDatabaseEntityTable',
+      request,
     )
   }
 

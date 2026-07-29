@@ -90,7 +90,29 @@ class SchemaWorkspaceService(
         } else {
             emptyList()
         }
-        val stores = (configuredStores + inferredStores)
+        val datasourceStores = graph.artifacts
+            .filter {
+                it.kind == ArtifactKind.CONFIGURATION_PROPERTY &&
+                    it.displayName.endsWith(".datasource.url")
+            }
+            .map { property ->
+                val storeName = property.displayName.removeSuffix(".datasource.url")
+                SchemaDataStoreSnapshot(
+                    id = "${property.owner.moduleId}:$storeName",
+                    name = storeName,
+                    moduleId = property.owner.moduleId,
+                    configuredPath = "",
+                    configurationLocator = property.sourceLocator,
+                    rootChangelogPath = null,
+                    rootLocator = null,
+                    includeMode = SchemaIncludeMode.MISSING,
+                    includeTargets = emptyList(),
+                    generatedDirectory = null,
+                )
+            }
+            .distinctBy(SchemaDataStoreSnapshot::id)
+        val stores = (configuredStores + inferredStores + datasourceStores)
+            .distinctBy(SchemaDataStoreSnapshot::id)
             .sortedWith(compareBy(SchemaDataStoreSnapshot::moduleId, SchemaDataStoreSnapshot::name))
 
         val changelogs = liquibaseFiles.map { artifact ->

@@ -941,6 +941,7 @@ export const developmentSchemaWorkspace: SchemaWorkspaceResponse = {
   snapshotDigest: 'development-schema',
   modules: [
     { moduleId: 'loan', projectId: 'loan', entityCount: 1, changelogCount: 2, storeCount: 1, findingCount: 2 },
+    { moduleId: 'hr', projectId: 'hr', entityCount: 1, changelogCount: 0, storeCount: 0, findingCount: 0 },
     { moduleId: 'payroll', projectId: 'payroll', entityCount: 0, changelogCount: 1, storeCount: 1, findingCount: 0 },
   ],
   stores: [{
@@ -998,6 +999,34 @@ export const developmentSchemaWorkspace: SchemaWorkspaceResponse = {
     ],
     migrationCoverage: 'COVERED',
     migrationArtifactIds: ['schema-loan-app'],
+  }, {
+    artifactId: 'entity-employee',
+    moduleId: 'hr',
+    className: 'Employee',
+    qualifiedName: 'com.company.hr.entity.Employee',
+    entityName: 'hr_Employee',
+    tableName: 'EMPLOYEE',
+    storeName: 'main',
+    idType: 'uuid',
+    idColumnName: 'ID',
+    databaseView: false,
+    ddlMode: 'DISABLED',
+    sourceLocator: locator('hr/src/main/java/com/company/hr/entity/Employee.java'),
+    attributes: [
+      {
+        artifactId: 'entity-employee:employeeNo',
+        name: 'employeeNo',
+        javaType: 'String',
+        columnName: 'EMPLOYEE_NO',
+        nullable: false,
+        unique: true,
+        persistent: true,
+        association: false,
+        moneyCandidate: false,
+      },
+    ],
+    migrationCoverage: 'DISABLED',
+    migrationArtifactIds: [],
   }],
   changelogs: [{
     artifactId: 'liquibase-loan-root',

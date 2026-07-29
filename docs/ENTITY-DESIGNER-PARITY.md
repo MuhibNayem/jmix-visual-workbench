@@ -66,6 +66,21 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   usage preview also includes plugin-contributed FlowUI, fetch-plan, JPQL and
   security references. A missing existing property in the normal update request
   is rejected rather than being misread as an addition.
+- Existing entities can inspect their live mapped table through the
+  project-owned JDBC driver and the active profile configuration. The backend
+  supports datasource-only stores with Liquibase intentionally disabled,
+  ordered active profiles, property/environment placeholders, driver-specific
+  connection/read timeouts, read-only metadata access and redacted failures.
+  It returns a credential-free, digest-stamped snapshot of columns, primary
+  keys, imported foreign keys, indexes and dependency tables. The responsive
+  in-IDE review surface distinguishes mapped, primary-key, generated,
+  relationship and unsupported columns; lets developers edit proposed
+  property names/types; and stages only selected additions into the existing
+  revision-bound Java/Kotlin atomic source/Liquibase preview. Known foreign
+  keys map to existing entities, and vendor-specific types fail closed until
+  the developer chooses an explicit supported datatype. An optional schema
+  selector resolves multi-schema databases; duplicate table names without an
+  explicit schema fail closed instead of depending on driver return order.
 - The designer consumes the connected application graph and displays entity
   consumers across views, services, security, REST, workflow, menus and
   migrations.
@@ -85,8 +100,11 @@ blocked until all of the following pass:
    rollback. Relationship join-column changes, combined property-and-physical
    mapping changes, type change and removal remain. Additive and
    managed-mapping Java/Kotlin round trip is implemented.
-2. Partial live-database reverse engineering for selected tables, columns,
-   keys and views, plus repeatable merge into existing source.
+2. The first partial live-database merge is implemented for a selected
+   existing entity/table and missing columns. Complete table/view selection,
+   composite-key and join-table mapping, all FK dependency import, database
+   catalog browsing, saved mapping overrides and repeatable regeneration
+   across schema evolution remain.
 3. Attribute propagation into selected FlowUI views, fetch plans,
    localization bundles and security policies through one impact-reviewed
    atomic plan.

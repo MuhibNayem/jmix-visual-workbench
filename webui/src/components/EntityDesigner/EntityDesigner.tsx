@@ -16,6 +16,8 @@ import type {
   SchemaWorkspaceResponse,
   WorkspaceChangePreviewResponse,
   ApplicationGraphResponse,
+  DatabaseEntityTableInspectionResponse,
+  DatabaseColumnSnapshot,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
@@ -45,6 +47,12 @@ const VALIDATIONS: ValidationType[] = [
   'positive', 'negative', 'digits', 'assertTrue',
 ]
 
+interface DatabaseColumnDraft {
+  selected: boolean
+  attributeName: string
+  attributeType: AttributeType
+}
+
 export default function EntityDesigner() {
   const {
     entity,
@@ -69,6 +77,12 @@ export default function EntityDesigner() {
   const [renameDraft, setRenameDraft] = useState('')
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameLaunched, setRenameLaunched] = useState(false)
+  const [databaseInspection, setDatabaseInspection] =
+    useState<DatabaseEntityTableInspectionResponse | null>(null)
+  const [databaseColumnDrafts, setDatabaseColumnDrafts] =
+    useState<Record<string, DatabaseColumnDraft>>({})
+  const [databaseInspectBusy, setDatabaseInspectBusy] = useState(false)
+  const [databaseSchemaName, setDatabaseSchemaName] = useState('')
 
   useEffect(() => {
     let active = true
@@ -199,6 +213,117 @@ export default function EntityDesigner() {
     } finally {
       setRenameBusy(false)
     }
+  }
+
+  const inspectMappedDatabaseTable = async () => {
+    const storeId = entity.generationTarget?.storeId
+    const configuredTableName = existingEntity?.tableName || entity.tableName
+    if (!existingEntity || !storeId || !configuredTableName.trim()) {
+      addToast('Select an existing mapped entity and data store first', 'error')
+      return
+    }
+    const tableParts = configuredTableName.split('.').map(part => part.trim()).filter(Boolean)
+    const tableName = tableParts.pop() ?? configuredTableName
+    const schemaName = databaseSchemaName.trim() ||
+      (tableParts.length ? tableParts.join('.') : undefined)
+    setDatabaseInspectBusy(true)
+    setDatabaseInspection(null)
+    setDatabaseColumnDrafts({})
+    setDatabaseSchemaName('')
+    try {
+      const response = await bridge.inspectDatabaseEntityTable({
+        storeId,
+        tableName,
+        schemaName,
+      })
+      setDatabaseInspection(response)
+      if (!response.accepted || !response.table) {
+        addToast(
+          response.issues.map(issue => issue.message).join(', ') || 'Database inspection was rejected',
+          'error',
+        )
+        return
+      }
+      const drafts = Object.fromEntries(response.table.columns.map(column => [
+        column.name,
+        {
+          selected: databaseColumnCanBeStaged(column),
+          attributeName: column.suggestion.attributeName,
+          attributeType: column.suggestion.attributeType,
+        },
+      ]))
+      setDatabaseColumnDrafts(drafts)
+      const missingCount = response.table.columns.filter(databaseColumnCanBeStaged).length
+      addToast(
+        `Inspected ${qualifiedDatabaseTable(response)}: ${missingCount} safe unmapped column${missingCount === 1 ? '' : 's'}`,
+        'success',
+      )
+    } catch (error: any) {
+      addToast(`Database inspection failed: ${error.message}`, 'error')
+    } finally {
+      setDatabaseInspectBusy(false)
+    }
+  }
+
+  const stageSelectedDatabaseColumns = () => {
+    const columns = databaseInspection?.table?.columns ?? []
+    const selected = columns.filter(column => databaseColumnDrafts[column.name]?.selected)
+    if (!selected.length) {
+      addToast('Select at least one unmapped database column', 'error')
+      return
+    }
+    const existingNames = new Set(entity.attributes.map(attribute => attribute.name))
+    const staged: AttributeModel[] = []
+    const problems: string[] = []
+    selected.forEach(column => {
+      const draft = databaseColumnDrafts[column.name]
+      const name = draft.attributeName.trim()
+      if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)) {
+        problems.push(`${column.name}: enter a valid Java/Kotlin property name`)
+        return
+      }
+      if (existingNames.has(name) || staged.some(attribute => attribute.name === name)) {
+        problems.push(`${column.name}: property ${name} already exists`)
+        return
+      }
+      if (draft.attributeType === 'custom') {
+        problems.push(`${column.name}: choose an explicit supported type`)
+        return
+      }
+      const attribute = databaseColumnToAttribute(
+        column,
+        draft,
+        schemaWorkspace,
+        existingEntity?.storeName ?? entity.dataStore,
+      )
+      if (!attribute) {
+        problems.push(`${column.name}: referenced entity is not mapped in this data store`)
+        return
+      }
+      attribute.unique = Boolean(databaseInspection?.table?.indexes.some(index =>
+        index.unique &&
+        index.columns.length === 1 &&
+        index.columns[0].toUpperCase() === column.name.toUpperCase(),
+      ))
+      staged.push(attribute)
+    })
+    if (problems.length) {
+      addToast(problems.join('; '), 'error')
+      return
+    }
+    setEntity({ attributes: [...entity.attributes, ...staged] })
+    setDatabaseColumnDrafts(current => Object.fromEntries(
+      Object.entries(current).map(([columnName, draft]) => [
+        columnName,
+        draft.selected ? { ...draft, selected: false } : draft,
+      ]),
+    ))
+    setSelectedAttr(entity.attributes.length)
+    setGenerationPreview(null)
+    addToast(
+      `Staged ${staged.length} database-backed attribute${staged.length === 1 ? '' : 's'}; preview the atomic update before applying`,
+      'success',
+    )
   }
 
   const refreshAfterNativeRefactor = async () => {
@@ -337,6 +462,9 @@ export default function EntityDesigner() {
     setExistingEntity(null)
     setGenerationPreview(null)
     setSelectedAttr(null)
+    setDatabaseInspection(null)
+    setDatabaseColumnDrafts({})
+    setDatabaseSchemaName('')
     resetEntity()
   }
 
@@ -353,6 +481,9 @@ export default function EntityDesigner() {
     setExistingEntity(snapshot)
     setGenerationPreview(null)
     setSelectedAttr(null)
+    setDatabaseInspection(null)
+    setDatabaseColumnDrafts({})
+    setDatabaseSchemaName('')
     setEntity(existingEntityModel(snapshot, store?.id))
   }
 
@@ -977,17 +1108,64 @@ export default function EntityDesigner() {
 
         {/* Center: Attributes Table */}
         <div className={`${activePane === 'attributes' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto p-3 sm:p-4 lg:block`}>
-          <div className="flex items-center justify-between mb-3">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider">
               {entity.entityType === 'enum' ? 'Enumeration' : 'Attributes'}
             </h3>
-            {entity.entityType !== 'enum' && <button
-              onClick={addAttribute}
-              className="px-3 py-1 text-xs rounded bg-jmix-500/20 text-jmix-400 hover:bg-jmix-500/30 transition-colors"
-            >
-              + Add Attribute
-            </button>}
+            {entity.entityType !== 'enum' && (
+              <div className="flex flex-wrap justify-end gap-2">
+                {existingEntity && (
+                  <>
+                    <input
+                      value={databaseSchemaName}
+                      onChange={event => setDatabaseSchemaName(event.target.value)}
+                      placeholder="DB schema (optional)"
+                      aria-label="Database schema"
+                      className="w-32 min-w-0 text-xs sm:w-40"
+                    />
+                    <button
+                      type="button"
+                      onClick={inspectMappedDatabaseTable}
+                      disabled={databaseInspectBusy || !entity.generationTarget?.storeId}
+                      className="rounded border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200 transition-colors hover:bg-cyan-500/20 disabled:opacity-50"
+                    >
+                      {databaseInspectBusy ? 'Inspecting database…' : '↻ Import missing DB columns'}
+                    </button>
+                  </>
+                )}
+                <button
+                  onClick={addAttribute}
+                  className="rounded bg-jmix-500/20 px-3 py-1 text-xs text-jmix-400 transition-colors hover:bg-jmix-500/30"
+                >
+                  + Add Attribute
+                </button>
+              </div>
+            )}
           </div>
+
+          {(databaseInspectBusy || databaseInspection) && (
+            <DatabaseInspectionPanel
+              busy={databaseInspectBusy}
+              inspection={databaseInspection}
+              drafts={databaseColumnDrafts}
+              onDraftChange={(columnName, change) => setDatabaseColumnDrafts(current => ({
+                ...current,
+                [columnName]: {
+                  ...(current[columnName] ?? {
+                    selected: false,
+                    attributeName: '',
+                    attributeType: 'custom' as AttributeType,
+                  }),
+                  ...change,
+                },
+              }))}
+              onClose={() => {
+                setDatabaseInspection(null)
+                setDatabaseColumnDrafts({})
+              }}
+              onStage={stageSelectedDatabaseColumns}
+            />
+          )}
 
           {entity.entityType === 'enum' ? (
             <div className="grid min-h-[24rem] place-items-center rounded-xl border border-surface-border bg-gradient-to-br from-surface-light/70 to-surface p-4 sm:p-6">
@@ -1933,6 +2111,289 @@ function AttributeDetail({
       </div>
     </div>
   )
+}
+
+function DatabaseInspectionPanel({
+  busy,
+  inspection,
+  drafts,
+  onDraftChange,
+  onClose,
+  onStage,
+}: {
+  busy: boolean
+  inspection: DatabaseEntityTableInspectionResponse | null
+  drafts: Record<string, DatabaseColumnDraft>
+  onDraftChange: (columnName: string, change: Partial<DatabaseColumnDraft>) => void
+  onClose: () => void
+  onStage: () => void
+}) {
+  if (busy) {
+    return (
+      <section className="mb-4 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+        <div className="flex items-center gap-3">
+          <span className="h-3 w-3 animate-pulse rounded-full bg-cyan-300" />
+          <div>
+            <div className="text-xs font-medium text-cyan-100">Inspecting the mapped database table</div>
+            <p className="mt-1 text-[10px] text-gray-500">
+              The JDBC connection stays inside IntelliJ. Passwords and connection URLs never enter this UI.
+            </p>
+          </div>
+        </div>
+      </section>
+    )
+  }
+  if (!inspection) return null
+  if (!inspection.accepted || !inspection.table) {
+    return (
+      <section className="mb-4 rounded-xl border border-red-500/25 bg-red-500/5 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs font-medium text-red-200">Database inspection could not continue</div>
+            <ul className="mt-2 space-y-1 text-[10px] text-red-100/70">
+              {inspection.issues.map(issue => <li key={`${issue.code}-${issue.message}`}>{issue.message}</li>)}
+            </ul>
+          </div>
+          <button type="button" onClick={onClose} className="text-xs text-gray-500 hover:text-gray-200">✕</button>
+        </div>
+      </section>
+    )
+  }
+  const table = inspection.table
+  const selectedCount = table.columns.filter(column => drafts[column.name]?.selected).length
+  const missingCount = table.columns.filter(column => !column.alreadyMapped && !column.primaryKey).length
+  return (
+    <section className="mb-4 overflow-hidden rounded-xl border border-cyan-500/25 bg-gradient-to-br from-cyan-500/[0.08] to-surface">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-cyan-500/15 p-3 sm:p-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-cyan-100">Database → existing entity</span>
+            <span className="rounded bg-cyan-500/15 px-2 py-0.5 font-mono text-[9px] text-cyan-200">
+              {qualifiedDatabaseTable(inspection)}
+            </span>
+            <span className="rounded bg-surface-lighter px-2 py-0.5 text-[9px] text-gray-400">
+              {inspection.database?.name} {inspection.database?.version}
+            </span>
+          </div>
+          <p className="mt-2 max-w-4xl text-[10px] leading-relaxed text-gray-500">
+            Review the live schema snapshot and stage only missing columns. Nothing is written yet: the normal safe
+            update preview still verifies the source fingerprint, preserves handwritten Java/Kotlin, and shows every
+            source and Liquibase edit before atomic apply.
+          </p>
+        </div>
+        <button type="button" onClick={onClose} className="text-xs text-gray-500 hover:text-gray-200">✕</button>
+      </div>
+
+      <div className="grid gap-px bg-surface-border/60 sm:grid-cols-2 lg:grid-cols-4">
+        {[
+          ['Columns', table.columns.length],
+          ['Missing', missingCount],
+          ['Foreign keys', table.foreignKeys.length],
+          ['Indexes', table.indexes.length],
+        ].map(([label, value]) => (
+          <div key={label} className="bg-surface/90 px-3 py-2">
+            <div className="text-[9px] uppercase tracking-wider text-gray-600">{label}</div>
+            <div className="mt-0.5 text-sm font-semibold text-gray-200">{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {inspection.issues.length > 0 && (
+        <div className="border-b border-amber-500/15 bg-amber-500/5 px-3 py-2 sm:px-4">
+          {inspection.issues.map(issue => (
+            <div key={`${issue.code}-${issue.message}`} className="text-[10px] text-amber-200/75">
+              {issue.message}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="grid gap-2 p-3 sm:grid-cols-2 sm:p-4 2xl:grid-cols-3">
+        {table.columns.map(column => {
+          const draft = drafts[column.name]
+          const locked = column.alreadyMapped || column.primaryKey || column.generated
+          const unsupported = Boolean(column.suggestion.unsupportedReason)
+          const selectable = !locked
+          const availableTypes = ATTRIBUTE_TYPES.filter(type =>
+            !['composition', 'embedded', 'enum', 'fileRef'].includes(type) &&
+            (type !== 'association' || Boolean(column.suggestion.relatedEntity)),
+          )
+          return (
+            <article
+              key={column.name}
+              className={`min-w-0 rounded-lg border p-3 ${
+                draft?.selected
+                  ? 'border-cyan-400/35 bg-cyan-500/[0.08]'
+                  : 'border-surface-border bg-surface/75'
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  aria-label={`Stage ${column.name}`}
+                  checked={draft?.selected ?? false}
+                  disabled={!selectable}
+                  onChange={event => onDraftChange(column.name, { selected: event.target.checked })}
+                  className="mt-0.5"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <span className="truncate font-mono text-[10px] text-gray-200" title={column.name}>
+                      {column.name}
+                    </span>
+                    {column.alreadyMapped && <DatabaseStatus label="mapped" tone="neutral" />}
+                    {column.primaryKey && <DatabaseStatus label="primary key" tone="neutral" />}
+                    {column.generated && <DatabaseStatus label="generated" tone="warning" />}
+                    {column.suggestion.relatedEntity && <DatabaseStatus label="relationship" tone="cyan" />}
+                    {unsupported && <DatabaseStatus label="needs type" tone="warning" />}
+                  </div>
+                  <div className="mt-1 truncate font-mono text-[9px] text-gray-600">
+                    {column.typeName}
+                    {column.size ? `(${column.size}${column.scale != null ? `,${column.scale}` : ''})` : ''}
+                    {column.nullable ? ' · nullable' : ' · required'}
+                  </div>
+                </div>
+              </div>
+              {!locked && draft && (
+                <div className="mt-3 grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(7rem,0.8fr)]">
+                  <label className="min-w-0 text-[9px] uppercase tracking-wider text-gray-600">
+                    Property
+                    <input
+                      value={draft.attributeName}
+                      onChange={event => onDraftChange(column.name, { attributeName: event.target.value })}
+                      className="mt-1 w-full min-w-0"
+                    />
+                  </label>
+                  <label className="min-w-0 text-[9px] uppercase tracking-wider text-gray-600">
+                    Jmix type
+                    <select
+                      value={draft.attributeType}
+                      onChange={event => onDraftChange(column.name, {
+                        attributeType: event.target.value as AttributeType,
+                      })}
+                      className="mt-1 w-full min-w-0"
+                    >
+                      {availableTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                    </select>
+                  </label>
+                </div>
+              )}
+              {column.suggestion.relatedEntity && (
+                <div className="mt-2 truncate text-[9px] text-cyan-200/60" title={column.suggestion.relatedEntity}>
+                  → {column.suggestion.relatedEntity}
+                </div>
+              )}
+              {unsupported && !locked && (
+                <p className="mt-2 text-[9px] leading-relaxed text-amber-200/60">
+                  {column.suggestion.unsupportedReason}
+                </p>
+              )}
+            </article>
+          )
+        })}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-cyan-500/15 bg-black/10 px-3 py-3 sm:px-4">
+        <div className="min-w-0 text-[9px] leading-relaxed text-gray-600">
+          Snapshot {inspection.snapshotDigest?.slice(0, 12)} · URL fingerprint {inspection.database?.urlFingerprint}
+          {table.dependencyTables.length
+            ? ` · dependencies ${table.dependencyTables.join(', ')}`
+            : ''}
+        </div>
+        <button
+          type="button"
+          disabled={selectedCount === 0}
+          onClick={onStage}
+          className="rounded bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
+        >
+          Stage {selectedCount || ''} selected {selectedCount === 1 ? 'attribute' : 'attributes'}
+        </button>
+      </div>
+    </section>
+  )
+}
+
+function DatabaseStatus({
+  label,
+  tone,
+}: {
+  label: string
+  tone: 'neutral' | 'warning' | 'cyan'
+}) {
+  const color = tone === 'warning'
+    ? 'bg-amber-500/10 text-amber-200/70'
+    : tone === 'cyan'
+      ? 'bg-cyan-500/10 text-cyan-200/70'
+      : 'bg-surface-lighter text-gray-500'
+  return <span className={`rounded px-1.5 py-0.5 text-[8px] ${color}`}>{label}</span>
+}
+
+function databaseColumnCanBeStaged(column: DatabaseColumnSnapshot): boolean {
+  return !column.alreadyMapped &&
+    !column.primaryKey &&
+    !column.generated &&
+    !column.suggestion.unsupportedReason
+}
+
+function qualifiedDatabaseTable(inspection: DatabaseEntityTableInspectionResponse): string {
+  const table = inspection.table
+  if (!table) return 'unresolved table'
+  return [table.catalog, table.schema, table.name].filter(Boolean).join('.')
+}
+
+function databaseColumnToAttribute(
+  column: DatabaseColumnSnapshot,
+  draft: DatabaseColumnDraft,
+  workspace: SchemaWorkspaceResponse | null,
+  storeName: string,
+): AttributeModel | null {
+  const suggestion = column.suggestion
+  const common: AttributeModel = {
+    name: draft.attributeName.trim(),
+    type: draft.attributeType,
+    columnName: column.name,
+    mandatory: !column.nullable,
+    unique: false,
+    length: draft.attributeType === 'string' || draft.attributeType === 'character'
+      ? suggestion.length
+      : undefined,
+    precision: draft.attributeType === 'bigDecimal' ? suggestion.precision : undefined,
+    scale: draft.attributeType === 'bigDecimal' ? suggestion.scale : undefined,
+    comment: column.remarks,
+    transientFlag: false,
+    systemLevel: false,
+    readOnly: false,
+    jmixProperty: false,
+    dependsOnProperties: [],
+    lob: /(?:BLOB|CLOB|LONGVARBINARY|LONGVARCHAR)/i.test(column.typeName),
+    enumIdType: 'string',
+    validations: [],
+    annotations: [],
+    inBaseFetchPlan: true,
+  }
+  if (draft.attributeType !== 'association') return common
+  const relatedName = suggestion.relatedEntity
+  const related = workspace?.entities.find(candidate =>
+    candidate.qualifiedName === relatedName && candidate.storeName === storeName,
+  )
+  if (!related || !relatedName) return null
+  return {
+    ...common,
+    type: 'association',
+    association: {
+      associationType: 'manyToOne',
+      relatedEntity: relatedName,
+      relatedTableName: suggestion.foreignKeyTable,
+      relatedIdColumnName: suggestion.referencedColumnName || related.idColumnName,
+      relatedIdType: related.idType,
+      joinColumnName: suggestion.joinColumnName || column.name,
+      cascade: [],
+      fetch: 'lazy',
+      collectionType: 'list',
+      crossDataStore: false,
+      orphanRemoval: false,
+    },
+  }
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

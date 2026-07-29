@@ -450,6 +450,97 @@ export interface EntityAttributeRenameLaunchResponse {
   message: string
 }
 
+export interface DatabaseEntityTableInspectionRequest {
+  storeId: string
+  tableName: string
+  schemaName?: string
+  connectTimeoutSeconds?: number
+  networkTimeoutSeconds?: number
+}
+
+export interface DatabaseEntityTableInspectionResponse {
+  accepted: boolean
+  snapshotDigest?: string
+  storeId?: string
+  database?: DatabaseProductSnapshot
+  table?: DatabaseTableSnapshot
+  existingEntityQualifiedName?: string
+  issues: WorkspaceChangeIssue[]
+}
+
+export interface DatabaseProductSnapshot {
+  name: string
+  version: string
+  driverName: string
+  driverVersion: string
+  urlFingerprint: string
+}
+
+export interface DatabaseTableSnapshot {
+  catalog?: string
+  schema?: string
+  name: string
+  type: string
+  remarks?: string
+  columns: DatabaseColumnSnapshot[]
+  primaryKeyColumns: string[]
+  foreignKeys: DatabaseForeignKeySnapshot[]
+  indexes: DatabaseIndexSnapshot[]
+  dependencyTables: string[]
+}
+
+export interface DatabaseColumnSnapshot {
+  name: string
+  jdbcType: number
+  typeName: string
+  size?: number
+  scale?: number
+  nullable: boolean
+  defaultValue?: string
+  remarks?: string
+  autoIncrement: boolean
+  generated: boolean
+  ordinal: number
+  primaryKey: boolean
+  alreadyMapped: boolean
+  suggestion: DatabaseColumnMappingSuggestion
+}
+
+export interface DatabaseColumnMappingSuggestion {
+  attributeName: string
+  attributeType: AttributeType
+  javaType: string
+  primaryKey: boolean
+  mandatory: boolean
+  length?: number
+  precision?: number
+  scale?: number
+  customSqlType?: string
+  unsupportedReason?: string
+  relatedEntity?: string
+  joinColumnName?: string
+  foreignKeyTable?: string
+  referencedColumnName?: string
+}
+
+export interface DatabaseForeignKeySnapshot {
+  name?: string
+  columnName: string
+  referencedCatalog?: string
+  referencedSchema?: string
+  referencedTableName: string
+  referencedColumnName: string
+  updateRule: number
+  deleteRule: number
+  sequence: number
+}
+
+export interface DatabaseIndexSnapshot {
+  name: string
+  unique: boolean
+  columns: string[]
+}
+
 export interface SchemaChangelogSnapshot {
   artifactId: string
   moduleId: string
