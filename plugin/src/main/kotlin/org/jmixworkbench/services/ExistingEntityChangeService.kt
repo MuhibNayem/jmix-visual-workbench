@@ -371,14 +371,15 @@ class ExistingEntityChangeService(
                 "JVW-ENTITY-CLASS-MISSING",
                 "The indexed Kotlin class ${request.entity.className} no longer exists in this source file.",
             )
-        val existingNames = PsiTreeUtil.findChildrenOfType(entityClass, PsiNamedElement::class.java)
+        val propertiesByName = PsiTreeUtil.findChildrenOfType(entityClass, PsiNamedElement::class.java)
             .asSequence()
             .filter {
                 it.javaClass.simpleName == "KtProperty" &&
                     it.nearestKotlinClass() === entityClass
             }
-            .mapNotNull(PsiNamedElement::getName)
-            .toSet()
+            .mapNotNull { property -> property.name?.let { it to property } }
+            .toMap()
+        val existingNames = propertiesByName.keys
         val additions = request.entity.attributes.filter { it.name !in existingNames }
         val duplicates = additions.groupingBy(AttributeModel::name)
             .eachCount()
@@ -409,6 +410,7 @@ class ExistingEntityChangeService(
             "JVW-ENTITY-SNAPSHOT-MISSING",
             "The exact existing Kotlin entity metadata could not be reconstructed. Refresh the schema workspace.",
         )
+        val metadataChanges = mutableListOf<ExistingAttributeMetadataChange>()
         snapshot.attributes.forEach { current ->
             val desired = request.entity.attributes.firstOrNull { it.name == current.name }
                 ?: return@forEach
@@ -417,58 +419,110 @@ class ExistingEntityChangeService(
                 current.association,
                 current.associationDetails?.composition == true,
             )
-            val mappingChanged =
-                desired.type != currentType ||
-                    desired.resolvedColumnName != current.columnName ||
+            if (desired.type != currentType) {
+                return rejected(
+                    "JVW-ENTITY-TYPE-REFACTOR-REQUIRES-IMPACT",
+                    "${current.name} changes Kotlin type from ${current.javaType} ($currentType) to ${desired.type}. " +
+                        "Use a project-wide refactor with call-site impact analysis.",
+                )
+            }
+            if (desired.resolvedColumnName != current.columnName) {
+                return rejected(
+                    "JVW-ENTITY-COLUMN-RENAME-REQUIRES-IMPACT",
+                    "${current.name} changes column ${current.columnName} to ${desired.resolvedColumnName}. " +
+                        "Use the explicit column-rename workflow.",
+                )
+            }
+            if (current.association) return@forEach
+            if (!current.persistent) {
+                if (
                     desired.mandatory != !current.nullable ||
                     desired.unique != current.unique ||
                     normalizedLength(desired) != normalizedLength(current) ||
                     desired.precision != current.precision ||
                     desired.scale != current.scale
-            if (mappingChanged) {
-                return rejected(
-                    "JVW-ENTITY-KOTLIN-MAPPING-REFACTOR-REQUIRES-IMPACT",
-                    "${current.name} changes an existing Kotlin declaration or persistence mapping. " +
-                        "Indexed=${currentType}/${current.columnName}/nullable=${current.nullable}/" +
-                        "unique=${current.unique}/length=${normalizedLength(current)}/" +
-                        "precision=${current.precision}/scale=${current.scale}; " +
-                        "requested=${desired.type}/${desired.resolvedColumnName}/nullable=${!desired.mandatory}/" +
-                        "unique=${desired.unique}/length=${normalizedLength(desired)}/" +
-                        "precision=${desired.precision}/scale=${desired.scale}. " +
-                        "Use the impact-aware mapping refactor; additive round-trip mode will not rewrite it.",
-                )
+                ) {
+                    return rejected(
+                        "JVW-ENTITY-TRANSIENT-MAPPING-INVALID",
+                        "${current.name} is transient and has no database column metadata to evolve.",
+                    )
+                }
+                return@forEach
+            }
+            if (
+                desired.mandatory != !current.nullable ||
+                desired.unique != current.unique ||
+                normalizedLength(desired) != normalizedLength(current) ||
+                desired.precision != current.precision ||
+                desired.scale != current.scale
+            ) {
+                metadataChanges += ExistingAttributeMetadataChange(current, desired)
             }
         }
-        if (additions.isEmpty()) {
+        metadataChanges.firstOrNull { it.current.unique && !it.desired.unique }?.let {
+            return rejected(
+                "JVW-ENTITY-UNIQUE-DROP-REQUIRES-CONSTRAINT",
+                "${it.current.name} is unique, but the physical constraint name is not provable from the property. " +
+                    "Use the schema constraint designer to remove it explicitly.",
+            )
+        }
+        metadataChanges.firstOrNull {
+            val oldLength = normalizedLength(it.current)
+            val newLength = normalizedLength(it.desired)
+            oldLength != null && newLength != null && newLength < oldLength
+        }?.let {
+            return rejected(
+                "JVW-ENTITY-LENGTH-NARROWING-REQUIRES-DATA-AUDIT",
+                "${it.current.name} narrows from ${normalizedLength(it.current)} to " +
+                    "${normalizedLength(it.desired)} characters. Run the data-safe narrowing workflow.",
+            )
+        }
+        if (additions.isEmpty() && metadataChanges.isEmpty()) {
             return rejected(
                 "JVW-ENTITY-UPDATE-NOOP",
-                "No new Kotlin entity attributes were found.",
+                "No Kotlin source or persistence metadata changes were found.",
             )
         }
 
-        val fragments = runCatching {
-            additions.map { KotlinEntityGenerator.attributeFragment(request.entity, it) }
-        }.getOrElse {
-            return rejected(
-                "JVW-ENTITY-FRAGMENT-GENERATION",
-                it.message ?: "The Kotlin entity generator could not produce safe property fragments.",
-            )
+        val fragments = if (additions.isEmpty()) {
+            emptyList()
+        } else {
+            runCatching {
+                additions.map { KotlinEntityGenerator.attributeFragment(request.entity, it) }
+            }.getOrElse {
+                return rejected(
+                    "JVW-ENTITY-FRAGMENT-GENERATION",
+                    it.message ?: "The Kotlin entity generator could not produce safe property fragments.",
+                )
+            }
         }
+        val metadataEdits = kotlinMetadataAnnotationEdits(
+            source = content,
+            propertiesByName = propertiesByName,
+            changes = metadataChanges,
+        ) ?: return rejected(
+            "JVW-ENTITY-METADATA-EDIT-UNSAFE",
+            "A Kotlin persistence annotation could not be updated without touching unmanaged source.",
+        )
         val imports = fragments.flatMapTo(linkedSetOf()) { it.imports }
+        imports += metadataEdits.imports
         val edits = mutableListOf<WorkspaceTextEdit>()
         kotlinImportEdit(content, imports)?.let(edits::add)
+        edits += metadataEdits.edits
         val classEnd = entityClass.textRange.endOffset
         val rightBrace = content.lastIndexOf('}', (classEnd - 1).coerceAtLeast(0))
         if (rightBrace < entityClass.textRange.startOffset) {
             return rejected("JVW-ENTITY-SOURCE-PARSE", "The Kotlin entity class closing brace is missing.")
         }
-        val body = fragments.joinToString("\n\n") { indent(it.source) }
-        edits += WorkspaceTextEdit(
-            startOffset = rightBrace,
-            endOffset = rightBrace,
-            expectedText = "",
-            replacement = "\n\n$body\n",
-        )
+        if (fragments.isNotEmpty()) {
+            val body = fragments.joinToString("\n\n") { indent(it.source) }
+            edits += WorkspaceTextEdit(
+                startOffset = rightBrace,
+                endOffset = rightBrace,
+                expectedText = "",
+                replacement = "\n\n$body\n",
+            )
+        }
         val resultingSource = applyEdits(content, edits)
         val resultingPsi = PsiFileFactory.getInstance(project).createFileFromText(
             fileName,
@@ -489,11 +543,11 @@ class ExistingEntityChangeService(
         )
         val persisted = additions.filterNot(AttributeModel::transientFlag)
         val migrationChanges = if (
-            persisted.isNotEmpty() &&
+            (persisted.isNotEmpty() || metadataChanges.isNotEmpty()) &&
             !request.entity.databaseView &&
             request.entity.ddlGeneration.effectiveMode != DdlGenerationMode.DISABLED
         ) {
-            val proposal = migrationProposal(request.entity, persisted, emptyList())
+            val proposal = migrationProposal(request.entity, persisted, metadataChanges)
             proposal.changeSet?.files ?: return ExistingEntityChangeProposal(null, proposal.issues)
         } else {
             emptyList()
@@ -507,12 +561,30 @@ class ExistingEntityChangeService(
                     .append('\u0000').append(it.type.name)
                     .append('\u0000').append(it.resolvedColumnName)
             }
+            metadataChanges.sortedBy { it.current.name }.forEach {
+                append('\u0000').append(it.current.name)
+                    .append('\u0000').append(it.desired.mandatory)
+                    .append('\u0000').append(it.desired.unique)
+                    .append('\u0000').append(it.desired.length)
+                    .append('\u0000').append(it.desired.precision)
+                    .append('\u0000').append(it.desired.scale)
+            }
         }
         return ExistingEntityChangeProposal(
             changeSet = WorkspaceChangeSet(
                 id = "existing-kotlin-entity-update:${CanonicalDiscoveryJson.sha256(identity).take(24)}",
-                label = "Update ${request.entity.className}: add ${additions.size} Kotlin attribute" +
-                    if (additions.size == 1) "" else "s",
+                label = buildString {
+                    append("Update ").append(request.entity.className).append(": ")
+                    if (additions.isNotEmpty()) {
+                        append("add ").append(additions.size).append(" Kotlin attribute")
+                        if (additions.size != 1) append('s')
+                    }
+                    if (additions.isNotEmpty() && metadataChanges.isNotEmpty()) append(", ")
+                    if (metadataChanges.isNotEmpty()) {
+                        append("change ").append(metadataChanges.size).append(" mapping")
+                        if (metadataChanges.size != 1) append('s')
+                    }
+                },
                 files = allChanges,
             ),
             issues = emptyList(),
@@ -1040,6 +1112,155 @@ class ExistingEntityChangeService(
             }
         }
         return GeneratedMetadataEdits(edits, imports)
+    }
+
+    private fun kotlinMetadataAnnotationEdits(
+        source: String,
+        propertiesByName: Map<String, PsiNamedElement>,
+        changes: List<ExistingAttributeMetadataChange>,
+    ): GeneratedMetadataEdits? {
+        val edits = mutableListOf<WorkspaceTextEdit>()
+        val imports = mutableSetOf<String>()
+        changes.forEach { change ->
+            val property = propertiesByName[change.current.name] ?: return null
+            val columnAnnotation = PsiTreeUtil.findChildrenOfType(
+                property,
+                com.intellij.psi.PsiElement::class.java,
+            ).firstOrNull { element ->
+                element.javaClass.simpleName == "KtAnnotationEntry" &&
+                    element.text.substringBefore('(')
+                        .substringAfterLast(':')
+                        .substringAfterLast('.')
+                        .removePrefix("@") == "Column"
+            }
+            val preserved = linkedMapOf<String, String>()
+            columnAnnotation?.text?.let { annotationText ->
+                val arguments = annotationText
+                    .substringAfter('(', "")
+                    .substringBeforeLast(')', "")
+                splitTopLevelArguments(arguments).forEach { argument ->
+                    val equals = topLevelEquals(argument)
+                    val name = if (equals < 0) "value" else argument.substring(0, equals).trim()
+                    val value = if (equals < 0) argument.trim() else argument.substring(equals + 1).trim()
+                    if (name !in MANAGED_COLUMN_ARGUMENTS && value.isNotBlank()) {
+                        preserved[name] = value
+                    }
+                }
+            }
+            val desired = change.desired
+            val managed = linkedMapOf<String, String>()
+            managed["name"] = "\"${escapeJavaString(change.current.columnName)}\""
+            if (desired.mandatory) managed["nullable"] = "false"
+            if (desired.unique) managed["unique"] = "true"
+            if (
+                desired.type in setOf(
+                    AttributeType.STRING,
+                    AttributeType.ENUM,
+                    AttributeType.URI,
+                    AttributeType.FILE_REF,
+                ) &&
+                desired.length != null
+            ) {
+                managed["length"] = desired.length.toString()
+            }
+            desired.precision?.let { managed["precision"] = it.toString() }
+            desired.scale?.let { managed["scale"] = it.toString() }
+            val arguments = (preserved + managed).entries.joinToString(", ") { (name, value) ->
+                if (name == "value") value else "$name = $value"
+            }
+            val annotationName = columnAnnotation?.text
+                ?.substringBefore('(')
+                ?.trim()
+                ?: "@Column"
+            val replacement = "$annotationName($arguments)"
+            if (columnAnnotation != null) {
+                if (columnAnnotation.text != replacement) {
+                    edits += WorkspaceTextEdit(
+                        startOffset = columnAnnotation.textRange.startOffset,
+                        endOffset = columnAnnotation.textRange.endOffset,
+                        expectedText = columnAnnotation.text,
+                        replacement = replacement,
+                    )
+                }
+            } else {
+                val offset = property.textRange.startOffset
+                val lineStart = source.lastIndexOf('\n', (offset - 1).coerceAtLeast(0)) + 1
+                val indentation = source.substring(lineStart, offset).takeWhile { it == ' ' || it == '\t' }
+                edits += WorkspaceTextEdit(
+                    startOffset = offset,
+                    endOffset = offset,
+                    expectedText = "",
+                    replacement = "$replacement\n$indentation",
+                )
+                imports += "jakarta.persistence.Column"
+            }
+        }
+        return GeneratedMetadataEdits(edits, imports)
+    }
+
+    private fun splitTopLevelArguments(arguments: String): List<String> {
+        if (arguments.isBlank()) return emptyList()
+        val result = mutableListOf<String>()
+        var start = 0
+        var round = 0
+        var square = 0
+        var curly = 0
+        var quoted = false
+        var escaped = false
+        arguments.forEachIndexed { index, char ->
+            if (quoted) {
+                if (escaped) {
+                    escaped = false
+                } else if (char == '\\') {
+                    escaped = true
+                } else if (char == '"') {
+                    quoted = false
+                }
+                return@forEachIndexed
+            }
+            when (char) {
+                '"' -> quoted = true
+                '(' -> round += 1
+                ')' -> round -= 1
+                '[' -> square += 1
+                ']' -> square -= 1
+                '{' -> curly += 1
+                '}' -> curly -= 1
+                ',' -> if (round == 0 && square == 0 && curly == 0) {
+                    result += arguments.substring(start, index).trim()
+                    start = index + 1
+                }
+            }
+        }
+        result += arguments.substring(start).trim()
+        return result.filter(String::isNotBlank)
+    }
+
+    private fun topLevelEquals(argument: String): Int {
+        var round = 0
+        var square = 0
+        var curly = 0
+        var quoted = false
+        var escaped = false
+        argument.forEachIndexed { index, char ->
+            if (quoted) {
+                if (escaped) escaped = false
+                else if (char == '\\') escaped = true
+                else if (char == '"') quoted = false
+                return@forEachIndexed
+            }
+            when (char) {
+                '"' -> quoted = true
+                '(' -> round += 1
+                ')' -> round -= 1
+                '[' -> square += 1
+                ']' -> square -= 1
+                '{' -> curly += 1
+                '}' -> curly -= 1
+                '=' -> if (round == 0 && square == 0 && curly == 0) return index
+            }
+        }
+        return -1
     }
 
     private fun escapeJavaString(value: String): String =

@@ -460,7 +460,8 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                     type = AttributeType.STRING,
                     columnName = "ACCOUNT_NO",
                     mandatory = true,
-                    length = 64,
+                    unique = true,
+                    length = 128,
                 ),
                 AttributeModel(
                     name = "approvedAmount",
@@ -480,10 +481,18 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         val kotlin = preview.files.single { it.relativePath.endsWith(".kt") }.resultContent
         assertTrue(kotlin.contains("fun manualRiskScore(): Int = 73"))
         assertTrue(kotlin.contains("import java.math.BigDecimal"))
+        assertTrue(
+            kotlin.contains(
+                "@Column(name = \"ACCOUNT_NO\", nullable = false, unique = true, length = 128)",
+            ),
+        )
         assertTrue(kotlin.contains("@Column(name = \"APPROVED_AMOUNT\", precision = 19, scale = 2)"))
         assertTrue(kotlin.contains("var approvedAmount: BigDecimal? = null"))
         val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
         assertTrue(migration.contains("<addColumn tableName=\"KOTLIN_LOAN_ACCOUNT\">"))
+        assertTrue(migration.contains("<addUniqueConstraint tableName=\"KOTLIN_LOAN_ACCOUNT\""))
+        assertTrue(migration.contains("newDataType=\"VARCHAR(128)\""))
+        assertTrue(migration.contains("JVW_DUPLICATES"))
         assertTrue(migration.contains("<dropColumn tableName=\"KOTLIN_LOAN_ACCOUNT\" columnName=\"APPROVED_AMOUNT\""))
     }
 

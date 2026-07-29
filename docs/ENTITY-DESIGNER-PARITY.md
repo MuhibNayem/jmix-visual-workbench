@@ -50,8 +50,11 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   precision, scale, persistence and relationships; additions preserve manual
   bodies and imports, read current unsaved IntelliJ documents, reject stale
   indexed revisions, validate the resulting Kotlin PSI and share the atomic
-  rollback-capable Liquibase plan. Existing Kotlin declaration/mapping changes
-  fail closed until the project-wide impact refactor is implemented.
+  rollback-capable Liquibase plan. Managed nullability, uniqueness, length,
+  precision and scale changes preserve unknown annotation arguments and
+  generate checked forward/rollback migrations. Type, property/column rename,
+  removal and unsafe narrowing still fail closed until the project-wide impact
+  refactor is implemented.
 - The designer consumes the connected application graph and displays entity
   consumers across views, services, security, REST, workflow, menus and
   migrations.
