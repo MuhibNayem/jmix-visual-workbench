@@ -11,6 +11,8 @@
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
+    <depends>com.intellij.modules.xml</depends>
+    <depends optional="true" config-file="jmix-kotlin.xml">org.jetbrains.kotlin</depends>
     <depends>com.intellij.modules.jcef</depends>
 
     <extensions defaultExtensionNs="com.intellij">
@@ -31,6 +33,42 @@
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiControllerChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.JmixRuntimeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
+
+        <psi.referenceContributor language="XML"
+                                  implementation="org.jmixworkbench.ide.JmixFlowUiReferenceContributor"/>
+        <psi.referenceContributor language="JAVA"
+                                  implementation="org.jmixworkbench.ide.JmixJavaReferenceContributor"/>
+        <psi.referenceContributor language="kotlin"
+                                  implementation="org.jmixworkbench.ide.JmixKotlinReferenceContributor"/>
+        <codeInsight.lineMarkerProvider language="JAVA"
+                                        implementationClass="org.jmixworkbench.ide.JmixViewDescriptorLineMarkerProvider"/>
+        <codeInsight.lineMarkerProvider language="XML"
+                                        implementationClass="org.jmixworkbench.ide.JmixViewDescriptorLineMarkerProvider"/>
+        <localInspection language="XML"
+                         shortName="JmixFlowUiReference"
+                         displayName="Unresolved Jmix FlowUI reference"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixFlowUiReferenceInspection"/>
+        <localInspection language="JAVA"
+                         shortName="JmixJavaReference"
+                         displayName="Unresolved Jmix controller reference"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixJavaReferenceInspection"/>
+        <localInspection language="kotlin"
+                         shortName="JmixKotlinReference"
+                         displayName="Unresolved Jmix controller reference"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixKotlinReferenceInspection"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="org.jetbrains.kotlin">
+        <supportsKotlinPluginMode supportsK2="true"/>
     </extensions>
 
     <actions>

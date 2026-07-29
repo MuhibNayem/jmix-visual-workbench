@@ -2,6 +2,7 @@
 plugin/.gradle/
 plugin/build/
 plugin/out/
+plugin/**/.kotlin/
 
 # Node
 webui/node_modules/

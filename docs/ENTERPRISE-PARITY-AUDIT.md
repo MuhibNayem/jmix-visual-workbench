@@ -19,10 +19,11 @@ marketed as replacing all Java/Kotlin development or as a complete visual
 operations platform.
 
 The atomic `STUDIO-*`, `SURPASS-*`, and `CERT-*` entries in the surpass ledger
-are now the strict claim gates. In particular, native IntelliJ coding
-assistance, live database reverse engineering, project/add-on/upgrade
+are now the strict claim gates. The first production tranche of native
+IntelliJ coding assistance is implemented, while complete Jmix semantic
+coverage, live database reverse engineering, project/add-on/upgrade
 management, OpenAPI clients, deployment, compatibility certification and
-signed distribution are explicit requirements rather than implied backlog.
+signed distribution remain explicit requirements rather than implied backlog.
 
 | Requirement area | Status | Implemented evidence | Remaining enterprise gap |
 |---|---|---|---|
@@ -31,6 +32,7 @@ signed distribution are explicit requirements rather than implied backlog.
 | Safe visual changes | Strong | Typed models, immutable digest-bound previews, stale-source rejection, atomic workspace changes, history/undo, read-only lock for unsupported BPMN/source constructs | Broaden PSI/source patchers to every supported language construct while retaining formatting |
 | Entity and schema studio | Substantial | Entity creation, associations/compositions/enums, constraints/indexes, additive existing-entity editing, datastore-aware Liquibase proposals, include-chain protection and schema diagnostics | Full inheritance/embeddable/projection editing, destructive migration choreography and live populated-schema rehearsal |
 | FlowUI designer | Substantial | Responsive permanent three-pane layout; palette-to-canvas and canvas-to-canvas drag/drop with before/inside/after targets; click insertion; immediate digest-guarded XML synchronization; global undo/redo; source-safe copy/cut/paste/clone, responsive wrapping and namespace-preserving layout conversion; subtree ID/reference rewriting; selection stability; desktop/tablet/mobile and zoom previews; Jmix-native form/grid/flex responsiveness; component tree/properties; bindings/loaders/fetch plans/actions; controller discovery and guarded controller changes | Genuine runtime hot reload for all views, reusable component templates, complete custom-component/theme/accessibility authoring and all handwritten-controller constructs |
+| Native IntelliJ editor intelligence | Substantial | Native PSI references for FlowUI XML IDs and Java/Kotlin controller annotations; completion; Ctrl/Cmd+B navigation; Find Usages; declaration-side, cross-file safe rename; unresolved-reference inspections with nearest-ID fixes; descriptor-file rename tracking; bidirectional controller/descriptor gutter navigation; and explicit Kotlin K2-mode compatibility | Expand the semantic surface to entities, properties, fetch plans, messages, menus, security, services, events and configuration; add injections, handler-signature validation, snippets and intentions; prove installed-IDE, heavy-fixture, dumb-mode and large-project behavior |
 | Visual programming language | Strong | Typed Java 17+ service model; permanent palette/canvas/inspector; structured literals/parameters/variables; constrained Jmix entity CRUD/query/property operations; indexed service calls; conditions, requirements, returns, exceptions and logs; explicit CRUD authorization; transaction propagation/isolation/read-only/timeout; reusable typed private subflows; typed collection iteration with ITEM/DONE routes and index variables; structured try/catch/finally subflow boundaries; bounded cyclic execution; recursion, argument/result type, exception signature and transitive read-only-write rejection; deterministic side-effect-free path tracing; deterministic source-owned round trip; first-class subflow/caller impact edges | Event/queue primitives, richer formulas/pattern matching, cross-service visual composition and semantic compilation against every target-project dependency |
 | Formula, decision and rules | Substantial | Responsive permanent palette/tree/inspector expression workspace plus a responsive three-region Jmix/Flowable DMN editor; typed inputs/outputs and conditions; UNIQUE/FIRST/ANY/PRIORITY/OUTPUT_ORDER/RULE_ORDER/COLLECT hit policies; SUM/MIN/MAX/COUNT aggregation; ordered output priorities; overlap/conflict/shadow analysis; authoring version/status/effective dates; typed simulation with matched-rule highlighting; deterministic `.dmn` generation under production resource roots; standard-DMN read-only parsing; exact owned-source round trip and manual-source lock; first-class decision/input/output/rule graph artifacts and BPMN decision-task impact links | Decision trees and reusable rule sets, bulk/cross-version simulation, deployed-version activation/retirement/migration, tenant-aware rollout and semantic compilation against every target-project dependency |
 | Workflow and case management | Substantial | BPMN states/transitions, roles, forms, listeners, mappings, timers, messages, signals, retries, multi-instance/quorum, compensation, embedded/event/transaction subprocesses, cancel/terminate/error semantics, Jmix email task, Flowable DMN business-rule tasks linked to indexed decision keys, unresolved-decision diagnostics, deterministic simulation and UI-transition bypass diagnostics | Live process-instance trace, assignee hierarchy/delegation resolution, deployed version migration and ad-hoc case management |
@@ -67,9 +69,12 @@ signed distribution are explicit requirements rather than implied backlog.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 124 tests passed.
-- IntelliJ 2026.2: 124 tests passed.
-- Platform-independent discovery/parser contracts: 68 tests passed.
+- IntelliJ 2025.3: 139 tests passed.
+- IntelliJ 2026.2: 139 tests passed.
+- Platform-independent discovery/parser contracts: 69 tests passed.
+- Eight native editor-assistance scenarios pass on both IntelliJ hosts,
+  covering FlowUI XML, Java and Kotlin completion, navigation, Find Usages,
+  cross-file rename, inspections, quick fixes and bidirectional gutter links.
 - Typed server-logic node creation, branch connection, edge selection, local
   undo, Java preview and 1440/1000/640-pixel adaptive layouts were exercised in
   Chrome without horizontal page overflow or current-run console errors.
@@ -145,25 +150,29 @@ signed distribution are explicit requirements rather than implied backlog.
 
 ## Release blockers for the full product promise
 
-1. Advance DMN into reusable rule sets/trees, bulk cross-version simulation
+1. Complete native Jmix editor intelligence across entities, properties,
+   fetch plans, messages, menus, security, services, events and configuration,
+   then add installed-IDE and enterprise-scale performance proof.
+2. Advance DMN into reusable rule sets/trees, bulk cross-version simulation
    and deployed-version rollout/migration governance; add event/queue
    primitives and richer expression semantics to typed visual logic.
-2. Add real runtime debugging, process-instance migration and assignee/security
+3. Add real runtime debugging, process-instance migration and assignee/security
    context simulation.
-3. Finish the integration runtime tranche: persisted outbox/dispatch, Rabbit
+4. Finish the integration runtime tranche: persisted outbox/dispatch, Rabbit
    retry infrastructure, provider-specific observability, signed organization
    catalogs, version adapters and real failure simulation.
-4. Complete recorded UI/API/workflow/migration scenario execution.
-5. Add collaboration, CI governance, signed distribution and enterprise
+5. Complete recorded UI/API/workflow/migration scenario execution.
+6. Add collaboration, CI governance, signed distribution and enterprise
    operational controls.
-6. Prove scale and round-trip behavior on representative customer repositories,
+7. Prove scale and round-trip behavior on representative customer repositories,
    including the referenced 16-module payroll system.
 
 ## Recommended next execution order
 
-1. DMN rule sets/trees, deployed-version governance and typed event/queue integration.
-2. Live workflow/security/runtime inspection and process migration.
-3. Complete connector runtime infrastructure, organization catalogs and
+1. Complete the native IntelliJ semantic surface and installed-IDE proof.
+2. DMN rule sets/trees, deployed-version governance and typed event/queue integration.
+3. Live workflow/security/runtime inspection and process migration.
+4. Complete connector runtime infrastructure, organization catalogs and
    provider fault-injection diagnostics.
-4. Recorded scenario execution across FlowUI, REST, workflow and migrations.
-5. Collaboration, release governance, performance and marketplace hardening.
+5. Recorded scenario execution across FlowUI, REST, workflow and migrations.
+6. Collaboration, release governance, performance and marketplace hardening.

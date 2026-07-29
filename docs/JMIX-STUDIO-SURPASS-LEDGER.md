@@ -70,7 +70,7 @@ source code, assets, protocols, or internal implementation.
 | STUDIO-CORE-009 | Framework-aware hot deploy for supported UI, messages, security, configuration and application changes with explicit restart boundaries | PARTIAL | Target-version runtime matrix proving every supported reload class |
 | STUDIO-CORE-010 | BPMN modeler compatible with Jmix BPM/Flowable artifacts, forms, listeners, DMN, deployment and source round trip | PARTIAL | Deployed runtime operations and version-migration fixtures |
 | STUDIO-CORE-011 | Live database reverse engineering, partial reverse engineering, entity/schema mapping, type mapping and safe regeneration | MISSING | Populated PostgreSQL/MySQL/MSSQL/Oracle fixtures with loss-prevention tests |
-| STUDIO-CORE-012 | Framework-specific coding assistance: completion, references, injections, line markers, navigation, inspections, intentions, quick fixes and safe refactorings | MISSING | IntelliJ light/heavy fixture suites for every supported language/artifact pair |
+| STUDIO-CORE-012 | Framework-specific coding assistance: completion, references, injections, line markers, navigation, inspections, intentions, quick fixes and safe refactorings | PARTIAL | Native FlowUI XML IDs plus Java/Kotlin `@ViewDescriptor`, `@ViewComponent`, `@Subscribe`, `@Install` and `@Supply` references now provide completion, navigation, Find Usages, cross-file rename, bidirectional controller/descriptor gutters and unresolved-reference quick fixes. Complete entity/property/fetch-plan/menu/message/security/service coverage, injections, intentions and installed-IDE/heavy-fixture proof remain |
 | STUDIO-CORE-013 | Context-aware Jmix code snippets and generators that use project conventions and never emit placeholder production behavior | PARTIAL | Discoverable editor actions plus target-toolchain compilation |
 | STUDIO-CORE-014 | AI assistance with explicit consent, source/privacy boundaries, reviewable changes, offline-disabled behavior and no required proprietary runtime | MISSING | Threat model, privacy controls, evaluation suite and deterministic fallback |
 
@@ -144,6 +144,8 @@ Implementation order may change to reduce risk, but requirements may not be
 removed or silently weakened. Any status change MUST update
 `ENTERPRISE-PARITY-AUDIT.md` with concrete evidence and remaining gaps.
 
-The current active tranche is `SURPASS-INT-001` and `SURPASS-INT-002`. The next
-release audit MUST also reconcile all newly completed work against
-`STUDIO-*`, `SURPASS-*`, and `CERT-*` identifiers.
+The current active tranche is `SURPASS-INT-001` and `SURPASS-INT-002`. The
+first native-editor tranche of `STUDIO-CORE-012` is also implemented and
+verified on both supported IntelliJ hosts. The next release audit MUST
+reconcile all newly completed work against `STUDIO-*`, `SURPASS-*`, and
+`CERT-*` identifiers.

@@ -139,7 +139,9 @@ dependencies {
             intellijIdeaUltimate("2025.3")
         }
         bundledModule("intellij.java.psi")
+        bundledPlugin("org.jetbrains.kotlin")
         testFramework(TestFrameworkType.Platform)
+        testFramework(TestFrameworkType.Plugin.Java)
         pluginVerifier()
     }
 }
@@ -271,6 +273,7 @@ tasks.withType<Test>().configureEach {
     // Keep platform tests deterministic and offline. Otherwise the IDE starts an
     // asynchronous Marketplace refresh and may leave pluginsXMLIds.json truncated.
     systemProperty("idea.plugins.host", "https://jmix-workbench.invalid")
+    systemProperty("idea.load.plugins.id", "com.intellij.java,org.jetbrains.kotlin,org.jmixworkbench")
 }
 
 tasks.named<Test>("test") {
