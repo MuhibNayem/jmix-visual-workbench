@@ -21,7 +21,7 @@ import type {
 
 type ChangeType =
   | 'createTable' | 'addColumn' | 'dropColumn' | 'addForeignKey'
-  | 'createIndex' | 'modifyColumn' | 'addUniqueConstraint'
+  | 'createIndex' | 'modifyColumn' | 'renameColumn' | 'addUniqueConstraint'
   | 'addNotNullConstraint' | 'dropNotNullConstraint'
   | 'insertData' | 'rawSql'
 
@@ -40,6 +40,7 @@ type MigrationChange =
   | { changeType: 'addForeignKey'; tableName: string; column: string; referencedTable: string; referencedColumn: string; onDelete: string }
   | { changeType: 'createIndex'; tableName: string; indexName: string; columns: string[]; unique: boolean }
   | { changeType: 'modifyColumn'; tableName: string; columnName: string; newDataType: string }
+  | { changeType: 'renameColumn'; tableName: string; oldColumnName: string; newColumnName: string; columnDataType?: string }
   | { changeType: 'addUniqueConstraint'; tableName: string; constraintName: string; columnNames: string[] }
   | { changeType: 'addNotNullConstraint'; tableName: string; columnName: string; columnDataType: string }
   | { changeType: 'dropNotNullConstraint'; tableName: string; columnName: string; columnDataType: string }
@@ -51,6 +52,7 @@ interface ChangeSet {
   comment: string
   changes: MigrationChange[]
   autoRollback: boolean
+  preConditions?: any[]
 }
 
 const SQL_TYPES = [
@@ -67,6 +69,7 @@ const CHANGE_TYPES: { type: ChangeType; label: string; icon: LucideIcon }[] = [
   { type: 'addForeignKey', label: 'Foreign Key', icon: KeyRound },
   { type: 'createIndex', label: 'Index', icon: Hash },
   { type: 'modifyColumn', label: 'Change Type', icon: RefreshCw },
+  { type: 'renameColumn', label: 'Quarantine Column', icon: ShieldCheck },
   { type: 'addUniqueConstraint', label: 'Unique', icon: ShieldCheck },
   { type: 'addNotNullConstraint', label: 'Require Value', icon: ShieldCheck },
   { type: 'dropNotNullConstraint', label: 'Allow Null', icon: ShieldCheck },
@@ -111,6 +114,15 @@ function automaticRollback(change: MigrationChange): Record<string, unknown> | n
         columnDataType: change.columnDataType,
       }
     case 'modifyColumn':
+      return null
+    case 'renameColumn':
+      return {
+        changeType: 'renameColumn',
+        tableName: change.tableName,
+        oldColumnName: change.newColumnName,
+        newColumnName: change.oldColumnName,
+        columnDataType: change.columnDataType,
+      }
     case 'dropColumn':
     case 'insertData':
     case 'rawSql':
@@ -136,6 +148,8 @@ function makeChange(type: ChangeType): MigrationChange {
       return { changeType: 'createIndex', tableName: '', indexName: '', columns: [], unique: false }
     case 'modifyColumn':
       return { changeType: 'modifyColumn', tableName: '', columnName: '', newDataType: 'VARCHAR(255)' }
+    case 'renameColumn':
+      return { changeType: 'renameColumn', tableName: '', oldColumnName: '', newColumnName: '' }
     case 'addUniqueConstraint':
       return { changeType: 'addUniqueConstraint', tableName: '', constraintName: '', columnNames: [] }
     case 'addNotNullConstraint':
@@ -177,6 +191,14 @@ function migrationChangeFromSuggestion(suggestion: SchemaDriftSuggestion): Migra
         tableName: suggestion.tableName,
         columnName: suggestion.columnName ?? '',
         newDataType: suggestion.newDataType ?? suggestion.columnType ?? 'VARCHAR(255)',
+      }
+    case 'renameColumn':
+      return {
+        changeType: 'renameColumn',
+        tableName: suggestion.tableName,
+        oldColumnName: suggestion.columnName ?? '',
+        newColumnName: suggestion.newColumnName ?? '',
+        columnDataType: suggestion.columnType,
       }
     case 'addUniqueConstraint':
       return {
@@ -371,6 +393,25 @@ export default function MigrationPanel() {
         : `Synchronize ${first.tableName} with ${stageable.length} entity mapping differences`,
       changes: stageable.map((candidate) => candidate.change),
       autoRollback: stageable.every((candidate) => automaticRollback(candidate.change) != null),
+      preConditions: stageable.flatMap((candidate) => {
+        if (candidate.change.changeType !== 'renameColumn') return []
+        return [
+          {
+            type: 'COLUMN_EXISTS',
+            params: {
+              tableName: candidate.change.tableName,
+              columnName: candidate.change.oldColumnName,
+            },
+          },
+          {
+            type: 'COLUMN_NOT_EXISTS',
+            params: {
+              tableName: candidate.change.tableName,
+              columnName: candidate.change.newColumnName,
+            },
+          },
+        ]
+      }),
     }
     setChangesets((current) => [...current, generated])
     setSelectedId(id)
@@ -409,6 +450,7 @@ export default function MigrationPanel() {
         id: cs.id,
         author: resolvedAuthor,
         comment: cs.comment || undefined,
+        preConditions: cs.preConditions,
         changes: cs.changes,
         rollback: cs.autoRollback
           ? cs.changes.slice().reverse().map(automaticRollback).filter(Boolean)
@@ -605,7 +647,7 @@ export default function MigrationPanel() {
 
       case 'dropColumn':
         return (
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             <Field label="Table Name">
               <input
                 value={change.tableName}
@@ -738,6 +780,40 @@ export default function MigrationPanel() {
                 list="jmix-sql-types"
               />
             </Field>
+          </div>
+        )
+
+      case 'renameColumn':
+        return (
+          <div className="space-y-2">
+            <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[10px] leading-relaxed text-amber-100/80">
+              Quarantine preserves every value under a deterministic retired name. The generated migration checks
+              that the current column exists, checks that the retired name is free, and includes a reverse rename.
+              Final deletion remains a later retention-policy decision.
+            </div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <Field label="Table Name">
+                <input
+                  value={change.tableName}
+                  onChange={(e) => patchChange(csId, index, { tableName: e.target.value.toUpperCase() })}
+                  className={`${inputSm} font-mono uppercase`}
+                />
+              </Field>
+              <Field label="Current Column">
+                <input
+                  value={change.oldColumnName}
+                  onChange={(e) => patchChange(csId, index, { oldColumnName: e.target.value.toUpperCase() })}
+                  className={`${inputSm} font-mono uppercase`}
+                />
+              </Field>
+              <Field label="Quarantine Column">
+                <input
+                  value={change.newColumnName}
+                  onChange={(e) => patchChange(csId, index, { newColumnName: e.target.value.toUpperCase() })}
+                  className={`${inputSm} font-mono uppercase`}
+                />
+              </Field>
+            </div>
           </div>
         )
 

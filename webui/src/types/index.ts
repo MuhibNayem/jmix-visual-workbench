@@ -351,6 +351,7 @@ export interface ChangeSetModel {
   runAlways?: boolean
   runInTransaction?: boolean
   labels?: string
+  preConditions?: any[]
 }
 
 export interface SchemaWorkspaceResponse {
@@ -406,6 +407,7 @@ export interface SchemaEntitySnapshot {
   idColumnName: string
   databaseView: boolean
   ddlMode: 'CREATE_AND_DROP' | 'CREATE_ONLY' | 'DISABLED'
+  protectedUnmappedColumns?: string[]
   sourceLocator: GraphSourceLocator
   attributes: SchemaEntityAttributeSnapshot[]
   migrationCoverage: 'COVERED' | 'MISSING' | 'DISABLED'
@@ -618,6 +620,7 @@ export interface SchemaPhysicalTableSnapshot {
   name: string
   columns: SchemaPhysicalColumnSnapshot[]
   foreignKeys: SchemaPhysicalForeignKeySnapshot[]
+  indexes?: SchemaPhysicalIndexSnapshot[]
   sourcePaths: string[]
 }
 
@@ -635,6 +638,12 @@ export interface SchemaPhysicalForeignKeySnapshot {
   referencedTableName: string
   referencedColumnNames: string
   onDelete?: string
+}
+
+export interface SchemaPhysicalIndexSnapshot {
+  name: string
+  unique: boolean
+  columns: string[]
 }
 
 export interface SchemaDriftSnapshot {
@@ -665,6 +674,7 @@ export interface SchemaDriftSuggestion {
     | 'createTable'
     | 'addColumn'
     | 'modifyColumn'
+    | 'renameColumn'
     | 'addUniqueConstraint'
     | 'addNotNullConstraint'
     | 'dropNotNullConstraint'
@@ -675,6 +685,7 @@ export interface SchemaDriftSuggestion {
   nullable?: boolean
   columns: SchemaSuggestedColumn[]
   newDataType?: string
+  newColumnName?: string
   constraintName?: string
   columnNames: string[]
   baseTableName?: string

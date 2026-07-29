@@ -1043,6 +1043,138 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
     }
 
+    fun testUnmappedColumnQuarantineIsDependencyGatedPreconditionedAndReversible() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/resources/com/acme/liquibase/changelog/020-legacy-column.xml",
+                """
+                    <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                        <changeSet id="legacy-column" author="legacy">
+                            <addColumn tableName="LOAN_APP">
+                                <column name="LEGACY_NOTES" type="VARCHAR(255)"/>
+                                <column name="INDEXED_LEGACY" type="VARCHAR(64)"/>
+                            </addColumn>
+                            <createIndex tableName="LOAN_APP" indexName="IDX_LOAN_APP_INDEXED_LEGACY">
+                                <column name="INDEXED_LEGACY"/>
+                            </createIndex>
+                        </changeSet>
+                    </databaseChangeLog>
+                """.trimIndent(),
+            )
+        }
+        val service = SchemaWorkspaceService.getInstance(project)
+        val workspace = service.load(forceRefresh = true)
+        val drift = workspace.drifts.single {
+            it.kind == SchemaDriftKind.UNMAPPED_COLUMN &&
+                it.columnName == "LEGACY_NOTES"
+        }
+        assertEquals(SchemaDriftSafety.DATA_CHECK_REQUIRED, drift.safety)
+        assertEquals(SchemaDriftConfidence.HIGH, drift.confidence)
+        val suggestion = requireNotNull(drift.suggestion)
+        assertEquals("renameColumn", suggestion.changeType)
+        assertEquals("LEGACY_NOTES", suggestion.columnName)
+        assertTrue(requireNotNull(suggestion.newColumnName).startsWith("ZZR_"))
+        assertTrue(requireNotNull(suggestion.newColumnName).length <= 30)
+        val indexedDrift = workspace.drifts.single {
+            it.kind == SchemaDriftKind.UNMAPPED_COLUMN &&
+                it.columnName == "INDEXED_LEGACY"
+        }
+        assertEquals(SchemaDriftSafety.REVIEW, indexedDrift.safety)
+        assertEquals(null, indexedDrift.suggestion)
+        val physicalTable = workspace.physicalSchemas.single()
+            .tables.single { it.name == "LOAN_APP" }
+        assertEquals(
+            listOf("INDEXED_LEGACY"),
+            physicalTable.indexes.single { it.name == "IDX_LOAN_APP_INDEXED_LEGACY" }.columns,
+        )
+
+        val proposal = service.previewMigration(
+            SchemaMigrationChangeRequest(
+                storeId = drift.storeId,
+                migration = MigrationModel(
+                    changelogId = "quarantine-legacy-notes",
+                    changes = mutableListOf(
+                        ChangeSetModel(
+                            id = "quarantine-legacy-notes",
+                            preConditions = mutableListOf(
+                                org.jmixworkbench.model.PreCondition(
+                                    type = org.jmixworkbench.model.PreConditionType.COLUMN_EXISTS,
+                                    params = mutableMapOf(
+                                        "tableName" to drift.tableName,
+                                        "columnName" to requireNotNull(suggestion.columnName),
+                                    ),
+                                ),
+                                org.jmixworkbench.model.PreCondition(
+                                    type = org.jmixworkbench.model.PreConditionType.COLUMN_NOT_EXISTS,
+                                    params = mutableMapOf(
+                                        "tableName" to drift.tableName,
+                                        "columnName" to requireNotNull(suggestion.newColumnName),
+                                    ),
+                                ),
+                            ),
+                            changes = mutableListOf(
+                                DbChange.RenameColumn(
+                                    tableName = drift.tableName,
+                                    oldColumnName = requireNotNull(suggestion.columnName),
+                                    newColumnName = requireNotNull(suggestion.newColumnName),
+                                    columnDataType = suggestion.columnType,
+                                ),
+                            ),
+                            rollback = mutableListOf(
+                                DbChange.RenameColumn(
+                                    tableName = drift.tableName,
+                                    oldColumnName = requireNotNull(suggestion.newColumnName),
+                                    newColumnName = requireNotNull(suggestion.columnName),
+                                    columnDataType = suggestion.columnType,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(proposal.accepted, proposal.issues.joinToString { "${it.code}: ${it.message}" })
+        val migration = proposal.files.single().resultContent
+        assertTrue(migration.contains("<columnExists tableName=\"LOAN_APP\" columnName=\"LEGACY_NOTES\""))
+        assertTrue(migration.contains("<not>"))
+        assertTrue(
+            migration.contains(
+                "oldColumnName=\"LEGACY_NOTES\" newColumnName=\"${suggestion.newColumnName}\"",
+            ),
+        )
+        assertTrue(
+            migration.contains(
+                "oldColumnName=\"${suggestion.newColumnName}\" newColumnName=\"LEGACY_NOTES\"",
+            ),
+        )
+
+        WriteAction.run<RuntimeException> {
+            val entityFile = requireNotNull(
+                root.findFileByRelativePath("src/main/java/com/acme/entity/LoanApp.java"),
+            )
+            val source = String(entityFile.contentsToByteArray())
+            write(
+                root,
+                "src/main/java/com/acme/entity/LoanApp.java",
+                source.replace(
+                    "@JmixEntity",
+                    "@DdlGeneration(unmappedColumns = {\"LEGACY_NOTES\"})\n@JmixEntity",
+                ),
+            )
+        }
+        val protectedWorkspace = service.load(forceRefresh = true)
+        val protectedDrift = protectedWorkspace.drifts.single {
+            it.kind == SchemaDriftKind.UNMAPPED_COLUMN &&
+                it.columnName == "LEGACY_NOTES"
+        }
+        assertEquals(SchemaDriftSafety.REVIEW, protectedDrift.safety)
+        assertEquals(null, protectedDrift.suggestion)
+        assertTrue(protectedDrift.message.contains("explicitly protects"))
+    }
+
     private fun addStatusMigration() = MigrationModel(
         changelogId = "loan-status",
         author = "team",

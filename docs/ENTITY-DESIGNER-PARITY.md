@@ -77,7 +77,12 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   mapping checks. IntelliJ and plugin-contributed Jmix references participate in
   the usage preview. The physical column is deliberately retained after source
   deletion so production data cannot be silently dropped; the UI explains the
-  two-stage retirement and requires a later schema/data audit.
+  staged retirement. After the source refactor, complete high-confidence
+  Liquibase inventory exposes an unmapped, non-key, non-unique, non-FK column
+  as a reversible quarantine rename. The generated retired name is deterministic
+  and portable, old-exists/new-absent preconditions and reverse rollback are
+  mandatory, and explicit `@DdlGeneration(unmappedColumns=...)` protection
+  disables the suggestion. Final deletion remains a retention-policy decision.
 - Existing entities can inspect their live mapped table through the
   project-owned JDBC driver and the active profile configuration. The backend
   supports datasource-only stores with Liquibase intentionally disabled,
@@ -125,8 +130,9 @@ blocked until all of the following pass:
    to IntelliJ usage preview, including native `mappedBy` references, and
    explicit scalar and owning to-one join-column physical rename is atomic
    with checked Liquibase rollback. Combined property-and-physical mapping
-   changes, relationship shape changes, type change and the data-audited
-   physical retirement stage after native Safe Delete remain.
+   changes, relationship shape changes, type change and final post-retention
+   physical deletion remain. Native Safe Delete plus reversible quarantine is
+   implemented.
    Additive and managed-mapping Java/Kotlin round trip is implemented.
 2. The first partial live-database merge is implemented for a selected
    existing entity/table and missing columns. Complete table/view selection,

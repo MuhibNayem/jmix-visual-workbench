@@ -213,6 +213,7 @@ class SchemaWorkspaceService(
                     idColumnName = idMapping.second,
                     databaseView = DB_VIEW.containsMatchIn(source),
                     ddlMode = ddlMode,
+                    protectedUnmappedColumns = ddlUnmappedColumns(source),
                     sourceLocator = entity.sourceLocator,
                     attributes = attributes,
                     migrationCoverage = when {
@@ -569,28 +570,40 @@ class SchemaWorkspaceService(
                     val table = tableName?.let(tables::get) ?: return@forEach
                     val removed = attributes["constraintName"]?.let(table.uniqueConstraints::remove).orEmpty()
                     removed.forEach { column ->
-                        val remainsUnique = table.uniqueConstraints.values.any { column in it }
+                        val remainsUnique =
+                            table.uniqueConstraints.values.any { column in it } ||
+                                table.indexes.values.any { it.unique && column in it.columns }
                         table.columns[column]?.let { table.columns[column] = it.copy(unique = remainsUnique) }
                     }
                     table.sourcePaths += sourcePath
                 }
                 "createIndex" -> {
-                    if (!attributes["unique"].equals("true", ignoreCase = true)) return@forEach
                     val table = tableName?.let { tables.getOrPut(it) { MutablePhysicalTable(it) } }
                         ?: return@forEach
                     val indexName = attributes["indexName"].orEmpty()
                     val columns = parseIndexColumns(body)
-                    if (indexName.isNotBlank()) table.uniqueConstraints[indexName] = columns
-                    columns.forEach { column ->
-                        table.columns[column]?.let { table.columns[column] = it.copy(unique = true) }
+                    val unique = attributes["unique"].equals("true", ignoreCase = true)
+                    if (indexName.isNotBlank()) {
+                        table.indexes[indexName] = SchemaPhysicalIndexSnapshot(
+                            name = indexName,
+                            unique = unique,
+                            columns = columns,
+                        )
+                    }
+                    if (unique) {
+                        columns.forEach { column ->
+                            table.columns[column]?.let { table.columns[column] = it.copy(unique = true) }
+                        }
                     }
                     table.sourcePaths += sourcePath
                 }
                 "dropIndex" -> {
                     val table = tableName?.let(tables::get) ?: return@forEach
-                    val removed = attributes["indexName"]?.let(table.uniqueConstraints::remove).orEmpty()
-                    removed.forEach { column ->
-                        val remainsUnique = table.uniqueConstraints.values.any { column in it }
+                    val removed = attributes["indexName"]?.let(table.indexes::remove)
+                    removed?.columns.orEmpty().forEach { column ->
+                        val remainsUnique =
+                            table.uniqueConstraints.values.any { column in it } ||
+                                table.indexes.values.any { it.unique && column in it.columns }
                         table.columns[column]?.let { table.columns[column] = it.copy(unique = remainsUnique) }
                     }
                     table.sourcePaths += sourcePath
@@ -648,6 +661,17 @@ class SchemaWorkspaceService(
     private fun splitColumns(value: String?): List<String> =
         value.orEmpty().split(',').map(String::trim).filter(String::isNotBlank)
             .map { it.uppercase(Locale.ROOT) }
+
+    private fun retiredColumnName(tableName: String, columnName: String): String {
+        val suffix = CanonicalDiscoveryJson.sha256("$tableName\u0000$columnName")
+            .take(8)
+            .uppercase(Locale.ROOT)
+        val readable = columnName
+            .uppercase(Locale.ROOT)
+            .replace(Regex("[^A-Z0-9_]"), "_")
+            .take(17)
+        return "ZZR_${suffix}_$readable"
+    }
 
     private fun buildSchemaDrifts(
         entities: List<SchemaEntitySnapshot>,
@@ -797,16 +821,70 @@ class SchemaWorkspaceService(
                 }
             }
             actualTable.columns.filterNot { it.name in expectedByName }.forEach { actual ->
+                val participatesInOutgoingForeignKey = actualTable.foreignKeys.any { foreignKey ->
+                    splitColumns(foreignKey.baseColumnNames).any {
+                        it.equals(actual.name, ignoreCase = true)
+                    }
+                }
+                val participatesInIncomingForeignKey = physicalStore.tables.any { table ->
+                    table.foreignKeys.any { foreignKey ->
+                        foreignKey.referencedTableName.equals(actualTable.name, ignoreCase = true) &&
+                            splitColumns(foreignKey.referencedColumnNames).any {
+                                it.equals(actual.name, ignoreCase = true)
+                            }
+                    }
+                }
+                val retiredName = retiredColumnName(actualTable.name, actual.name)
+                val explicitlyProtected = entity.protectedUnmappedColumns.any {
+                    it.equals(actual.name, ignoreCase = true)
+                }
+                val participatesInIndex = actualTable.indexes.any { index ->
+                    index.columns.any { it.equals(actual.name, ignoreCase = true) }
+                }
+                val canQuarantine =
+                    confidence == SchemaDriftConfidence.HIGH &&
+                        !explicitlyProtected &&
+                        !actual.primaryKey &&
+                        !actual.unique &&
+                        !participatesInOutgoingForeignKey &&
+                        !participatesInIncomingForeignKey &&
+                        !participatesInIndex &&
+                        actualTable.columns.none { it.name.equals(retiredName, ignoreCase = true) }
                 drifts += drift(
                     entity,
                     store.id,
                     SchemaDriftKind.UNMAPPED_COLUMN,
                     SchemaDriftSeverity.INFO,
-                    SchemaDriftSafety.REVIEW,
+                    if (canQuarantine) {
+                        SchemaDriftSafety.DATA_CHECK_REQUIRED
+                    } else {
+                        SchemaDriftSafety.REVIEW
+                    },
                     confidence,
                     actual.name,
-                    "${entity.tableName}.${actual.name} exists in Liquibase but is not mapped by ${entity.className}; it may be legacy, computed, or intentionally protected.",
-                    null,
+                    "${entity.tableName}.${actual.name} exists in Liquibase but is not mapped by " +
+                        "${entity.className}; it may be legacy, computed, or intentionally protected." +
+                        if (explicitlyProtected) {
+                            " The entity explicitly protects this unmapped column."
+                        } else {
+                            ""
+                        } +
+                        if (canQuarantine) {
+                            " A reversible quarantine rename is available after impact review."
+                        } else {
+                            ""
+                        },
+                    if (canQuarantine) {
+                        SchemaDriftSuggestion(
+                            changeType = "renameColumn",
+                            tableName = entity.tableName,
+                            columnName = actual.name,
+                            columnType = actual.type,
+                            newColumnName = retiredName,
+                        )
+                    } else {
+                        null
+                    },
                 )
             }
         }
@@ -1446,6 +1524,21 @@ class SchemaWorkspaceService(
         }
     }
 
+    private fun ddlUnmappedColumns(source: String): List<String> {
+        val arguments = DDL_GENERATION.find(source)?.groupValues?.get(1).orEmpty()
+        val body = Regex("""(?s)\bunmappedColumns\s*=\s*[\[{]([^}\]]*)[}\]]""")
+            .find(arguments)
+            ?.groupValues
+            ?.get(1)
+            .orEmpty()
+        return Regex(""""((?:\\.|[^"\\])*)"""")
+            .findAll(body)
+            .map { it.groupValues[1].uppercase(Locale.ROOT) }
+            .distinct()
+            .sorted()
+            .toList()
+    }
+
     private fun safeFileName(raw: String): String? {
         val normalized = raw.trim().removeSuffix(".xml")
         if (normalized.isBlank() || normalized.length > 120 || !SAFE_FILE_NAME.matches(normalized)) return null
@@ -1557,10 +1650,10 @@ class SchemaWorkspaceService(
         private val UNIQUE_TRUE = Regex("""\bunique\s*=\s*true\b""")
         private val CHANGESET_TAG = Regex("""(?is)<changeSet\b([^>]*)>""")
         private val LIQUIBASE_SCHEMA_OPERATION = Regex(
-            """(?is)<(createTable|addColumn)\b([^>]*)>(.*?)</\1\s*>|""" +
+            """(?is)<(createTable|addColumn|createIndex)\b([^>]*)>(.*?)</\1\s*>|""" +
                 """<(dropTable|renameTable|dropColumn|renameColumn|modifyDataType|""" +
                 """addNotNullConstraint|dropNotNullConstraint|addUniqueConstraint|""" +
-                """dropUniqueConstraint|createIndex|dropIndex|addForeignKeyConstraint|""" +
+                """dropUniqueConstraint|dropIndex|addForeignKeyConstraint|""" +
                 """dropForeignKeyConstraint)\b([^>]*)/?>""",
         )
         private val LIQUIBASE_COLUMN = Regex(
@@ -1608,12 +1701,14 @@ private data class MutablePhysicalTable(
     val columns: MutableMap<String, SchemaPhysicalColumnSnapshot> = linkedMapOf(),
     val foreignKeys: MutableMap<String, SchemaPhysicalForeignKeySnapshot> = linkedMapOf(),
     val uniqueConstraints: MutableMap<String, List<String>> = linkedMapOf(),
+    val indexes: MutableMap<String, SchemaPhysicalIndexSnapshot> = linkedMapOf(),
     val sourcePaths: MutableSet<String> = linkedSetOf(),
 ) {
     fun snapshot(): SchemaPhysicalTableSnapshot = SchemaPhysicalTableSnapshot(
         name = name,
         columns = columns.values.sortedBy(SchemaPhysicalColumnSnapshot::name),
         foreignKeys = foreignKeys.values.sortedBy(SchemaPhysicalForeignKeySnapshot::constraintName),
+        indexes = indexes.values.sortedBy(SchemaPhysicalIndexSnapshot::name),
         sourcePaths = sourcePaths.toList(),
     )
 }
@@ -1678,6 +1773,7 @@ data class SchemaEntitySnapshot(
     val idColumnName: String,
     val databaseView: Boolean,
     val ddlMode: SchemaDdlMode,
+    val protectedUnmappedColumns: List<String> = emptyList(),
     val sourceLocator: SourceLocator,
     val attributes: List<SchemaEntityAttributeSnapshot>,
     val migrationCoverage: SchemaMigrationCoverage,
@@ -1755,6 +1851,7 @@ data class SchemaPhysicalTableSnapshot(
     val name: String,
     val columns: List<SchemaPhysicalColumnSnapshot>,
     val foreignKeys: List<SchemaPhysicalForeignKeySnapshot>,
+    val indexes: List<SchemaPhysicalIndexSnapshot> = emptyList(),
     val sourcePaths: List<String>,
 )
 
@@ -1772,6 +1869,12 @@ data class SchemaPhysicalForeignKeySnapshot(
     val referencedTableName: String,
     val referencedColumnNames: String,
     val onDelete: String? = null,
+)
+
+data class SchemaPhysicalIndexSnapshot(
+    val name: String,
+    val unique: Boolean,
+    val columns: List<String>,
 )
 
 data class SchemaDriftSnapshot(
@@ -1825,6 +1928,7 @@ data class SchemaDriftSuggestion(
     val nullable: Boolean? = null,
     val columns: List<SchemaSuggestedColumn> = emptyList(),
     val newDataType: String? = null,
+    val newColumnName: String? = null,
     val constraintName: String? = null,
     val columnNames: List<String> = emptyList(),
     val baseTableName: String? = null,
