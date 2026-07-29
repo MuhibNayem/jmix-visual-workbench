@@ -55,8 +55,14 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   generate checked forward/rollback migrations. Explicit scalar column renames
   now update Java/Kotlin `@Column` mappings and generate a preconditioned
   Liquibase `renameColumn` with reverse rollback in the same atomic preview.
-  Inferred columns, collisions, disabled DDL, relationship join-column changes,
-  type/removal and unsafe narrowing fail closed instead of guessing.
+  Explicit owning-side `ManyToOne` and `OneToOne` join-column renames receive
+  the same treatment for Java and Kotlin: only the literal `@JoinColumn(name)`
+  changes, every other handwritten annotation argument is preserved, and
+  old-exists/new-absent preconditions plus reverse rollback are generated.
+  Target/cardinality/ownership/cascade/fetch/constraint changes, inferred
+  columns, inverse/collection/join-table/cross-store mappings, collisions,
+  disabled DDL, type/removal and unsafe narrowing fail closed instead of
+  guessing.
 - Existing scalar and relationship properties with stable explicit physical
   mappings can launch IntelliJ's native rename processor directly from Entity
   Designer. The exact revision and live Java/Kotlin PSI declaration are
@@ -111,10 +117,10 @@ blocked until all of the following pass:
 1. Complete schema-aware Java and Kotlin PSI refactoring for handwritten
    entities. Stable-mapping scalar and relationship property rename delegates
    to IntelliJ usage preview, including native `mappedBy` references, and
-   explicit scalar physical-column rename is atomic with checked Liquibase
-   rollback. Relationship join-column changes, combined property-and-physical
-   mapping changes, type change and removal remain. Additive and
-   managed-mapping Java/Kotlin round trip is implemented.
+   explicit scalar and owning to-one join-column physical rename is atomic
+   with checked Liquibase rollback. Combined property-and-physical mapping
+   changes, relationship shape changes, type change and removal remain.
+   Additive and managed-mapping Java/Kotlin round trip is implemented.
 2. The first partial live-database merge is implemented for a selected
    existing entity/table and missing columns. Complete table/view selection,
    composite-key and join-table mapping, all FK dependency import, database

@@ -831,6 +831,182 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertEquals("JVW-ENTITY-RENAME-INFERRED-RELATIONSHIP-MAPPING", rejected.code)
     }
 
+    fun testExistingJavaAndKotlinOwningJoinColumnRenameIsSourceSafeAndRollbackChecked() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/Department.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity @Entity @Table(name = "DEPARTMENT")
+                    public class Department {
+                        @Id @Column(name = "ID")
+                        private java.util.UUID id;
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/Employee.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity @Entity @Table(name = "EMPLOYEE")
+                    public class Employee {
+                        @Id @Column(name = "ID")
+                        private java.util.UUID id;
+                        @ManyToOne
+                        @JoinColumn(
+                            name = "DEPARTMENT_ID",
+                            referencedColumnName = "ID",
+                            nullable = false,
+                            foreignKey = @ForeignKey(name = "FK_EMPLOYEE_DEPARTMENT")
+                        )
+                        private Department department;
+                        public String manualLabel() { return "employee"; }
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/UnsafeEmployee.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity @Entity @Table(name = "UNSAFE_EMPLOYEE")
+                    public class UnsafeEmployee {
+                        @Id @Column(name = "ID")
+                        private java.util.UUID id;
+                        @ManyToOne
+                        private Department department;
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/KotlinEmployee.kt",
+                """
+                    package com.acme.entity
+                    import io.jmix.core.metamodel.annotation.JmixEntity
+                    import jakarta.persistence.*
+                    import java.util.UUID
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "KOTLIN_EMPLOYEE")
+                    class KotlinEmployee {
+                        @Id
+                        @Column(name = "ID")
+                        var id: UUID? = null
+                        @ManyToOne
+                        @JoinColumn(name = "DEPARTMENT_ID", referencedColumnName = "ID", nullable = false)
+                        var department: Department? = null
+                        fun manualLabel(): String = "kotlin-employee"
+                    }
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val store = workspace.stores.single()
+        val service = ExistingEntityChangeService.getInstance(project)
+
+        fun model(snapshot: SchemaEntitySnapshot, newColumn: String): EntityModel {
+            val relationAttribute = snapshot.attributes.single { it.name == "department" }
+            val relation = requireNotNull(relationAttribute.associationDetails)
+            return EntityModel(
+                className = snapshot.className,
+                packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+                sourceLanguage = if (snapshot.sourceLocator.relativePath.endsWith(".kt")) {
+                    EntitySourceLanguage.KOTLIN
+                } else {
+                    EntitySourceLanguage.JAVA
+                },
+                tableName = snapshot.tableName,
+                dataStore = snapshot.storeName,
+                generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+                attributes = mutableListOf(
+                    AttributeModel(
+                        name = relationAttribute.name,
+                        type = AttributeType.ASSOCIATION,
+                        columnName = relationAttribute.columnName,
+                        mandatory = !relationAttribute.nullable,
+                        unique = relationAttribute.unique,
+                        association = AssociationConfig(
+                            associationType = relation.associationType,
+                            relatedEntity = relation.relatedEntity,
+                            relatedTableName = relation.relatedTableName,
+                            relatedIdColumnName = relation.relatedIdColumnName,
+                            relatedIdType = relation.relatedIdType,
+                            localIdAttributeName = relation.localIdAttributeName,
+                            mappedBy = relation.mappedBy,
+                            joinColumnName = newColumn,
+                            joinTable = relation.joinTable,
+                            cascade = relation.cascade.toMutableList(),
+                            fetch = relation.fetch,
+                            collectionType = relation.collectionType,
+                            crossDataStore = relation.crossDataStore,
+                            orphanRemoval = relation.orphanRemoval,
+                            onDelete = relation.onDelete,
+                        ),
+                    ),
+                ),
+            )
+        }
+
+        listOf("Employee", "KotlinEmployee").forEach { className ->
+            val snapshot = workspace.entities.single { it.className == className }
+            val preview = service.previewAttributeAdditions(
+                ExistingEntityAttributeAdditionRequest(
+                    snapshot.sourceLocator,
+                    model(snapshot, "ORG_UNIT_ID"),
+                ),
+            )
+            assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+            assertEquals(2, preview.files.size)
+            val source = preview.files.single {
+                it.relativePath.endsWith(if (className == "Employee") ".java" else ".kt")
+            }.resultContent
+            assertTrue(source.contains("name = \"ORG_UNIT_ID\""))
+            assertTrue(source.contains("referencedColumnName = \"ID\""))
+            assertTrue(source.contains("nullable = false"))
+            assertTrue(source.contains("manualLabel"))
+            if (className == "Employee") {
+                assertTrue(source.contains("foreignKey = @ForeignKey(name = \"FK_EMPLOYEE_DEPARTMENT\")"))
+            }
+            val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+            assertTrue(
+                migration.contains(
+                    "oldColumnName=\"DEPARTMENT_ID\" newColumnName=\"ORG_UNIT_ID\"",
+                ),
+            )
+            assertTrue(
+                migration.contains(
+                    "oldColumnName=\"ORG_UNIT_ID\" newColumnName=\"DEPARTMENT_ID\"",
+                ),
+            )
+            assertTrue(migration.contains("columnName=\"DEPARTMENT_ID\""))
+            assertTrue(migration.contains("columnName=\"ORG_UNIT_ID\""))
+        }
+
+        val unsafe = workspace.entities.single { it.className == "UnsafeEmployee" }
+        val rejected = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                unsafe.sourceLocator,
+                model(unsafe, "ORG_UNIT_ID"),
+            ),
+        )
+        assertFalse(rejected.accepted)
+        assertTrue(
+            rejected.issues.any { it.code == "JVW-ENTITY-RELATIONSHIP-JOIN-COLUMN-INFERRED" },
+            rejected.issues.toString(),
+        )
+    }
+
     private fun addStatusMigration() = MigrationModel(
         changelogId = "loan-status",
         author = "team",

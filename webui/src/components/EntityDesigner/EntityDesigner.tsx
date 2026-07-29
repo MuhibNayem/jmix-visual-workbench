@@ -1646,15 +1646,49 @@ export default function EntityDesigner() {
                 const selected = entity.attributes[selectedAttr]
                 const source = existingEntity?.attributes.find((candidate) => candidate.name === selected.name)
                 const mappingLocked = Boolean(source && (source.association || !source.persistent))
+                const sourceAssociation = source?.associationDetails
+                const joinColumnRenameSafe = Boolean(
+                  source?.persistent &&
+                  sourceAssociation?.joinColumnName &&
+                  !sourceAssociation.crossDataStore &&
+                  !sourceAssociation.mappedBy &&
+                  ['manyToOne', 'oneToOne'].includes(sourceAssociation.associationType) &&
+                  existingEntity?.ddlMode !== 'DISABLED' &&
+                  !existingEntity?.databaseView,
+                )
                 return (
                   <div className="mt-4 rounded-lg border border-surface-border bg-surface-light p-4">
                     <div className="text-xs text-gray-400">
                       <span className="font-mono text-gray-200">{selected.name}</span>
                       {' · '}
                       {mappingLocked
-                        ? 'relationship/transient mapping is source-protected'
+                        ? joinColumnRenameSafe
+                          ? 'owning relationship · checked join-column evolution'
+                          : 'relationship/transient mapping is source-protected'
                         : 'safe persistence metadata editor'}
                     </div>
+                    {joinColumnRenameSafe && selected.association && (
+                      <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
+                        <Field label="Physical join column">
+                          <input
+                            value={selected.association.joinColumnName ?? ''}
+                            onChange={(event) => updateAttribute(selectedAttr, {
+                              association: {
+                                ...selected.association!,
+                                joinColumnName: event.target.value || undefined,
+                              },
+                            })}
+                            className="w-full min-w-0 font-mono"
+                            aria-label={`Physical join column for ${selected.name}`}
+                          />
+                        </Field>
+                        <div className="min-w-0 rounded border border-emerald-500/20 bg-emerald-500/5 p-2 text-[10px] leading-relaxed text-emerald-200/80">
+                          Preview updates only the literal <code>@JoinColumn(name)</code> and creates a guarded
+                          Liquibase rename with reverse rollback. Target, cardinality, ownership, cascade, fetch,
+                          nullability, and constraints remain locked.
+                        </div>
+                      </div>
+                    )}
                     {!mappingLocked && (
                       <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                         <label className="text-[10px] uppercase tracking-wider text-gray-500">
@@ -1718,6 +1752,7 @@ export default function EntityDesigner() {
                     )}
                     <p className="mt-3 text-[10px] leading-relaxed text-gray-600">
                       Mapping edits preserve property identity, Java/Kotlin type, manual annotations, accessors, and call sites.
+                      {' '}Unsafe relationship changes remain blocked by the backend even if a request bypasses this UI.
                     </p>
                     {source && (
                       <div className="mt-4 rounded-lg border border-jmix-500/20 bg-jmix-500/5 p-3">
