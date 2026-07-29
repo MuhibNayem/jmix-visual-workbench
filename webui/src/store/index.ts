@@ -7,7 +7,20 @@ import type {
   ProjectConfig,
 } from '../types'
 
-export type ActiveTab = 'projectMap' | 'entity' | 'view' | 'crud' | 'menu' | 'role' | 'migration'
+export type ActiveTab =
+  | 'projectMap'
+  | 'entity'
+  | 'view'
+  | 'crud'
+  | 'menu'
+  | 'role'
+  | 'api'
+  | 'integration'
+  | 'workflow'
+  | 'logic'
+  | 'rules'
+  | 'scenario'
+  | 'migration'
 
 function defaultAttribute(name: string = ''): AttributeModel {
   return {
@@ -27,6 +40,8 @@ function defaultEntity(): EntityModel {
   return {
     className: '',
     packageName: 'com.example.app.entity',
+    dataStore: 'main',
+    entityName: '',
     tableName: '',
     entityType: 'entity',
     id: { type: 'uuid', generation: 'jmixGenerated', columnName: 'ID' },
@@ -38,7 +53,13 @@ function defaultEntity(): EntityModel {
     entityListeners: [],
     implementsInterfaces: [],
     annotations: [],
-    ddlGeneration: { enabled: true },
+    databaseView: false,
+    ddlGeneration: {
+      enabled: true,
+      mode: 'createAndDrop',
+      unmappedColumns: [],
+      unmappedConstraints: [],
+    },
   }
 }
 

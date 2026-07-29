@@ -1,0 +1,692 @@
+package org.jmixworkbench.services
+
+import com.intellij.openapi.application.WriteAction
+import com.intellij.openapi.module.ModuleManager
+import com.intellij.openapi.module.ModuleType
+import com.intellij.openapi.roots.ModuleRootManager
+import com.intellij.openapi.vfs.VfsUtil
+import com.intellij.testFramework.HeavyPlatformTestCase
+import org.jmixworkbench.generator.CrudOrchestrator
+import org.jmixworkbench.model.ChangeSetModel
+import org.jmixworkbench.model.ColumnDef
+import org.jmixworkbench.model.DbChange
+import org.jmixworkbench.model.DataRepositoryConfig
+import org.jmixworkbench.model.AttributeModel
+import org.jmixworkbench.model.AttributeType
+import org.jmixworkbench.model.AssociationConfig
+import org.jmixworkbench.model.AssociationCollectionType
+import org.jmixworkbench.model.AssociationType
+import org.jmixworkbench.model.CascadeType
+import org.jmixworkbench.model.EntityGenerationTarget
+import org.jmixworkbench.model.EntityModel
+import org.jmixworkbench.model.MigrationModel
+import org.jmixworkbench.model.ProjectConfig
+import org.jmixworkbench.model.IdType
+import org.jmixworkbench.model.FetchType
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
+
+class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
+    fun testCustomGradleResourceRootKeepsLiquibaseClasspathAndGenerationDestination() {
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            val module = ModuleManager.getInstance(project).modules.first()
+            if (ModuleRootManager.getInstance(module).contentRoots.none { it == root }) {
+                val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+                rootModel.addContentEntry(root)
+                rootModel.commit()
+            }
+            write(
+                root,
+                "build.gradle.kts",
+                """
+                plugins { id("io.jmix") version "2.8.3" }
+                sourceSets {
+                    named("main") {
+                        resources {
+                            srcDir("runtime-resources")
+                        }
+                    }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "runtime-resources/application.properties",
+                "main.liquibase.change-log=com/acme/liquibase/changelog.xml\n",
+            )
+            write(
+                root,
+                "runtime-resources/com/acme/liquibase/changelog.xml",
+                """
+                <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                    <includeAll path="com/acme/liquibase/changelog"/>
+                </databaseChangeLog>
+                """.trimIndent(),
+            )
+        }
+
+        val service = SchemaWorkspaceService.getInstance(project)
+        val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh = true)
+        assertTrue(
+            graph.modules.flatMap(ApplicationGraphModuleCoverage::sourceRoots).any {
+                it.relativePath == "runtime-resources" &&
+                    it.kind == ApplicationGraphSourceRootKind.RESOURCES
+            },
+            graph.modules.flatMap(ApplicationGraphModuleCoverage::sourceRoots).toString(),
+        )
+        assertTrue(
+            ProjectSourceDestinationService.getInstance(project)
+                .productionResources(graph)
+                .any { it.sourceRoot == "runtime-resources" },
+        )
+        val workspace = service.load()
+        val store = workspace.stores.single()
+
+        assertEquals("com/acme/liquibase/changelog.xml", store.configuredPath)
+        assertEquals(
+            "runtime-resources/com/acme/liquibase/changelog",
+            store.generatedDirectory,
+        )
+        val preview = service.previewMigration(
+            SchemaMigrationChangeRequest(store.id, addStatusMigration()),
+        )
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        val generated = preview.files.single()
+        assertTrue(
+            generated.relativePath.startsWith("runtime-resources/com/acme/liquibase/changelog/"),
+            generated.relativePath,
+        )
+        assertTrue(
+            generated.resultContent.contains("logicalFilePath=\"com/acme/liquibase/changelog/"),
+            generated.resultContent,
+        )
+    }
+
+    fun testExistingRelationshipMetadataIsRoundTrippedWithoutCardinalityLoss() {
+        createRelationshipFixture()
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val loanApp = workspace.entities.single { it.className == "LoanApp" }
+
+        val account = loanApp.attributes.single { it.name == "loanAcct" }
+        val accountRelation = requireNotNull(account.associationDetails)
+        assertEquals(AssociationType.MANY_TO_ONE, accountRelation.associationType)
+        assertEquals("com.acme.entity.LoanAcct", accountRelation.relatedEntity)
+        assertEquals("LOAN_ACCT", accountRelation.relatedTableName)
+        assertEquals(IdType.LONG, accountRelation.relatedIdType)
+        assertEquals("ACCT_ID", accountRelation.relatedIdColumnName)
+        assertEquals("LOAN_ACCT_ID", accountRelation.joinColumnName)
+        assertEquals(FetchType.EAGER, accountRelation.fetch)
+        assertEquals(listOf(CascadeType.MERGE), accountRelation.cascade)
+        assertFalse(account.nullable)
+
+        val schedules = loanApp.attributes.single { it.name == "schedules" }
+        val scheduleRelation = requireNotNull(schedules.associationDetails)
+        assertEquals(AssociationType.ONE_TO_MANY, scheduleRelation.associationType)
+        assertEquals("loanApp", scheduleRelation.mappedBy)
+        assertEquals(AssociationCollectionType.LIST, scheduleRelation.collectionType)
+        assertTrue(scheduleRelation.composition)
+        assertTrue(scheduleRelation.orphanRemoval)
+        assertEquals("CASCADE", scheduleRelation.onDelete)
+        assertEquals(listOf(CascadeType.ALL), scheduleRelation.cascade)
+
+        val documents = loanApp.attributes.single { it.name == "documents" }
+        val documentRelation = requireNotNull(documents.associationDetails)
+        assertEquals(AssociationType.MANY_TO_MANY, documentRelation.associationType)
+        assertEquals(AssociationCollectionType.SET, documentRelation.collectionType)
+        assertEquals("LOAN_APP_DOCUMENT_LINK", documentRelation.joinTable?.name)
+        assertEquals("APP_ID", documentRelation.joinTable?.joinColumnName)
+        assertEquals("DOC_ID", documentRelation.joinTable?.inverseJoinColumnName)
+
+        val fundProfile = loanApp.attributes.single { it.name == "fundProfile" }
+        val fundRelation = requireNotNull(fundProfile.associationDetails)
+        assertTrue(fundRelation.crossDataStore)
+        assertEquals("fundProfileId", fundRelation.localIdAttributeName)
+        assertEquals("FUND_PROFILE_ID", fundRelation.joinColumnName)
+        assertEquals("com.acme.entity.FundProfile", fundRelation.relatedEntity)
+        assertEquals("FUND_PROFILE", fundRelation.relatedTableName)
+    }
+
+    fun testIncludeAllStoreEntityCoverageAndSourceSafeMigrationDestination() {
+        createFixture(includeAll = true)
+        val service = SchemaWorkspaceService.getInstance(project)
+        val workspace = service.load(forceRefresh = true)
+
+        assertTrue(workspace.accepted)
+        assertTrue(
+            workspace.stores.isNotEmpty(),
+            "No stores indexed; project=${project.basePath}, modules=${ModuleManager.getInstance(project).modules.map { it.name }}",
+        )
+        val store = workspace.stores.single()
+        assertEquals(SchemaIncludeMode.INCLUDE_ALL, store.includeMode)
+        assertTrue(store.generatedDirectory!!.endsWith("com/acme/liquibase/changelog"))
+        val entity = workspace.entities.single { it.className == "LoanApp" }
+        assertEquals("LOAN_APP", entity.tableName)
+        assertEquals(SchemaMigrationCoverage.COVERED, entity.migrationCoverage)
+        assertTrue(workspace.findings.any { it.code == "SCHEMA_BUSINESS_IDENTIFIER_NOT_UNIQUE" })
+        val physicalStore = workspace.physicalSchemas.single()
+        assertTrue(physicalStore.complete)
+        assertTrue(physicalStore.changelogPaths.any { it.endsWith("/010-init.xml") })
+        val physicalTable = physicalStore.tables.single { it.name == "LOAN_APP" }
+        assertEquals(listOf("ID"), physicalTable.columns.map { it.name })
+        assertFalse(workspace.drifts.any { it.kind == SchemaDriftKind.TABLE_MISSING })
+        val missingColumns = workspace.drifts
+            .filter { it.kind == SchemaDriftKind.COLUMN_MISSING }
+            .associateBy { it.columnName }
+        assertEquals(setOf("APPLICATION_NO", "LOAN_AMOUNT"), missingColumns.keys)
+        assertEquals("VARCHAR(255)", missingColumns.getValue("APPLICATION_NO").suggestion?.columnType)
+        assertEquals(false, missingColumns.getValue("APPLICATION_NO").suggestion?.nullable)
+        assertEquals("DECIMAL(19,2)", missingColumns.getValue("LOAN_AMOUNT").suggestion?.columnType)
+        assertTrue(workspace.drifts.all { it.confidence == SchemaDriftConfidence.HIGH })
+
+        val request = SchemaMigrationChangeRequest(store.id, addStatusMigration())
+        val preview = service.previewMigration(request)
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        assertNotNull(preview.planDigest)
+        assertEquals(1, preview.files.size)
+        assertEquals(org.jmixworkbench.discovery.change.WorkspaceFileChangeMode.CREATE, preview.files.single().mode)
+        assertTrue(preview.files.single().relativePath.contains("/liquibase/changelog/"))
+    }
+
+    fun testExplicitIncludeRootIsEditedAndDuplicateChangesetIsRejected() {
+        createFixture(includeAll = false)
+        val service = SchemaWorkspaceService.getInstance(project)
+        val workspace = service.load(forceRefresh = true)
+        assertTrue(
+            workspace.stores.isNotEmpty(),
+            "No stores indexed; project=${project.basePath}, modules=${ModuleManager.getInstance(project).modules.map { it.name }}",
+        )
+        val store = workspace.stores.single()
+        assertEquals(SchemaIncludeMode.EXPLICIT, store.includeMode)
+
+        val preview = service.previewMigration(SchemaMigrationChangeRequest(store.id, addStatusMigration()))
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        assertEquals(2, preview.files.size)
+        val root = preview.files.single { it.relativePath.endsWith("liquibase/changelog.xml") }
+        assertEquals(org.jmixworkbench.discovery.change.WorkspaceFileChangeMode.MODIFY, root.mode)
+        assertTrue(root.resultContent.contains("<include file=\"com/acme/liquibase/changelog/"))
+
+        val duplicate = addStatusMigration().copy(
+            changes = mutableListOf(
+                ChangeSetModel(
+                    id = "existing",
+                    author = "team",
+                    changes = mutableListOf(DbChange.AddColumn("LOAN_APP", mutableListOf(ColumnDef("X", "INT")))),
+                ),
+            ),
+        )
+        val rejected = service.previewMigration(SchemaMigrationChangeRequest(store.id, duplicate))
+        assertFalse(rejected.accepted)
+        assertTrue(rejected.issues.any { it.code == "JVW-SCHEMA-CHANGESET-DUPLICATE" })
+    }
+
+    fun testEntityGenerationUsesSelectedModuleStoreAndRevisionBoundPreview() {
+        createFixture(includeAll = true)
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val store = workspace.stores.single()
+        val entity = EntityModel(
+            className = "RepaymentSchedule",
+            packageName = "com.acme.entity",
+            dataStore = store.name,
+            generationTarget = EntityGenerationTarget(
+                moduleId = store.moduleId,
+                storeId = store.id,
+            ),
+            dataRepository = DataRepositoryConfig(enabled = true),
+        )
+        val preview = CodeGenerationService.getInstance(project).previewEntityGeneration(
+            entity,
+            ProjectConfig(
+                projectRoot = requireNotNull(project.basePath),
+                basePackage = "com.acme",
+            ),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        assertNotNull(preview.planDigest)
+        assertTrue(
+            preview.files.any {
+                it.relativePath.endsWith("src/main/java/com/acme/entity/RepaymentSchedule.java")
+            },
+        )
+        assertTrue(
+            preview.files.any {
+                it.relativePath.contains("/liquibase/changelog/") &&
+                    it.relativePath.endsWith("-create-repayment_schedule.xml")
+            },
+        )
+        assertTrue(
+            preview.files.any {
+                it.relativePath.endsWith("src/main/resources/com/acme/entity/messages.properties")
+            },
+        )
+        assertTrue(
+            preview.files.any {
+                it.relativePath.endsWith("src/main/java/com/acme/entity/RepaymentScheduleRepository.java")
+            },
+        )
+        val repositoryConfiguration = preview.files.single {
+            it.relativePath.endsWith("src/main/java/com/acme/JmixDataRepositoryConfiguration.java")
+        }
+        assertTrue(repositoryConfiguration.resultContent.contains("@EnableJmixDataRepositories"))
+        assertTrue(repositoryConfiguration.resultContent.contains("basePackages = \"com.acme.entity\""))
+
+        val crudPreview = CodeGenerationService.getInstance(project).previewCrudGeneration(
+            entity,
+            ProjectConfig(
+                projectRoot = requireNotNull(project.basePath),
+                basePackage = "com.acme",
+            ),
+            CrudOrchestrator.CrudOptions(generateDataRepository = true),
+        )
+        assertTrue(crudPreview.accepted, crudPreview.issues.joinToString { it.message })
+        assertEquals(12, crudPreview.files.size)
+        assertFalse(crudPreview.files.any { "/entity/entity/" in it.relativePath })
+        assertTrue(
+            crudPreview.files.any {
+                it.relativePath.endsWith("src/main/java/com/acme/entity/RepaymentSchedule.java")
+            },
+        )
+        assertTrue(
+            crudPreview.files.any {
+                it.relativePath.endsWith("src/main/java/com/acme/view/RepaymentScheduleListView.java")
+            },
+        )
+        assertTrue(
+            crudPreview.files.any {
+                it.relativePath.contains("/liquibase/changelog/") &&
+                    it.relativePath.endsWith("-create-repayment_schedule.xml")
+            },
+        )
+    }
+
+    fun testExistingEntityAttributeAdditionPreservesSourceAndAddsRollbackMigration() {
+        createFixture(includeAll = true)
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val snapshot = workspace.entities.single { it.className == "LoanApp" }
+        val store = workspace.stores.single()
+        val entity = EntityModel(
+            className = snapshot.className,
+            packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+            tableName = snapshot.tableName,
+            dataStore = snapshot.storeName,
+            generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "applicationNo",
+                    type = AttributeType.STRING,
+                    columnName = "APPLICATION_NO",
+                    mandatory = true,
+                ),
+                AttributeModel(
+                    name = "loanAmount",
+                    type = AttributeType.BIG_DECIMAL,
+                    columnName = "LOAN_AMOUNT",
+                    mandatory = true,
+                    precision = 19,
+                    scale = 2,
+                ),
+                AttributeModel(
+                    name = "status",
+                    type = AttributeType.STRING,
+                    columnName = "STATUS",
+                    mandatory = true,
+                    length = 32,
+                ),
+            ),
+        )
+        val request = ExistingEntityAttributeAdditionRequest(snapshot.sourceLocator, entity)
+        val preview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(request)
+
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertNotNull(preview.planDigest)
+        assertEquals(2, preview.files.size)
+        val java = preview.files.single { it.relativePath.endsWith("LoanApp.java") }
+        assertEquals(org.jmixworkbench.discovery.change.WorkspaceFileChangeMode.MODIFY, java.mode)
+        assertTrue(java.resultContent.contains("public int calculateRisk()"))
+        assertTrue(java.resultContent.contains("@Column(name = \"STATUS\", nullable = false, length = 32)"))
+        assertTrue(java.resultContent.contains("protected String status;"))
+        assertTrue(java.resultContent.contains("public String getStatus()"))
+        val migration = preview.files.single { it.relativePath.endsWith(".xml") }
+        assertTrue(migration.resultContent.contains("<addColumn tableName=\"LOAN_APP\">"))
+        assertTrue(migration.resultContent.contains("<dropColumn tableName=\"LOAN_APP\" columnName=\"STATUS\""))
+
+        val stale = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            request.copy(sourceLocator = snapshot.sourceLocator.copy(revisionFingerprint = "stale")),
+        )
+        assertFalse(stale.accepted)
+        assertTrue(stale.issues.any { it.code == "JVW-ENTITY-SOURCE-STALE" })
+    }
+
+    fun testExistingEntityCrossStoreRelationshipIsAddedWithoutRewritingManualCodeOrAddingForeignKey() {
+        createFixture(includeAll = true)
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val snapshot = workspace.entities.single { it.className == "LoanApp" }
+        val store = workspace.stores.single()
+        val entity = EntityModel(
+            className = snapshot.className,
+            packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+            tableName = snapshot.tableName,
+            dataStore = snapshot.storeName,
+            generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "applicationNo",
+                    type = AttributeType.STRING,
+                    columnName = "APPLICATION_NO",
+                    mandatory = true,
+                ),
+                AttributeModel(
+                    name = "fundProfile",
+                    type = AttributeType.ASSOCIATION,
+                    mandatory = true,
+                    association = AssociationConfig(
+                        associationType = AssociationType.MANY_TO_ONE,
+                        relatedEntity = "com.acme.fund.FundProfile",
+                        relatedTableName = "FUND_PROFILE",
+                        relatedIdType = IdType.UUID,
+                        localIdAttributeName = "fundProfileId",
+                        joinColumnName = "FUND_PROFILE_ID",
+                        crossDataStore = true,
+                    ),
+                ),
+            ),
+        )
+
+        val preview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(snapshot.sourceLocator, entity),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        val java = preview.files.single { it.relativePath.endsWith("LoanApp.java") }.resultContent
+        assertTrue(java.contains("public int calculateRisk()"))
+        assertTrue(java.contains("protected UUID fundProfileId;"))
+        assertTrue(java.contains("@DependsOnProperties(\"fundProfileId\")"))
+        assertTrue(java.contains("protected FundProfile fundProfile;"))
+        val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+        assertTrue(migration.contains("<addColumn tableName=\"LOAN_APP\">"))
+        assertTrue(migration.contains("<column name=\"FUND_PROFILE_ID\" type=\"UUID\""))
+        assertFalse(migration.contains("<addForeignKeyConstraint"))
+        assertTrue(migration.contains("<dropColumn tableName=\"LOAN_APP\" columnName=\"FUND_PROFILE_ID\""))
+    }
+
+    fun testExistingEntitySafeMetadataUpdatePreservesManualCodeAndGeneratesCheckedRollback() {
+        createFixture(includeAll = true)
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val snapshot = workspace.entities.single { it.className == "LoanApp" }
+        val store = workspace.stores.single()
+        val entity = EntityModel(
+            className = snapshot.className,
+            packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+            tableName = snapshot.tableName,
+            dataStore = snapshot.storeName,
+            generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "applicationNo",
+                    type = AttributeType.STRING,
+                    columnName = "APPLICATION_NO",
+                    mandatory = true,
+                    unique = true,
+                    length = 512,
+                ),
+                AttributeModel(
+                    name = "loanAmount",
+                    type = AttributeType.BIG_DECIMAL,
+                    columnName = "LOAN_AMOUNT",
+                    mandatory = false,
+                    precision = 24,
+                    scale = 2,
+                ),
+            ),
+        )
+
+        val preview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(snapshot.sourceLocator, entity),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(2, preview.files.size)
+        val java = preview.files.single { it.relativePath.endsWith("LoanApp.java") }.resultContent
+        assertTrue(java.contains("public int calculateRisk()"))
+        assertTrue(
+            java.contains(
+                "@Column(name = \"APPLICATION_NO\", nullable = false, unique = true, length = 512)",
+            ),
+        )
+        assertTrue(java.contains("@Column(name = \"LOAN_AMOUNT\", precision = 24, scale = 2)"))
+        val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+        assertTrue(migration.contains("<sqlCheck expectedResult=\"0\">"))
+        assertTrue(migration.contains("JVW_DUPLICATES"))
+        assertTrue(migration.contains("<addUniqueConstraint tableName=\"LOAN_APP\""))
+        assertTrue(migration.contains("<dropNotNullConstraint tableName=\"LOAN_APP\" columnName=\"LOAN_AMOUNT\""))
+        assertTrue(migration.contains("newDataType=\"VARCHAR(512)\""))
+        assertTrue(migration.contains("newDataType=\"DECIMAL(24, 2)\""))
+        assertTrue(migration.contains("<rollback>"))
+        assertTrue(migration.contains("<dropUniqueConstraint tableName=\"LOAN_APP\""))
+        assertTrue(migration.contains("<addNotNullConstraint tableName=\"LOAN_APP\" columnName=\"LOAN_AMOUNT\""))
+    }
+
+    private fun addStatusMigration() = MigrationModel(
+        changelogId = "loan-status",
+        author = "team",
+        changes = mutableListOf(
+            ChangeSetModel(
+                id = "loan-status-1",
+                author = "team",
+                changes = mutableListOf(
+                    DbChange.AddColumn(
+                        tableName = "LOAN_APP",
+                        columns = mutableListOf(ColumnDef("STATUS", "VARCHAR(32)", nullable = false)),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    private fun createFixture(includeAll: Boolean) {
+        val root = getOrCreateProjectBaseDir()
+        val rootChangelog = if (includeAll) {
+            """
+            <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                <includeAll path="com/acme/liquibase/changelog"/>
+            </databaseChangeLog>
+            """.trimIndent()
+        } else {
+            """
+            <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                <include file="com/acme/liquibase/changelog/010-init.xml"/>
+            </databaseChangeLog>
+            """.trimIndent()
+        }
+        val entity = """
+            package com.acme.entity;
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+            import jakarta.persistence.*;
+            @JmixEntity
+            @Entity
+            @Table(name = "LOAN_APP")
+            public class LoanApp {
+                @Id
+                private java.util.UUID id;
+                @Column(name = "APPLICATION_NO", nullable = false)
+                private String applicationNo;
+                @Column(name = "LOAN_AMOUNT", nullable = false, precision = 19, scale = 2)
+                private java.math.BigDecimal loanAmount;
+
+                public int calculateRisk() {
+                    return 42;
+                }
+            }
+        """.trimIndent()
+        val initial = """
+            <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                <changeSet id="existing" author="team">
+                    <createTable tableName="LOAN_APP">
+                        <column name="ID" type="UUID"/>
+                    </createTable>
+                </changeSet>
+            </databaseChangeLog>
+        """.trimIndent()
+        WriteAction.run<RuntimeException> {
+            val module = ModuleManager.getInstance(project).modules.firstOrNull()
+                ?: ModuleManager.getInstance(project).newModule(
+                    "${root.path}/schema-test.iml",
+                    ModuleType.EMPTY.id,
+                )
+            if (ModuleRootManager.getInstance(module).contentRoots.none { it == root }) {
+                val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+                rootModel.addContentEntry(root)
+                rootModel.commit()
+            }
+            write(root, "src/main/java/com/acme/entity/LoanApp.java", entity)
+            write(
+                root,
+                "src/main/resources/application.properties",
+                "main.liquibase.change-log=com/acme/liquibase/changelog.xml\n",
+            )
+            write(root, "src/main/resources/com/acme/liquibase/changelog.xml", rootChangelog)
+            write(root, "src/main/resources/com/acme/liquibase/changelog/010-init.xml", initial)
+        }
+    }
+
+    private fun createRelationshipFixture() {
+        val root = getOrCreateProjectBaseDir()
+        val loanApp = """
+            package com.acme.entity;
+
+            import io.jmix.core.DeletePolicy;
+            import io.jmix.core.entity.annotation.OnDelete;
+            import io.jmix.core.entity.annotation.SystemLevel;
+            import io.jmix.core.metamodel.annotation.Composition;
+            import io.jmix.core.metamodel.annotation.DependsOnProperties;
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+            import io.jmix.core.metamodel.annotation.JmixProperty;
+            import jakarta.persistence.*;
+            import java.util.List;
+            import java.util.Set;
+            import java.util.UUID;
+
+            @JmixEntity
+            @Entity(name = "loan_LoanApp")
+            @Table(name = "LOAN_LOAN_APP")
+            public class LoanApp {
+                @Id
+                @Column(name = "ID", nullable = false)
+                private UUID id;
+
+                @ManyToOne(fetch = FetchType.EAGER, optional = false, cascade = {CascadeType.MERGE})
+                @JoinColumn(name = "LOAN_ACCT_ID", referencedColumnName = "ACCT_ID", nullable = false)
+                private LoanAcct loanAcct;
+
+                @Composition
+                @OnDelete(DeletePolicy.CASCADE)
+                @OneToMany(mappedBy = "loanApp", cascade = {CascadeType.ALL}, orphanRemoval = true)
+                private List<LoanSchedule> schedules;
+
+                @ManyToMany(fetch = FetchType.LAZY)
+                @JoinTable(
+                    name = "LOAN_APP_DOCUMENT_LINK",
+                    joinColumns = @JoinColumn(name = "APP_ID"),
+                    inverseJoinColumns = @JoinColumn(name = "DOC_ID")
+                )
+                private Set<LoanDocument> documents;
+
+                @SystemLevel
+                @Column(name = "FUND_PROFILE_ID")
+                private UUID fundProfileId;
+
+                @Transient
+                @JmixProperty
+                @DependsOnProperties("fundProfileId")
+                private FundProfile fundProfile;
+            }
+        """.trimIndent()
+        val loanAcct = """
+            package com.acme.entity;
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+            import jakarta.persistence.*;
+            @JmixEntity
+            @Entity(name = "loan_LoanAcct")
+            @Table(name = "LOAN_ACCT")
+            public class LoanAcct {
+                @Id
+                @Column(name = "ACCT_ID", nullable = false)
+                private Long id;
+            }
+        """.trimIndent()
+        val schedule = """
+            package com.acme.entity;
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+            import jakarta.persistence.*;
+            import java.util.UUID;
+            @JmixEntity
+            @Entity(name = "loan_LoanSchedule")
+            @Table(name = "LOAN_SCHEDULE")
+            public class LoanSchedule {
+                @Id
+                private UUID id;
+                @ManyToOne(fetch = FetchType.LAZY)
+                @JoinColumn(name = "LOAN_APP_ID")
+                private LoanApp loanApp;
+            }
+        """.trimIndent()
+        val document = """
+            package com.acme.entity;
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+            import jakarta.persistence.*;
+            import java.util.UUID;
+            @JmixEntity
+            @Entity(name = "loan_LoanDocument")
+            @Table(name = "LOAN_DOCUMENT")
+            public class LoanDocument {
+                @Id
+                private UUID id;
+            }
+        """.trimIndent()
+        val fundProfile = """
+            package com.acme.entity;
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+            import io.jmix.core.metamodel.annotation.Store;
+            import jakarta.persistence.*;
+            import java.util.UUID;
+            @JmixEntity
+            @Store(name = "fund")
+            @Entity(name = "fund_FundProfile")
+            @Table(name = "FUND_PROFILE")
+            public class FundProfile {
+                @Id
+                private UUID id;
+            }
+        """.trimIndent()
+        WriteAction.run<RuntimeException> {
+            val module = ModuleManager.getInstance(project).modules.firstOrNull()
+                ?: ModuleManager.getInstance(project).newModule(
+                    "${root.path}/relationship-schema-test.iml",
+                    ModuleType.EMPTY.id,
+                )
+            if (ModuleRootManager.getInstance(module).contentRoots.none { it == root }) {
+                val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+                rootModel.addContentEntry(root)
+                rootModel.commit()
+            }
+            write(root, "src/main/java/com/acme/entity/LoanApp.java", loanApp)
+            write(root, "src/main/java/com/acme/entity/LoanAcct.java", loanAcct)
+            write(root, "src/main/java/com/acme/entity/LoanSchedule.java", schedule)
+            write(root, "src/main/java/com/acme/entity/LoanDocument.java", document)
+            write(root, "src/main/java/com/acme/entity/FundProfile.java", fundProfile)
+        }
+    }
+
+    private fun write(root: com.intellij.openapi.vfs.VirtualFile, path: String, content: String) {
+        val parentPath = path.substringBeforeLast('/', "")
+        val parent = if (parentPath.isBlank()) {
+            root
+        } else {
+            requireNotNull(VfsUtil.createDirectoryIfMissing(root, parentPath))
+        }
+        VfsUtil.saveText(parent.findOrCreateChildData(this, path.substringAfterLast('/')), content)
+    }
+}

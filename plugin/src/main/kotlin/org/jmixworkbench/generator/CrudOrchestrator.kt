@@ -50,10 +50,11 @@ object CrudOrchestrator {
     enum class ListViewStyle { DATA_GRID, TREE_DATA_GRID, VIRTUAL_LIST }
     enum class DetailViewMode { FORM, TABBED, SIDE_PANEL }
 
-    fun generate(entity: EntityModel, config: ProjectConfig, options: CrudOptions = CrudOptions()): CrudOutput {
-        val basePkg = entity.packageName
+    fun generate(requestedEntity: EntityModel, config: ProjectConfig, options: CrudOptions = CrudOptions()): CrudOutput {
+        val entity = requestedEntity.withProjectNaming(config.projectId)
+        val entityPkg = entity.packageName
+        val basePkg = entityPkg.removeSuffix(".entity")
         val viewPkg = "$basePkg.view"
-        val entityPkg = "$basePkg.entity"
 
         val entityName = entity.className
         val entityLower = entityName.replaceFirstChar { it.lowercase() }
@@ -130,7 +131,9 @@ object CrudOrchestrator {
         // ── 8. Security Role ──
         val roleCode = options.roleCode ?: "${entityLower}-role"
         val role = RoleModel(
-            name = "${entityName}Role",
+            className = "${entityName}Role",
+            packageName = "$basePkg.security",
+            name = "$entityName full access",
             code = roleCode,
             description = "Full access to $entityName",
             entityPolicies = mutableListOf(
@@ -142,12 +145,12 @@ object CrudOrchestrator {
             menuPolicies = mutableListOf(
                 MenuPolicyModel(menuId = "$viewIdBase-list")
             ),
-            screenPolicies = mutableListOf(
-                ScreenPolicyModel(screenId = "$viewIdBase-list-view"),
-                ScreenPolicyModel(screenId = "$viewIdBase-detail-view")
+            viewPolicies = mutableListOf(
+                ViewPolicyModel(viewId = "$viewIdBase-list-view"),
+                ViewPolicyModel(viewId = "$viewIdBase-detail-view")
             )
         )
-        val roleContent = RoleGenerator.generate(role)
+        val roleContent = RoleGenerator.generate(role, "$basePkg.security")
         val roleFile = GeneratedFile(
             relativePath = "${config.sourceRoot}/${config.packageToPath(basePkg)}/security/${entityName}Role.java",
             content = roleContent,
@@ -291,7 +294,7 @@ object CrudOrchestrator {
                     ),
                     loader = DataLoaderModel(
                         id = "${entity.className.lowercase()}Dl",
-                        query = "select e from ${entity.className} e",
+                        query = "select e from ${entity.resolvedEntityName} e",
                         cacheable = true
                     )
                 )

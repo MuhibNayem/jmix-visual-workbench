@@ -9,6 +9,7 @@ import org.gradle.language.jvm.tasks.ProcessResources
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -129,7 +130,8 @@ sourceSets {
 dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
     testImplementation(kotlin("test"))
-    testRuntimeOnly("junit:junit:4.13.2")
+    testImplementation("junit:junit:4.13.2")
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.10.1")
     intellijPlatform {
         if (localIdeaPath.isPresent) {
             local(verifiedLocalIdeaPath)
@@ -139,6 +141,7 @@ dependencies {
         bundledModule("intellij.java.psi")
         bundledModule("intellij.libraries.jcef")
         bundledModule("intellij.platform.ui.jcef")
+        testFramework(TestFrameworkType.Platform)
         pluginVerifier()
     }
 }
@@ -267,6 +270,9 @@ tasks.withType<KotlinCompile>().configureEach {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // Keep platform tests deterministic and offline. Otherwise the IDE starts an
+    // asynchronous Marketplace refresh and may leave pluginsXMLIds.json truncated.
+    systemProperty("idea.plugins.host", "https://jmix-workbench.invalid")
 }
 
 tasks.named<Test>("test") {

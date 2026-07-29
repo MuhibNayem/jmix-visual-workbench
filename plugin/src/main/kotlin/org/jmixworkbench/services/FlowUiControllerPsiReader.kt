@@ -2,7 +2,6 @@ package org.jmixworkbench.services
 
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiClass
@@ -34,12 +33,14 @@ object FlowUiControllerPsiReader {
                 message = "Controller symbols are indexed, but PSI mutation is currently enabled only for Java controllers.",
             )
         }
-        val baseDir = project.basePath?.let(LocalFileSystem.getInstance()::findFileByPath)
-            ?: return unavailable(controllerArtifact, "The project root is unavailable.")
-        val file = baseDir.findFileByRelativePath(locator.relativePath)
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(locator.relativePath)
             ?: return unavailable(controllerArtifact, "The connected view controller no longer exists.")
-        if (file.isDirectory || !VfsUtilCore.isAncestor(baseDir, file, false)) {
-            return unavailable(controllerArtifact, "The connected view controller is outside the open project.")
+        val file = resolved.file
+        if (file.isDirectory || !VfsUtilCore.isAncestor(resolved.root, file, false)) {
+            return unavailable(
+                controllerArtifact,
+                "The connected view controller is outside the registered project content roots.",
+            )
         }
         val currentText = runCatching {
             String(file.contentsToByteArray(false), file.charset)

@@ -22,8 +22,10 @@ data class SecurityWorkspaceSnapshot(
     val policies: List<SecurityPolicySnapshot>,
     val surfaces: List<SecuritySurfaceSnapshot>,
     val menuRoutes: List<SecurityMenuRouteSnapshot>,
+    val journeys: List<SecurityJourneySnapshot>,
     val findings: List<SecurityFindingSnapshot>,
     val summary: SecurityWorkspaceSummary,
+    val runtime: RuntimeSecurityEvidenceSnapshot = RuntimeSecurityEvidenceSnapshot(),
 )
 
 enum class SecurityRoleKind {
@@ -90,6 +92,20 @@ data class SecurityMenuRouteSnapshot(
     val viewArtifactId: String?,
     val menuId: String,
     val viewId: String?,
+    val sourceLocator: SourceLocator,
+)
+
+data class SecurityJourneySnapshot(
+    val menuArtifactId: String,
+    val menuId: String,
+    val menuPathArtifactIds: List<String>,
+    val menuPathIds: List<String>,
+    val viewArtifactId: String?,
+    val viewId: String?,
+    val entityArtifactIds: List<String>,
+    val attributeArtifactIds: List<String>,
+    val componentArtifactIds: List<String>,
+    val unresolvedDependencyCount: Int,
     val sourceLocator: SourceLocator,
 )
 
@@ -230,6 +246,56 @@ object SecurityWorkspaceBuilder {
                 sourceLocator = relationship.sourceLocator,
             )
         }.sortedBy(SecurityMenuRouteSnapshot::menuId)
+        val menuParentByChild = input.relationships
+            .filter { relationship ->
+                relationship.type == RelationshipType.DECLARES &&
+                    artifactsById[relationship.sourceArtifactId]?.kind == ArtifactKind.MENU_ITEM &&
+                    relationship.targetArtifactId?.let(artifactsById::get)?.kind == ArtifactKind.MENU_ITEM
+            }
+            .mapNotNull { relationship ->
+                relationship.targetArtifactId?.let { childId -> childId to relationship.sourceArtifactId }
+            }
+            .toMap()
+        val traversableJourneyLinks = setOf(
+            RelationshipType.DECLARES,
+            RelationshipType.BINDS_TO_ENTITY,
+            RelationshipType.BINDS_TO_ATTRIBUTE,
+            RelationshipType.LOADS_ENTITY,
+            RelationshipType.EXECUTES_QUERY,
+        )
+        val outgoingBySource = input.relationships
+            .filter { it.type in traversableJourneyLinks }
+            .groupBy(ArtifactRelationship::sourceArtifactId)
+        val journeys = menuRoutes.map { route ->
+            val menuPath = buildList {
+                val seen = mutableSetOf<String>()
+                var current: String? = route.menuArtifactId
+                while (current != null && seen.add(current)) {
+                    add(current)
+                    current = menuParentByChild[current]
+                }
+            }.reversed()
+            val reachable = route.viewArtifactId?.let { viewId ->
+                reachableArtifacts(viewId, outgoingBySource, maxDepth = 6)
+            }.orEmpty()
+            SecurityJourneySnapshot(
+                menuArtifactId = route.menuArtifactId,
+                menuId = route.menuId,
+                menuPathArtifactIds = menuPath,
+                menuPathIds = menuPath.mapNotNull { artifactsById[it]?.displayName },
+                viewArtifactId = route.viewArtifactId,
+                viewId = route.viewId,
+                entityArtifactIds = reachable.filter { artifactsById[it]?.kind == ArtifactKind.ENTITY }.sorted(),
+                attributeArtifactIds = reachable.filter { artifactsById[it]?.kind == ArtifactKind.ENTITY_ATTRIBUTE }.sorted(),
+                componentArtifactIds = reachable.filter {
+                    artifactsById[it]?.kind in setOf(ArtifactKind.UI_COMPONENT, ArtifactKind.UI_ACTION)
+                }.sorted(),
+                unresolvedDependencyCount = route.viewArtifactId?.let { viewId ->
+                    reachableUnresolvedCount(viewId, outgoingBySource, maxDepth = 6)
+                } ?: 1,
+                sourceLocator = route.sourceLocator,
+            )
+        }
 
         val findings = buildFindings(
             input = input,
@@ -237,6 +303,7 @@ object SecurityWorkspaceBuilder {
             policies = policies,
             surfaces = surfaces,
             menuRoutes = menuRoutes,
+            journeys = journeys,
         )
         return SecurityWorkspaceSnapshot(
             graphDigest = input.graphDigest,
@@ -244,6 +311,7 @@ object SecurityWorkspaceBuilder {
             policies = policies,
             surfaces = surfaces,
             menuRoutes = menuRoutes,
+            journeys = journeys,
             findings = findings,
             summary = SecurityWorkspaceSummary(
                 resourceRoleCount = roles.count { it.kind == SecurityRoleKind.RESOURCE },
@@ -264,6 +332,7 @@ object SecurityWorkspaceBuilder {
         policies: List<SecurityPolicySnapshot>,
         surfaces: List<SecuritySurfaceSnapshot>,
         menuRoutes: List<SecurityMenuRouteSnapshot>,
+        journeys: List<SecurityJourneySnapshot>,
     ): List<SecurityFindingSnapshot> {
         val findings = input.diagnostics
             .filter { it.category == DiagnosticCategory.SECURITY }
@@ -320,6 +389,36 @@ object SecurityWorkspaceBuilder {
                 }
             }
         }
+        journeys.forEach { journey ->
+            val pathSurfaces = journey.menuPathArtifactIds.mapNotNull(surfacesById::get)
+            val leaf = pathSurfaces.lastOrNull() ?: return@forEach
+            leaf.grantingRoleIds.forEach { roleId ->
+                val missingAncestors = pathSurfaces.dropLast(1).filter { roleId !in it.grantingRoleIds }
+                if (missingAncestors.isNotEmpty()) {
+                    findings += SecurityFindingSnapshot(
+                        code = "JVW-SECURITY-MENU-ANCESTOR-MISSING",
+                        severity = DiagnosticSeverity.ERROR,
+                        title = "Nested menu path is not fully granted",
+                        message = "${roles.firstOrNull { it.id == roleId }?.name ?: roleId} can access ${journey.menuId}, but not parent menu ${missingAncestors.joinToString { it.displayName }}.",
+                        remediation = "Grant every parent menu in the path: ${journey.menuPathIds.joinToString(" → ")}.",
+                        roleId = roleId,
+                        artifactId = journey.menuArtifactId,
+                        sourceLocator = journey.sourceLocator,
+                    )
+                }
+            }
+            if (journey.viewArtifactId != null && journey.entityArtifactIds.isEmpty()) {
+                findings += SecurityFindingSnapshot(
+                    code = "JVW-SECURITY-VIEW-DATA-DEPENDENCY-UNRESOLVED",
+                    severity = DiagnosticSeverity.INFO,
+                    title = "View data dependency is not visible",
+                    message = "${journey.viewId ?: journey.menuId} has no indexed entity binding or loader dependency.",
+                    remediation = "Confirm the view is intentionally data-free or bind its containers and loaders explicitly.",
+                    artifactId = journey.viewArtifactId,
+                    sourceLocator = journey.sourceLocator,
+                )
+            }
+        }
         val genericRestPresent = input.artifacts.any {
             it.kind == ArtifactKind.REST_SERVICE_CONFIG || it.kind == ArtifactKind.REST_QUERY_CONFIG
         }
@@ -361,6 +460,50 @@ object SecurityWorkspaceBuilder {
         }
         visit(roleId)
         return result
+    }
+
+    private fun reachableArtifacts(
+        startId: String,
+        outgoingBySource: Map<String, List<ArtifactRelationship>>,
+        maxDepth: Int,
+    ): Set<String> {
+        val result = linkedSetOf<String>()
+        val queue = ArrayDeque<Pair<String, Int>>()
+        queue.add(startId to 0)
+        while (queue.isNotEmpty()) {
+            val (current, depth) = queue.removeFirst()
+            if (depth >= maxDepth) continue
+            outgoingBySource[current].orEmpty().forEach { relationship ->
+                val target = relationship.targetArtifactId ?: return@forEach
+                if (result.add(target)) queue.add(target to depth + 1)
+            }
+        }
+        result.remove(startId)
+        return result
+    }
+
+    private fun reachableUnresolvedCount(
+        startId: String,
+        outgoingBySource: Map<String, List<ArtifactRelationship>>,
+        maxDepth: Int,
+    ): Int {
+        val visited = mutableSetOf(startId)
+        val queue = ArrayDeque<Pair<String, Int>>()
+        queue.add(startId to 0)
+        var unresolved = 0
+        while (queue.isNotEmpty()) {
+            val (current, depth) = queue.removeFirst()
+            if (depth >= maxDepth) continue
+            outgoingBySource[current].orEmpty().forEach { relationship ->
+                val target = relationship.targetArtifactId
+                if (target == null) {
+                    unresolved += 1
+                } else if (visited.add(target)) {
+                    queue.add(target to depth + 1)
+                }
+            }
+        }
+        return unresolved
     }
 
     private fun parseRoleMetadata(artifact: ArtifactSnapshot): ParsedRole {

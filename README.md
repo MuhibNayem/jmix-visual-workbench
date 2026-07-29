@@ -9,18 +9,21 @@ endorsed by Haulmont.**
 
 ## Current status
 
-This repository is early and non-certified. It contains a React/TypeScript
-workbench, a Kotlin IntelliJ plugin shell, in-memory models, and draft
-string-based generators. The checked-in wrapper now builds and verifies
-separate verified IDEA 253 and IDEA 262 plugin artifacts with a project-local Node
-24.18.0 toolchain. The current generator and bridge paths remain prototypes:
-they do not safely parse, preview, merge, validate, atomically apply, or undo
-changes to an existing project.
+This repository is an advanced, non-certified development preview. It contains
+a module-aware semantic application index, source-safe visual change planning,
+digest-bound previews, stale-source rejection, atomic IntelliJ writes and
+workspace undo/redo. Supported visual documents use deterministic round-trip
+models; manual or unsupported source is kept read-only instead of being
+overwritten.
 
-Do not run the current mutation paths against a valuable repository. The
-verified findings and planned remediation are in
-[JMIX_STUDIO_ASSESSMENT.md](JMIX_STUDIO_ASSESSMENT.md) and
-[the project roadmap](.planning/ROADMAP.md).
+The checked-in wrapper builds and tests separate IDEA 253 and IDEA 262 plugin
+artifacts with a Gradle-managed Node 24.18.0 toolchain. Generated target-project
+source stays Java 17 compatible while the host lanes are exercised with their
+current Java toolchains.
+
+The workbench is not yet certified as a complete replacement for every paid
+Studio or handwritten-development workflow. Review the current evidence and
+remaining gaps in [the enterprise parity audit](docs/ENTERPRISE-PARITY-AUDIT.md).
 
 ## Intended product boundary
 
@@ -35,15 +38,26 @@ The product direction is a source-aware workbench in which:
 - compatibility behavior is implemented independently from public
   specifications and openly licensed sources.
 
-Existing entity, view, CRUD, menu, role, migration, repository, event, and BPMN
-generators are non-certified prototypes, not supported product features.
+Implemented workspaces currently include:
+
+- connected multi-build/multi-module application mapping and impact analysis;
+- entity, CRUD, menu, resource/row security, REST and Liquibase tooling;
+- a permanent three-region FlowUI round-trip designer;
+- advanced BPMN authoring and deterministic workflow simulation;
+- typed transactional server logic and reusable server-enforced formulas;
+- Jmix/Flowable DMN decision tables with hit policies, conflict analysis,
+  governance metadata, simulation and BPMN key resolution;
+- source-generated integration scenarios and production-readiness diagnostics.
+
+Every workspace remains subject to the compatibility and certification
+boundaries documented in the audit.
 
 ## Architecture snapshot
 
 ```text
 webui/                        React/TypeScript prototype workbench
   src/
-    components/               Draft visual designers
+    components/               Responsive visual engineering workspaces
     bridge/                   JCEF client adapter
     store/                    Zustand state
     types/                    Mirrored payload types
@@ -52,15 +66,15 @@ plugin/                       Kotlin IntelliJ plugin prototype
   src/main/kotlin/
     actions/                  IDE action entry points
     bridge/                   JCEF request dispatcher
-    generator/                Draft pure string generators
-    model/                    Draft backend models
-    services/                 Project detection and direct-write prototype
+    generator/                Deterministic typed source generators/patchers
+    model/                    Closed bridge and authoring models
+    services/                 Index, preview, source-safety and workspace changes
     toolwindow/               JCEF host
 ```
 
-The target architecture replaces direct writes with a typed privilege boundary,
-semantic project index, version-aware adapters, immutable change plans,
-structured editors, validation, atomic application, and exact rollback/undo.
+The active architecture uses a typed bridge boundary, semantic project index,
+immutable reviewed change plans, structured editors, validation, atomic
+application and workspace rollback/undo.
 
 ## Build and compatibility evidence
 
@@ -69,21 +83,21 @@ part of the build:
 
 ```text
 cd plugin
-./gradlew clean phase1Check --dependency-verification=strict
+./gradlew test --dependency-verification=strict
 ```
 
-Gradle downloads a project-local Node 24.18.0 runtime, runs the locked frontend
-build, provisions Java 21 and Java 25 compiler toolchains, builds both
-lane-suffixed ZIPs, runs smoke/tests and Plugin Verifier, and inspects packaged
-contents. Manual installation into the two minimum IDEs remains pending.
+Gradle downloads a project-local Node 24.18.0 runtime when needed, runs the
+locked frontend build, packages the exact current web bundle, provisions the
+host toolchains and runs the shared IDEA 253/262 test lanes.
 
 - [Exact build prerequisites, commands, artifacts, and offline behavior](docs/BUILDING.md)
 - [IntelliJ host and target-project compatibility matrices](docs/COMPATIBILITY.md)
 - [Dependency, checksum, CI, and future signing/SBOM policy](docs/RELEASE-INTEGRITY.md)
 
-Java 17, Java 21, and Java 25 target-project cells are future fixture
-certification targets. Repository mutation remains non-certified and disabled
-for valuable repositories; this build work does not enable it.
+Java 17, Java 21 and current-JDK target projects are the compatibility
+direction. Generated Java is constrained to Java 17 syntax; representative
+real-project fixture certification and signed marketplace distribution remain
+release work.
 
 ## Project policies
 

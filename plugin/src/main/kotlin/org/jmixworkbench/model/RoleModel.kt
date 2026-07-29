@@ -5,16 +5,21 @@ import com.google.gson.annotations.SerializedName
 // ─── Resource Role ───────────────────────────────────────────────────────────
 
 data class RoleModel(
+    val className: String,
+    val packageName: String? = null,
     val name: String,
     val code: String,
     val description: String? = null,
     val scope: RoleScope = RoleScope.RESOURCE,
+    val securityScopes: MutableList<String> = mutableListOf("UI"),
     val entityPolicies: MutableList<EntityPolicyModel> = mutableListOf(),
+    val entityAttributePolicies: MutableList<EntityAttributePolicyModel> = mutableListOf(),
     val menuPolicies: MutableList<MenuPolicyModel> = mutableListOf(),
-    val screenPolicies: MutableList<ScreenPolicyModel> = mutableListOf(),
+    val viewPolicies: MutableList<ViewPolicyModel> = mutableListOf(),
     val specificPolicies: MutableList<SpecificPolicyModel> = mutableListOf(),
     val rowLevelPolicies: MutableList<RowLevelPolicyModel> = mutableListOf(),
-    val childRoles: MutableList<String> = mutableListOf()
+    val baseRoleClasses: MutableList<String> = mutableListOf(),
+    val allowWildcardPolicies: Boolean = false,
 )
 
 enum class RoleScope {
@@ -30,7 +35,7 @@ data class EntityPolicyModel(
     val allActions: Boolean = false
 ) {
     val resolvedActions: List<EntityPolicyAction>
-        get() = if (allActions) EntityPolicyAction.entries else actions
+        get() = if (allActions) listOf(EntityPolicyAction.ALL) else actions.distinct()
 }
 
 enum class EntityPolicyAction(val annotationValue: String) {
@@ -41,15 +46,26 @@ enum class EntityPolicyAction(val annotationValue: String) {
     @SerializedName("delete") DELETE("delete")
 }
 
-// ─── Menu / Screen / Specific Policies ───────────────────────────────────────
+// ─── Entity Attribute / Menu / View / Specific Policies ─────────────────────
+
+data class EntityAttributePolicyModel(
+    val entityClass: String,
+    val attributes: MutableList<String> = mutableListOf("*"),
+    val action: EntityAttributePolicyAction = EntityAttributePolicyAction.VIEW,
+)
+
+enum class EntityAttributePolicyAction {
+    @SerializedName("view") VIEW,
+    @SerializedName("modify") MODIFY,
+}
 
 data class MenuPolicyModel(
     val menuId: String,
     val caption: String? = null
 )
 
-data class ScreenPolicyModel(
-    val screenId: String,
+data class ViewPolicyModel(
+    val viewId: String,
     val caption: String? = null
 )
 
@@ -64,9 +80,10 @@ data class RowLevelPolicyModel(
     val entityClass: String,
     val type: RowLevelPolicyType,
     val action: RowLevelPolicyAction = RowLevelPolicyAction.READ,
+    val actions: MutableList<RowLevelPolicyAction> = mutableListOf(),
     val whereClause: String? = null,
     val joinClause: String? = null,
-    val script: String? = null
+    val predicateExpression: String? = null,
 )
 
 enum class RowLevelPolicyType {

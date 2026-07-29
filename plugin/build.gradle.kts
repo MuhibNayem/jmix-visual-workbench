@@ -47,6 +47,20 @@ val phase2CoreTestSourceSet = sourceSets.create("phase2CoreTest") {
     runtimeClasspath += output + compileClasspath
 }
 
+// IntelliJ-dependent production sources are compiled by the two explicit host
+// builds below. Keeping the aggregate JVM source sets empty prevents an
+// accidental SDK-less compilation when contributors run the conventional
+// `./gradlew test` command.
+sourceSets.named("main") {
+    kotlin.setSrcDirs(emptyList<String>())
+    resources.setSrcDirs(emptyList<String>())
+}
+
+sourceSets.named("test") {
+    kotlin.setSrcDirs(emptyList<String>())
+    resources.setSrcDirs(emptyList<String>())
+}
+
 configurations.named(phase2CoreTestSourceSet.implementationConfigurationName) {
     extendsFrom(configurations[phase2CoreSourceSet.implementationConfigurationName])
 }
@@ -70,6 +84,15 @@ val phase2CoreTest = tasks.register<Test>("phase2CoreTest") {
     classpath = phase2CoreTestSourceSet.runtimeClasspath
     useJUnitPlatform()
     reports.junitXml.required.set(true)
+}
+
+tasks.named<Test>("test") {
+    description = "Runs parser contracts and the shared suite against both supported IntelliJ hosts."
+    dependsOn(
+        phase2CoreTest,
+        "verifyWebBundle",
+    )
+    finalizedBy("testShared")
 }
 
 tasks.register("phase2FastCheck") {
@@ -427,11 +450,24 @@ tasks.register("compileHostKotlin") {
     )
 }
 
-tasks.register("testShared") {
-    description = "Runs the shared test lifecycle against both host lanes."
-    dependsOn(
-        gradle.includedBuild("idea253").task(":test"),
-        gradle.includedBuild("idea262").task(":test"),
+tasks.register<Exec>("testShared") {
+    description = "Builds current web resources, then runs the shared test lifecycle against both host lanes."
+    dependsOn(verifyWebBundle)
+    workingDir(layout.projectDirectory)
+    executable(layout.projectDirectory.file("gradlew").asFile)
+    args(
+        buildList {
+            add(":idea253:test")
+            add(":idea262:test")
+            add("--dependency-verification=strict")
+            add("--no-daemon")
+            add("--no-configuration-cache")
+            if (gradle.startParameter.isOffline) add("--offline")
+            gradle.startParameter.projectProperties
+                .filterKeys { it in setOf("localIdeaPath", "localIdea253Path", "localIdea262Path") }
+                .toSortedMap()
+                .forEach { (name, value) -> add("-P$name=$value") }
+        },
     )
 }
 

@@ -109,7 +109,7 @@ object EventListenerGenerator {
             sb.appendLine()
             sb.appendLine("    ${callback.annotation}")
             sb.appendLine("    private void on${callback.name.lowercase().replaceFirstChar { it.uppercase() }}() {")
-            sb.appendLine("        // TODO: implement ${callback.name}")
+            sb.appendLine("        // Intentionally no generated side effects; add reviewed lifecycle logic explicitly.")
             sb.appendLine("    }")
         }
         return sb.toString()

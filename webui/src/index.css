@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer components {
+  .field-input {
+    @apply w-full min-w-0 rounded border border-surface-border bg-surface px-2 py-2 text-[10px] text-gray-200 outline-none transition-colors focus:border-jmix-500;
+  }
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -20,6 +26,232 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'JetBrains Sans', Roboto, sans-serif;
   font-size: 13px;
   overflow: hidden;
+}
+
+.workbench-shell,
+.workbench-shell > main,
+.workbench-shell section,
+.workbench-shell header,
+.workbench-shell footer {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.workbench-shell p,
+.workbench-shell pre,
+.workbench-shell code {
+  overflow-wrap: anywhere;
+}
+
+.view-designer-shell {
+  container-name: view-designer;
+  container-type: inline-size;
+}
+
+.logic-designer-shell {
+  container-name: logic-designer;
+  container-type: inline-size;
+}
+
+.rule-designer-shell {
+  container-name: rule-designer;
+  container-type: inline-size;
+}
+
+.rule-designer-workspace {
+  display: grid !important;
+  grid-template-columns: minmax(190px, 22%) minmax(360px, 1fr) minmax(250px, 28%);
+  overflow: hidden;
+}
+
+.rule-designer-palette,
+.rule-designer-canvas,
+.rule-designer-inspector {
+  display: flex !important;
+}
+
+@container rule-designer (min-width: 1180px) {
+  .rule-designer-workspace {
+    grid-template-columns: 250px minmax(460px, 1fr) 330px;
+  }
+}
+
+@container rule-designer (min-width: 760px) and (max-width: 979px) {
+  .rule-designer-workspace {
+    grid-template-columns: minmax(165px, 21%) minmax(320px, 1fr) minmax(225px, 29%);
+  }
+}
+
+@container rule-designer (max-width: 759px) {
+  .rule-designer-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(250px, 34vh) minmax(390px, 1fr) minmax(380px, 48vh);
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .rule-designer-palette,
+  .rule-designer-canvas,
+  .rule-designer-inspector {
+    grid-column: 1;
+    min-height: 0;
+  }
+
+  .rule-designer-palette {
+    grid-row: 1;
+    border-right: 0 !important;
+    border-bottom: 1px solid rgb(69 69 90);
+  }
+
+  .rule-designer-canvas {
+    grid-row: 2;
+  }
+
+  .rule-designer-inspector {
+    grid-row: 3;
+    border-left: 0 !important;
+    border-top: 1px solid rgb(69 69 90);
+  }
+}
+
+.logic-designer-workspace {
+  display: grid !important;
+  grid-template-columns: minmax(190px, 22%) minmax(360px, 1fr) minmax(250px, 27%);
+  overflow: hidden;
+}
+
+.logic-designer-palette,
+.logic-designer-canvas,
+.logic-designer-inspector {
+  display: flex !important;
+}
+
+@container logic-designer (min-width: 1180px) {
+  .logic-designer-workspace {
+    grid-template-columns: 250px minmax(460px, 1fr) 310px;
+  }
+}
+
+@container logic-designer (min-width: 760px) and (max-width: 979px) {
+  .logic-designer-workspace {
+    grid-template-columns: minmax(165px, 21%) minmax(320px, 1fr) minmax(220px, 28%);
+  }
+}
+
+@container logic-designer (max-width: 759px) {
+  .logic-designer-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(220px, 30vh) minmax(380px, 1fr) minmax(320px, 42vh);
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .logic-designer-palette,
+  .logic-designer-canvas,
+  .logic-designer-inspector {
+    grid-column: 1;
+    min-height: 0;
+  }
+
+  .logic-designer-palette {
+    grid-row: 1;
+    border-right: 0 !important;
+    border-bottom: 1px solid rgb(69 69 90);
+  }
+
+  .logic-designer-canvas {
+    grid-row: 2;
+  }
+
+  .logic-designer-inspector {
+    grid-row: 3;
+    border-left: 0 !important;
+    border-top: 1px solid rgb(69 69 90);
+  }
+}
+
+/*
+ * The visual designer is embedded in an IntelliJ tool window, so viewport
+ * breakpoints are misleading. Palette, canvas, and inspector are permanent
+ * workspace regions: the responsive layout must never replace them with tabs
+ * or one-pane-at-a-time drawers.
+ */
+.view-designer-workspace {
+  display: grid !important;
+  grid-template-columns: minmax(120px, 26%) minmax(170px, 1fr) minmax(140px, 28%);
+}
+
+.view-designer-left,
+.view-designer-right {
+  position: static !important;
+  inset: auto !important;
+  z-index: auto !important;
+  display: flex !important;
+  width: auto !important;
+  box-shadow: none !important;
+}
+
+.view-designer-canvas {
+  grid-column-start: 2;
+}
+
+.view-designer-mobile-only {
+  display: none !important;
+}
+
+@container view-designer (min-width: 680px) {
+  .view-designer-workspace {
+    grid-template-columns: minmax(170px, 22%) minmax(240px, 1fr) minmax(190px, 25%);
+  }
+}
+
+@container view-designer (min-width: 980px) {
+  .view-designer-workspace {
+    grid-template-columns: minmax(220px, 24%) minmax(320px, 1fr) minmax(240px, 26%);
+  }
+}
+
+@container view-designer (min-width: 1260px) {
+  .view-designer-workspace {
+    grid-template-columns: 260px minmax(360px, 1fr) 300px;
+  }
+}
+
+/*
+ * At phone-sized editor widths there is not enough horizontal space for
+ * usable drag/drop columns. Keep every region visible in one continuous
+ * workspace and stack them instead of introducing navigation tabs.
+ */
+@container view-designer (max-width: 479px) {
+  .view-designer-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(220px, 32vh) minmax(320px, 1fr) minmax(240px, 36vh);
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+  }
+
+  .view-designer-left,
+  .view-designer-canvas,
+  .view-designer-right {
+    grid-column: 1;
+    min-height: 0;
+  }
+
+  .view-designer-left {
+    grid-row: 1;
+    border-bottom: 1px solid rgb(69 71 90);
+    border-right: 0 !important;
+  }
+
+  .view-designer-canvas {
+    grid-row: 2;
+  }
+
+  .view-designer-right {
+    grid-row: 3;
+    border-left: 0 !important;
+    border-top: 1px solid rgb(69 71 90);
+  }
 }
 
 button {
@@ -53,4 +285,94 @@ input, select, textarea {
 }
 input:focus, select:focus, textarea:focus {
   @apply border-jmix-500 ring-1 ring-jmix-500/30;
+}
+/* Integration Designer keeps catalog, canvas, and inspector visible together
+   on desktop, then stacks all three regions instead of hiding them behind tabs. */
+.integration-designer-grid {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.82fr) minmax(340px, 1.55fr) minmax(255px, 1fr);
+  overflow: hidden;
+}
+
+.integration-catalog,
+.integration-canvas,
+.integration-inspector,
+.integration-canvas-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.integration-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.integration-flow-node {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border: 1px solid rgb(55 65 81 / 0.8);
+  border-radius: 0.5rem;
+  background: rgb(17 24 39 / 0.65);
+  padding: 0.65rem 0.4rem;
+  color: rgb(156 163 175);
+  font-size: 0.625rem;
+  text-align: center;
+}
+
+.integration-flow-node span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-flow-node-active {
+  border-color: rgb(45 212 191 / 0.45);
+  background: rgb(20 184 166 / 0.1);
+  color: rgb(153 246 228);
+}
+
+.integration-flow-arrow {
+  color: rgb(75 85 99);
+}
+
+@media (max-width: 1023px) {
+  .integration-designer-grid {
+    display: block;
+    overflow: auto;
+  }
+
+  .integration-catalog,
+  .integration-canvas,
+  .integration-inspector {
+    min-height: auto;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid rgb(55 65 81 / 0.7);
+  }
+
+  .integration-catalog {
+    max-height: 30rem;
+    overflow: auto;
+  }
+
+  .integration-canvas-scroll {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 520px) {
+  .integration-flow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .integration-flow-arrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
 }

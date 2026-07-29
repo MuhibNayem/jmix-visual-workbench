@@ -33,7 +33,18 @@ class SecurityWorkspaceBuilderTest {
                         SourceLanguage.XML,
                         """
                         <view xmlns="http://jmix.io/schema/flowui/view" id="Customer.list">
-                          <layout><dataGrid id="customers"/></layout>
+                          <data>
+                            <collection id="customersDc" class="com.acme.Customer">
+                              <loader id="customersDl">
+                                <query>select e from Customer e</query>
+                              </loader>
+                            </collection>
+                          </data>
+                          <layout>
+                            <dataGrid id="customers" dataContainer="customersDc">
+                              <columns><column property="name"/></columns>
+                            </dataGrid>
+                          </layout>
                         </view>
                         """.trimIndent(),
                     ),
@@ -42,7 +53,11 @@ class SecurityWorkspaceBuilderTest {
                         SourceLanguage.XML,
                         """
                         <menu xmlns="http://jmix.io/schema/flowui/menu">
-                          <item id="customers" view="Customer.list"/>
+                          <menu id="application">
+                            <menu id="operations">
+                              <item id="customers" view="Customer.list"/>
+                            </menu>
+                          </menu>
                         </menu>
                         """.trimIndent(),
                     ),
@@ -90,9 +105,14 @@ class SecurityWorkspaceBuilderTest {
         assertEquals(1, clerk.inheritedRoleIds.size)
         val customer = workspace.surfaces.single { it.kind == SecuritySurfaceKind.ENTITY }
         assertTrue(clerk.id in customer.grantingRoleIds)
-        val menu = workspace.surfaces.single { it.kind == SecuritySurfaceKind.MENU }
+        val menu = workspace.surfaces.single { it.kind == SecuritySurfaceKind.MENU && it.displayName == "customers" }
         assertTrue(clerk.id in menu.grantingRoleIds)
+        val journey = workspace.journeys.single()
+        assertEquals(listOf("application", "operations", "customers"), journey.menuPathIds)
+        assertEquals(listOf(customer.artifactId), journey.entityArtifactIds)
+        assertTrue(journey.attributeArtifactIds.isNotEmpty())
         assertTrue(workspace.findings.any { it.code == "JVW-SECURITY-MENU-VIEW-MISMATCH" })
+        assertTrue(workspace.findings.any { it.code == "JVW-SECURITY-MENU-ANCESTOR-MISSING" })
     }
 
     @Test

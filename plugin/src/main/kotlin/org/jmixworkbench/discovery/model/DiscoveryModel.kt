@@ -74,6 +74,7 @@ enum class SourceLanguage {
     XML,
     PROPERTIES,
     YAML,
+    SQL,
     TOML,
     MIXED,
     UNKNOWN,
@@ -124,6 +125,11 @@ enum class ArtifactKind {
     MESSAGE_BUNDLE,
     MESSAGE_KEY,
     REPOSITORY,
+    BUSINESS_RULE,
+    DECISION_TABLE,
+    DECISION_INPUT,
+    DECISION_OUTPUT,
+    DECISION_RULE,
     SERVICE,
     SERVICE_METHOD,
     REST_CONTROLLER,
@@ -148,6 +154,11 @@ enum class ArtifactKind {
     SOURCE_SET,
     ADDON,
     DATA_STORE,
+    REPORT_TEMPLATE,
+    REPORT_QUERY,
+    THEME_ASSET,
+    FRONTEND_ASSET,
+    INTEGRATION_ENDPOINT,
 }
 
 enum class ArtifactOrigin {
@@ -186,11 +197,13 @@ enum class RelationshipType {
     LISTENS_TO,
     SCHEDULED_BY,
     PARTICIPATES_IN_WORKFLOW,
+    EVALUATES_DECISION,
     TRANSITIONS_TO,
     INCLUDES_CHANGELOG,
     MIGRATES,
     BELONGS_TO_STORE,
     DEPENDS_ON_ADDON,
+    DEPENDS_ON_MODULE,
     LOCALIZES,
 }
 

@@ -44,6 +44,7 @@ class WorkspaceChangeService(
                     ),
                 ),
                 baseDir = prepared.baseDir,
+                targets = prepared.targets,
             )
         }
         return prepared
@@ -51,7 +52,12 @@ class WorkspaceChangeService(
 
     fun applyPrepared(prepared: PreparedWorkspaceChange): WorkspaceChangeApplyResponse {
         val plan = prepared.plan
-        if (!plan.accepted || plan.planDigest == null || prepared.baseDir == null) {
+        if (
+            !plan.accepted ||
+            plan.planDigest == null ||
+            prepared.baseDir == null ||
+            plan.files.any { it.relativePath !in prepared.targets }
+        ) {
             return WorkspaceChangeApplyResponse(
                 success = false,
                 changeSetId = plan.changeSetId,
@@ -68,7 +74,7 @@ class WorkspaceChangeService(
             )
         }
 
-        val preflightIssue = preflight(plan, prepared.baseDir)
+        val preflightIssue = preflight(plan, prepared.targets)
         if (preflightIssue != null) {
             return WorkspaceChangeApplyResponse(
                 success = false,
@@ -91,11 +97,13 @@ class WorkspaceChangeService(
                         plan.files.forEach { planned ->
                             when (planned.mode) {
                                 WorkspaceFileChangeMode.CREATE -> {
-                                    val created = createFile(prepared.baseDir, planned)
+                                    val target = requireNotNull(prepared.targets[planned.relativePath])
+                                    val created = createFile(target, planned)
                                     createdFiles += created
                                 }
                                 WorkspaceFileChangeMode.MODIFY -> {
-                                    val file = prepared.baseDir.findFileByRelativePath(planned.relativePath)
+                                    val target = requireNotNull(prepared.targets[planned.relativePath])
+                                    val file = target.root.findFileByRelativePath(target.relativePath)
                                         ?: error("Source disappeared during write: ${planned.relativePath}")
                                     VfsUtil.saveText(file, planned.resultContent)
                                     modifiedFiles += planned
@@ -104,7 +112,8 @@ class WorkspaceChangeService(
                         }
                     } catch (failure: Throwable) {
                         modifiedFiles.asReversed().forEach { planned ->
-                            val file = prepared.baseDir.findFileByRelativePath(planned.relativePath)
+                            val target = prepared.targets[planned.relativePath]
+                            val file = target?.root?.findFileByRelativePath(target.relativePath)
                             if (file != null && planned.originalContent != null) {
                                 runCatching { VfsUtil.saveText(file, planned.originalContent) }
                             }
@@ -119,6 +128,7 @@ class WorkspaceChangeService(
                 },
             )
             ApplicationGraphService.getInstance(project).invalidate()
+            WorkspaceHistoryService.getInstance(project).record(plan)
             WorkspaceChangeApplyResponse(
                 success = true,
                 changeSetId = plan.changeSetId,
@@ -152,21 +162,32 @@ class WorkspaceChangeService(
             )
         }
         val currentContent = linkedMapOf<String, String?>()
+        val targets = linkedMapOf<String, ResolvedProjectTarget>()
+        val resolver = ProjectFileResolver.getInstance(project)
         for (change in changeSet.files) {
             if (!validPath(change.relativePath)) {
                 currentContent[change.relativePath] = null
                 continue
             }
-            val file = baseDir.findFileByRelativePath(change.relativePath)
+            val target = resolver.resolveTarget(change.relativePath)
+                ?: return rejected(
+                    changeSet,
+                    "JVW-CHANGE-PATH-REJECTED",
+                    "A proposed target is outside the registered project content roots.",
+                    change.relativePath,
+                    baseDir,
+                )
+            targets[change.relativePath] = target
+            val file = target.root.findFileByRelativePath(target.relativePath)
             if (file == null) {
                 currentContent[change.relativePath] = null
                 continue
             }
-            if (file.isDirectory || !VfsUtilCore.isAncestor(baseDir, file, false)) {
+            if (file.isDirectory || !VfsUtilCore.isAncestor(target.root, file, false)) {
                 return rejected(
                     changeSet,
                     "JVW-CHANGE-PATH-REJECTED",
-                    "A proposed target is outside the open project.",
+                    "A proposed target is outside its registered project content root.",
                     change.relativePath,
                     baseDir,
                 )
@@ -186,12 +207,29 @@ class WorkspaceChangeService(
         return PreparedWorkspaceChange(
             plan = WorkspaceChangePlanner.plan(changeSet, currentContent),
             baseDir = baseDir,
+            targets = targets,
         )
     }
 
-    private fun preflight(plan: WorkspaceChangePlan, baseDir: VirtualFile): WorkspaceChangeIssue? {
+    private fun preflight(
+        plan: WorkspaceChangePlan,
+        targets: Map<String, ResolvedProjectTarget>,
+    ): WorkspaceChangeIssue? {
         plan.files.forEach { planned ->
-            val file = baseDir.findFileByRelativePath(planned.relativePath)
+            val target = targets[planned.relativePath]
+                ?: return WorkspaceChangeIssue(
+                    "JVW-CHANGE-PATH-REJECTED",
+                    "The approved target content root is no longer registered.",
+                    planned.relativePath,
+                )
+            if (!target.root.isValid) {
+                return WorkspaceChangeIssue(
+                    "JVW-CHANGE-PATH-REJECTED",
+                    "The approved target content root is no longer available.",
+                    planned.relativePath,
+                )
+            }
+            val file = target.root.findFileByRelativePath(target.relativePath)
             when (planned.mode) {
                 WorkspaceFileChangeMode.CREATE -> if (file != null) {
                     return WorkspaceChangeIssue(
@@ -201,7 +239,11 @@ class WorkspaceChangeService(
                     )
                 }
                 WorkspaceFileChangeMode.MODIFY -> {
-                    if (file == null || file.isDirectory || !VfsUtilCore.isAncestor(baseDir, file, false)) {
+                    if (
+                        file == null ||
+                        file.isDirectory ||
+                        !VfsUtilCore.isAncestor(target.root, file, false)
+                    ) {
                         return WorkspaceChangeIssue(
                             "JVW-CHANGE-SOURCE-MISSING",
                             "A source file disappeared after preview.",
@@ -224,15 +266,18 @@ class WorkspaceChangeService(
         return null
     }
 
-    private fun createFile(baseDir: VirtualFile, planned: PlannedWorkspaceFile): VirtualFile {
-        val parentPath = planned.relativePath.substringBeforeLast('/', "")
+    private fun createFile(
+        target: ResolvedProjectTarget,
+        planned: PlannedWorkspaceFile,
+    ): VirtualFile {
+        val parentPath = target.relativePath.substringBeforeLast('/', "")
         val parent = if (parentPath.isBlank()) {
-            baseDir
+            target.root
         } else {
-            VfsUtil.createDirectoryIfMissing(baseDir, parentPath)
+            VfsUtil.createDirectoryIfMissing(target.root, parentPath)
                 ?: error("Cannot create source directory: $parentPath")
         }
-        val fileName = planned.relativePath.substringAfterLast('/')
+        val fileName = target.relativePath.substringAfterLast('/')
         check(parent.findChild(fileName) == null) { "Target already exists: ${planned.relativePath}" }
         return parent.createChildData(this, fileName).also { VfsUtil.saveText(it, planned.resultContent) }
     }
@@ -302,6 +347,7 @@ data class WorkspaceChangeApplyResponse(
 data class PreparedWorkspaceChange(
     val plan: WorkspaceChangePlan,
     val baseDir: VirtualFile?,
+    val targets: Map<String, ResolvedProjectTarget> = emptyMap(),
 ) {
     fun preview(): WorkspaceChangePreviewResponse =
         WorkspaceChangePreviewResponse(

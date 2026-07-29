@@ -18,6 +18,7 @@ type Group =
   | 'WORKFLOW'
   | 'SECURITY'
   | 'DATABASE'
+  | 'OPERATIONS'
   | 'CONFIG'
 
 const GROUPS: { id: Group; label: string; kinds?: string[] }[] = [
@@ -41,7 +42,7 @@ const GROUPS: { id: Group; label: string; kinds?: string[] }[] = [
   {
     id: 'SERVICES',
     label: 'Services',
-    kinds: ['SOURCE_TYPE', 'SERVICE', 'SERVICE_METHOD', 'VALIDATOR', 'EVENT_LISTENER', 'SCHEDULED_JOB'],
+    kinds: ['SOURCE_TYPE', 'BUSINESS_RULE', 'SERVICE', 'SERVICE_METHOD', 'VALIDATOR', 'EVENT_LISTENER', 'SCHEDULED_JOB'],
   },
   {
     id: 'REST',
@@ -51,7 +52,14 @@ const GROUPS: { id: Group; label: string; kinds?: string[] }[] = [
       'REST_QUERY_CONFIG', 'REST_QUERY', 'CONTRACT_PARAMETER',
     ],
   },
-  { id: 'WORKFLOW', label: 'Workflow', kinds: ['WORKFLOW_PROCESS', 'WORKFLOW_STATE'] },
+  {
+    id: 'WORKFLOW',
+    label: 'Workflow',
+    kinds: [
+      'WORKFLOW_PROCESS', 'WORKFLOW_STATE', 'DECISION_TABLE',
+      'DECISION_INPUT', 'DECISION_OUTPUT', 'DECISION_RULE',
+    ],
+  },
   { id: 'SECURITY', label: 'Security', kinds: ['RESOURCE_ROLE', 'ROW_ROLE', 'SECURITY_POLICY'] },
   {
     id: 'DATABASE',
@@ -62,6 +70,14 @@ const GROUPS: { id: Group; label: string; kinds?: string[] }[] = [
     ],
   },
   {
+    id: 'OPERATIONS',
+    label: 'Operations',
+    kinds: [
+      'SCHEDULED_JOB', 'REPORT_TEMPLATE', 'REPORT_QUERY', 'THEME_ASSET',
+      'FRONTEND_ASSET', 'INTEGRATION_ENDPOINT', 'DATABASE_OPERATION',
+    ],
+  },
+  {
     id: 'CONFIG',
     label: 'Config',
     kinds: ['CONFIGURATION_FILE', 'CONFIGURATION_PROPERTY', 'MESSAGE_BUNDLE', 'MESSAGE_KEY'],
@@ -69,6 +85,64 @@ const GROUPS: { id: Group; label: string; kinds?: string[] }[] = [
 ]
 
 const MAX_VISIBLE_ARTIFACTS = 250
+const MAX_TRANSITIVE_IMPACT = 120
+const MAX_TRANSITIVE_DEPTH = 5
+
+interface ImpactHop {
+  relationship: GraphRelationship
+  direction: 'incoming' | 'outgoing'
+}
+
+interface TransitiveImpact {
+  artifact: GraphArtifact
+  depth: number
+  route: ImpactHop[]
+}
+
+function connectedImpact(
+  graph: ApplicationGraphResponse,
+  startId: string,
+  artifactsById: Map<string, GraphArtifact>,
+): TransitiveImpact[] {
+  const adjacency = new Map<string, Array<{ nextId: string; hop: ImpactHop }>>()
+  const connect = (from: string, nextId: string, hop: ImpactHop) => {
+    const links = adjacency.get(from) ?? []
+    links.push({ nextId, hop })
+    adjacency.set(from, links)
+  }
+  graph.relationships.forEach((relationship) => {
+    const targetId = relationship.targetArtifactId
+    if (!targetId || !artifactsById.has(targetId) || !artifactsById.has(relationship.sourceArtifactId)) return
+    connect(relationship.sourceArtifactId, targetId, { relationship, direction: 'outgoing' })
+    connect(targetId, relationship.sourceArtifactId, { relationship, direction: 'incoming' })
+  })
+
+  const visited = new Set([startId])
+  const queue: Array<{ artifactId: string; route: ImpactHop[] }> = [{ artifactId: startId, route: [] }]
+  const results: TransitiveImpact[] = []
+  while (queue.length && results.length < MAX_TRANSITIVE_IMPACT) {
+    const current = queue.shift()!
+    if (current.route.length >= MAX_TRANSITIVE_DEPTH) continue
+    const nextLinks = (adjacency.get(current.artifactId) ?? []).sort((left, right) => (
+      left.hop.relationship.type.localeCompare(right.hop.relationship.type) ||
+      left.nextId.localeCompare(right.nextId)
+    ))
+    nextLinks.forEach(({ nextId, hop }) => {
+      if (visited.has(nextId) || results.length >= MAX_TRANSITIVE_IMPACT) return
+      const artifact = artifactsById.get(nextId)
+      if (!artifact) return
+      visited.add(nextId)
+      const route = [...current.route, hop]
+      results.push({ artifact, depth: route.length, route })
+      queue.push({ artifactId: nextId, route })
+    })
+  }
+  return results.sort((left, right) => (
+    left.depth - right.depth ||
+    left.artifact.kind.localeCompare(right.artifact.kind) ||
+    left.artifact.displayName.localeCompare(right.artifact.displayName)
+  ))
+}
 
 function readable(value: string): string {
   return value.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (character: string) => character.toUpperCase())
@@ -148,6 +222,10 @@ export default function ProjectMap() {
   const selectedDiagnostics = graph?.diagnostics.filter((diagnostic) => (
     diagnostic.sourceLocator?.relativePath === selected?.sourceLocator.relativePath
   )) ?? []
+  const transitiveImpact = useMemo(
+    () => graph && selectedId ? connectedImpact(graph, selectedId, artifactsById) : [],
+    [graph, selectedId, artifactsById],
+  )
 
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Connected application map">
@@ -171,13 +249,78 @@ export default function ProjectMap() {
         </div>
 
         {graph && (
-          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
+            <Metric label="Modules" value={graph.indexHealth.moduleCount} />
             <Metric label="Artifacts" value={graph.summary.artifactCount} />
             <Metric label="Relationships" value={graph.summary.relationshipCount} />
             <Metric label="Diagnostics" value={graph.summary.diagnosticCount} />
             <Metric label="Unresolved" value={graph.summary.unresolvedRelationshipCount} warning />
             <Metric label="Files indexed" value={graph.scannedFiles} />
             <Metric label={graph.cacheHit ? 'Cache hit' : 'Index time'} value={graph.cacheHit ? 'Yes' : `${graph.durationMillis} ms`} />
+          </div>
+        )}
+        {graph && (
+          <div className={`mt-3 rounded-lg border px-3 py-2.5 ${
+            graph.indexHealth.complete
+              ? 'border-emerald-500/25 bg-emerald-500/5'
+              : 'border-red-500/35 bg-red-500/10'
+          }`}>
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+              <span className={`text-[10px] font-semibold uppercase tracking-wider ${
+                graph.indexHealth.complete ? 'text-emerald-300' : 'text-red-200'
+              }`}>
+                {graph.indexHealth.complete ? 'Complete inventory and parser coverage' : 'Partial index — do not trust impact analysis yet'}
+              </span>
+              <span className="text-[10px] text-gray-500">
+                {graph.indexHealth.moduleCount} modules · {graph.indexHealth.contentRootCount} content roots ·{' '}
+                {graph.indexHealth.sourceRootCount} source roots ·{' '}
+                {graph.indexHealth.discoveredSourceRootCount > 0 && (
+                  <>{graph.indexHealth.discoveredSourceRootCount} recovered outside Gradle sync · </>
+                )}
+                {graph.scannedFiles}/{graph.candidateFiles} eligible files indexed
+              </span>
+              {(graph.excludedFiles > 0 ||
+                graph.unreadableFiles > 0 ||
+                graph.parseErrorFiles > 0 ||
+                graph.parserUnavailableFiles > 0 ||
+                graph.indexHealth.ambiguousOwnershipFileCount > 0 ||
+                graph.indexHealth.unresolvedModuleDependencyCount > 0) && (
+                <span className="text-[10px] text-red-200">
+                  {graph.excludedFiles} excluded · {graph.unreadableFiles} unreadable ·{' '}
+                  {graph.parseErrorFiles} parse errors · {graph.parserUnavailableFiles} parser gaps ·{' '}
+                  {graph.indexHealth.ambiguousOwnershipFileCount} ownership conflicts ·{' '}
+                  {graph.indexHealth.unresolvedModuleDependencyCount} unresolved module dependencies
+                </span>
+              )}
+              {graph.indexHealth.overlappingOwnershipFileCount > 0 &&
+                graph.indexHealth.ambiguousOwnershipFileCount === 0 && (
+                  <span className="text-[10px] text-amber-200">
+                    {graph.indexHealth.overlappingOwnershipFileCount} overlapping file owner
+                    {graph.indexHealth.overlappingOwnershipFileCount === 1 ? '' : 's'} resolved
+                  </span>
+                )}
+            </div>
+            <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
+              {graph.modules.slice(0, 16).map((module) => (
+                <span
+                  key={module.moduleId}
+                  className="max-w-full rounded border border-surface-border bg-surface/70 px-2 py-1 font-mono text-[9px] text-gray-400"
+                  title={`${module.buildIds.join(', ') || 'Imported IDE module'} · ${module.contentRootCount} content roots · ${module.sourceRootCount} source roots · ${module.discoveredSourceRootCount} recovered outside Gradle sync · ${module.sourceSets.join(', ') || 'no eligible source sets'}`}
+                >
+                  <span className="text-gray-200">{module.moduleId}</span>
+                  {' · '}{module.indexedFileCount}/{module.candidateFileCount} files
+                  {module.discoveredSourceRootCount > 0
+                    ? ` · ${module.discoveredSourceRootCount} recovered root${module.discoveredSourceRootCount === 1 ? '' : 's'}`
+                    : ''}
+                  {module.fallbackContentRootCount > 0 ? ' · fallback scan' : ''}
+                </span>
+              ))}
+              {graph.modules.length > 16 && (
+                <span className="rounded border border-surface-border px-2 py-1 text-[9px] text-gray-500">
+                  +{graph.modules.length - 16} more modules
+                </span>
+              )}
+            </div>
           </div>
         )}
       </header>
@@ -235,8 +378,8 @@ export default function ProjectMap() {
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
             <div className={`${activePane === 'artifacts' ? 'block' : 'hidden'} min-h-0 w-full overflow-auto ${
-              selected ? 'min-[1600px]:w-[42%] min-[1600px]:shrink-0 min-[1600px]:border-r min-[1600px]:border-surface-border' : ''
-            } min-[1600px]:block`}>
+              selected ? 'lg:w-[42%] lg:shrink-0 lg:border-r lg:border-surface-border' : ''
+            } lg:block`}>
               <div className="sticky top-0 z-10 border-b border-surface-border bg-surface/95 px-4 py-2 text-[11px] text-gray-500 backdrop-blur">
                 Showing {Math.min(filtered.length, MAX_VISIBLE_ARTIFACTS).toLocaleString()} of {filtered.length.toLocaleString()} matches
                 {filtered.length > MAX_VISIBLE_ARTIFACTS && ' — refine the search to see more'}
@@ -265,12 +408,13 @@ export default function ProjectMap() {
             </div>
 
             {selected && (
-              <div className={`${activePane === 'impact' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-auto p-3 sm:p-5 min-[1600px]:block`}>
+              <div className={`${activePane === 'impact' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-auto p-3 sm:p-5 lg:block`}>
                 <ArtifactInspector
                   artifact={selected}
                   outgoing={outgoing}
                   incoming={incoming}
                   diagnostics={selectedDiagnostics}
+                  transitiveImpact={transitiveImpact}
                   artifactsById={artifactsById}
                   onNavigate={setSelectedId}
                   onOpenDesigner={() => openFlowUiDesigner(selected.sourceLocator)}
@@ -333,6 +477,7 @@ function ArtifactInspector({
   outgoing,
   incoming,
   diagnostics,
+  transitiveImpact,
   artifactsById,
   onNavigate,
   onOpenDesigner,
@@ -341,6 +486,7 @@ function ArtifactInspector({
   outgoing: GraphRelationship[]
   incoming: GraphRelationship[]
   diagnostics: GraphDiagnostic[]
+  transitiveImpact: TransitiveImpact[]
   artifactsById: Map<string, GraphArtifact>
   onNavigate: (id: string) => void
   onOpenDesigner: () => void
@@ -415,6 +561,8 @@ function ArtifactInspector({
         onNavigate={onNavigate}
       />
 
+      <TransitiveImpactSection impact={transitiveImpact} onNavigate={onNavigate} />
+
       <section>
         <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
           Diagnostics ({diagnostics.length})
@@ -440,6 +588,73 @@ function ArtifactInspector({
         </div>
       </section>
     </div>
+  )
+}
+
+function TransitiveImpactSection({
+  impact,
+  onNavigate,
+}: {
+  impact: TransitiveImpact[]
+  onNavigate: (id: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const visible = expanded ? impact : impact.slice(0, 18)
+  return (
+    <section>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div>
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+            Connected behavior & change impact ({impact.length})
+          </h4>
+          <p className="mt-1 text-[10px] text-gray-600">
+            Shortest dependency paths across screens, services, listeners, workflow, security, APIs, jobs, reports, and migrations.
+          </p>
+        </div>
+        {impact.length > 18 && (
+          <button
+            type="button"
+            onClick={() => setExpanded((current) => !current)}
+            className="shrink-0 rounded border border-surface-border px-2 py-1 text-[10px] text-gray-400 hover:text-gray-200"
+          >
+            {expanded ? 'Show less' : `Show all ${impact.length}`}
+          </button>
+        )}
+      </div>
+      <div className="space-y-1">
+        {visible.map((entry) => (
+          <button
+            key={entry.artifact.id}
+            type="button"
+            onClick={() => onNavigate(entry.artifact.id)}
+            className="group w-full rounded border border-surface-border bg-surface-light px-3 py-2 text-left hover:border-jmix-500/50"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="shrink-0 rounded bg-jmix-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-jmix-300">
+                {entry.depth} hop{entry.depth === 1 ? '' : 's'}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-xs text-gray-200">{entry.artifact.displayName}</span>
+              <span className="shrink-0 text-[9px] text-gray-600">{readable(entry.artifact.kind)}</span>
+            </div>
+            <div className="mt-1 truncate font-mono text-[9px] text-gray-600">
+              {entry.route.map((hop) => (
+                `${hop.direction === 'outgoing' ? '→' : '←'} ${readable(hop.relationship.type)}`
+              )).join('  ')}
+            </div>
+          </button>
+        ))}
+        {impact.length === 0 && (
+          <div className="rounded border border-dashed border-surface-border p-3 text-xs text-gray-600">
+            No resolved connected impact. Check unresolved relationship and parser diagnostics before assuming this artifact is isolated.
+          </div>
+        )}
+        {impact.length >= MAX_TRANSITIVE_IMPACT && (
+          <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[10px] text-amber-200">
+            Impact display reached the {MAX_TRANSITIVE_IMPACT}-artifact safety limit. Narrow the selection or inspect the source graph.
+          </div>
+        )}
+      </div>
+    </section>
   )
 }
 

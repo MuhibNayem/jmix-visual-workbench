@@ -7,7 +7,9 @@ import com.google.gson.annotations.SerializedName
 data class MigrationModel(
     val changelogId: String,
     val author: String = "jmix-visual-workbench",
-    val changes: MutableList<ChangeSetModel> = mutableListOf()
+    val changes: MutableList<ChangeSetModel> = mutableListOf(),
+    val logicalFilePath: String? = null,
+    val objectQuotingStrategy: String? = null,
 )
 
 data class ChangeSetModel(
@@ -19,7 +21,10 @@ data class ChangeSetModel(
     val context: String? = null,
     val dbms: String? = null,
     val runOnChange: Boolean = false,
-    val runAlways: Boolean = false
+    val runAlways: Boolean = false,
+    val runInTransaction: Boolean = true,
+    val labels: String? = null,
+    val rollback: MutableList<DbChange> = mutableListOf(),
 )
 
 sealed class DbChange {

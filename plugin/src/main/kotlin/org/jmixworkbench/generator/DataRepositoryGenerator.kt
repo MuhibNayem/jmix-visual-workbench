@@ -18,8 +18,8 @@ object DataRepositoryGenerator {
         b.asInterface()
 
         b.import_(
-            "org.springframework.data.jpa.repository.JpaRepository",
-            "org.springframework.data.jpa.repository.Query",
+            "io.jmix.core.repository.JmixDataRepository",
+            "io.jmix.core.repository.Query",
             "org.springframework.data.repository.query.Param",
             "org.springframework.stereotype.Repository",
             entity.fullName
@@ -36,7 +36,7 @@ object DataRepositoryGenerator {
             b.import_("java.util.UUID")
         }
 
-        b.extends_("JpaRepository<${entity.className}, $idType>")
+        b.extends_("JmixDataRepository<${entity.className}, $idType>")
 
         b.annotation {
             name = "Repository"
@@ -54,12 +54,11 @@ object DataRepositoryGenerator {
                     when (method.queryType) {
                         QueryType.JPQL -> annotation {
                             name = "Query"
-                            importPath = "org.springframework.data.jpa.repository.Query"
+                            importPath = "io.jmix.core.repository.Query"
                             value("\"${method.query}\"")
                         }
                         QueryType.NATIVE -> annotation {
-                            name = "Query"
-                            importPath = "org.springframework.data.jpa.repository.Query"
+                            name = "org.springframework.data.jpa.repository.Query"
                             value("\"${method.query}\"")
                             param("nativeQuery", "true")
                         }

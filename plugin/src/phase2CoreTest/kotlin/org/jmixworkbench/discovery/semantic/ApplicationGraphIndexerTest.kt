@@ -6,6 +6,7 @@ import org.jmixworkbench.discovery.model.RelationshipType
 import org.jmixworkbench.discovery.model.SourceLanguage
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -15,6 +16,38 @@ class ApplicationGraphIndexerTest {
         moduleId = "loan-module",
         sourceSetId = "main",
     )
+
+    @Test
+    fun `commented code cannot create phantom artifacts or diagnostics`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                files = listOf(
+                    source(
+                        "loan/src/main/java/com/acme/payroll/LoanService.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.payroll;
+                        // @JmixEntity public class PhantomLoan { private Double amount; }
+                        /*
+                         * @RestController
+                         * public class PhantomController {
+                         *   void write() { dataManager.save(value); }
+                         * }
+                         */
+                        @Service
+                        public class LoanService {
+                            String endpoint = "https://example.test/path//kept";
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(listOf("LoanService"), result.artifacts.map { it.displayName })
+        assertFalse(result.diagnostics.any { it.reasonCode == "P2_UNSAFE_FLOATING_POINT_MONEY" })
+        assertFalse(result.diagnostics.any { it.reasonCode == "P2_MISSING_TRANSACTION_BOUNDARY" })
+    }
 
     @Test
     fun `indexes a connected payroll screen service rest security workflow and database graph`() {
@@ -149,6 +182,25 @@ class ApplicationGraphIndexerTest {
                         </databaseChangeLog>
                         """.trimIndent(),
                     ),
+                    source(
+                        "loan/src/main/resources/reports/loan-register.jrxml",
+                        SourceLanguage.XML,
+                        """
+                        <jasperReport name="loan-register">
+                          <queryString language="HQL"><![CDATA[select e from LoanApp e]]></queryString>
+                        </jasperReport>
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "loan/src/main/resources/application.properties",
+                        SourceLanguage.PROPERTIES,
+                        "sms.gateway.url=https://sms.example.test/v1/send?token=\${SMS_TOKEN}",
+                    ),
+                    source(
+                        "loan/src/main/frontend/themes/payroll/styles.css",
+                        SourceLanguage.UNKNOWN,
+                        ".loan-approved { color: green; }",
+                    ),
                 ),
             ),
         )
@@ -163,6 +215,10 @@ class ApplicationGraphIndexerTest {
         assertEquals(1, kinds[ArtifactKind.WORKFLOW_PROCESS])
         assertEquals(3, kinds[ArtifactKind.WORKFLOW_STATE])
         assertEquals(1, kinds[ArtifactKind.LIQUIBASE_CHANGESET])
+        assertEquals(1, kinds[ArtifactKind.REPORT_TEMPLATE])
+        assertEquals(1, kinds[ArtifactKind.REPORT_QUERY])
+        assertEquals(1, kinds[ArtifactKind.INTEGRATION_ENDPOINT])
+        assertEquals(1, kinds[ArtifactKind.THEME_ASSET])
         assertTrue((kinds[ArtifactKind.UI_COMPONENT] ?: 0) >= 2)
 
         val relationships = result.relationships.groupBy { it.type }
@@ -203,6 +259,115 @@ class ApplicationGraphIndexerTest {
         assertEquals(first.artifacts, second.artifacts)
         assertEquals(first.relationships, second.relationships)
         assertEquals(first.diagnostics, second.diagnostics)
+    }
+
+    @Test
+    fun `duplicate simple names resolve inside the owning module and remain ambiguous outside it`() {
+        fun ownedSource(moduleId: String, path: String, content: String) = GraphSourceFile(
+            relativePath = path,
+            content = content.trimIndent(),
+            owner = ArtifactOwner("enterprise-build", moduleId, "main"),
+            language = SourceLanguage.JAVA,
+        )
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    ownedSource(
+                        "retail",
+                        "retail/src/main/java/com/bank/retail/Customer.java",
+                        "package com.bank.retail; @JmixEntity public class Customer {}",
+                    ),
+                    ownedSource(
+                        "corporate",
+                        "corporate/src/main/java/com/bank/corporate/Customer.java",
+                        "package com.bank.corporate; @JmixEntity public class Customer {}",
+                    ),
+                    ownedSource(
+                        "retail",
+                        "retail/src/main/java/com/bank/retail/CustomerService.java",
+                        """
+                        package com.bank.retail;
+                        @Service
+                        public class CustomerService {
+                            public Customer load() { return null; }
+                        }
+                        """,
+                    ),
+                    ownedSource(
+                        "reporting",
+                        "reporting/src/main/java/com/bank/reporting/AmbiguousCustomerReport.java",
+                        """
+                        package com.bank.reporting;
+                        @Service
+                        public class AmbiguousCustomerReport {
+                            public Customer load() { return null; }
+                        }
+                        """,
+                    ),
+                ),
+            ),
+        )
+
+        val artifacts = result.artifacts.associateBy { it.id }
+        val retailService = result.artifacts.single { it.displayName == "CustomerService" }
+        val retailEntity = result.artifacts.single {
+            it.kind == ArtifactKind.ENTITY && it.owner.moduleId == "retail"
+        }
+        val retailUses = result.relationships.filter {
+            it.sourceArtifactId == retailService.id && it.type == RelationshipType.USES_ENTITY
+        }
+        assertEquals(listOf(retailEntity.id), retailUses.mapNotNull { it.targetArtifactId }.distinct())
+
+        val report = result.artifacts.single { it.displayName == "AmbiguousCustomerReport" }
+        val ambiguous = result.relationships.single {
+            it.sourceArtifactId == report.id && it.type == RelationshipType.USES_ENTITY
+        }
+        assertEquals(null, ambiguous.targetArtifactId)
+        assertEquals("P2_RELATIONSHIP_AMBIGUOUS", ambiguous.diagnostic?.reasonCode)
+        assertTrue(artifacts[retailUses.single().targetArtifactId]?.owner?.moduleId == "retail")
+    }
+
+    @Test
+    fun `indexes annotation exposed rest service as a typed contract`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "loan/src/main/java/com/acme/LoanApi.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme;
+                        @RestService("payroll_LoanService")
+                        public class LoanApi {
+                            @RestMethod
+                            public LoanResult approve(UUID loanId, @NotNull BigDecimal amount) {
+                                return null;
+                            }
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val contract = result.artifacts.single {
+            it.kind == ArtifactKind.REST_SERVICE_METHOD &&
+                it.displayName == "payroll_LoanService.approve"
+        }
+        val parameters = result.relationships
+            .filter {
+                it.sourceArtifactId == contract.id &&
+                    it.type == RelationshipType.DECLARES_PARAMETER
+            }
+            .mapNotNull { relationship ->
+                result.artifacts.firstOrNull { it.id == relationship.targetArtifactId }
+            }
+        assertEquals(setOf("loanId", "amount"), parameters.map { it.displayName }.toSet())
+        assertTrue(result.relationships.any {
+            it.sourceArtifactId == contract.id &&
+                it.type == RelationshipType.IMPLEMENTED_BY &&
+                it.targetArtifactId != null
+        })
     }
 
     @Test
@@ -552,6 +717,437 @@ class ApplicationGraphIndexerTest {
         assertTrue("P2_SWALLOWED_EXCEPTION" in reasonCodes)
         assertTrue("P2_HARDCODED_HTTP_ENDPOINT" in reasonCodes)
         assertTrue("P2_OUTBOUND_HTTP_TIMEOUT_MISSING" in reasonCodes)
+    }
+
+    @Test
+    fun `security policy locators identify each exact annotation in source order`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "security/src/main/java/com/acme/PayrollRole.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme;
+                        @ResourceRole(name = "Payroll", code = "payroll")
+                        public interface PayrollRole {
+                            @EntityPolicy(entityClass = PayrollRun.class, actions = EntityPolicyAction.READ)
+                            void entity();
+                            @MenuPolicy(menuIds = "payroll")
+                            @ViewPolicy(viewIds = "payroll_PayrollRun.list")
+                            void screens();
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val policies = result.artifacts
+            .filter { it.kind == ArtifactKind.SECURITY_POLICY }
+            .sortedBy { it.sourceLocator.line }
+        assertEquals(listOf(4, 6, 7), policies.map { it.sourceLocator.line })
+        assertEquals(
+            listOf(
+                "com.acme.PayrollRole#EntityPolicy-1",
+                "com.acme.PayrollRole#MenuPolicy-2",
+                "com.acme.PayrollRole#ViewPolicy-3",
+            ),
+            policies.map { it.sourceLocator.symbol },
+        )
+    }
+
+    @Test
+    fun `indexes liquibase includeAll directories as changelog dependencies`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "loan/src/main/resources/com/acme/liquibase/changelog.xml",
+                        SourceLanguage.XML,
+                        """
+                        <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                          <includeAll
+                              relativeToChangelogFile="true"
+                              path="changelog"/>
+                        </databaseChangeLog>
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val root = result.artifacts.single { it.kind == ArtifactKind.LIQUIBASE_ROOT }
+        val includeAll = result.artifacts.single { it.kind == ArtifactKind.LIQUIBASE_INCLUDE }
+        assertEquals("changelog", includeAll.displayName)
+        assertTrue(includeAll.summary.orEmpty().contains("includeAll"))
+        assertTrue(
+            result.relationships.any {
+                it.type == RelationshipType.INCLUDES_CHANGELOG &&
+                    it.sourceArtifactId == root.id &&
+                    it.targetArtifactId == includeAll.id
+            },
+        )
+    }
+
+    @Test
+    fun `indexes nested menus with containers bean actions separators and parent relationships`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "loan/src/main/resources/com/acme/menu.xml",
+                        SourceLanguage.XML,
+                        """
+                        <menu-config xmlns="http://jmix.io/schema/flowui/menu">
+                          <menu id="application">
+                            <menu id="operations">
+                              <item id="customers" view="Customer.list"/>
+                              <item id="closeMonth" bean="menuBean" beanMethod="closeMonth"/>
+                              <separator/>
+                            </menu>
+                          </menu>
+                        </menu-config>
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "loan/src/main/resources/com/acme/view/customer-list-view.xml",
+                        SourceLanguage.XML,
+                        """
+                        <view xmlns="http://jmix.io/schema/flowui/view" id="Customer.list">
+                          <layout/>
+                        </view>
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val menuSource = result.artifacts.single { it.kind == ArtifactKind.MENU_SOURCE }
+        val menuNodes = result.artifacts.filter { it.kind == ArtifactKind.MENU_ITEM }
+        assertEquals(
+            setOf("application", "operations", "customers", "closeMonth", "separator-5"),
+            menuNodes.map { it.displayName }.toSet(),
+        )
+        val application = menuNodes.single { it.displayName == "application" }
+        val operations = menuNodes.single { it.displayName == "operations" }
+        val customers = menuNodes.single { it.displayName == "customers" }
+        assertTrue(result.relationships.any {
+            it.type == RelationshipType.DECLARES &&
+                it.sourceArtifactId == menuSource.id &&
+                it.targetArtifactId == operations.id
+        })
+        assertTrue(result.relationships.any {
+            it.type == RelationshipType.DECLARES &&
+                it.sourceArtifactId == application.id &&
+                it.targetArtifactId == operations.id
+        })
+        assertTrue(result.relationships.any {
+            it.type == RelationshipType.DECLARES &&
+                it.sourceArtifactId == operations.id &&
+                it.targetArtifactId == customers.id
+        })
+        assertTrue(result.relationships.any {
+            it.type == RelationshipType.NAVIGATES_TO &&
+                it.sourceArtifactId == customers.id &&
+                it.targetArtifactId != null
+        })
+    }
+
+    @Test
+    fun `indexes yaml configuration and formatted sql changelogs without flattening module ownership`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "loan/src/main/resources/application-bank.yml",
+                        SourceLanguage.YAML,
+                        """
+                        spring:
+                          datasource:
+                            url: https://database.example.test/payroll
+                            password: ${'$'}{DB_PASSWORD}
+                        jmix:
+                          rest:
+                            services-config: com/acme/rest-services.xml
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "loan/src/main/resources/db/changelog/2026/001-loan.sql",
+                        SourceLanguage.SQL,
+                        """
+                        --liquibase formatted sql
+                        --changeset payroll:loan-account
+                        create table ACME_LOAN_ACCOUNT (
+                            ID uuid not null,
+                            ACCOUNT_NO varchar(40) not null
+                        );
+                        alter table ACME_LOAN_ACCOUNT add constraint UK_LOAN_ACCOUNT unique (ACCOUNT_NO);
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val configuration = result.artifacts.single {
+            it.kind == ArtifactKind.CONFIGURATION_FILE &&
+                it.displayName == "application-bank"
+        }
+        val properties = result.artifacts.filter {
+            it.kind == ArtifactKind.CONFIGURATION_PROPERTY
+        }
+        val changeSet = result.artifacts.single { it.kind == ArtifactKind.LIQUIBASE_CHANGESET }
+        val schemaObjects = result.artifacts.filter { it.kind == ArtifactKind.SCHEMA_OBJECT }
+
+        assertEquals(
+            setOf(
+                "spring.datasource.url",
+                "spring.datasource.password",
+                "jmix.rest.services-config",
+            ),
+            properties.map { it.displayName }.toSet(),
+        )
+        assertTrue(properties.all { it.owner == owner })
+        assertTrue(result.relationships.count {
+            it.type == RelationshipType.DECLARES && it.sourceArtifactId == configuration.id
+        } >= 3)
+        assertEquals("loan-account", changeSet.displayName)
+        assertEquals(2, schemaObjects.size, schemaObjects.map { it.semanticKey }.toString())
+        assertTrue(schemaObjects.all { it.displayName == "ACME_LOAN_ACCOUNT" })
+        assertTrue(result.relationships.count {
+            it.type == RelationshipType.MIGRATES && it.sourceArtifactId == changeSet.id
+        } == 2)
+        assertTrue(result.diagnostics.any { it.reasonCode == "P2_EXTERNAL_ENDPOINT_CONFIGURATION" })
+        assertTrue(result.diagnostics.none { it.reasonCode == "P2_HARDCODED_SECRET_PROPERTY" })
+        assertTrue(result.diagnostics.none { it.reasonCode == "P2_YAML_PARTIAL" })
+    }
+
+    @Test
+    fun `indexes generated visual rules as first class business rules with entity impact`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "loan/src/main/java/com/acme/loan/LoanApp.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.loan;
+                        @JmixEntity
+                        public class LoanApp {
+                            private java.math.BigDecimal requestedAmount;
+                        }
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "loan/src/main/java/com/acme/loan/LoanEligibilityRule.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.loan;
+                        import org.springframework.stereotype.Component;
+                        // JVW-VISUAL-RULE-MODEL: encoded
+                        @Component("loanEligibilityRule")
+                        public class LoanEligibilityRule {
+                            public boolean evaluate(LoanApp loan) {
+                                return loan.getRequestedAmount().signum() > 0;
+                            }
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val rule = result.artifacts.single { it.kind == ArtifactKind.BUSINESS_RULE }
+        val entity = result.artifacts.single { it.kind == ArtifactKind.ENTITY }
+
+        assertEquals("LoanEligibilityRule", rule.displayName)
+        assertTrue(result.artifacts.any {
+            it.kind == ArtifactKind.SERVICE_METHOD &&
+                it.semanticKey == "com.acme.loan.LoanEligibilityRule#evaluate"
+        })
+        assertTrue(result.relationships.any {
+            it.sourceArtifactId == rule.id &&
+                it.targetArtifactId == entity.id &&
+                it.type == RelationshipType.USES_ENTITY
+        })
+    }
+
+    @Test
+    fun `indexes DMN structure and resolves BPMN decision task impact`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "loan/src/main/resources/dmn/loan-eligibility.dmn",
+                        SourceLanguage.XML,
+                        """
+                        <definitions xmlns="http://www.omg.org/spec/DMN/20151101"
+                                     id="loanDefinitions" namespace="https://acme.example/dmn">
+                          <decision id="loanEligibility" name="Loan eligibility">
+                            <decisionTable id="loanEligibilityTable" hitPolicy="FIRST">
+                              <input id="ageInput" label="Age">
+                                <inputExpression id="ageExpression" typeRef="number"><text>age</text></inputExpression>
+                              </input>
+                              <output id="decisionOutput" label="Decision" name="decision" typeRef="string"/>
+                              <rule id="adultRule">
+                                <description>Adult applicant</description>
+                                <inputEntry id="adultInput"><text>&gt;=18</text></inputEntry>
+                                <outputEntry id="adultOutput"><text>"APPROVE"</text></outputEntry>
+                              </rule>
+                            </decisionTable>
+                          </decision>
+                        </definitions>
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "loan/src/main/resources/processes/loan-approval.bpmn20.xml",
+                        SourceLanguage.XML,
+                        """
+                        <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                                     xmlns:flowable="http://flowable.org/bpmn">
+                          <process id="loanApproval">
+                            <startEvent id="start"/>
+                            <serviceTask id="evaluate" name="Evaluate eligibility" flowable:type="dmn">
+                              <extensionElements>
+                                <flowable:field name="decisionTableReferenceKey">
+                                  <flowable:string>loanEligibility</flowable:string>
+                                </flowable:field>
+                              </extensionElements>
+                            </serviceTask>
+                          </process>
+                        </definitions>
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val decision = result.artifacts.single { it.kind == ArtifactKind.DECISION_TABLE }
+        assertEquals("loanEligibility", decision.semanticKey)
+        assertEquals(1, result.artifacts.count { it.kind == ArtifactKind.DECISION_INPUT })
+        assertEquals(1, result.artifacts.count { it.kind == ArtifactKind.DECISION_OUTPUT })
+        assertEquals(1, result.artifacts.count { it.kind == ArtifactKind.DECISION_RULE })
+        assertTrue(result.relationships.any {
+            it.type == RelationshipType.EVALUATES_DECISION &&
+                it.targetArtifactId == decision.id
+        })
+    }
+
+    @Test
+    fun `indexes reusable visual subflows and their exact caller impact`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "loan/src/main/java/com/acme/loan/VisualLoanService.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.loan;
+                        // JVW-VISUAL-LOGIC-MODEL: encoded-model
+                        @Component("visualLoanService")
+                        public class VisualLoanService {
+                            public void approve() {
+                                validateLoan();
+                                auditLoan();
+                            }
+
+                            @SuppressWarnings("JVW-VISUAL-SUBFLOW")
+                            private void validateLoan() {
+                            }
+
+                            @SuppressWarnings("JVW-VISUAL-SUBFLOW")
+                            private void auditLoan() {
+                                validateLoan();
+                            }
+
+                            private static int compareValues(Object left, Object right) {
+                                return 0;
+                            }
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val methods = result.artifacts
+            .filter { it.kind == ArtifactKind.SERVICE_METHOD }
+            .associateBy { it.displayName }
+        assertEquals(setOf("approve", "validateLoan", "auditLoan"), methods.keys)
+        assertEquals(
+            "Reusable visual subflow declared by VisualLoanService",
+            methods.getValue("validateLoan").summary,
+        )
+        assertTrue(result.relationships.any {
+            it.sourceArtifactId == methods.getValue("approve").id &&
+                it.targetArtifactId == methods.getValue("validateLoan").id &&
+                it.type == RelationshipType.CALLS_SERVICE
+        })
+        assertTrue(result.relationships.any {
+            it.sourceArtifactId == methods.getValue("auditLoan").id &&
+                it.targetArtifactId == methods.getValue("validateLoan").id &&
+                it.type == RelationshipType.CALLS_SERVICE
+        })
+    }
+
+    @Test
+    fun `indexes generated connectors as first class integration endpoints`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "integration/src/main/java/com/acme/integration/PayrollWebhookConnector.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.integration;
+
+                        @SuppressWarnings("JVW-INTEGRATION-CONNECTOR")
+                        @Component("payrollWebhookConnector")
+                        public final class PayrollWebhookConnector {
+                            public String send(String payload) {
+                                return loanService.approve(payload);
+                            }
+
+                            private LoanService loanService;
+                        }
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "loan/src/main/java/com/acme/loan/LoanService.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.loan;
+
+                        @Service
+                        public class LoanService {
+                            public String approve(String payload) {
+                                return payload;
+                            }
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val connector = result.artifacts.single { it.kind == ArtifactKind.INTEGRATION_ENDPOINT }
+        val operation = result.artifacts.single {
+            it.kind == ArtifactKind.SERVICE_METHOD && it.displayName == "send"
+        }
+        val service = result.artifacts.single {
+            it.kind == ArtifactKind.SERVICE && it.displayName == "LoanService"
+        }
+        assertEquals("PayrollWebhookConnector", connector.displayName)
+        assertTrue(result.relationships.any {
+            it.sourceArtifactId == connector.id &&
+                it.targetArtifactId == operation.id &&
+                it.type == RelationshipType.DECLARES
+        })
+        assertTrue(result.relationships.any {
+            it.sourceArtifactId == operation.id &&
+                it.targetArtifactId == service.id &&
+                it.type == RelationshipType.CALLS_SERVICE
+        })
     }
 
     private fun source(

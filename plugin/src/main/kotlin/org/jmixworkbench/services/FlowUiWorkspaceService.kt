@@ -2,7 +2,6 @@ package org.jmixworkbench.services
 
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import org.jmixworkbench.discovery.change.WorkspaceChangeIssue
 import org.jmixworkbench.discovery.change.WorkspaceChangePlan
@@ -211,6 +210,8 @@ class FlowUiWorkspaceService(
                     parentKey = request.parentKey.orEmpty(),
                     tagName = request.tagName.orEmpty(),
                     attributes = request.attributes,
+                    childCapable = request.childCapable,
+                    beforeElementKey = request.beforeElementKey,
                 )
                 FlowUiStructureOperation.DELETE -> FlowUiDescriptorParser.proposeDeleteElement(
                     document = document,
@@ -225,6 +226,29 @@ class FlowUiWorkspaceService(
                     document = document,
                     elementKey = request.elementKey.orEmpty(),
                     direction = FlowUiMoveDirection.DOWN,
+                )
+                FlowUiStructureOperation.REPARENT -> FlowUiDescriptorParser.proposeReparentElement(
+                    document = document,
+                    elementKey = request.elementKey.orEmpty(),
+                    newParentKey = request.parentKey.orEmpty(),
+                    beforeElementKey = request.beforeElementKey,
+                )
+                FlowUiStructureOperation.COPY_SUBTREE -> FlowUiDescriptorParser.proposeCopyElement(
+                    document = document,
+                    elementKey = request.elementKey.orEmpty(),
+                    newParentKey = request.parentKey.orEmpty(),
+                    beforeElementKey = request.beforeElementKey,
+                )
+                FlowUiStructureOperation.WRAP -> FlowUiDescriptorParser.proposeWrapElement(
+                    document = document,
+                    elementKey = request.elementKey.orEmpty(),
+                    tagName = request.tagName.orEmpty(),
+                    attributes = request.attributes,
+                )
+                FlowUiStructureOperation.CONVERT_LAYOUT -> FlowUiDescriptorParser.proposeConvertLayout(
+                    document = document,
+                    elementKey = request.elementKey.orEmpty(),
+                    tagName = request.tagName.orEmpty(),
                 )
             }
         }
@@ -288,22 +312,17 @@ class FlowUiWorkspaceService(
                 validated.relativePath,
             )
         }
-        val baseDir = project.basePath?.let(LocalFileSystem.getInstance()::findFileByPath)
-            ?: return rejectedDescriptor(
-                "JVW-FLOWUI-PROJECT-MISSING",
-                "The open project root is unavailable.",
-                validated.relativePath,
-            )
-        val file = baseDir.findFileByRelativePath(validated.relativePath)
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(validated.relativePath)
             ?: return rejectedDescriptor(
                 "JVW-FLOWUI-SOURCE-MISSING",
                 "The selected FlowUI descriptor no longer exists.",
                 validated.relativePath,
             )
-        if (file.isDirectory || !VfsUtilCore.isAncestor(baseDir, file, false)) {
+        val file = resolved.file
+        if (file.isDirectory || !VfsUtilCore.isAncestor(resolved.root, file, false)) {
             return rejectedDescriptor(
                 "JVW-FLOWUI-PATH-REJECTED",
-                "The selected descriptor is outside the open project.",
+                "The selected descriptor is outside the registered project content roots.",
                 validated.relativePath,
             )
         }
@@ -464,7 +483,7 @@ class FlowUiWorkspaceService(
         ArtifactKind.JPQL_QUERY, ArtifactKind.QUERY_PARAMETER -> 3
         ArtifactKind.UI_COMPONENT, ArtifactKind.UI_ACTION -> 4
         ArtifactKind.ENTITY, ArtifactKind.ENTITY_ATTRIBUTE -> 5
-        ArtifactKind.SERVICE, ArtifactKind.SERVICE_METHOD -> 6
+        ArtifactKind.BUSINESS_RULE, ArtifactKind.SERVICE, ArtifactKind.SERVICE_METHOD -> 6
         ArtifactKind.RESOURCE_ROLE, ArtifactKind.ROW_ROLE, ArtifactKind.SECURITY_POLICY -> 7
         ArtifactKind.WORKFLOW_PROCESS, ArtifactKind.WORKFLOW_STATE -> 8
         else -> 9
@@ -532,6 +551,10 @@ enum class FlowUiStructureOperation {
     DELETE,
     MOVE_UP,
     MOVE_DOWN,
+    REPARENT,
+    COPY_SUBTREE,
+    WRAP,
+    CONVERT_LAYOUT,
 }
 
 data class FlowUiStructureChangeRequest(
@@ -541,6 +564,8 @@ data class FlowUiStructureChangeRequest(
     val parentKey: String? = null,
     val tagName: String? = null,
     val attributes: Map<String, String> = emptyMap(),
+    val childCapable: Boolean = false,
+    val beforeElementKey: String? = null,
 )
 
 data class FlowUiStructureApplyRequest(

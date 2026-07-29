@@ -184,6 +184,203 @@ class FlowUiDescriptorParserTest {
         )
     }
 
+    @Test
+    fun `child-capable catalog insertion remains editable and supports nested components`() {
+        val source = descriptor()
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val layout = document.elements.single { it.localTag == "layout" }
+        val containerProposal = FlowUiDescriptorParser.proposeInsertChild(
+            document = document,
+            parentKey = layout.key,
+            tagName = "vbox",
+            attributes = mapOf("id" to "paymentSection", "width" to "100%"),
+            childCapable = true,
+        )
+        val withContainer = WorkspaceChangePlanner.plan(
+            assertNotNull(containerProposal.changeSet),
+            mapOf("view.xml" to source),
+        ).files.single().resultContent
+        val containerDocument = assertNotNull(FlowUiDescriptorParser.parse("view.xml", withContainer).document)
+        val container = containerDocument.elements.single { it.id == "paymentSection" }
+
+        assertFalse(container.selfClosing)
+        val fieldProposal = FlowUiDescriptorParser.proposeInsertChild(
+            document = containerDocument,
+            parentKey = container.key,
+            tagName = "bigDecimalField",
+            attributes = mapOf("id" to "paymentAmountField"),
+        )
+        val withField = WorkspaceChangePlanner.plan(
+            assertNotNull(fieldProposal.changeSet),
+            mapOf("view.xml" to withContainer),
+        ).files.single().resultContent
+        val reparsed = assertNotNull(FlowUiDescriptorParser.parse("view.xml", withField).document)
+        val field = reparsed.elements.single { it.id == "paymentAmountField" }
+        assertEquals("paymentSection", reparsed.elements.single { it.key == field.parentKey }.id)
+        assertTrue("<!-- manual layout comment -->" in withField)
+    }
+
+    @Test
+    fun `drag placement reparents and reorders exact subtrees without losing manual source`() {
+        val source = descriptor().replace(
+            """<bigDecimalField id="amountField" dataContainer="loanDc" property="loanAmount"/>""",
+            """
+            <bigDecimalField id="amountField" dataContainer="loanDc" property="loanAmount"/>
+            <textField id="commentField" dataContainer="loanDc" property="comment"/>
+            """.trimIndent(),
+        ).replace(
+            "</layout>",
+            """
+              <hbox id="actionsBox">
+                <button id="saveButton" text="Save"/>
+              </hbox>
+            </layout>
+            """.trimIndent(),
+        )
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val comment = document.elements.single { it.id == "commentField" }
+        val actions = document.elements.single { it.id == "actionsBox" }
+        val save = document.elements.single { it.id == "saveButton" }
+        val proposal = FlowUiDescriptorParser.proposeReparentElement(
+            document = document,
+            elementKey = comment.key,
+            newParentKey = actions.key,
+            beforeElementKey = save.key,
+        )
+        val moved = WorkspaceChangePlanner.plan(
+            assertNotNull(proposal.changeSet),
+            mapOf("view.xml" to source),
+        )
+
+        assertTrue(moved.accepted, moved.issues.joinToString { it.message })
+        assertEquals(2, moved.files.single().appliedEditCount)
+        val changed = moved.files.single().resultContent
+        assertTrue("<!-- manual layout comment -->" in changed)
+        assertEquals(1, changed.split("commentField").size - 1)
+        val reparsed = assertNotNull(FlowUiDescriptorParser.parse("view.xml", changed).document)
+        val movedComment = reparsed.elements.single { it.id == "commentField" }
+        val movedParent = reparsed.elements.single { it.key == movedComment.parentKey }
+        assertEquals("actionsBox", movedParent.id)
+        assertTrue(movedParent.childKeys.indexOf(movedComment.key) < movedParent.childKeys.indexOf(
+            reparsed.elements.single { it.id == "saveButton" }.key,
+        ))
+
+        val cycle = FlowUiDescriptorParser.proposeReparentElement(
+            document = reparsed,
+            elementKey = movedParent.key,
+            newParentKey = movedComment.key,
+        )
+        assertFalse(cycle.accepted)
+        assertTrue(cycle.issues.any { it.code == "JVW-FLOWUI-CYCLIC-MOVE" })
+    }
+
+    @Test
+    fun `copy subtree creates unique ids and rewrites internal component references`() {
+        val source = descriptor().replace(
+            "</layout>",
+            """
+              <hbox id="actionsBox" width="100%">
+                <button id="saveButton" action="actionsBox.save"/>
+              </hbox>
+            </layout>
+            """.trimIndent(),
+        )
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val actions = document.elements.single { it.id == "actionsBox" }
+        val layout = document.elements.single { it.localTag == "layout" }
+        val proposal = FlowUiDescriptorParser.proposeCopyElement(
+            document = document,
+            elementKey = actions.key,
+            newParentKey = layout.key,
+        )
+        val plan = WorkspaceChangePlanner.plan(
+            assertNotNull(proposal.changeSet),
+            mapOf("view.xml" to source),
+        )
+
+        assertTrue(plan.accepted, plan.issues.joinToString { it.message })
+        val changed = plan.files.single().resultContent
+        val reparsed = assertNotNull(FlowUiDescriptorParser.parse("view.xml", changed).document)
+        val copiedActions = reparsed.elements.single { it.id == "actionsBoxCopy" }
+        val copiedButton = reparsed.elements.single { it.id == "saveButtonCopy" }
+        assertEquals(copiedActions.key, copiedButton.parentKey)
+        assertEquals(
+            "actionsBoxCopy.save",
+            copiedButton.attributes.single { it.name == "action" }.value,
+        )
+        assertEquals(1, reparsed.elements.count { it.id == "actionsBox" })
+        assertEquals(1, reparsed.elements.count { it.id == "saveButton" })
+        assertTrue("<!-- manual layout comment -->" in changed)
+    }
+
+    @Test
+    fun `wrap preserves selected subtree and adds an editable responsive parent`() {
+        val source = descriptor()
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val amount = document.elements.single { it.id == "amountField" }
+        val proposal = FlowUiDescriptorParser.proposeWrapElement(
+            document = document,
+            elementKey = amount.key,
+            tagName = "flexLayout",
+            attributes = mapOf(
+                "id" to "amountRow",
+                "width" to "100%",
+                "flexWrap" to "WRAP",
+            ),
+        )
+        val changed = WorkspaceChangePlanner.plan(
+            assertNotNull(proposal.changeSet),
+            mapOf("view.xml" to source),
+        ).files.single().resultContent
+
+        val reparsed = assertNotNull(FlowUiDescriptorParser.parse("view.xml", changed).document)
+        val wrapper = reparsed.elements.single { it.id == "amountRow" }
+        val wrappedAmount = reparsed.elements.single { it.id == "amountField" }
+        assertEquals("flexLayout", wrapper.localTag)
+        assertEquals(wrapper.key, wrappedAmount.parentKey)
+        assertEquals("WRAP", wrapper.attributes.single { it.name == "flexWrap" }.value)
+        assertEquals(1, reparsed.elements.count { it.id == "amountField" })
+        assertTrue("<!-- manual layout comment -->" in changed)
+    }
+
+    @Test
+    fun `layout conversion preserves namespace and children while removing incompatible properties`() {
+        val source =
+            """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <ui:view xmlns:ui="http://jmix.io/schema/flowui/view" id="Namespaced.view">
+              <ui:layout>
+                <ui:hbox id="editorRow" width="100%" wrap="true" spacing="true">
+                  <ui:textField id="nameField"/>
+                </ui:hbox>
+              </ui:layout>
+            </ui:view>
+            """.trimIndent()
+        val document = assertNotNull(FlowUiDescriptorParser.parse("view.xml", source).document)
+        val row = document.elements.single { it.id == "editorRow" }
+        val proposal = FlowUiDescriptorParser.proposeConvertLayout(
+            document = document,
+            elementKey = row.key,
+            tagName = "formLayout",
+        )
+        val plan = WorkspaceChangePlanner.plan(
+            assertNotNull(proposal.changeSet),
+            mapOf("view.xml" to source),
+        )
+
+        assertTrue(plan.accepted, plan.issues.joinToString { it.message })
+        val changed = plan.files.single().resultContent
+        assertTrue("<ui:formLayout id=\"editorRow\" width=\"100%\">" in changed)
+        assertTrue("</ui:formLayout>" in changed)
+        assertFalse("wrap=" in changed)
+        assertFalse("spacing=" in changed)
+        val reparsed = assertNotNull(FlowUiDescriptorParser.parse("view.xml", changed).document)
+        val converted = reparsed.elements.single { it.id == "editorRow" }
+        val field = reparsed.elements.single { it.id == "nameField" }
+        assertEquals("formLayout", converted.localTag)
+        assertEquals(converted.key, field.parentKey)
+    }
+
     private fun descriptor(): String =
         """
         <?xml version="1.0" encoding="UTF-8"?>

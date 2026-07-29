@@ -7,8 +7,6 @@ import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.module.ModuleUtilCore
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ModuleRootManager
-import com.intellij.openapi.vfs.LocalFileSystem
-import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.util.concurrency.AppExecutorUtil
 import org.jmixworkbench.discovery.change.WorkspaceChangeIssue
 import org.jmixworkbench.discovery.change.WorkspaceChangePlan
@@ -25,6 +23,7 @@ import org.jmixworkbench.discovery.navigation.SourceNavigationPolicy
 import org.jmixworkbench.discovery.runtime.JmixRuntimeConfigurationParser
 import org.jmixworkbench.discovery.runtime.ParsedRuntimeConfiguration
 import org.jmixworkbench.toolwindow.JmixRuntimePreviewToolWindow
+import org.jetbrains.jps.model.java.JavaResourceRootType
 import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.file.Files
@@ -193,10 +192,13 @@ class JmixRuntimeService(
         val source = loadDescriptor(request.descriptorLocator)
         val content = source.content
             ?: return RuntimeChangeProposal(false, null, source.issues)
-        val resourcePath = resourcePath(request.descriptorLocator.relativePath)
+        val resourcePath = resourcePath(
+            request.descriptorLocator.relativePath,
+            ApplicationGraphService.getInstance(project).graph(),
+        )
             ?: return RuntimeChangeProposal.rejected(
                 "JVW-RUNTIME-RESOURCE-PATH-UNSUPPORTED",
-                "Hot deployment requires a descriptor below src/main/resources.",
+                "Hot deployment requires a descriptor below an indexed production resource root.",
                 request.descriptorLocator.relativePath,
             )
         val projectRoot = projectRoot()
@@ -334,7 +336,7 @@ class JmixRuntimeService(
         val identity = "${module.relativeRoot}\u0000${candidate.profile}\u0000$baseUrl"
         return JmixRuntimeTargetSnapshot(
             id = CanonicalDiscoveryJson.sha256(identity).take(24),
-            moduleId = module.module.name,
+            moduleId = module.moduleId,
             moduleRoot = module.relativeRoot,
             profile = candidate.profile,
             preferred = module.module == ownerModule || ReadAction.compute<Boolean, RuntimeException> {
@@ -358,14 +360,70 @@ class JmixRuntimeService(
 
     private fun applicationModules(ownerModule: Module?, descriptorPath: Path): List<RuntimeModule> {
         val projectRoot = projectRoot() ?: return emptyList()
-        val candidates = ModuleManager.getInstance(project).modules.flatMap { module ->
+        val resolver = ProjectFileResolver.getInstance(project)
+        val imported = ModuleManager.getInstance(project).modules.flatMap { module ->
             ModuleRootManager.getInstance(module).contentRoots.mapNotNull { root ->
                 val path = Path.of(root.path).normalize()
-                if (!path.startsWith(projectRoot)) return@mapNotNull null
-                val relativeRoot = projectRoot.relativize(path).invariantPath().ifBlank { "." }
-                RuntimeModule(module, path, relativeRoot)
+                val relativeRoot = resolver.locatorPath(root, module)?.ifBlank { "." }
+                    ?: return@mapNotNull null
+                val resources = ModuleRootManager.getInstance(module)
+                    .getSourceRoots(JavaResourceRootType.RESOURCE)
+                    .asSequence()
+                    .map { Path.of(it.path).normalize() }
+                    .filter { it.startsWith(path) }
+                    .toList()
+                    .ifEmpty { listOf(path.resolve("src/main/resources")) }
+                RuntimeModule(module.name, module, path, relativeRoot, resources)
             }
         }.distinctBy { "${it.module.name}\u0000${it.root}" }
+        val recovered = ApplicationGraphService.getInstance(project).graph().modules
+            .asSequence()
+            .mapNotNull { coverage ->
+                val path = if (coverage.moduleRoot.isBlank()) {
+                    projectRoot
+                } else {
+                    resolver.resolveFile(coverage.moduleRoot)
+                        ?.file
+                        ?.takeIf { it.isDirectory }
+                        ?.path
+                        ?.let(Path::of)
+                        ?.normalize()
+                        ?: return@mapNotNull null
+                }
+                val importedOwner = imported.asSequence()
+                    .filter { path.startsWith(it.root) }
+                    .maxByOrNull { it.root.nameCount }
+                    ?: return@mapNotNull null
+                val relativeRoot = if (path.startsWith(projectRoot)) {
+                    projectRoot.relativize(path).invariantPath().ifBlank { "." }
+                } else {
+                    coverage.moduleRoot
+                }
+                val resources = coverage.sourceRoots.asSequence()
+                    .filter {
+                        it.kind == ApplicationGraphSourceRootKind.RESOURCES &&
+                            it.sourceSetId.isProductionRuntimeSourceSet()
+                    }
+                    .mapNotNull {
+                        resolver.resolveFile(it.relativePath)?.file
+                            ?.takeIf { file -> file.isDirectory }
+                            ?.path
+                            ?.let(Path::of)
+                            ?.normalize()
+                    }
+                    .toList()
+                    .ifEmpty { listOf(path.resolve("src/main/resources")) }
+                RuntimeModule(
+                    coverage.moduleId,
+                    importedOwner.module,
+                    path,
+                    relativeRoot,
+                    resources,
+                )
+            }
+            .toList()
+        val candidates = (imported + recovered)
+            .distinctBy { "${it.moduleId}\u0000${it.root}" }
         val applications = candidates.filter(::looksLikeApplicationModule)
         if (applications.isNotEmpty()) return applications
         val ownerRoots = candidates.filter { it.module == ownerModule || descriptorPath.startsWith(it.root) }
@@ -380,9 +438,11 @@ class JmixRuntimeService(
             .mapNotNull(::readBounded)
             .firstOrNull()
             .orEmpty()
-        val hasRuntimeConfig = CONFIG_DIRECTORIES.any { directory ->
-            CONFIG_EXTENSIONS.any { extension ->
-                Files.isRegularFile(module.root.resolve(directory).resolve("application.$extension"))
+        val hasRuntimeConfig = module.resourceRoots.any { resourceRoot ->
+            listOf(resourceRoot, resourceRoot.resolve("config")).any { configurationRoot ->
+                CONFIG_EXTENSIONS.any { extension ->
+                    Files.isRegularFile(configurationRoot.resolve("application.$extension"))
+                }
             }
         }
         return hasRuntimeConfig && ("io.jmix" in buildText || "jmix" in buildText.lowercase())
@@ -391,8 +451,10 @@ class JmixRuntimeService(
     private fun configurationCandidates(module: RuntimeModule): List<RuntimeConfigurationCandidate> {
         val baseFiles = mutableListOf<Path>()
         val profileFiles = linkedMapOf<String, MutableList<Path>>()
-        CONFIG_DIRECTORIES.forEach { directory ->
-            val root = module.root.resolve(directory)
+        module.resourceRoots
+            .flatMap { root -> listOf(root, root.resolve("config")) }
+            .distinct()
+            .forEach { root ->
             if (!Files.isDirectory(root)) return@forEach
             listedConfigFiles(root, "application.*").forEach(baseFiles::add)
             listedConfigFiles(root, "application-*.*").forEach { file ->
@@ -547,17 +609,23 @@ class JmixRuntimeService(
                 locator.relativePath,
             )
         }
-        val projectRoot = projectRoot()
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(locator.relativePath)
             ?: return LoadedRuntimeSource.rejected(
-                "JVW-RUNTIME-PROJECT-MISSING",
-                "The project root is unavailable.",
+                "JVW-RUNTIME-SOURCE-MISSING",
+                "The FlowUI descriptor no longer exists inside a registered project content root.",
                 locator.relativePath,
             )
-        val path = projectRoot.resolve(locator.relativePath).normalize()
-        if (!path.startsWith(projectRoot) || containsSymlink(projectRoot, path) || !Files.isRegularFile(path)) {
+        val virtualFile = resolved.file
+        val path = virtualFile.toNioPath().toAbsolutePath().normalize()
+        val contentRoot = resolved.root.toNioPath().toAbsolutePath().normalize()
+        if (
+            !path.startsWith(contentRoot) ||
+            containsSymlink(contentRoot, path) ||
+            !Files.isRegularFile(path)
+        ) {
             return LoadedRuntimeSource.rejected(
                 "JVW-RUNTIME-SOURCE-MISSING",
-                "The FlowUI descriptor no longer exists inside the open project.",
+                "The FlowUI descriptor no longer exists inside its registered project content root.",
                 locator.relativePath,
             )
         }
@@ -574,20 +642,6 @@ class JmixRuntimeService(
             return LoadedRuntimeSource.rejected(
                 "JVW-RUNTIME-SOURCE-STALE",
                 "The descriptor changed after runtime inspection. Refresh before previewing or deploying.",
-                locator.relativePath,
-            )
-        }
-        val virtualFile = LocalFileSystem.getInstance().findFileByNioFile(path)
-            ?: return LoadedRuntimeSource.rejected(
-                "JVW-RUNTIME-VFS-MISSING",
-                "IntelliJ could not resolve the descriptor in the project filesystem.",
-                locator.relativePath,
-            )
-        val baseDir = project.basePath?.let(LocalFileSystem.getInstance()::findFileByPath)
-        if (baseDir == null || !VfsUtilCore.isAncestor(baseDir, virtualFile, false)) {
-            return LoadedRuntimeSource.rejected(
-                "JVW-RUNTIME-SOURCE-REJECTED",
-                "The descriptor is outside the open project.",
                 locator.relativePath,
             )
         }
@@ -647,7 +701,23 @@ class JmixRuntimeService(
         return false
     }
 
-    private fun resourcePath(relativePath: String): String? {
+    private fun resourcePath(
+        relativePath: String,
+        graph: ApplicationGraphResponse,
+    ): String? {
+        graph.modules.asSequence()
+            .flatMap(ApplicationGraphModuleCoverage::sourceRoots)
+            .filter {
+                it.kind == ApplicationGraphSourceRootKind.RESOURCES &&
+                    it.sourceSetId.isProductionRuntimeSourceSet()
+            }
+            .sortedByDescending { it.relativePath.length }
+            .firstNotNullOfOrNull { root ->
+                val prefix = root.relativePath.trimEnd('/')
+                relativePath.removePrefix("$prefix/")
+                    .takeIf { it != relativePath && it.isNotBlank() }
+            }
+            ?.let { return it }
         val marker = "/src/main/resources/"
         val normalized = "/$relativePath"
         return normalized.substringAfter(marker, "").takeIf(String::isNotBlank)
@@ -661,6 +731,11 @@ class JmixRuntimeService(
             .ifBlank { "/" }
     }
 
+    private fun String.isProductionRuntimeSourceSet(): Boolean =
+        !contains("test", ignoreCase = true) &&
+            !contains("fixture", ignoreCase = true) &&
+            !contains("benchmark", ignoreCase = true)
+
     private fun Path.invariantPath(): String = toString().replace('\\', '/')
 
     private fun elapsedMillis(started: Long): Long =
@@ -672,7 +747,6 @@ class JmixRuntimeService(
         private const val PROBE_TIMEOUT_MILLIS = 900
         private const val MAX_RUNTIME_TARGETS = 32
         private const val MAX_RUNTIME_FILE_BYTES = 2L * 1024 * 1024
-        private val CONFIG_DIRECTORIES = listOf("src/main/resources", "src/main/resources/config")
         private val CONFIG_EXTENSIONS = setOf("properties", "yml", "yaml")
         private val VERIFIED_FLOWUI_TRIGGERS = listOf(
             "io.jmix.flowui.view.ViewRegistry#reset",
@@ -743,9 +817,11 @@ data class JmixFlowUiHotDeployApplyRequest(
 )
 
 private data class RuntimeModule(
+    val moduleId: String,
     val module: Module,
     val root: Path,
     val relativeRoot: String,
+    val resourceRoots: List<Path>,
 )
 
 private data class RuntimeConfigurationCandidate(

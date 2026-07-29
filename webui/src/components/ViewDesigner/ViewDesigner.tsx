@@ -1,17 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   AlignLeft, ArrowDown, ArrowUp, Calendar, CalendarClock, CheckSquare, ChevronDown,
   ChevronRight, CircleDollarSign, Columns, Copy, Database, Filter, Grid, Hash,
-  Heading1, Heading2, Heading3, Image as ImageIcon, Layers, LayoutTemplate, List,
-  ListTree, Loader2, MousePointerClick, MoreHorizontal, PanelLeft, Play, Plus, Rows,
-  Search, Sigma, Star, Table as TableIcon, Tag, Text as TextIcon, Trash2, Type, X,
+  GripVertical, Heading1, Heading2, Heading3, Image as ImageIcon, Layers, LayoutTemplate,
+  List, ListTree, Loader2, MousePointerClick, MoreHorizontal, PanelLeft, Play, Plus,
+  Redo2, Rows, Search, Sigma, Star, Table as TableIcon, Tag, Text as TextIcon, Trash2,
+  Type, Undo2, X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
 import ExistingFlowUiDesigner from './ExistingFlowUiDesigner'
-import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 import type {
   ComponentModel, ComponentType, DataContainerModel, ViewModel, ViewType,
 } from '../../types'
@@ -19,6 +19,15 @@ import type {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DND_MIME = 'application/x-jmix-component'
+const DND_NODE_MIME = 'application/x-jmix-layout-node'
+const LOCAL_HISTORY_LIMIT = 100
+
+type CanvasDropPlacement = 'BEFORE' | 'INSIDE' | 'AFTER'
+
+interface CanvasDropTarget {
+  id: string
+  placement: CanvasDropPlacement
+}
 
 const CONTAINERS = new Set<ComponentType>([
   'vbox', 'hbox', 'formLayout', 'gridLayout', 'split', 'tabSheet',
@@ -146,6 +155,83 @@ function insertChild(node: ComponentModel, parentId: string, child: ComponentMod
   return { ...node, children: node.children.map((c) => insertChild(c, parentId, child)) }
 }
 
+function containsNode(node: ComponentModel, id: string): boolean {
+  return node.id === id || node.children.some((child) => containsNode(child, id))
+}
+
+function detachNode(
+  node: ComponentModel,
+  id: string,
+): { root: ComponentModel, detached: ComponentModel | null } {
+  const childIndex = node.children.findIndex((child) => child.id === id)
+  if (childIndex >= 0) {
+    const children = [...node.children]
+    const [detached] = children.splice(childIndex, 1)
+    return { root: { ...node, children }, detached }
+  }
+  for (let index = 0; index < node.children.length; index += 1) {
+    const result = detachNode(node.children[index], id)
+    if (result.detached) {
+      const children = [...node.children]
+      children[index] = result.root
+      return { root: { ...node, children }, detached: result.detached }
+    }
+  }
+  return { root: node, detached: null }
+}
+
+function insertAtPlacement(
+  node: ComponentModel,
+  targetId: string,
+  child: ComponentModel,
+  placement: CanvasDropPlacement,
+): ComponentModel {
+  if (placement === 'INSIDE') return insertChild(node, targetId, child)
+  const targetIndex = node.children.findIndex((candidate) => candidate.id === targetId)
+  if (targetIndex >= 0) {
+    const children = [...node.children]
+    children.splice(targetIndex + (placement === 'AFTER' ? 1 : 0), 0, child)
+    return { ...node, children }
+  }
+  return {
+    ...node,
+    children: node.children.map((candidate) => insertAtPlacement(candidate, targetId, child, placement)),
+  }
+}
+
+function placeNode(
+  root: ComponentModel,
+  child: ComponentModel,
+  targetId: string,
+  placement: CanvasDropPlacement,
+): ComponentModel {
+  if (!findNode(root, targetId)) return root
+  if (targetId === 'root' && placement !== 'INSIDE') return root
+  if (placement === 'INSIDE') {
+    const target = findNode(root, targetId)
+    if (!target || !CONTAINERS.has(target.type)) return root
+  }
+  return insertAtPlacement(root, targetId, child, placement)
+}
+
+function reparentNode(
+  root: ComponentModel,
+  nodeId: string,
+  targetId: string,
+  placement: CanvasDropPlacement,
+): ComponentModel {
+  if (nodeId === 'root' || nodeId === targetId) return root
+  const moved = findNode(root, nodeId)
+  if (!moved || containsNode(moved, targetId)) return root
+  if (placement === 'INSIDE') {
+    const target = findNode(root, targetId)
+    if (!target || !CONTAINERS.has(target.type)) return root
+  }
+  const detached = detachNode(root, nodeId)
+  if (!detached.detached) return root
+  return placeNode(detached.root, detached.detached, targetId, placement)
+}
+
 function moveNode(node: ComponentModel, id: string, dir: -1 | 1): ComponentModel {
   const idx = node.children.findIndex((c) => c.id === id)
   if (idx !== -1) {
@@ -211,6 +297,103 @@ function makeRoot(): ComponentModel {
   return {
     id: 'root', type: 'vbox', properties: {}, children: [], actions: [],
     columns: [], cssClasses: [], visible: true, enabled: true, width: '100%',
+  }
+}
+
+interface DesignerSnapshot {
+  view: ViewModel
+  selectedId: string | null
+}
+
+interface DesignerHistoryFrame {
+  snapshot: DesignerSnapshot
+  label: string
+}
+
+interface DesignerHistoryState {
+  current: DesignerSnapshot
+  past: DesignerHistoryFrame[]
+  future: DesignerHistoryFrame[]
+  lastCoalesce?: { key: string, at: number }
+}
+
+type DesignerHistoryAction =
+  | {
+    type: 'COMMIT'
+    label: string
+    mutate: (view: ViewModel) => ViewModel
+    selectedId?: string | null
+    coalesceKey?: string
+    timestamp: number
+  }
+  | { type: 'SELECT', selectedId: string | null }
+  | { type: 'UNDO' }
+  | { type: 'REDO' }
+
+function initialView(basePackage: string): ViewModel {
+  return {
+    viewName: 'NewView',
+    packageName: `${basePackage}.view`,
+    viewType: 'blankView',
+    entityClass: '',
+    layout: makeRoot(),
+    dataContainers: [],
+    facets: [],
+    actions: [],
+    messages: {},
+  }
+}
+
+function designerHistoryReducer(
+  state: DesignerHistoryState,
+  action: DesignerHistoryAction,
+): DesignerHistoryState {
+  if (action.type === 'SELECT') {
+    return {
+      ...state,
+      current: { ...state.current, selectedId: action.selectedId },
+      lastCoalesce: undefined,
+    }
+  }
+  if (action.type === 'UNDO') {
+    const previous = state.past[state.past.length - 1]
+    if (!previous) return state
+    return {
+      current: previous.snapshot,
+      past: state.past.slice(0, -1),
+      future: [{ snapshot: state.current, label: previous.label }, ...state.future],
+      lastCoalesce: undefined,
+    }
+  }
+  if (action.type === 'REDO') {
+    const next = state.future[0]
+    if (!next) return state
+    return {
+      current: next.snapshot,
+      past: [...state.past, { snapshot: state.current, label: next.label }].slice(-LOCAL_HISTORY_LIMIT),
+      future: state.future.slice(1),
+      lastCoalesce: undefined,
+    }
+  }
+
+  const nextView = action.mutate(state.current.view)
+  if (nextView === state.current.view) return state
+  const nextSnapshot: DesignerSnapshot = {
+    view: nextView,
+    selectedId: action.selectedId === undefined ? state.current.selectedId : action.selectedId,
+  }
+  const coalesces = Boolean(
+    action.coalesceKey &&
+    state.lastCoalesce?.key === action.coalesceKey &&
+    action.timestamp - state.lastCoalesce.at < 900,
+  )
+  return {
+    current: nextSnapshot,
+    past: coalesces
+      ? state.past
+      : [...state.past, { snapshot: state.current, label: action.label }].slice(-LOCAL_HISTORY_LIMIT),
+    future: [],
+    lastCoalesce: action.coalesceKey ? { key: action.coalesceKey, at: action.timestamp } : undefined,
   }
 }
 
@@ -358,16 +541,27 @@ interface NodeViewProps {
   node: ComponentModel
   depth: number
   selectedId: string | null
-  dropTargetId: string | null
+  dropTarget: CanvasDropTarget | null
   onSelect: (id: string) => void
-  onDropNew: (type: ComponentType, parentId: string) => void
-  onHoverDrop: (id: string | null) => void
+  onDropNew: (type: ComponentType, targetId: string, placement: CanvasDropPlacement) => void
+  onDropMove: (nodeId: string, targetId: string, placement: CanvasDropPlacement) => void
+  onHoverDrop: (target: CanvasDropTarget | null) => void
 }
 
-function NodeView({ node, depth, selectedId, dropTargetId, onSelect, onDropNew, onHoverDrop }: NodeViewProps) {
+function NodeView({
+  node,
+  depth,
+  selectedId,
+  dropTarget,
+  onSelect,
+  onDropNew,
+  onDropMove,
+  onHoverDrop,
+}: NodeViewProps) {
   const isContainer = CONTAINERS.has(node.type)
   const isSelected = selectedId === node.id
-  const isDropTarget = dropTargetId === node.id
+  const isDropTarget = dropTarget?.id === node.id
+  const placement = isDropTarget ? dropTarget.placement : null
 
   const containerLayout: Partial<Record<ComponentType, string>> = {
     vbox: 'flex flex-col gap-2',
@@ -380,33 +574,67 @@ function NodeView({ node, depth, selectedId, dropTargetId, onSelect, onDropNew, 
 
   return (
     <div
+      draggable={node.id !== 'root'}
+      onDragStart={node.id !== 'root' ? (e) => {
+        e.stopPropagation()
+        e.dataTransfer.setData(DND_NODE_MIME, node.id)
+        e.dataTransfer.effectAllowed = 'move'
+      } : undefined}
+      onDragEnd={() => onHoverDrop(null)}
       onClick={(e) => { e.stopPropagation(); onSelect(node.id) }}
-      onDragOver={isContainer ? (e) => {
+      onDragOver={(e) => {
         e.preventDefault()
         e.stopPropagation()
-        e.dataTransfer.dropEffect = 'copy'
-        onHoverDrop(node.id)
-      } : undefined}
-      onDrop={isContainer ? (e) => {
+        e.dataTransfer.dropEffect = e.dataTransfer.types.includes(DND_NODE_MIME) ? 'move' : 'copy'
+        if (node.id === 'root') {
+          onHoverDrop({ id: node.id, placement: 'INSIDE' })
+          return
+        }
+        const bounds = e.currentTarget.getBoundingClientRect()
+        const ratio = bounds.height > 0 ? (e.clientY - bounds.top) / bounds.height : 0.5
+        onHoverDrop({
+          id: node.id,
+          placement: ratio < 0.24
+            ? 'BEFORE'
+            : ratio > 0.76
+              ? 'AFTER'
+              : isContainer
+                ? 'INSIDE'
+                : ratio < 0.5
+                  ? 'BEFORE'
+                  : 'AFTER',
+        })
+      }}
+      onDrop={(e) => {
         e.preventDefault()
         e.stopPropagation()
+        const resolvedPlacement = placement ?? (isContainer ? 'INSIDE' : 'AFTER')
+        const movedNodeId = e.dataTransfer.getData(DND_NODE_MIME)
         const type = e.dataTransfer.getData(DND_MIME) as ComponentType
-        if (type) onDropNew(type, node.id)
+        if (movedNodeId) onDropMove(movedNodeId, node.id, resolvedPlacement)
+        else if (type) onDropNew(type, node.id, resolvedPlacement)
         onHoverDrop(null)
-      } : undefined}
-      onDragLeave={isContainer ? () => onHoverDrop(null) : undefined}
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onHoverDrop(null)
+      }}
       className={[
         'group/node relative rounded-sm transition-all duration-150',
         isContainer
           ? `border p-2.5 pt-3.5 ${containerLayout[node.type] ?? 'flex flex-col gap-2'}`
           : 'border border-transparent p-1',
-        isSelected
+        placement === 'BEFORE'
+          ? 'border-t-4 border-t-sky-400 bg-sky-500/5'
+          : placement === 'AFTER'
+            ? 'border-b-4 border-b-sky-400 bg-sky-500/5'
+            : isSelected
           ? 'border-jmix-500 ring-1 ring-jmix-500/50'
-          : isDropTarget
+          : placement === 'INSIDE'
             ? 'border-jmix-400 bg-jmix-500/10'
             : isContainer
               ? 'border-surface-border/80 hover:border-gray-500'
               : 'hover:border-surface-border',
+        node.id !== 'root' ? 'cursor-grab active:cursor-grabbing' : '',
       ].join(' ')}
     >
       {/* type chip */}
@@ -417,6 +645,7 @@ function NodeView({ node, depth, selectedId, dropTargetId, onSelect, onDropNew, 
             : 'border-surface-border bg-surface-light text-gray-500 group-hover/node:text-gray-400'
         }`}
       >
+        {node.id !== 'root' && <GripVertical size={9} className="mr-0.5 inline-block text-gray-600" />}
         {node.type}{isSelected ? ` · ${node.id}` : ''}
       </span>
 
@@ -438,9 +667,10 @@ function NodeView({ node, depth, selectedId, dropTargetId, onSelect, onDropNew, 
               node={child}
               depth={depth + 1}
               selectedId={selectedId}
-              dropTargetId={dropTargetId}
+              dropTarget={dropTarget}
               onSelect={onSelect}
               onDropNew={onDropNew}
+              onDropMove={onDropMove}
               onHoverDrop={onHoverDrop}
             />
           ))}
@@ -503,24 +733,45 @@ export default function ViewDesigner() {
 function NewViewDesigner() {
   const { projectConfig, addToast, isGenerating, setIsGenerating, setLastResult } = useStore()
 
-  const [view, setView] = useState<ViewModel>(() => ({
-    viewName: 'NewView',
-    packageName: `${projectConfig?.basePackage ?? 'com.example.app'}.view`,
-    viewType: 'blankView',
-    entityClass: '',
-    layout: makeRoot(),
-    dataContainers: [],
-    facets: [],
-    actions: [],
-    messages: {},
-  }))
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [dropTargetId, setDropTargetId] = useState<string | null>(null)
+  const [designer, dispatchDesigner] = useReducer(
+    designerHistoryReducer,
+    projectConfig?.basePackage ?? 'com.example.app',
+    (basePackage): DesignerHistoryState => ({
+      current: {
+        view: initialView(basePackage),
+        selectedId: null,
+      },
+      past: [],
+      future: [],
+    }),
+  )
+  const view = designer.current.view
+  const selectedId = designer.current.selectedId
+  const [dropTarget, setDropTarget] = useState<CanvasDropTarget | null>(null)
   const [cssText, setCssText] = useState('')
-  const [activePane, setActivePane] = useState<'palette' | 'canvas' | 'properties'>('canvas')
 
   const uid = useRef(1)
   const nextId = useCallback((type: string) => `${type}${uid.current++}`, [])
+
+  const commitView = useCallback((
+    label: string,
+    mutate: (current: ViewModel) => ViewModel,
+    nextSelection?: string | null,
+    coalesceKey?: string,
+  ) => {
+    dispatchDesigner({
+      type: 'COMMIT',
+      label,
+      mutate,
+      selectedId: nextSelection,
+      coalesceKey,
+      timestamp: Date.now(),
+    })
+  }, [])
+
+  const setSelectedId = useCallback((id: string | null) => {
+    dispatchDesigner({ type: 'SELECT', selectedId: id })
+  }, [])
 
   const layout = view.layout
   const selected = selectedId ? findNode(layout, selectedId) : null
@@ -532,23 +783,38 @@ function NewViewDesigner() {
     const node = selectedId ? findNode(layout, selectedId) : null
     setCssText(node?.cssClasses.join(' ') ?? '')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId])
+  }, [selectedId, selected?.cssClasses])
 
-  // Delete key removes the selected component (ignored while typing)
+  // Delete and history shortcuts are ignored while typing in an editor.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Delete') return
       const t = e.target as HTMLElement
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName) || t.isContentEditable) return
-      if (selectedId && selectedId !== 'root') handleRemove(selectedId)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        dispatchDesigner({ type: e.shiftKey ? 'REDO' : 'UNDO' })
+        return
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault()
+        dispatchDesigner({ type: 'REDO' })
+        return
+      }
+      if (e.key === 'Delete' && selectedId && selectedId !== 'root') handleRemove(selectedId)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, layout])
 
-  const setLayout = (fn: (l: ComponentModel) => ComponentModel) =>
-    setView((v) => ({ ...v, layout: fn(v.layout) }))
+  const setLayout = (
+    label: string,
+    fn: (layout: ComponentModel) => ComponentModel,
+    nextSelection?: string | null,
+  ) => commitView(label, (current) => {
+    const nextLayout = fn(current.layout)
+    return nextLayout === current.layout ? current : { ...current, layout: nextLayout }
+  }, nextSelection)
 
   // Nearest container ancestor of the selection (falls back to root)
   const getAddTargetId = (): string => {
@@ -559,53 +825,105 @@ function NewViewDesigner() {
     return 'root'
   }
 
-  const addComponent = (type: ComponentType, parentId: string) => {
+  const addComponent = (
+    type: ComponentType,
+    targetId: string,
+    placement: CanvasDropPlacement = 'INSIDE',
+  ) => {
     const comp = createComponent(type, nextId)
-    setLayout((l) => insertChild(l, parentId, comp))
-    setSelectedId(comp.id)
+    setLayout(
+      `Add ${type}`,
+      (current) => placeNode(current, comp, targetId, placement),
+      comp.id,
+    )
+  }
+
+  const selectComponent = (id: string | null) => {
+    setSelectedId(id)
   }
 
   const handleRemove = (id: string) => {
     const path = findPath(layout, id)
     const parentId = path && path.length > 1 ? path[path.length - 2].id : null
-    setLayout((l) => removeNode(l, id))
-    setSelectedId(parentId && parentId !== id ? parentId : null)
+    setLayout(
+      `Delete ${findNode(layout, id)?.type ?? 'component'}`,
+      (current) => removeNode(current, id),
+      parentId && parentId !== id ? parentId : null,
+    )
   }
 
   const handleDuplicate = (id: string) => {
-    setLayout((l) => duplicateNode(l, id, nextId))
+    setLayout('Duplicate component', (current) => duplicateNode(current, id, nextId))
+  }
+
+  const handleReparent = (
+    nodeId: string,
+    targetId: string,
+    placement: CanvasDropPlacement,
+  ) => {
+    const currentNode = findNode(layout, nodeId)
+    if (!currentNode || containsNode(currentNode, targetId)) {
+      addToast('A component cannot be moved inside itself.', 'error')
+      return
+    }
+    setLayout(
+      `Move ${currentNode.type}`,
+      (current) => reparentNode(current, nodeId, targetId, placement),
+      nodeId,
+    )
   }
 
   const updateSelected = (patch: Partial<ComponentModel>) => {
     if (!selectedId) return
-    setLayout((l) => updateNode(l, selectedId, (n) => ({ ...n, ...patch })))
+    const nextSelection = typeof patch.id === 'string' ? patch.id : selectedId
+    const fields = Object.keys(patch).sort().join(',')
+    commitView(
+      'Edit component properties',
+      (current) => ({
+        ...current,
+        layout: updateNode(current.layout, selectedId, (node) => ({ ...node, ...patch })),
+      }),
+      nextSelection,
+      `component:${selectedId}:${fields}`,
+    )
   }
 
   // ── Data containers ────────────────────────────────────────────────────────
 
   const addContainer = () => {
-    setView((v) => {
-      const n = v.dataContainers.length + 1
+    commitView('Add data container', (current) => {
+      const n = current.dataContainers.length + 1
       const container: DataContainerModel = {
         id: `container${n}`,
         type: 'collection',
-        entityClass: v.entityClass ?? '',
+        entityClass: current.entityClass ?? '',
         fetchPlan: { name: '_base', properties: [] },
         loader: { id: `container${n}Loader`, query: '', cacheable: false },
       }
-      return { ...v, dataContainers: [...v.dataContainers, container] }
+      return { ...current, dataContainers: [...current.dataContainers, container] }
     })
   }
 
   const updateContainer = (index: number, patch: Partial<DataContainerModel>) => {
-    setView((v) => ({
-      ...v,
-      dataContainers: v.dataContainers.map((c, i) => (i === index ? { ...c, ...patch } : c)),
-    }))
+    const fields = Object.keys(patch).sort().join(',')
+    commitView(
+      'Edit data container',
+      (current) => ({
+        ...current,
+        dataContainers: current.dataContainers.map((container, itemIndex) => (
+          itemIndex === index ? { ...container, ...patch } : container
+        )),
+      }),
+      undefined,
+      `container:${index}:${fields}`,
+    )
   }
 
   const removeContainer = (index: number) => {
-    setView((v) => ({ ...v, dataContainers: v.dataContainers.filter((_, i) => i !== index) }))
+    commitView('Delete data container', (current) => ({
+      ...current,
+      dataContainers: current.dataContainers.filter((_, itemIndex) => itemIndex !== index),
+    }))
   }
 
   // ── Generate ───────────────────────────────────────────────────────────────
@@ -634,7 +952,7 @@ function NewViewDesigner() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full min-w-0 flex-col bg-surface [color-scheme:dark]">
+    <div className="view-designer-shell flex h-full min-w-0 flex-col bg-surface [color-scheme:dark]">
       {/* Top bar */}
       <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-surface-border bg-surface-light/60 px-3 py-2">
         <div className="flex items-center gap-2">
@@ -646,7 +964,12 @@ function NewViewDesigner() {
           Name
           <input
             value={view.viewName}
-            onChange={(e) => setView((v) => ({ ...v, viewName: e.target.value }))}
+            onChange={(e) => commitView(
+              'Rename view',
+              (current) => ({ ...current, viewName: e.target.value }),
+              undefined,
+              'view:name',
+            )}
             className="w-32 py-1 text-xs normal-case tracking-normal sm:w-36"
             placeholder="CustomerDetailView"
           />
@@ -656,7 +979,12 @@ function NewViewDesigner() {
           Package
           <input
             value={view.packageName}
-            onChange={(e) => setView((v) => ({ ...v, packageName: e.target.value }))}
+            onChange={(e) => commitView(
+              'Change view package',
+              (current) => ({ ...current, packageName: e.target.value }),
+              undefined,
+              'view:package',
+            )}
             className="w-36 py-1 font-mono text-xs tracking-normal sm:w-48"
           />
         </label>
@@ -665,7 +993,10 @@ function NewViewDesigner() {
           Type
           <select
             value={view.viewType}
-            onChange={(e) => setView((v) => ({ ...v, viewType: e.target.value as ViewType }))}
+            onChange={(e) => commitView(
+              'Change view type',
+              (current) => ({ ...current, viewType: e.target.value as ViewType }),
+            )}
             className="py-1 text-xs"
           >
             {VIEW_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -676,13 +1007,52 @@ function NewViewDesigner() {
           Entity
           <input
             value={view.entityClass ?? ''}
-            onChange={(e) => setView((v) => ({ ...v, entityClass: e.target.value }))}
+            onChange={(e) => commitView(
+              'Change bound entity',
+              (current) => ({ ...current, entityClass: e.target.value }),
+              undefined,
+              'view:entity',
+            )}
             className="w-36 py-1 font-mono text-xs tracking-normal sm:w-44"
             placeholder="com.example.entity.Order"
           />
         </label>
 
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <div className="flex items-center rounded border border-surface-border bg-surface">
+            <button
+              type="button"
+              onClick={() => dispatchDesigner({ type: 'UNDO' })}
+              disabled={designer.past.length === 0}
+              className="inline-flex items-center gap-1 border-r border-surface-border px-2 py-1 text-[10px] text-gray-400 transition-colors hover:text-jmix-300 disabled:cursor-not-allowed disabled:opacity-35"
+              title={designer.past.length
+                ? `Undo: ${designer.past[designer.past.length - 1].label} (⌘/Ctrl+Z)`
+                : 'Nothing to undo'}
+              aria-label="Undo visual change"
+            >
+              <Undo2 size={11} />
+              <span className="hidden xl:inline">Undo</span>
+              {designer.past.length > 0 && (
+                <span className="text-[8px] text-gray-600">{designer.past.length}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => dispatchDesigner({ type: 'REDO' })}
+              disabled={designer.future.length === 0}
+              className="inline-flex items-center gap-1 px-2 py-1 text-[10px] text-gray-400 transition-colors hover:text-jmix-300 disabled:cursor-not-allowed disabled:opacity-35"
+              title={designer.future.length
+                ? `Redo: ${designer.future[0].label} (⌘/Ctrl+Shift+Z)`
+                : 'Nothing to redo'}
+              aria-label="Redo visual change"
+            >
+              <Redo2 size={11} />
+              <span className="hidden xl:inline">Redo</span>
+              {designer.future.length > 0 && (
+                <span className="text-[8px] text-gray-600">{designer.future.length}</span>
+              )}
+            </button>
+          </div>
           <span className="rounded-full border border-surface-border bg-surface-lighter px-2 py-0.5 text-[10px] text-gray-400">
             {componentCount} component{componentCount === 1 ? '' : 's'}
           </span>
@@ -693,21 +1063,22 @@ function NewViewDesigner() {
         </div>
       </header>
 
-      <ResponsivePaneSwitcher
-        value={activePane}
-        onChange={setActivePane}
-        label="View designer panels"
-        options={[
-          { id: 'palette', label: 'Components', icon: <PanelLeft size={12} />, badge: PALETTE.reduce((sum, group) => sum + group.items.length, 0) },
-          { id: 'canvas', label: 'Canvas', icon: <LayoutTemplate size={12} />, badge: componentCount },
-          { id: 'properties', label: 'Properties', icon: <Tag size={12} /> },
-        ]}
-      />
-
       {/* Three-pane workspace */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="view-designer-workspace relative flex min-h-0 flex-1 overflow-hidden">
         {/* Left: palette + data containers */}
-        <aside className={`${activePane === 'palette' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-56 min-[1600px]:border-r min-[1600px]:border-surface-border`}>
+        <aside
+          aria-label="FlowUI component palette"
+          className="view-designer-left flex min-h-0 flex-col border-r border-surface-border bg-surface-light"
+        >
+          <div className="flex items-center border-b border-surface-border">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-2 text-[10px] font-semibold uppercase tracking-widest text-gray-500">
+              <PanelLeft size={12} className="text-jmix-400" />
+              Components
+              <span className="rounded-full bg-surface-lighter px-1.5 py-px text-[9px] text-gray-400">
+                {PALETTE.reduce((sum, group) => sum + group.items.length, 0)}
+              </span>
+            </div>
+          </div>
           <div className="flex-1 overflow-y-auto">
             {PALETTE.map((group) => (
               <div key={group.category} className="border-b border-surface-border/60">
@@ -724,7 +1095,7 @@ function NewViewDesigner() {
                         e.dataTransfer.setData(DND_MIME, item.type)
                         e.dataTransfer.effectAllowed = 'copy'
                       }}
-                      onClick={() => addComponent(item.type, getAddTargetId())}
+                      onClick={() => addComponent(item.type, getAddTargetId(), 'INSIDE')}
                       title={`${item.label} — click to add to selected container, or drag onto the canvas`}
                       className="group flex cursor-grab items-center gap-1.5 rounded border border-transparent px-1.5 py-1.5 text-left text-[10px] text-gray-400 transition-all hover:border-surface-border hover:bg-surface-lighter hover:text-gray-200 active:scale-[0.97] active:cursor-grabbing"
                     >
@@ -808,7 +1179,7 @@ function NewViewDesigner() {
         </aside>
 
         {/* Center: canvas */}
-        <section className={`${activePane === 'canvas' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col min-[1600px]:flex`}>
+        <section className="view-designer-canvas flex min-h-0 min-w-0 flex-1 flex-col">
           <div
             className="flex-1 overflow-auto p-3 sm:p-6"
             style={{
@@ -822,10 +1193,11 @@ function NewViewDesigner() {
                 node={layout}
                 depth={0}
                 selectedId={selectedId}
-                dropTargetId={dropTargetId}
-                onSelect={setSelectedId}
+                dropTarget={dropTarget}
+                onSelect={selectComponent}
                 onDropNew={addComponent}
-                onHoverDrop={setDropTargetId}
+                onDropMove={handleReparent}
+                onHoverDrop={setDropTarget}
               />
               {layout.children.length === 0 && (
                 <p className="pointer-events-none -mt-8 pb-6 text-center text-[11px] text-gray-600">
@@ -844,13 +1216,22 @@ function NewViewDesigner() {
                 ? selectedPath.map((n) => n.id).join(' › ')
                 : 'Nothing selected'}
             </span>
-            <span className="ml-auto hidden text-gray-600 sm:block">Del — remove selected</span>
+            <span className="ml-auto hidden text-gray-600 sm:block">
+              Drag — reposition · Del — remove · ⌘/Ctrl+Z — undo
+            </span>
           </footer>
         </section>
 
         {/* Right: properties inspector */}
-        <aside className={`${activePane === 'properties' ? 'flex' : 'hidden'} min-h-0 w-full shrink-0 flex-col overflow-y-auto bg-surface-light/40 min-[1600px]:flex min-[1600px]:w-64 min-[1600px]:border-l min-[1600px]:border-surface-border`}>
-          <SectionHeader icon={Tag} title="Properties" />
+        <aside
+          aria-label="FlowUI property inspector"
+          className="view-designer-right flex min-h-0 flex-col overflow-y-auto border-l border-surface-border bg-surface-light"
+        >
+          <div className="flex items-center border-b border-surface-border">
+            <div className="min-w-0 flex-1">
+              <SectionHeader icon={Tag} title="Properties" />
+            </div>
+          </div>
 
           {!selected ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
@@ -867,13 +1248,19 @@ function NewViewDesigner() {
                 {selected.id !== 'root' && (
                   <div className="flex items-center gap-0.5">
                     <button
-                      onClick={() => setLayout((l) => moveNode(l, selected.id, -1))}
+                      onClick={() => setLayout(
+                        `Move ${selected.type} up`,
+                        (current) => moveNode(current, selected.id, -1),
+                      )}
                       className={btnIcon} title="Move up" aria-label="Move up"
                     >
                       <ArrowUp size={12} />
                     </button>
                     <button
-                      onClick={() => setLayout((l) => moveNode(l, selected.id, 1))}
+                      onClick={() => setLayout(
+                        `Move ${selected.type} down`,
+                        (current) => moveNode(current, selected.id, 1),
+                      )}
                       className={btnIcon} title="Move down" aria-label="Move down"
                     >
                       <ArrowDown size={12} />

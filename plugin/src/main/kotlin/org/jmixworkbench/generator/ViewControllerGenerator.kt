@@ -201,6 +201,9 @@ object ViewControllerGenerator {
         method: ControllerMethodModel,
         view: ViewModel
     ) {
+        require(method.body.isNotBlank() || method.returnType == "void") {
+            "Controller method '${method.name}' returns ${method.returnType} and requires an explicit implementation body."
+        }
         b.method {
             name = method.name
             returnType = method.returnType
@@ -286,7 +289,7 @@ object ViewControllerGenerator {
             if (method.body.isNotEmpty()) {
                 method.body.lines().forEach { line(it) }
             } else {
-                line("// TODO: implement ${method.name}")
+                line("// Intentionally empty event hook; add reviewed behavior explicitly.")
             }
         }
     }

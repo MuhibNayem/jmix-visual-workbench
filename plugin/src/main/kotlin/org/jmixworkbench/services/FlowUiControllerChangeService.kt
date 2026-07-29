@@ -2,7 +2,6 @@ package org.jmixworkbench.services
 
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiAnnotation
@@ -247,6 +246,13 @@ class FlowUiControllerChangeService(
                     return rejected(
                         "JVW-CONTROLLER-HANDLER-ENTITY-MISSING",
                         "The collection loader must resolve to a valid entity class before generating a typed handler.",
+                        request.controllerLocator.relativePath,
+                    )
+                }
+                if (request.kind == FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE) {
+                    return rejected(
+                        "JVW-CONTROLLER-DELEGATE-BODY-REQUIRED",
+                        "A load delegate changes runtime data semantics and requires a complete typed implementation; placeholder delegates are never generated.",
                         request.controllerLocator.relativePath,
                     )
                 }
@@ -584,7 +590,7 @@ class FlowUiControllerChangeService(
                         "java.util.List",
                     ) + entityType.imports,
                     bodyLines = listOf(
-                        "throw new UnsupportedOperationException(\"Implement the ${escapeJavaString(loaderId)} load delegate\");",
+                        "throw new IllegalStateException(\"JVW invariant violation: unvalidated load delegate\");",
                     ),
                 )
             }
@@ -688,11 +694,7 @@ class FlowUiControllerChangeService(
                 ),
             )
         }
-        val baseDir = project.basePath?.let(LocalFileSystem.getInstance()::findFileByPath)
-            ?: return LoadedJavaController.rejected(
-                WorkspaceChangeIssue("JVW-CONTROLLER-PROJECT-MISSING", "The project root is unavailable."),
-            )
-        val file = baseDir.findFileByRelativePath(validated.relativePath)
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(validated.relativePath)
             ?: return LoadedJavaController.rejected(
                 WorkspaceChangeIssue(
                     "JVW-CONTROLLER-SOURCE-MISSING",
@@ -700,11 +702,12 @@ class FlowUiControllerChangeService(
                     validated.relativePath,
                 ),
             )
-        if (file.isDirectory || !VfsUtilCore.isAncestor(baseDir, file, false)) {
+        val file = resolved.file
+        if (file.isDirectory || !VfsUtilCore.isAncestor(resolved.root, file, false)) {
             return LoadedJavaController.rejected(
                 WorkspaceChangeIssue(
                     "JVW-CONTROLLER-PATH-REJECTED",
-                    "The controller is outside the open project.",
+                    "The controller is outside the registered project content roots.",
                     validated.relativePath,
                 ),
             )

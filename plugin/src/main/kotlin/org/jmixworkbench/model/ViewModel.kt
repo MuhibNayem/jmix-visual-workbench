@@ -372,5 +372,19 @@ data class MenuEntryModel(
     val order: Int = 100,
     val viewId: String? = null,
     val shortcut: String? = null,
-    val openedBy: String? = null
+    val openedBy: String? = null,
+    val type: MenuEntryType? = null,
+    val description: String? = null,
+    val classNames: String? = null,
+    val opened: Boolean = false,
+    val bean: String? = null,
+    val beanMethod: String? = null,
+    val title: String? = null,
 )
+
+enum class MenuEntryType {
+    MENU,
+    VIEW,
+    BEAN,
+    SEPARATOR,
+}

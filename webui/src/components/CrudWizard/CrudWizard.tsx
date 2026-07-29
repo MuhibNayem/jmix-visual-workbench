@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
-import type { CrudOptions } from '../../types'
+import type { CrudOptions, WorkspaceChangePreviewResponse } from '../../types'
 
 const defaultOptions: CrudOptions = {
   generateMigration: true,
@@ -21,24 +21,49 @@ export default function CrudWizard() {
   const [options, setOptions] = useState<CrudOptions>(defaultOptions)
   const [step, setStep] = useState(0)
   const [result, setResult] = useState<{ files: string[]; errors: string[] } | null>(null)
+  const [generationPreview, setGenerationPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
 
   const steps = ['Entity', 'Options', 'Preview', 'Generate']
 
   const handleGenerate = async () => {
     if (!entity.className.trim()) {
-      addToast('Define an entity first in the Entity Designer tab', 'error')
+      addToast('Define an entity first in the Entity Designer', 'error')
       return
     }
     setIsGenerating(true)
     setResult(null)
+    setGenerationPreview(null)
     try {
-      const res = await bridge.generateCrud(entity, options)
-      if (res.success) {
-        setResult({ files: res.filesWritten, errors: [] })
-        addToast(`CRUD generated: ${res.filesWritten.length} files created`, 'success')
+      const preview = await bridge.previewCrudGeneration(entity, options)
+      if (preview.accepted && preview.planDigest) {
+        setGenerationPreview(preview)
+        addToast(`CRUD preview ready: ${preview.files.length} atomic file changes`, 'info')
       } else {
-        setResult({ files: [], errors: res.errors })
-        addToast(`CRUD generation failed`, 'error')
+        const errors = preview.issues.map(issue => issue.message)
+        setResult({ files: [], errors })
+        addToast('CRUD generation rejected', 'error')
+      }
+    } catch (e: any) {
+      setResult({ files: [], errors: [e.message] })
+      addToast(`Error: ${e.message}`, 'error')
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const handleApplyGeneration = async () => {
+    if (!generationPreview?.planDigest) return
+    setIsGenerating(true)
+    try {
+      const response = await bridge.applyCrudGeneration(entity, options, generationPreview.planDigest)
+      if (response.success) {
+        setResult({ files: response.filesChanged, errors: [] })
+        setGenerationPreview(null)
+        addToast(`CRUD generated atomically: ${response.filesChanged.length} files changed`, 'success')
+      } else {
+        const errors = response.issues.map(issue => issue.message)
+        setResult({ files: [], errors })
+        addToast('CRUD apply rejected; refresh the preview', 'error')
       }
     } catch (e: any) {
       setResult({ files: [], errors: [e.message] })
@@ -55,20 +80,19 @@ export default function CrudWizard() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-surface-light px-3 py-2.5 sm:px-4">
         <h2 className="text-sm font-semibold text-gray-200">CRUD Scaffolding Wizard</h2>
-        <div className="flex flex-wrap items-center justify-end gap-1">
-          {steps.map((s, i) => (
-            <button
-              key={s}
-              onClick={() => setStep(i)}
-              className={`px-3 py-1 text-xs rounded transition-colors ${
-                step === i
-                  ? 'bg-jmix-500 text-white'
-                  : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              {i + 1}. {s}
-            </button>
-          ))}
+        <div className="flex min-w-[11rem] max-w-xs flex-1 items-center gap-2 sm:flex-none" aria-label={`Step ${step + 1} of ${steps.length}: ${steps[step]}`}>
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 flex items-center justify-between gap-3 text-[10px]">
+              <span className="truncate font-medium text-gray-300">{steps[step]}</span>
+              <span className="shrink-0 text-gray-500">Step {step + 1} of {steps.length}</span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-surface">
+              <div
+                className="h-full rounded-full bg-jmix-500 transition-[width] duration-200"
+                style={{ width: `${((step + 1) / steps.length) * 100}%` }}
+              />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -109,7 +133,7 @@ export default function CrudWizard() {
             ) : (
               <div className="text-center py-16 text-gray-600">
                 <p className="text-sm mb-2">No entity defined yet.</p>
-                <p className="text-xs">Go to the Entity Designer tab to create an entity first.</p>
+                <p className="text-xs">Open the Entity Designer workspace to create an entity first.</p>
               </div>
             )}
             <div className="mt-6 flex justify-end">
@@ -213,7 +237,7 @@ export default function CrudWizard() {
           <div className="max-w-2xl mx-auto text-center">
             <h3 className="text-sm font-medium text-gray-200 mb-6">Ready to Generate</h3>
 
-            {!result ? (
+            {!result && !generationPreview ? (
               <button
                 onClick={handleGenerate}
                 disabled={isGenerating || !entity.className}
@@ -221,27 +245,69 @@ export default function CrudWizard() {
               >
                 {isGenerating ? (
                   <span className="flex items-center gap-2">
-                    <span className="animate-spin">⏳</span> Generating...
+                    <span className="animate-spin">⏳</span> Planning...
                   </span>
                 ) : (
-                  '⚡ Generate Full CRUD Stack'
+                  '⚡ Preview Full CRUD Stack'
                 )}
               </button>
+            ) : generationPreview ? (
+              <div className="space-y-4 text-left">
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                  <h4 className="text-xs font-semibold text-amber-200">
+                    Review {generationPreview.files.length} source-safe changes
+                  </h4>
+                  <p className="mt-1 text-[10px] leading-relaxed text-amber-100/60">
+                    Existing menu and message files are merged at exact source locations. New Java, FlowUI, security,
+                    fetch-plan, and Liquibase files are created only if their destinations remain unchanged.
+                  </p>
+                  <div className="mt-3 max-h-72 space-y-1 overflow-auto">
+                    {generationPreview.files.map((file) => (
+                      <div
+                        key={file.relativePath}
+                        className="flex min-w-0 items-center gap-2 rounded border border-amber-500/15 bg-black/15 px-2 py-1.5"
+                      >
+                        <span className="shrink-0 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] text-amber-200">
+                          {file.mode}
+                        </span>
+                        <span className="min-w-0 truncate font-mono text-[10px] text-amber-100/70">
+                          {file.relativePath}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    onClick={() => setGenerationPreview(null)}
+                    className="rounded bg-surface-lighter px-4 py-2 text-xs text-gray-300 hover:bg-surface-border"
+                  >
+                    Discard
+                  </button>
+                  <button
+                    onClick={handleApplyGeneration}
+                    disabled={isGenerating}
+                    className="rounded bg-jmix-500 px-4 py-2 text-xs font-medium text-white hover:bg-jmix-600 disabled:opacity-50"
+                  >
+                    {isGenerating ? 'Applying…' : 'Apply atomic CRUD change'}
+                  </button>
+                </div>
+              </div>
             ) : (
               <div className="text-left space-y-4">
-                {result.errors.length > 0 ? (
+                {result!.errors.length > 0 ? (
                   <div className="p-4 bg-red-900/20 border border-red-800 rounded-lg">
                     <h4 className="text-xs font-semibold text-red-300 mb-2">Errors</h4>
-                    {result.errors.map((e, i) => (
+                    {result!.errors.map((e, i) => (
                       <p key={i} className="text-xs text-red-400">{e}</p>
                     ))}
                   </div>
                 ) : (
                   <div className="p-4 bg-green-900/20 border border-green-800 rounded-lg">
                     <h4 className="text-xs font-semibold text-green-300 mb-2">
-                      ✓ Generated {result.files.length} files
+                      ✓ Generated {result!.files.length} files
                     </h4>
-                    {result.files.map((f, i) => (
+                    {result!.files.map((f, i) => (
                       <p key={i} className="text-xs text-green-400 font-mono py-0.5">{f}</p>
                     ))}
                   </div>

@@ -331,6 +331,8 @@ object FlowUiDescriptorParser {
         parentKey: String,
         tagName: String,
         attributes: Map<String, String>,
+        childCapable: Boolean = false,
+        beforeElementKey: String? = null,
     ): FlowUiPropertyChangeProposal {
         if (!XML_NAME.matches(tagName) || tagName.length > MAX_XML_NAME_LENGTH) {
             return proposalRejected(
@@ -385,16 +387,38 @@ object FlowUiDescriptorParser {
             attributes.toSortedMap().forEach { (name, value) ->
                 append(' ').append(name).append("=\"").append(escapeAttribute(value)).append('"')
             }
-            append("/>")
+            if (childCapable) {
+                append("></").append(tagName).append('>')
+            } else {
+                append("/>")
+            }
+        }
+        val beforeElement = beforeElementKey?.let { key ->
+            document.elements.singleOrNull { it.key == key }
+                ?.takeIf { it.parentKey == parent.key }
+                ?: return proposalRejected(
+                    "JVW-FLOWUI-PLACEMENT-STALE",
+                    "The requested insertion position is no longer a child of the destination.",
+                    document.relativePath,
+                )
         }
         val closingLineStart = document.sourceText.lastIndexOf('\n', parent.endTagStart - 1).let { it + 1 }
         val closingPrefix = document.sourceText.substring(closingLineStart, parent.endTagStart)
-        val edit = if (closingPrefix.all(Char::isWhitespace)) {
+        val edit = if (beforeElement != null) {
+            val beforeLineStart = document.sourceText.lastIndexOf('\n', beforeElement.sourceStart - 1).let { it + 1 }
+            val beforeIndent = indentationAt(document.sourceText, beforeElement.sourceStart)
+            WorkspaceTextEdit(
+                startOffset = beforeLineStart,
+                endOffset = beforeLineStart,
+                expectedText = "",
+                replacement = "$beforeIndent$markup$newline",
+            )
+        } else if (closingPrefix.all(Char::isWhitespace)) {
             WorkspaceTextEdit(
                 startOffset = closingLineStart,
-                endOffset = parent.endTagStart,
-                expectedText = closingPrefix,
-                replacement = "$childIndent$markup$newline$closingPrefix",
+                endOffset = closingLineStart,
+                expectedText = "",
+                replacement = "$childIndent$markup$newline",
             )
         } else {
             WorkspaceTextEdit(
@@ -406,9 +430,375 @@ object FlowUiDescriptorParser {
         }
         return structuralProposal(
             document = document,
-            operationIdentity = "insert\u0000$parentKey\u0000$tagName\u0000${attributes.toSortedMap()}",
+            operationIdentity = "insert\u0000$parentKey\u0000$beforeElementKey\u0000$tagName\u0000$childCapable\u0000${attributes.toSortedMap()}",
             label = "Insert ${requestedId ?: tagName}",
             edit = edit,
+        )
+    }
+
+    fun proposeReparentElement(
+        document: FlowUiDescriptorSnapshot,
+        elementKey: String,
+        newParentKey: String,
+        beforeElementKey: String? = null,
+    ): FlowUiPropertyChangeProposal {
+        val element = document.elements.singleOrNull { it.key == elementKey }
+            ?: return proposalRejected(
+                "JVW-FLOWUI-ELEMENT-STALE",
+                "The selected FlowUI element no longer exists.",
+                document.relativePath,
+            )
+        if (element.parentKey == null) {
+            return proposalRejected(
+                "JVW-FLOWUI-ROOT-PROTECTED",
+                "The FlowUI document root cannot be moved.",
+                document.relativePath,
+            )
+        }
+        val newParent = document.elements.singleOrNull { it.key == newParentKey }
+            ?: return proposalRejected(
+                "JVW-FLOWUI-ELEMENT-STALE",
+                "The destination FlowUI element no longer exists.",
+                document.relativePath,
+            )
+        val descendants = linkedSetOf(element.key)
+        var changed = true
+        while (changed) {
+            changed = false
+            document.elements.asSequence()
+                .filter { it.parentKey in descendants && descendants.add(it.key) }
+                .forEach { changed = true }
+        }
+        if (newParent.key in descendants) {
+            return proposalRejected(
+                "JVW-FLOWUI-CYCLIC-MOVE",
+                "A component cannot be moved into itself or one of its descendants.",
+                document.relativePath,
+            )
+        }
+        if (newParent.selfClosing || newParent.endTagStart < newParent.startTagEnd) {
+            return proposalRejected(
+                "JVW-FLOWUI-PARENT-SELF-CLOSING",
+                "The destination cannot contain child elements.",
+                document.relativePath,
+            )
+        }
+        val beforeElement = beforeElementKey?.let { key ->
+            document.elements.singleOrNull { it.key == key }
+                ?.takeIf { it.parentKey == newParent.key }
+                ?: return proposalRejected(
+                    "JVW-FLOWUI-PLACEMENT-STALE",
+                    "The requested drop position is no longer a child of the destination.",
+                    document.relativePath,
+                )
+        }
+        if (beforeElement?.key == element.key) {
+            return FlowUiPropertyChangeProposal(true, true, null, emptyList())
+        }
+        if (element.parentKey == newParentKey) {
+            val siblings = newParent.childKeys
+            val currentIndex = siblings.indexOf(element.key)
+            val beforeIndex = beforeElement?.let { siblings.indexOf(it.key) } ?: siblings.size
+            val effectiveIndex = if (currentIndex < beforeIndex) beforeIndex - 1 else beforeIndex
+            if (currentIndex == effectiveIndex) {
+                return FlowUiPropertyChangeProposal(true, true, null, emptyList())
+            }
+        }
+
+        val source = document.sourceText
+        val newline = newlineOf(source)
+        val sourceLineStart = source.lastIndexOf('\n', element.sourceStart - 1).let { it + 1 }
+        val sourceLineEnd = source.indexOf('\n', element.sourceEnd)
+        val sourceContentEnd = if (sourceLineEnd >= 0) sourceLineEnd else source.length
+        val sourcePrefix = source.substring(sourceLineStart, element.sourceStart)
+        val sourceSuffix = source.substring(element.sourceEnd, sourceContentEnd)
+        val removeWholeLine = sourcePrefix.all(Char::isWhitespace) && sourceSuffix.all(Char::isWhitespace)
+        val removalStart = if (removeWholeLine) sourceLineStart else element.sourceStart
+        val removalEnd = if (removeWholeLine && sourceLineEnd >= 0) sourceLineEnd + 1 else element.sourceEnd
+
+        val parentIndent = indentationAt(source, newParent.sourceStart)
+        val childIndent = newParent.childKeys.firstOrNull()
+            ?.let { key -> document.elements.singleOrNull { it.key == key } }
+            ?.let { child -> indentationAt(source, child.sourceStart) }
+            ?.takeIf { it.length > parentIndent.length }
+            ?: "$parentIndent${indentUnitOf(source)}"
+        val originalIndent = indentationAt(source, element.sourceStart)
+        val movedMarkup = reindentElement(
+            source.substring(element.sourceStart, element.sourceEnd),
+            originalIndent,
+            childIndent,
+            newline,
+        )
+        val closingLineStart = source.lastIndexOf('\n', newParent.endTagStart - 1).let { it + 1 }
+        val closingPrefix = source.substring(closingLineStart, newParent.endTagStart)
+        val insertion = if (beforeElement != null) {
+            val beforeLineStart = source.lastIndexOf('\n', beforeElement.sourceStart - 1).let { it + 1 }
+            val beforeIndent = indentationAt(source, beforeElement.sourceStart)
+            WorkspaceTextEdit(
+                startOffset = beforeLineStart,
+                endOffset = beforeLineStart,
+                expectedText = "",
+                replacement = "$beforeIndent$movedMarkup$newline",
+            )
+        } else if (closingPrefix.all(Char::isWhitespace)) {
+            WorkspaceTextEdit(
+                startOffset = closingLineStart,
+                endOffset = closingLineStart,
+                expectedText = "",
+                replacement = "$childIndent$movedMarkup$newline",
+            )
+        } else {
+            WorkspaceTextEdit(
+                startOffset = newParent.endTagStart,
+                endOffset = newParent.endTagStart,
+                expectedText = "",
+                replacement = "$newline$childIndent$movedMarkup$newline$parentIndent",
+            )
+        }
+        if (insertion.startOffset in (removalStart + 1) until removalEnd) {
+            return proposalRejected(
+                "JVW-FLOWUI-CYCLIC-MOVE",
+                "The destination is inside the selected component source range.",
+                document.relativePath,
+            )
+        }
+        return structuralProposal(
+            document = document,
+            operationIdentity = "reparent\u0000$elementKey\u0000$newParentKey\u0000$beforeElementKey",
+            label = "Position ${element.id ?: element.localTag} in ${newParent.id ?: newParent.localTag}",
+            edits = listOf(
+                WorkspaceTextEdit(
+                    startOffset = removalStart,
+                    endOffset = removalEnd,
+                    expectedText = source.substring(removalStart, removalEnd),
+                    replacement = "",
+                ),
+                insertion,
+            ),
+        )
+    }
+
+    fun proposeCopyElement(
+        document: FlowUiDescriptorSnapshot,
+        elementKey: String,
+        newParentKey: String,
+        beforeElementKey: String? = null,
+    ): FlowUiPropertyChangeProposal {
+        val element = document.elements.singleOrNull { it.key == elementKey }
+            ?: return proposalRejected(
+                "JVW-FLOWUI-ELEMENT-STALE",
+                "The copied FlowUI element no longer exists.",
+                document.relativePath,
+            )
+        if (element.parentKey == null) {
+            return proposalRejected(
+                "JVW-FLOWUI-ROOT-PROTECTED",
+                "The FlowUI document root cannot be copied.",
+                document.relativePath,
+            )
+        }
+        val newParent = document.elements.singleOrNull { it.key == newParentKey }
+            ?: return proposalRejected(
+                "JVW-FLOWUI-ELEMENT-STALE",
+                "The paste destination no longer exists.",
+                document.relativePath,
+            )
+        if (newParent.selfClosing || newParent.endTagStart < newParent.startTagEnd) {
+            return proposalRejected(
+                "JVW-FLOWUI-PARENT-SELF-CLOSING",
+                "The paste destination cannot contain child elements.",
+                document.relativePath,
+            )
+        }
+        val subtree = document.elements.filter {
+            it.sourceStart >= element.sourceStart && it.sourceEnd <= element.sourceEnd
+        }
+        if (newParent.key in subtree.map(FlowUiElementSnapshot::key)) {
+            return proposalRejected(
+                "JVW-FLOWUI-CYCLIC-COPY",
+                "A component cannot be copied into itself or one of its descendants.",
+                document.relativePath,
+            )
+        }
+        val duplicateIds = subtree.mapNotNull(FlowUiElementSnapshot::id)
+            .groupingBy { it }
+            .eachCount()
+            .filterValues { it > 1 }
+            .keys
+        if (duplicateIds.isNotEmpty()) {
+            return proposalRejected(
+                "JVW-FLOWUI-DUPLICATE-ID",
+                "The selected subtree already contains duplicate ids and cannot be copied safely.",
+                document.relativePath,
+            )
+        }
+        val beforeElement = beforeElementKey?.let { key ->
+            document.elements.singleOrNull { it.key == key }
+                ?.takeIf { it.parentKey == newParent.key }
+                ?: return proposalRejected(
+                    "JVW-FLOWUI-PLACEMENT-STALE",
+                    "The requested paste position is no longer a child of the destination.",
+                    document.relativePath,
+                )
+        }
+        val usedIds = document.elements.mapNotNull(FlowUiElementSnapshot::id).toMutableSet()
+        val copiedIds = linkedMapOf<String, String>()
+        subtree.mapNotNull(FlowUiElementSnapshot::id).forEach { original ->
+            copiedIds[original] = nextCopyId(original, usedIds)
+        }
+        var markup = document.sourceText.substring(element.sourceStart, element.sourceEnd)
+        val replacements = subtree.flatMap { copied ->
+            copied.attributes.mapNotNull { attribute ->
+                val replacement = when {
+                    attribute.name == "id" -> copiedIds[attribute.value]
+                    else -> rewriteCopiedReference(attribute.value, copiedIds)
+                        .takeIf { it != attribute.value }
+                } ?: return@mapNotNull null
+                RelativeReplacement(
+                    start = attribute.valueStart - element.sourceStart,
+                    end = attribute.valueEnd - element.sourceStart,
+                    value = escapeAttribute(replacement),
+                )
+            }
+        }.sortedByDescending(RelativeReplacement::start)
+        replacements.forEach { replacement ->
+            markup = markup.replaceRange(replacement.start, replacement.end, replacement.value)
+        }
+        val insertion = insertionEdit(
+            document = document,
+            parent = newParent,
+            beforeElement = beforeElement,
+            markup = markup,
+            originalIndent = indentationAt(document.sourceText, element.sourceStart),
+        )
+        return structuralProposal(
+            document = document,
+            operationIdentity = "copy\u0000$elementKey\u0000$newParentKey\u0000$beforeElementKey\u0000$copiedIds",
+            label = "Copy ${element.id ?: element.localTag}",
+            edit = insertion,
+        )
+    }
+
+    fun proposeWrapElement(
+        document: FlowUiDescriptorSnapshot,
+        elementKey: String,
+        tagName: String,
+        attributes: Map<String, String>,
+    ): FlowUiPropertyChangeProposal {
+        val element = document.elements.singleOrNull { it.key == elementKey }
+            ?: return proposalRejected(
+                "JVW-FLOWUI-ELEMENT-STALE",
+                "The selected FlowUI element no longer exists.",
+                document.relativePath,
+            )
+        if (element.parentKey == null) {
+            return proposalRejected(
+                "JVW-FLOWUI-ROOT-PROTECTED",
+                "The FlowUI document root cannot be wrapped.",
+                document.relativePath,
+            )
+        }
+        validateInsertedElement(document, tagName, attributes)?.let { return it }
+        val newline = newlineOf(document.sourceText)
+        val outerIndent = indentationAt(document.sourceText, element.sourceStart)
+        val innerIndent = "$outerIndent${indentUnitOf(document.sourceText)}"
+        val original = document.sourceText.substring(element.sourceStart, element.sourceEnd)
+        val reindented = reindentElement(original, outerIndent, innerIndent, newline)
+        val opening = buildOpeningTag(tagName, attributes)
+        val replacement = buildString {
+            append(opening).append('>').append(newline)
+            append(innerIndent).append(reindented).append(newline)
+            append(outerIndent).append("</").append(tagName).append('>')
+        }
+        return structuralProposal(
+            document = document,
+            operationIdentity = "wrap\u0000$elementKey\u0000$tagName\u0000${attributes.toSortedMap()}",
+            label = "Wrap ${element.id ?: element.localTag} in ${attributes["id"] ?: tagName}",
+            edit = WorkspaceTextEdit(
+                startOffset = element.sourceStart,
+                endOffset = element.sourceEnd,
+                expectedText = original,
+                replacement = replacement,
+            ),
+        )
+    }
+
+    fun proposeConvertLayout(
+        document: FlowUiDescriptorSnapshot,
+        elementKey: String,
+        tagName: String,
+    ): FlowUiPropertyChangeProposal {
+        val element = document.elements.singleOrNull { it.key == elementKey }
+            ?: return proposalRejected(
+                "JVW-FLOWUI-ELEMENT-STALE",
+                "The selected FlowUI layout no longer exists.",
+                document.relativePath,
+            )
+        val targetLocalTag = tagName.substringAfter(':')
+        if (element.localTag !in CONVERTIBLE_LAYOUT_TAGS || targetLocalTag !in CONVERTIBLE_LAYOUT_TAGS) {
+            return proposalRejected(
+                "JVW-FLOWUI-LAYOUT-CONVERSION-REJECTED",
+                "Only Jmix box, flex, form, and grid layouts can be converted visually.",
+                document.relativePath,
+            )
+        }
+        if (element.localTag == targetLocalTag) {
+            return FlowUiPropertyChangeProposal(true, true, null, emptyList())
+        }
+        val convertedTag = if (':' in element.tagName && ':' !in tagName) {
+            "${element.tagName.substringBefore(':')}:$targetLocalTag"
+        } else {
+            tagName
+        }
+        if (!XML_NAME.matches(convertedTag) || convertedTag.length > MAX_XML_NAME_LENGTH) {
+            return proposalRejected(
+                "JVW-FLOWUI-TAG-REJECTED",
+                "The requested layout tag name is not safe.",
+                document.relativePath,
+            )
+        }
+        val targetProperties = LAYOUT_SPECIFIC_PROPERTIES[targetLocalTag].orEmpty()
+        val incompatibleProperties = ALL_LAYOUT_SPECIFIC_PROPERTIES - targetProperties
+        val source = document.sourceText
+        val edits = mutableListOf(
+            WorkspaceTextEdit(
+                startOffset = element.sourceStart + 1,
+                endOffset = element.sourceStart + 1 + element.tagName.length,
+                expectedText = element.tagName,
+                replacement = convertedTag,
+            ),
+        )
+        if (!element.selfClosing) {
+            edits += WorkspaceTextEdit(
+                startOffset = element.endTagStart + 2,
+                endOffset = element.endTagStart + 2 + element.tagName.length,
+                expectedText = element.tagName,
+                replacement = convertedTag,
+            )
+        }
+        element.attributes
+            .filter { it.name in incompatibleProperties }
+            .forEach { attribute ->
+                var start = attribute.sourceStart
+                while (start > element.sourceStart + 1 &&
+                    source[start - 1].isWhitespace() &&
+                    source[start - 1] != '\n' &&
+                    source[start - 1] != '\r'
+                ) {
+                    start -= 1
+                }
+                edits += WorkspaceTextEdit(
+                    startOffset = start,
+                    endOffset = attribute.sourceEnd,
+                    expectedText = source.substring(start, attribute.sourceEnd),
+                    replacement = "",
+                )
+            }
+        return structuralProposal(
+            document = document,
+            operationIdentity = "convert\u0000$elementKey\u0000$convertedTag",
+            label = "Convert ${element.id ?: element.localTag} to $targetLocalTag",
+            edits = edits,
         )
     }
 
@@ -448,6 +838,114 @@ object FlowUiDescriptorParser {
                 replacement = "",
             ),
         )
+    }
+
+    private fun validateInsertedElement(
+        document: FlowUiDescriptorSnapshot,
+        tagName: String,
+        attributes: Map<String, String>,
+    ): FlowUiPropertyChangeProposal? {
+        if (!XML_NAME.matches(tagName) || tagName.length > MAX_XML_NAME_LENGTH) {
+            return proposalRejected(
+                "JVW-FLOWUI-TAG-REJECTED",
+                "The requested component tag name is not safe to insert.",
+                document.relativePath,
+            )
+        }
+        if (attributes.size > MAX_INSERT_ATTRIBUTES ||
+            attributes.keys.any {
+                !PROPERTY_NAME.matches(it) || it.length > MAX_XML_NAME_LENGTH ||
+                    it == "xmlns" || it.startsWith("xmlns:")
+            }
+        ) {
+            return proposalRejected(
+                "JVW-FLOWUI-ATTRIBUTES-REJECTED",
+                "One or more component attributes are not safe to insert.",
+                document.relativePath,
+            )
+        }
+        val requestedId = attributes["id"]
+        if (requestedId != null && document.elements.any { it.id == requestedId }) {
+            return proposalRejected(
+                "JVW-FLOWUI-ID-CONFLICT",
+                "A FlowUI element with id '$requestedId' already exists.",
+                document.relativePath,
+            )
+        }
+        return null
+    }
+
+    private fun buildOpeningTag(tagName: String, attributes: Map<String, String>): String =
+        buildString {
+            append('<').append(tagName)
+            attributes.toSortedMap().forEach { (name, value) ->
+                append(' ').append(name).append("=\"").append(escapeAttribute(value)).append('"')
+            }
+        }
+
+    private fun insertionEdit(
+        document: FlowUiDescriptorSnapshot,
+        parent: FlowUiElementSnapshot,
+        beforeElement: FlowUiElementSnapshot?,
+        markup: String,
+        originalIndent: String,
+    ): WorkspaceTextEdit {
+        val source = document.sourceText
+        val newline = newlineOf(source)
+        val parentIndent = indentationAt(source, parent.sourceStart)
+        val childIndent = parent.childKeys.firstOrNull()
+            ?.let { key -> document.elements.singleOrNull { it.key == key } }
+            ?.let { child -> indentationAt(source, child.sourceStart) }
+            ?.takeIf { it.length > parentIndent.length }
+            ?: "$parentIndent${indentUnitOf(source)}"
+        val reindented = reindentElement(markup, originalIndent, childIndent, newline)
+        val closingLineStart = source.lastIndexOf('\n', parent.endTagStart - 1).let { it + 1 }
+        val closingPrefix = source.substring(closingLineStart, parent.endTagStart)
+        return if (beforeElement != null) {
+            val beforeLineStart = source.lastIndexOf('\n', beforeElement.sourceStart - 1).let { it + 1 }
+            val beforeIndent = indentationAt(source, beforeElement.sourceStart)
+            WorkspaceTextEdit(
+                startOffset = beforeLineStart,
+                endOffset = beforeLineStart,
+                expectedText = "",
+                replacement = "$beforeIndent$reindented$newline",
+            )
+        } else if (closingPrefix.all(Char::isWhitespace)) {
+            WorkspaceTextEdit(
+                startOffset = closingLineStart,
+                endOffset = closingLineStart,
+                expectedText = "",
+                replacement = "$childIndent$reindented$newline",
+            )
+        } else {
+            WorkspaceTextEdit(
+                startOffset = parent.endTagStart,
+                endOffset = parent.endTagStart,
+                expectedText = "",
+                replacement = "$newline$childIndent$reindented$newline$parentIndent",
+            )
+        }
+    }
+
+    private fun nextCopyId(original: String, used: MutableSet<String>): String {
+        val base = "${original}Copy"
+        var candidate = base
+        var suffix = 2
+        while (candidate in used) {
+            candidate = "$base$suffix"
+            suffix += 1
+        }
+        used += candidate
+        return candidate
+    }
+
+    private fun rewriteCopiedReference(value: String, copiedIds: Map<String, String>): String {
+        copiedIds[value]?.let { return it }
+        val prefix = copiedIds.keys
+            .filter { value.startsWith("$it.") }
+            .maxByOrNull(String::length)
+            ?: return value
+        return copiedIds.getValue(prefix) + value.removePrefix(prefix)
     }
 
     fun proposeMoveElement(
@@ -503,6 +1001,14 @@ object FlowUiDescriptorParser {
         label: String,
         edit: WorkspaceTextEdit,
     ): FlowUiPropertyChangeProposal =
+        structuralProposal(document, operationIdentity, label, listOf(edit))
+
+    private fun structuralProposal(
+        document: FlowUiDescriptorSnapshot,
+        operationIdentity: String,
+        label: String,
+        edits: List<WorkspaceTextEdit>,
+    ): FlowUiPropertyChangeProposal =
         FlowUiPropertyChangeProposal(
             accepted = true,
             noChange = false,
@@ -514,7 +1020,7 @@ object FlowUiDescriptorParser {
                         relativePath = document.relativePath,
                         mode = WorkspaceFileChangeMode.MODIFY,
                         baseRevisionFingerprint = document.revisionFingerprint,
-                        edits = listOf(edit),
+                        edits = edits,
                     ),
                 ),
             ),
@@ -634,6 +1140,12 @@ object FlowUiDescriptorParser {
         val attributes: List<FlowUiAttributeSnapshot>,
     )
 
+    private data class RelativeReplacement(
+        val start: Int,
+        val end: Int,
+        val value: String,
+    )
+
     private data class ElementBuilder(
         val key: String,
         val tagName: String,
@@ -665,8 +1177,46 @@ object FlowUiDescriptorParser {
         return indentation ?: "    "
     }
 
+    private fun reindentElement(
+        markup: String,
+        oldIndent: String,
+        newIndent: String,
+        newline: String,
+    ): String =
+        markup.split(newline).mapIndexed { index, line ->
+            if (index == 0 || line.isEmpty()) {
+                line
+            } else if (line.startsWith(oldIndent)) {
+                newIndent + line.removePrefix(oldIndent)
+            } else {
+                newIndent + line.trimStart()
+            }
+        }.joinToString(newline)
+
     private const val MAX_XML_NAME_LENGTH = 120
     private const val MAX_INSERT_ATTRIBUTES = 100
     private val PROPERTY_NAME = Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""")
     private val XML_NAME = Regex("""[A-Za-z_][A-Za-z0-9_.:-]*""")
+    private val CONVERTIBLE_LAYOUT_TAGS = setOf("vbox", "hbox", "flexLayout", "formLayout", "gridLayout")
+    private val LAYOUT_SPECIFIC_PROPERTIES = mapOf(
+        "vbox" to setOf("spacing", "padding", "margin", "alignItems", "justifyContent", "expand"),
+        "hbox" to setOf("spacing", "padding", "margin", "alignItems", "justifyContent", "wrap", "expand"),
+        "flexLayout" to setOf(
+            "flexDirection",
+            "flexWrap",
+            "justifyContent",
+            "alignItems",
+            "alignContent",
+        ),
+        "formLayout" to setOf(
+            "autoResponsive",
+            "minColumns",
+            "maxColumns",
+            "columnWidth",
+            "labelsPosition",
+            "responsiveSteps",
+        ),
+        "gridLayout" to setOf("columnMinWidth", "gap"),
+    )
+    private val ALL_LAYOUT_SPECIFIC_PROPERTIES = LAYOUT_SPECIFIC_PROPERTIES.values.flatten().toSet()
 }

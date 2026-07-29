@@ -62,10 +62,24 @@ class ApplicationGraphIndexer {
             when (file.language) {
                 SourceLanguage.JAVA,
                 SourceLanguage.KOTLIN,
-                -> indexJvm(file, artifacts, pendingLinks, diagnostics)
+                SourceLanguage.GROOVY,
+                -> indexJvm(
+                    file.copy(
+                        content = maskJvmComments(file.content),
+                        fingerprint = file.fingerprint,
+                    ),
+                    artifacts,
+                    pendingLinks,
+                    diagnostics,
+                )
 
                 SourceLanguage.XML -> indexXml(file, artifacts, pendingLinks, diagnostics)
                 SourceLanguage.PROPERTIES -> indexProperties(file, artifacts, pendingLinks, diagnostics)
+                SourceLanguage.YAML -> indexYaml(file, artifacts, pendingLinks, diagnostics)
+                SourceLanguage.SQL -> indexSql(file, artifacts, pendingLinks, diagnostics)
+                SourceLanguage.MIXED,
+                SourceLanguage.UNKNOWN,
+                -> indexProjectAsset(file, artifacts)
                 else -> Unit
             }
 
@@ -118,7 +132,11 @@ class ApplicationGraphIndexer {
         REST_SERVICE_NAME.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
         JMIX_ENTITY_NAME.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
         TABLE_NAME.find(file.content)?.groupValues?.get(1)?.let(aliases::add)
-        if (primaryKind == ArtifactKind.SERVICE) {
+        if (
+            primaryKind == ArtifactKind.SERVICE ||
+            primaryKind == ArtifactKind.BUSINESS_RULE ||
+            primaryKind == ArtifactKind.INTEGRATION_ENDPOINT
+        ) {
             aliases += typeName.replaceFirstChar(Char::lowercase)
         }
         val primary = addArtifact(
@@ -158,7 +176,11 @@ class ApplicationGraphIndexer {
             indexViewControllerMembers(file, primary, semanticKey, artifacts, links)
         }
 
-        if (primaryKind == ArtifactKind.SERVICE) {
+        if (
+            primaryKind == ArtifactKind.SERVICE ||
+            primaryKind == ArtifactKind.BUSINESS_RULE ||
+            primaryKind == ArtifactKind.INTEGRATION_ENDPOINT
+        ) {
             indexServiceMethods(file, primary, semanticKey, typeName, artifacts, links)
         }
 
@@ -328,6 +350,94 @@ class ApplicationGraphIndexer {
         addJvmRiskDiagnostics(file, semanticKey, diagnostics)
     }
 
+    /**
+     * Removes line and nested block comments without changing offsets.
+     *
+     * The semantic fallback parser must not discover types, annotations, SQL,
+     * service calls, or security policies from commented-out code. String,
+     * character, Java text-block, and Kotlin/Groovy triple-quoted contents are
+     * retained because Jmix metadata is frequently declared as annotation
+     * arguments. Newlines and total length remain identical so source
+     * navigation continues to point at the original file.
+     */
+    private fun maskJvmComments(content: String): String {
+        if ('/' !in content) return content
+        val masked = content.toCharArray()
+        var index = 0
+        var blockDepth = 0
+        var lineComment = false
+        var quote: Char? = null
+        var tripleQuote: Char? = null
+        var escaped = false
+        while (index < content.length) {
+            val current = content[index]
+            val next = content.getOrNull(index + 1)
+            val third = content.getOrNull(index + 2)
+            when {
+                lineComment -> {
+                    if (current == '\n' || current == '\r') {
+                        lineComment = false
+                    } else {
+                        masked[index] = ' '
+                    }
+                }
+                blockDepth > 0 -> {
+                    when {
+                        current == '/' && next == '*' -> {
+                            masked[index] = ' '
+                            masked[index + 1] = ' '
+                            blockDepth += 1
+                            index += 1
+                        }
+                        current == '*' && next == '/' -> {
+                            masked[index] = ' '
+                            masked[index + 1] = ' '
+                            blockDepth -= 1
+                            index += 1
+                        }
+                        current != '\n' && current != '\r' -> masked[index] = ' '
+                    }
+                }
+                tripleQuote != null -> {
+                    if (current == tripleQuote && next == tripleQuote && third == tripleQuote) {
+                        tripleQuote = null
+                        index += 2
+                    }
+                }
+                quote != null -> {
+                    when {
+                        escaped -> escaped = false
+                        current == '\\' -> escaped = true
+                        current == quote -> quote = null
+                    }
+                }
+                current == '"' && next == '"' && third == '"' -> {
+                    tripleQuote = '"'
+                    index += 2
+                }
+                current == '\'' && next == '\'' && third == '\'' -> {
+                    tripleQuote = '\''
+                    index += 2
+                }
+                current == '"' || current == '\'' -> quote = current
+                current == '/' && next == '/' -> {
+                    masked[index] = ' '
+                    masked[index + 1] = ' '
+                    lineComment = true
+                    index += 1
+                }
+                current == '/' && next == '*' -> {
+                    masked[index] = ' '
+                    masked[index + 1] = ' '
+                    blockDepth = 1
+                    index += 1
+                }
+            }
+            index += 1
+        }
+        return String(masked)
+    }
+
     private fun indexEntityAttributes(
         file: GraphSourceFile,
         entity: DetectedArtifact,
@@ -457,18 +567,44 @@ class ApplicationGraphIndexer {
         links: MutableList<PendingLink>,
     ) {
         val exposedMethods = REST_METHOD_DECLARATION.findAll(file.content)
-            .map { it.groupValues[1] }
-            .toSet()
+            .associateBy { it.groupValues[1] }
+        val restServiceName = REST_SERVICE_NAME.find(file.content)?.groupValues?.get(1)
+            ?: typeName.replaceFirstChar(Char::lowercase)
         val declarations = buildList {
             JAVA_METHOD_DECLARATION.findAll(file.content).forEach { match ->
-                add(MethodDeclaration(match.groupValues[1], match.range.last + 1))
+                add(
+                    MethodDeclaration(
+                        match.groupValues[1],
+                        match.range.last + 1,
+                        TRANSACTIONAL.containsMatchIn(match.value),
+                        visualSubflow = false,
+                    ),
+                )
             }
             KOTLIN_METHOD_DECLARATION.findAll(file.content).forEach { match ->
-                add(MethodDeclaration(match.groupValues[1], match.range.last + 1))
+                add(
+                    MethodDeclaration(
+                        match.groupValues[1],
+                        match.range.last + 1,
+                        TRANSACTIONAL.containsMatchIn(match.value),
+                        visualSubflow = false,
+                    ),
+                )
+            }
+            VISUAL_SUBFLOW_METHOD.findAll(file.content).forEach { match ->
+                add(
+                    MethodDeclaration(
+                        match.groupValues[1],
+                        match.range.last + 1,
+                        transactional = false,
+                        visualSubflow = true,
+                    ),
+                )
             }
         }.distinctBy(MethodDeclaration::name)
             .filterNot { it.name == typeName || it.name in METHOD_KEYWORDS }
 
+        val declaredArtifacts = linkedMapOf<String, DetectedArtifact>()
         declarations.forEach { declaration ->
             val aliases = service.aliases.mapTo(linkedSetOf()) { alias -> "$alias#${declaration.name}" }
             aliases += "$semanticKey#${declaration.name}"
@@ -478,25 +614,160 @@ class ApplicationGraphIndexer {
                 kind = ArtifactKind.SERVICE_METHOD,
                 semanticKey = "$semanticKey#${declaration.name}",
                 displayName = declaration.name,
-                summary = "Service operation declared by $typeName",
+                summary = when {
+                    declaration.visualSubflow -> "Reusable visual subflow declared by $typeName"
+                    declaration.transactional -> "Transactional service operation declared by $typeName"
+                    else -> "Service operation declared by $typeName"
+                },
                 symbol = "$semanticKey#${declaration.name}",
                 aliases = aliases,
                 token = declaration.name,
                 analysisText = file.memberSnippet(declaration.bodyAnchor),
             )
+            declaredArtifacts[declaration.name] = method
             links += service.link(
                 method,
                 RelationshipType.DECLARES,
                 file.locator(declaration.name, "$semanticKey#${declaration.name}"),
             )
-            if (declaration.name in exposedMethods) {
+            val exposedMatch = exposedMethods[declaration.name]
+            if (exposedMatch != null) {
                 links += service.link(
                     method,
                     RelationshipType.EXPOSES_SERVICE_METHOD,
                     file.locator(declaration.name, "$semanticKey#${declaration.name}"),
                 )
+                val parameters = parseMethodParameters(file.content, exposedMatch.range.last)
+                val contractKey = "$restServiceName#${declaration.name}@annotation"
+                val contract = addArtifact(
+                    artifacts = artifacts,
+                    file = file,
+                    kind = ArtifactKind.REST_SERVICE_METHOD,
+                    semanticKey = contractKey,
+                    displayName = "$restServiceName.${declaration.name}",
+                    summary = "Annotation-exposed REST service method with ${parameters.size} parameter(s)",
+                    symbol = "$semanticKey#${declaration.name}",
+                    aliases = setOf(contractKey, "$restServiceName#${declaration.name}"),
+                    token = declaration.name,
+                    analysisText = method.analysisText,
+                )
+                links += service.link(
+                    contract,
+                    RelationshipType.EXPOSES_SERVICE_METHOD,
+                    file.locator(declaration.name, "$semanticKey#${declaration.name}"),
+                )
+                links += contract.link(
+                    method,
+                    RelationshipType.IMPLEMENTED_BY,
+                    file.locator(declaration.name, "$semanticKey#${declaration.name}"),
+                )
+                parameters.forEach { parameter ->
+                    val parameterArtifact = addArtifact(
+                        artifacts = artifacts,
+                        file = file,
+                        kind = ArtifactKind.CONTRACT_PARAMETER,
+                        semanticKey = "$contractKey#${parameter.name}",
+                        displayName = parameter.name,
+                        summary = "REST parameter of type ${parameter.type}",
+                        symbol = "$semanticKey#${declaration.name}",
+                        aliases = setOf("$contractKey#${parameter.name}"),
+                        token = parameter.name,
+                    )
+                    links += contract.link(
+                        parameterArtifact,
+                        RelationshipType.DECLARES_PARAMETER,
+                        file.locator(parameter.name, "$semanticKey#${declaration.name}"),
+                    )
+                }
             }
         }
+        if (declarations.any(MethodDeclaration::visualSubflow)) {
+            declarations.forEach { caller ->
+                val callerArtifact = declaredArtifacts[caller.name] ?: return@forEach
+                val callerBody = callerArtifact.analysisText.orEmpty()
+                declarations
+                    .filter { it.visualSubflow && it.name != caller.name }
+                    .forEach { target ->
+                        if (!Regex("""\b${Regex.escape(target.name)}\s*\(""").containsMatchIn(callerBody)) {
+                            return@forEach
+                        }
+                        val targetArtifact = declaredArtifacts[target.name] ?: return@forEach
+                        links += callerArtifact.link(
+                            targetArtifact,
+                            RelationshipType.CALLS_SERVICE,
+                            file.locator(target.name, callerArtifact.semanticKey),
+                        )
+                    }
+            }
+        }
+    }
+
+    private fun parseMethodParameters(content: String, openingParenthesis: Int): List<FieldDeclaration> {
+        if (openingParenthesis !in content.indices || content[openingParenthesis] != '(') return emptyList()
+        var depth = 1
+        var index = openingParenthesis + 1
+        var quote: Char? = null
+        var escaped = false
+        while (index < content.length && depth > 0) {
+            val current = content[index]
+            when {
+                quote != null -> when {
+                    escaped -> escaped = false
+                    current == '\\' -> escaped = true
+                    current == quote -> quote = null
+                }
+                current == '"' || current == '\'' -> quote = current
+                current == '(' || current == '<' || current == '[' -> depth += 1
+                current == ')' || current == '>' || current == ']' -> depth -= 1
+            }
+            index += 1
+        }
+        if (depth != 0) return emptyList()
+        val raw = content.substring(openingParenthesis + 1, index - 1)
+        return splitTopLevel(raw).mapNotNull { declaration ->
+            val cleaned = declaration
+                .replace(Regex("""@\w+(?:\s*\([^)]*\))?\s*"""), "")
+                .replace(Regex("""\b(?:final|crossinline|noinline|vararg)\s+"""), "")
+                .trim()
+            when {
+                ':' in cleaned -> {
+                    val name = cleaned.substringBefore(':').trim().substringAfterLast(' ')
+                    val type = cleaned.substringAfter(':').substringBefore('=').trim()
+                    if (name.matches(IDENTIFIER) && type.isNotBlank()) FieldDeclaration(name, type) else null
+                }
+                else -> {
+                    val name = cleaned.substringBefore('=').trim().substringAfterLast(' ')
+                    val type = cleaned.substringBefore('=').trim().removeSuffix(name).trim()
+                    if (name.matches(IDENTIFIER) && type.isNotBlank()) FieldDeclaration(name, type) else null
+                }
+            }
+        }
+    }
+
+    private fun splitTopLevel(value: String): List<String> {
+        val result = mutableListOf<String>()
+        var start = 0
+        var depth = 0
+        var quote: Char? = null
+        var escaped = false
+        value.forEachIndexed { index, current ->
+            when {
+                quote != null -> when {
+                    escaped -> escaped = false
+                    current == '\\' -> escaped = true
+                    current == quote -> quote = null
+                }
+                current == '"' || current == '\'' -> quote = current
+                current == '<' || current == '(' || current == '[' || current == '{' -> depth += 1
+                current == '>' || current == ')' || current == ']' || current == '}' -> depth = (depth - 1).coerceAtLeast(0)
+                current == ',' && depth == 0 -> {
+                    result += value.substring(start, index)
+                    start = index + 1
+                }
+            }
+        }
+        result += value.substring(start)
+        return result.map(String::trim).filter(String::isNotBlank)
     }
 
     private fun indexSecurityPolicies(
@@ -521,8 +792,13 @@ class ApplicationGraphIndexer {
                 symbol = "$semanticKey#$policyType-${index + 1}",
                 aliases = setOf("$semanticKey#$policyType-${index + 1}"),
                 token = policyType,
+                offset = match.range.first,
             )
-            links += role.link(policy, RelationshipType.DECLARES, file.locator(policyType, policy.semanticKey))
+            links += role.link(
+                policy,
+                RelationshipType.DECLARES,
+                file.locatorAt(match.range.first, policy.semanticKey),
+            )
 
             when (policyType) {
                 "EntityPolicy" -> policyEntityReference(body)?.let { entity ->
@@ -750,7 +1026,15 @@ class ApplicationGraphIndexer {
             "menu-config", "menu" -> indexMenuXml(file, root, artifacts, links)
             "fetchPlans", "fetch-plans" -> indexFetchPlans(file, root, artifacts)
             "databaseChangeLog" -> indexLiquibase(file, root, artifacts, links)
-            "definitions" -> indexWorkflow(file, root, artifacts, links)
+            "definitions" -> if (
+                root.namespaceURI.orEmpty().contains("/DMN/", ignoreCase = true) ||
+                root.descendants("decisionTable").isNotEmpty()
+            ) {
+                indexDmn(file, root, artifacts, links)
+            } else {
+                indexWorkflow(file, root, artifacts, links)
+            }
+            "jasperReport" -> indexReportTemplate(file, root, artifacts, links)
             "services" -> if (root.namespaceURI.orEmpty().contains("/rest/services")) {
                 indexRestServices(file, root, artifacts, links, diagnostics)
             }
@@ -758,6 +1042,84 @@ class ApplicationGraphIndexer {
                 indexRestQueries(file, root, artifacts, links, diagnostics)
             }
         }
+    }
+
+    private fun indexReportTemplate(
+        file: GraphSourceFile,
+        root: Element,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+    ) {
+        val reportName = root.attr("name").ifBlank { file.fileNameWithoutExtension() }
+        val report = addArtifact(
+            artifacts,
+            file,
+            ArtifactKind.REPORT_TEMPLATE,
+            file.relativePath,
+            reportName,
+            "JasperReports template",
+            reportName,
+            setOf(reportName, file.relativePath, file.fileNameWithoutExtension()),
+            reportName,
+        )
+        root.descendants("queryString").forEachIndexed { index, queryElement ->
+            val queryText = queryElement.textContent.trim().replace(Regex("""\s+"""), " ")
+            if (queryText.isBlank()) return@forEachIndexed
+            val query = addArtifact(
+                artifacts,
+                file,
+                ArtifactKind.REPORT_QUERY,
+                "${file.relativePath}#report-query-${index + 1}",
+                "report-query-${index + 1}",
+                queryText.take(240),
+                "${file.relativePath}#report-query-${index + 1}",
+                setOf("${file.relativePath}#report-query-${index + 1}"),
+                queryText.take(80),
+            )
+            links += report.link(
+                query,
+                RelationshipType.EXECUTES_QUERY,
+                file.locator(queryText.take(80), reportName),
+            )
+            JPQL_FROM.find(queryText)?.groupValues?.get(1)?.let { entity ->
+                links += query.link(
+                    entity,
+                    RelationshipType.LOADS_ENTITY,
+                    setOf(ArtifactKind.ENTITY, ArtifactKind.DTO),
+                    file.locator(entity.substringAfterLast('.'), reportName),
+                )
+            }
+        }
+    }
+
+    private fun indexProjectAsset(
+        file: GraphSourceFile,
+        artifacts: MutableMap<String, DetectedArtifact>,
+    ) {
+        val extension = file.relativePath.substringAfterLast('.', "").lowercase()
+        val kind = when (extension) {
+            "css", "scss", "sass", "less" -> ArtifactKind.THEME_ASSET
+            "js", "jsx", "mjs", "cjs", "ts", "tsx", "html" -> ArtifactKind.FRONTEND_ASSET
+            "ftl", "freemarker" -> ArtifactKind.REPORT_TEMPLATE
+            "json" -> ArtifactKind.CONFIGURATION_FILE
+            else -> return
+        }
+        addArtifact(
+            artifacts,
+            file,
+            kind,
+            file.relativePath,
+            file.relativePath.substringAfterLast('/'),
+            when (kind) {
+                ArtifactKind.THEME_ASSET -> "Theme stylesheet"
+                ArtifactKind.FRONTEND_ASSET -> "Frontend source or template"
+                ArtifactKind.REPORT_TEMPLATE -> "Report template"
+                else -> "JSON configuration"
+            },
+            file.relativePath,
+            setOf(file.relativePath, file.relativePath.substringAfterLast('/')),
+            file.relativePath.substringAfterLast('/'),
+        )
     }
 
     private fun indexViewXml(
@@ -978,29 +1340,55 @@ class ApplicationGraphIndexer {
             setOf(menuKey),
             root.tagName,
         )
-        root.descendants("item").forEachIndexed { index, element ->
-            val id = element.attr("id").ifBlank { "item-${index + 1}" }
-            val item = addArtifact(
-                artifacts,
-                file,
-                ArtifactKind.MENU_ITEM,
-                "$menuKey#$id",
-                id,
-                "Menu item",
-                id,
-                setOf("$menuKey#$id", id),
-                id,
-            )
-            links += menu.link(item, RelationshipType.DECLARES, file.locator(id, id))
-            element.attr("view").takeIf(String::isNotBlank)?.let { viewId ->
-                links += item.link(
-                    viewId,
-                    RelationshipType.NAVIGATES_TO,
-                    setOf(ArtifactKind.VIEW_DESCRIPTOR),
-                    file.locator(viewId, id),
+        var nodeIndex = 0
+        fun visit(parent: DetectedArtifact, parentElement: Element, ancestry: String) {
+            parentElement.directChildren("menu", "item", "separator").forEachIndexed { childIndex, element ->
+                val tag = element.localTag()
+                nodeIndex += 1
+                val declaredId = element.attr("id")
+                val viewId = element.attr("view")
+                val bean = element.attr("bean")
+                val stableId = declaredId.ifBlank {
+                    viewId.ifBlank {
+                        bean.takeIf(String::isNotBlank)?.let { "$it#${element.attr("beanMethod")}" }
+                            ?: "$tag-${nodeIndex}"
+                    }
+                }
+                val semanticPath = "$ancestry/$childIndex:$stableId"
+                val item = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.MENU_ITEM,
+                    "$menuKey#$semanticPath",
+                    stableId,
+                    when {
+                        tag == "menu" -> "Menu container"
+                        tag == "separator" -> "Menu separator"
+                        bean.isNotBlank() -> "Bean menu action"
+                        else -> "View menu item"
+                    },
+                    stableId,
+                    setOf("$menuKey#$stableId", stableId, semanticPath),
+                    declaredId.ifBlank { tag },
                 )
+                links += menu.link(item, RelationshipType.DECLARES, file.locator(stableId, stableId))
+                if (parent != menu) {
+                    links += parent.link(item, RelationshipType.DECLARES, file.locator(stableId, stableId))
+                }
+                viewId.takeIf(String::isNotBlank)?.let { targetViewId ->
+                    links += item.link(
+                        targetViewId,
+                        RelationshipType.NAVIGATES_TO,
+                        setOf(ArtifactKind.VIEW_DESCRIPTOR),
+                        file.locator(targetViewId, stableId),
+                    )
+                }
+                if (tag == "menu") {
+                    visit(item, element, semanticPath)
+                }
             }
         }
+        visit(menu, root, "")
     }
 
     private fun indexFetchPlans(
@@ -1229,15 +1617,18 @@ class ApplicationGraphIndexer {
             setOf(file.relativePath, file.fileNameWithoutExtension()),
             root.tagName,
         )
-        root.descendants("include").forEachIndexed { index, element ->
-            val included = element.attr("file").ifBlank { "include-${index + 1}" }
+        (root.descendants("include").map { it to false } +
+            root.descendants("includeAll").map { it to true })
+            .forEachIndexed { index, (element, includeAll) ->
+            val included = element.attr(if (includeAll) "path" else "file")
+                .ifBlank { "include-${index + 1}" }
             val includeArtifact = addArtifact(
                 artifacts,
                 file,
                 ArtifactKind.LIQUIBASE_INCLUDE,
-                "${file.relativePath}#$included",
+                "${file.relativePath}#${if (includeAll) "all:" else ""}$included",
                 included,
-                "Liquibase include",
+                if (includeAll) "Liquibase includeAll directory" else "Liquibase include",
                 included,
                 setOf(included),
                 included,
@@ -1338,6 +1729,26 @@ class ApplicationGraphIndexer {
                     RelationshipType.PARTICIPATES_IN_WORKFLOW,
                     file.locator(nodeId, nodeId),
                 )
+                if (
+                    node.localTag() == "serviceTask" &&
+                    node.attr("flowable:type").equals("dmn", ignoreCase = true)
+                ) {
+                    node.descendants("field")
+                        .firstOrNull { it.attr("name") == "decisionTableReferenceKey" }
+                        ?.descendants("string")
+                        ?.firstOrNull()
+                        ?.textContent
+                        ?.trim()
+                        ?.takeIf(String::isNotBlank)
+                        ?.let { decisionKey ->
+                            links += state.link(
+                                decisionKey,
+                                RelationshipType.EVALUATES_DECISION,
+                                setOf(ArtifactKind.DECISION_TABLE),
+                                file.locator(decisionKey, nodeId),
+                            )
+                        }
+                }
             }
             processElement.descendants("sequenceFlow").forEach { flow ->
                 val source = stateByNodeId[flow.attr("sourceRef")] ?: return@forEach
@@ -1348,6 +1759,84 @@ class ApplicationGraphIndexer {
                     setOf(ArtifactKind.WORKFLOW_STATE),
                     file.locator(flow.attr("id").ifBlank { target }, flow.attr("id")),
                 )
+            }
+        }
+    }
+
+    private fun indexDmn(
+        file: GraphSourceFile,
+        root: Element,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+    ) {
+        root.descendants("decision").forEachIndexed { decisionIndex, decisionElement ->
+            val key = decisionElement.attr("id").ifBlank { "decision-${decisionIndex + 1}" }
+            val tableElement = decisionElement.descendants("decisionTable").firstOrNull()
+                ?: return@forEachIndexed
+            val hitPolicy = tableElement.attr("hitPolicy").ifBlank { "UNIQUE" }
+            val aggregation = tableElement.attr("aggregation").takeIf(String::isNotBlank)
+            val decision = addArtifact(
+                artifacts,
+                file,
+                ArtifactKind.DECISION_TABLE,
+                key,
+                decisionElement.attr("name").ifBlank { key },
+                buildString {
+                    append("DMN decision table · ").append(hitPolicy)
+                    aggregation?.let { append(" / ").append(it) }
+                },
+                key,
+                setOf(key, decisionElement.attr("name").ifBlank { key }),
+                key,
+            )
+            tableElement.directChildren("input").forEachIndexed { index, input ->
+                val id = input.attr("id").ifBlank { "input-${index + 1}" }
+                val variable = input.descendants("text").firstOrNull()?.textContent?.trim().orEmpty()
+                val column = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.DECISION_INPUT,
+                    "$key#input:$id",
+                    input.attr("label").ifBlank { variable.ifBlank { id } },
+                    "DMN input · ${input.descendants("inputExpression").firstOrNull()?.attr("typeRef").orEmpty()}",
+                    id,
+                    setOf("$key#input:$id", id, variable),
+                    id,
+                )
+                links += decision.link(column, RelationshipType.DECLARES, file.locator(id, key))
+            }
+            tableElement.directChildren("output").forEachIndexed { index, output ->
+                val id = output.attr("id").ifBlank { "output-${index + 1}" }
+                val variable = output.attr("name")
+                val column = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.DECISION_OUTPUT,
+                    "$key#output:$id",
+                    output.attr("label").ifBlank { variable.ifBlank { id } },
+                    "DMN output · ${output.attr("typeRef")}",
+                    id,
+                    setOf("$key#output:$id", id, variable),
+                    id,
+                )
+                links += decision.link(column, RelationshipType.DECLARES, file.locator(id, key))
+            }
+            tableElement.directChildren("rule").forEachIndexed { index, ruleElement ->
+                val id = ruleElement.attr("id").ifBlank { "rule-${index + 1}" }
+                val description = ruleElement.directChildren("description")
+                    .firstOrNull()?.textContent?.trim().orEmpty()
+                val rule = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.DECISION_RULE,
+                    "$key#rule:$id",
+                    description.ifBlank { id },
+                    "DMN rule ${index + 1}",
+                    id,
+                    setOf("$key#rule:$id", id),
+                    id,
+                )
+                links += decision.link(rule, RelationshipType.DECLARES, file.locator(id, key))
             }
         }
     }
@@ -1401,6 +1890,7 @@ class ApplicationGraphIndexer {
                     file.locator(value, key),
                 )
             }
+            indexIntegrationProperty(file, property, key, value, artifacts, links)
             if (!isMessages && SECRET_PROPERTY_KEY.containsMatchIn(key) && isLiteralSecret(value)) {
                 diagnostics += diagnostic(
                     reasonCode = "P2_HARDCODED_SECRET_PROPERTY",
@@ -1424,6 +1914,354 @@ class ApplicationGraphIndexer {
         }
     }
 
+    private fun indexYaml(
+        file: GraphSourceFile,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+        diagnostics: MutableList<DiscoveryDiagnostic>,
+    ) {
+        val configuration = addArtifact(
+            artifacts,
+            file,
+            ArtifactKind.CONFIGURATION_FILE,
+            file.relativePath,
+            file.fileNameWithoutExtension(),
+            "YAML application or module configuration",
+            file.relativePath,
+            setOf(file.relativePath, file.fileNameWithoutExtension()),
+            file.fileNameWithoutExtension(),
+        )
+        val parsed = parseYamlEntries(file)
+        parsed.entries.forEach { entry ->
+            val property = addArtifact(
+                artifacts,
+                file,
+                ArtifactKind.CONFIGURATION_PROPERTY,
+                "${file.relativePath}#${entry.key}",
+                entry.key,
+                entry.value.take(240),
+                entry.key,
+                setOf(entry.key, "${file.relativePath}#${entry.key}"),
+                entry.key.substringAfterLast('.'),
+                offset = entry.offset,
+            )
+            links += configuration.link(
+                property,
+                RelationshipType.DECLARES,
+                file.locatorAt(entry.offset, entry.key),
+            )
+            when (entry.key) {
+                "jmix.rest.services-config" -> links += property.link(
+                    entry.value,
+                    RelationshipType.CONFIGURES,
+                    setOf(ArtifactKind.REST_SERVICE_CONFIG),
+                    file.locatorAt(entry.offset, entry.key),
+                )
+                "jmix.rest.queries-config" -> links += property.link(
+                    entry.value,
+                    RelationshipType.CONFIGURES,
+                    setOf(ArtifactKind.REST_QUERY_CONFIG),
+                    file.locatorAt(entry.offset, entry.key),
+                )
+            }
+            indexIntegrationProperty(file, property, entry.key, entry.value, artifacts, links)
+            if (SECRET_PROPERTY_KEY.containsMatchIn(entry.key) && isLiteralSecret(entry.value)) {
+                diagnostics += diagnostic(
+                    reasonCode = "P2_HARDCODED_SECRET_PROPERTY",
+                    message = "A credential-like YAML property contains a literal value.",
+                    nextStep = "Use an environment variable, secret store, or encrypted deployment configuration.",
+                    category = DiagnosticCategory.SECURITY,
+                    severity = DiagnosticSeverity.ERROR,
+                    locator = file.locatorAt(entry.offset, entry.key),
+                )
+            }
+            if (HTTP_PROPERTY_VALUE.containsMatchIn(entry.value) && !isLocalEndpoint(entry.value)) {
+                diagnostics += diagnostic(
+                    reasonCode = "P2_EXTERNAL_ENDPOINT_CONFIGURATION",
+                    message = "An external endpoint is configured here and should be included in integration impact analysis.",
+                    nextStep = "Verify environment overrides, TLS, timeouts, authentication, retry, and data-handling requirements.",
+                    category = DiagnosticCategory.SOURCE,
+                    severity = DiagnosticSeverity.INFO,
+                    locator = file.locatorAt(entry.offset, entry.key),
+                )
+            }
+        }
+        if (parsed.unsupportedOffset != null) {
+            diagnostics += diagnostic(
+                reasonCode = "P2_YAML_PARTIAL",
+                message = "A YAML construct could not be represented safely in the semantic property map.",
+                nextStep = "Open the file natively and remove syntax errors; anchors, tags, or complex flow structures require an imported YAML parser.",
+                category = DiagnosticCategory.SOURCE,
+                severity = DiagnosticSeverity.ERROR,
+                locator = file.locatorAt(parsed.unsupportedOffset, file.relativePath),
+            )
+        }
+    }
+
+    private fun indexIntegrationProperty(
+        file: GraphSourceFile,
+        property: DetectedArtifact,
+        key: String,
+        value: String,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+    ) {
+        val normalizedKey = key.lowercase()
+        val externalEndpoint = HTTP_PROPERTY_VALUE.find(value)
+            ?.value
+            ?.takeUnless(::isLocalEndpoint)
+        val label = when {
+            "spring.security.oauth2" in normalizedKey ||
+                "jmix.oidc" in normalizedKey ||
+                "keycloak" in normalizedKey -> "Identity and OIDC"
+            "spring.mail" in normalizedKey ||
+                "jmix.email" in normalizedKey ||
+                normalizedKey.startsWith("mail.") ||
+                "smtp" in normalizedKey -> "Email and SMTP"
+            "google.cloud.storage" in normalizedKey ||
+                "gcs" in normalizedKey ||
+                "s3" in normalizedKey ||
+                "file-storage" in normalizedKey ||
+                "filestorage" in normalizedKey -> "File and object storage"
+            "sms" in normalizedKey -> "SMS provider"
+            "superset" in normalizedKey -> "Apache Superset"
+            "libreoffice" in normalizedKey -> "LibreOffice"
+            "report" in normalizedKey -> "Reporting"
+            "quartz" in normalizedKey -> "Quartz scheduler"
+            externalEndpoint != null -> "External HTTP endpoint"
+            else -> return
+        }
+        val integration = addArtifact(
+            artifacts,
+            file,
+            ArtifactKind.INTEGRATION_ENDPOINT,
+            "${file.relativePath}#integration:$label",
+            label,
+            externalEndpoint
+                ?.let(::redactEndpoint)
+                ?.let { "Configured endpoint: $it" }
+                ?: "Integration configuration",
+            label,
+            setOf(label, key, "${file.relativePath}#integration:$label"),
+            key,
+        )
+        links += property.link(
+            integration,
+            RelationshipType.CONFIGURES,
+            file.locator(key, key),
+        )
+    }
+
+    private fun redactEndpoint(value: String): String =
+        value.substringBefore('?')
+            .substringBefore('#')
+            .replace(Regex("""(https?://)[^/@\s]+@"""), "\$1<redacted>@")
+
+    private fun parseYamlEntries(file: GraphSourceFile): ParsedYaml {
+        val entries = mutableListOf<YamlEntry>()
+        val stack = mutableListOf<Pair<Int, String>>()
+        var unsupportedOffset: Int? = null
+        var offset = 0
+        var blockScalarIndent: Int? = null
+        file.content.lineSequence().forEach { rawLine ->
+            val lineOffset = offset
+            offset += rawLine.length + 1
+            if (rawLine.isBlank() || rawLine.trimStart().startsWith('#')) return@forEach
+            val indentText = rawLine.takeWhile(Char::isWhitespace)
+            if ('\t' in indentText) {
+                unsupportedOffset = unsupportedOffset ?: lineOffset
+                return@forEach
+            }
+            val indent = indentText.length
+            blockScalarIndent?.let { activeIndent ->
+                if (indent > activeIndent) return@forEach
+                blockScalarIndent = null
+            }
+            val content = stripYamlComment(rawLine.drop(indent)).trimEnd()
+            if (content.isBlank() || content == "---" || content == "...") {
+                if (content == "---") stack.clear()
+                return@forEach
+            }
+            if (content.startsWith("- ")) {
+                unsupportedOffset = unsupportedOffset ?: lineOffset + indent
+                return@forEach
+            }
+            val separator = yamlSeparator(content)
+            if (separator <= 0) {
+                unsupportedOffset = unsupportedOffset ?: lineOffset + indent
+                return@forEach
+            }
+            val rawKey = content.substring(0, separator).trim()
+            val key = rawKey.trim('"', '\'')
+            if (!YAML_KEY.matches(key)) {
+                unsupportedOffset = unsupportedOffset ?: lineOffset + indent
+                return@forEach
+            }
+            while (stack.isNotEmpty() && stack.last().first >= indent) stack.removeLast()
+            val path = (stack.map { it.second } + key).joinToString(".")
+            val rawValue = content.substring(separator + 1).trim()
+            if (rawValue.isBlank()) {
+                stack += indent to key
+                return@forEach
+            }
+            if (rawValue == "|" || rawValue == ">" || rawValue.startsWith("|-") || rawValue.startsWith(">-")) {
+                entries += YamlEntry(path, "<block scalar>", lineOffset + indent)
+                blockScalarIndent = indent
+                return@forEach
+            }
+            if (rawValue.startsWith('&') || rawValue.startsWith('*') || rawValue.startsWith('!') ||
+                rawKey == "<<" || rawValue.count { it == '[' } != rawValue.count { it == ']' } ||
+                rawValue.count { it == '{' } != rawValue.count { it == '}' }
+            ) {
+                unsupportedOffset = unsupportedOffset ?: lineOffset + indent + separator + 1
+            }
+            entries += YamlEntry(
+                key = path,
+                value = rawValue.trim().trim('"', '\''),
+                offset = lineOffset + indent,
+            )
+        }
+        return ParsedYaml(entries, unsupportedOffset)
+    }
+
+    private fun stripYamlComment(value: String): String {
+        var singleQuoted = false
+        var doubleQuoted = false
+        value.forEachIndexed { index, character ->
+            when {
+                character == '\'' && !doubleQuoted -> singleQuoted = !singleQuoted
+                character == '"' && !singleQuoted &&
+                    (index == 0 || value[index - 1] != '\\') -> doubleQuoted = !doubleQuoted
+                character == '#' && !singleQuoted && !doubleQuoted &&
+                    (index == 0 || value[index - 1].isWhitespace()) -> return value.substring(0, index)
+            }
+        }
+        return value
+    }
+
+    private fun yamlSeparator(value: String): Int {
+        var singleQuoted = false
+        var doubleQuoted = false
+        value.forEachIndexed { index, character ->
+            when {
+                character == '\'' && !doubleQuoted -> singleQuoted = !singleQuoted
+                character == '"' && !singleQuoted &&
+                    (index == 0 || value[index - 1] != '\\') -> doubleQuoted = !doubleQuoted
+                character == ':' && !singleQuoted && !doubleQuoted &&
+                    (index == value.lastIndex || value[index + 1].isWhitespace()) -> return index
+            }
+        }
+        return -1
+    }
+
+    private fun indexSql(
+        file: GraphSourceFile,
+        artifacts: MutableMap<String, DetectedArtifact>,
+        links: MutableList<PendingLink>,
+        diagnostics: MutableList<DiscoveryDiagnostic>,
+    ) {
+        val formattedLiquibase = LIQUIBASE_FORMATTED_SQL.containsMatchIn(file.content)
+        val root = addArtifact(
+            artifacts,
+            file,
+            if (formattedLiquibase) ArtifactKind.LIQUIBASE_ROOT else ArtifactKind.CONFIGURATION_FILE,
+            file.relativePath,
+            file.fileNameWithoutExtension(),
+            if (formattedLiquibase) "Liquibase formatted SQL changelog" else "SQL resource",
+            file.relativePath,
+            setOf(file.relativePath, file.fileNameWithoutExtension()),
+            file.fileNameWithoutExtension(),
+        )
+        LIQUIBASE_SQL_INCLUDE.findAll(file.content).forEachIndexed { index, match ->
+            val included = match.groupValues[1]
+            val include = addArtifact(
+                artifacts,
+                file,
+                ArtifactKind.LIQUIBASE_INCLUDE,
+                "${file.relativePath}#include:$index:$included",
+                included,
+                "Liquibase formatted SQL include",
+                included,
+                setOf(included),
+                included,
+                offset = match.range.first,
+            )
+            links += root.link(include, RelationshipType.INCLUDES_CHANGELOG, file.locatorAt(match.range.first, included))
+        }
+        val changeSets = LIQUIBASE_SQL_CHANGESET.findAll(file.content).toList()
+        if (formattedLiquibase && changeSets.isEmpty()) {
+            diagnostics += diagnostic(
+                reasonCode = "P2_LIQUIBASE_SQL_MALFORMED",
+                message = "A formatted SQL changelog has no valid --changeset author:id declaration.",
+                nextStep = "Add a valid Liquibase changeset header or remove the formatted-SQL marker.",
+                category = DiagnosticCategory.SOURCE,
+                severity = DiagnosticSeverity.ERROR,
+                locator = file.locator(),
+            )
+        }
+        val scopes = if (changeSets.isEmpty()) {
+            listOf(SqlScope(root, 0, file.content.length))
+        } else {
+            changeSets.mapIndexed { index, match ->
+                val author = match.groupValues[1]
+                val id = match.groupValues[2]
+                val changeSet = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.LIQUIBASE_CHANGESET,
+                    "${file.relativePath}#$author:$id",
+                    id,
+                    "Liquibase SQL changeset by $author",
+                    "$author:$id",
+                    setOf(id, "$author:$id", "${file.relativePath}#$id"),
+                    match.value,
+                    offset = match.range.first,
+                )
+                links += root.link(
+                    changeSet,
+                    RelationshipType.DECLARES,
+                    file.locatorAt(match.range.first, "$author:$id"),
+                )
+                SqlScope(
+                    owner = changeSet,
+                    start = match.range.last + 1,
+                    end = changeSets.getOrNull(index + 1)?.range?.first ?: file.content.length,
+                )
+            }
+        }
+        scopes.forEach { scope ->
+            val sql = file.content.substring(scope.start, scope.end)
+            SQL_TABLE_OPERATION.findAll(sql).forEachIndexed { index, match ->
+                val operation = match.groupValues[1].uppercase().replace(Regex("""\s+"""), " ")
+                val table = match.groupValues[2].trim('"', '`', '[', ']')
+                val absoluteOffset = scope.start + match.range.first
+                val schemaObject = addArtifact(
+                    artifacts,
+                    file,
+                    ArtifactKind.SCHEMA_OBJECT,
+                    "${scope.owner.semanticKey}#$operation:$table:$index",
+                    table,
+                    "$operation in ${scope.owner.displayName}",
+                    table,
+                    setOf(table),
+                    table,
+                    offset = absoluteOffset,
+                )
+                links += scope.owner.link(
+                    schemaObject,
+                    RelationshipType.MIGRATES,
+                    file.locatorAt(absoluteOffset, table),
+                )
+                links += schemaObject.link(
+                    table,
+                    RelationshipType.MIGRATES,
+                    setOf(ArtifactKind.ENTITY),
+                    file.locatorAt(absoluteOffset, table),
+                )
+            }
+        }
+    }
+
     private fun addImplicitSourceRelationships(
         files: List<GraphSourceFile>,
         artifacts: Map<String, DetectedArtifact>,
@@ -1433,28 +2271,52 @@ class ApplicationGraphIndexer {
             .filter { it.snapshot.kind in IMPLICIT_RELATIONSHIP_SOURCE_KINDS }
             .groupBy { it.snapshot.sourceLocator.relativePath }
         val entities = artifacts.values.filter { it.snapshot.kind == ArtifactKind.ENTITY }
-        val services = artifacts.values.filter { it.snapshot.kind == ArtifactKind.SERVICE }
+        val services = artifacts.values.filter {
+            it.snapshot.kind == ArtifactKind.SERVICE ||
+                it.snapshot.kind == ArtifactKind.BUSINESS_RULE ||
+                it.snapshot.kind == ArtifactKind.INTEGRATION_ENDPOINT
+        }
         val workflows = artifacts.values.filter { it.snapshot.kind == ArtifactKind.WORKFLOW_PROCESS }
 
         files.forEach { file ->
             val owners = sourceArtifacts[file.relativePath].orEmpty()
             owners.forEach { source ->
                 val evidenceText = source.analysisText ?: return@forEach
-                entities.filterNot { it.id == source.id }.forEach { entity ->
-                    if (entity.aliases.any { alias -> containsSymbol(evidenceText, alias) }) {
+                referencedArtifacts(source, evidenceText, entities.filterNot { it.id == source.id }).forEach { entity ->
+                    if (entity != null) {
                         links += source.link(
                             entity,
                             RelationshipType.USES_ENTITY,
                             file.locator(entity.displayName, source.semanticKey),
                         )
+                    } else {
+                        val reference = ambiguousReference(evidenceText, entities) ?: return@forEach
+                        links += source.link(
+                            reference,
+                            RelationshipType.USES_ENTITY,
+                            setOf(ArtifactKind.ENTITY),
+                            file.locator(reference, source.semanticKey),
+                        )
                     }
                 }
-                services.filterNot { it.id == source.id }.forEach { service ->
-                    if (service.aliases.any { alias -> containsSymbol(evidenceText, alias) }) {
+                referencedArtifacts(source, evidenceText, services.filterNot { it.id == source.id }).forEach { service ->
+                    if (service != null) {
                         links += source.link(
                             service,
                             RelationshipType.CALLS_SERVICE,
                             file.locator(service.displayName, source.semanticKey),
+                        )
+                    } else {
+                        val reference = ambiguousReference(evidenceText, services) ?: return@forEach
+                        links += source.link(
+                            reference,
+                            RelationshipType.CALLS_SERVICE,
+                            setOf(
+                                ArtifactKind.SERVICE,
+                                ArtifactKind.BUSINESS_RULE,
+                                ArtifactKind.INTEGRATION_ENDPOINT,
+                            ),
+                            file.locator(reference, source.semanticKey),
                         )
                     }
                 }
@@ -1471,6 +2333,50 @@ class ApplicationGraphIndexer {
         }
     }
 
+    /**
+     * Resolves text-only JVM references conservatively.
+     *
+     * A large composite build frequently contains the same simple class name in
+     * multiple bounded contexts. Fully-qualified references win. Otherwise the
+     * source module/build is preferred, and an ambiguous global match stays
+     * unresolved instead of creating false impact edges.
+     */
+    private fun referencedArtifacts(
+        source: DetectedArtifact,
+        evidenceText: String,
+        candidates: List<DetectedArtifact>,
+    ): List<DetectedArtifact?> {
+        val result = mutableListOf<DetectedArtifact?>()
+        candidates.groupBy { normalizeAlias(it.displayName) }.values.forEach { sameSimpleName ->
+            val qualified = sameSimpleName.filter { candidate ->
+                candidate.semanticKey.contains('.') &&
+                    containsQualifiedSymbol(evidenceText, candidate.semanticKey)
+            }
+            if (qualified.isNotEmpty()) {
+                result += qualified
+                return@forEach
+            }
+            if (sameSimpleName.none { containsArtifactReference(evidenceText, it) }) return@forEach
+            val preferred = preferredCandidates(source, sameSimpleName)
+            result += preferred.singleOrNull()
+        }
+        return result
+    }
+
+    private fun ambiguousReference(
+        evidenceText: String,
+        candidates: List<DetectedArtifact>,
+    ): String? = candidates
+        .groupBy { normalizeAlias(it.displayName) }
+        .values
+        .firstOrNull { group ->
+            group.size > 1 &&
+                group.any { containsArtifactReference(evidenceText, it) } &&
+                group.none { containsQualifiedSymbol(evidenceText, it.semanticKey) }
+        }
+        ?.first()
+        ?.displayName
+
     private fun resolveLinks(
         artifacts: Map<String, DetectedArtifact>,
         pending: List<PendingLink>,
@@ -1486,13 +2392,15 @@ class ApplicationGraphIndexer {
             val candidates = aliases[normalizeAlias(link.targetRef)].orEmpty()
                 .filter { link.expectedKinds.isEmpty() || it.snapshot.kind in link.expectedKinds }
                 .distinctBy(DetectedArtifact::id)
-            val target = candidates.singleOrNull()
+            val source = artifacts[link.sourceId]
+            val preferred = source?.let { preferredCandidates(it, candidates) } ?: candidates
+            val target = preferred.singleOrNull()
             val linkDiagnostic = when {
                 target != null -> null
-                candidates.size > 1 -> diagnostic(
+                preferred.size > 1 -> diagnostic(
                     reasonCode = "P2_RELATIONSHIP_AMBIGUOUS",
-                    message = "A relationship target is ambiguous: ${link.targetRef}.",
-                    nextStep = "Open the source and select the intended owned artifact.",
+                    message = "A relationship target is ambiguous in the nearest module/build scope: ${link.targetRef}.",
+                    nextStep = "Use a fully-qualified reference or import the intended owned artifact explicitly.",
                     category = DiagnosticCategory.RELATIONSHIP,
                     severity = DiagnosticSeverity.WARNING,
                     locator = link.locator,
@@ -1516,6 +2424,20 @@ class ApplicationGraphIndexer {
         }
     }
 
+    private fun preferredCandidates(
+        source: DetectedArtifact,
+        candidates: List<DetectedArtifact>,
+    ): List<DetectedArtifact> {
+        if (candidates.size <= 1) return candidates
+        val owner = source.snapshot.owner
+        val sameModule = candidates.filter {
+            it.snapshot.owner.buildId == owner.buildId && it.snapshot.owner.moduleId == owner.moduleId
+        }
+        if (sameModule.isNotEmpty()) return sameModule
+        val sameBuild = candidates.filter { it.snapshot.owner.buildId == owner.buildId }
+        return sameBuild.ifEmpty { candidates }
+    }
+
     private fun addArtifact(
         artifacts: MutableMap<String, DetectedArtifact>,
         file: GraphSourceFile,
@@ -1527,10 +2449,11 @@ class ApplicationGraphIndexer {
         aliases: Set<String>,
         token: String,
         analysisText: String? = null,
+        offset: Int? = null,
     ): DetectedArtifact {
         val id = CanonicalDiscoveryJson.artifactId(kind, file.owner.buildId, file.owner.moduleId, semanticKey)
         return artifacts.getOrPut(id) {
-            val locator = file.locator(token, symbol)
+            val locator = offset?.let { file.locatorAt(it, symbol) } ?: file.locator(token, symbol)
             val snapshot = ArtifactSnapshot(
                 id = id,
                 kind = kind,
@@ -1559,6 +2482,10 @@ class ApplicationGraphIndexer {
             REST_CONTROLLER.containsMatchIn(content) -> ArtifactKind.REST_CONTROLLER
             RESOURCE_ROLE.containsMatchIn(content) -> ArtifactKind.RESOURCE_ROLE
             ROW_ROLE.containsMatchIn(content) -> ArtifactKind.ROW_ROLE
+            INTEGRATION_CONNECTOR.containsMatchIn(content) -> ArtifactKind.INTEGRATION_ENDPOINT
+            typeName.endsWith("Rule") &&
+                (SERVICE.containsMatchIn(content) || SPRING_BEAN_NAME.containsMatchIn(content)) ->
+                ArtifactKind.BUSINESS_RULE
             REPOSITORY.containsMatchIn(content) || typeName.endsWith("Repository") -> ArtifactKind.REPOSITORY
             VALIDATOR.containsMatchIn(content) || typeName.endsWith("Validator") -> ArtifactKind.VALIDATOR
             SERVICE.containsMatchIn(content) ||
@@ -1651,6 +2578,10 @@ class ApplicationGraphIndexer {
 
     private fun GraphSourceFile.locator(token: String? = null, symbol: String? = null): SourceLocator {
         val offset = token?.takeIf(String::isNotBlank)?.let(content::indexOf)?.takeIf { it >= 0 }
+        return locatorAt(offset, symbol)
+    }
+
+    private fun GraphSourceFile.locatorAt(offset: Int?, symbol: String? = null): SourceLocator {
         val line = offset?.let { content.take(it).count { character -> character == '\n' } + 1 }
         val column = offset?.let {
             val lineStart = content.lastIndexOf('\n', it - 1).let { index -> if (index < 0) 0 else index + 1 }
@@ -1741,6 +2672,15 @@ class ApplicationGraphIndexer {
         if (simple.length < 3) return false
         return Regex("(?<![A-Za-z0-9_])${Regex.escape(simple)}(?![A-Za-z0-9_])").containsMatchIn(content)
     }
+
+    private fun containsQualifiedSymbol(content: String, symbol: String): Boolean {
+        if (!symbol.contains('.')) return false
+        return Regex("(?<![A-Za-z0-9_$.])${Regex.escape(symbol)}(?![A-Za-z0-9_$.])")
+            .containsMatchIn(content)
+    }
+
+    private fun containsArtifactReference(content: String, artifact: DetectedArtifact): Boolean =
+        artifact.aliases.any { alias -> containsSymbol(content, alias) }
 
     private fun normalizeAlias(value: String): String =
         value.trim().removeSuffix(".xml").replace('\\', '/').lowercase()
@@ -1884,13 +2824,33 @@ class ApplicationGraphIndexer {
         val type: String,
     )
 
+    private data class YamlEntry(
+        val key: String,
+        val value: String,
+        val offset: Int,
+    )
+
+    private data class ParsedYaml(
+        val entries: List<YamlEntry>,
+        val unsupportedOffset: Int?,
+    )
+
+    private data class SqlScope(
+        val owner: DetectedArtifact,
+        val start: Int,
+        val end: Int,
+    )
+
     private data class MethodDeclaration(
         val name: String,
         val bodyAnchor: Int,
+        val transactional: Boolean,
+        val visualSubflow: Boolean,
     )
 
     private companion object {
         val PACKAGE = Regex("""(?m)^\s*package\s+([A-Za-z_][\w.]*)""")
+        val IDENTIFIER = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
         val TYPE = Regex("""\b(enum\s+class|data\s+class|class|interface|object|record|enum)\s+([A-Za-z_][A-Za-z0-9_]*)""")
         val JMIX_ENTITY = Regex("""@(JmixEntity|Entity)\b""")
         val JMIX_ENTITY_NAME = Regex("""@JmixEntity\s*\([^)]*\bname\s*=\s*["']([^"']+)["']""")
@@ -1946,6 +2906,12 @@ class ApplicationGraphIndexer {
         val REST_METHOD_DECLARATION = Regex(
             """@RestMethod(?:\s*\([^)]*\))?[\s\S]{0,320}?\b(?:fun\s+|(?:public|protected|private)?\s*[\w<>,?.\[\]\s]+\s+)([A-Za-z_]\w*)\s*\(""",
         )
+        val VISUAL_SUBFLOW_METHOD = Regex(
+            """(?m)^[ \t]*@SuppressWarnings\([ \t]*["']JVW-VISUAL-SUBFLOW["'][ \t]*\)[ \t]*\r?\n[ \t]*private[ \t]+(?:static[ \t]+)?(?:final[ \t]+)?[\w<>,?.\[\] \t]+[ \t]+([A-Za-z_]\w*)[ \t]*\(""",
+        )
+        val INTEGRATION_CONNECTOR = Regex(
+            """@SuppressWarnings\([ \t]*["']JVW-INTEGRATION-CONNECTOR["'][ \t]*\)""",
+        )
         val ROLE_REFERENCES = Regex("""@(RolesAllowed|Secured)\s*\(\s*(?:value\s*=\s*)?([^)]*)\)""")
         val ROLE_ANNOTATION = Regex("""@(ResourceRole|RowLevelRole)\s*\(([\s\S]{0,1200}?)\)""")
         val POLICY_ANNOTATION = Regex(
@@ -1978,6 +2944,17 @@ class ApplicationGraphIndexer {
         val OUTBOUND_HTTP_CLIENT = Regex("""\b(RestTemplate|WebClient|HttpClient|FeignClient|RestClient)\b""")
         val HTTP_TIMEOUT_CONFIGURATION = Regex("""(?i)\b(connectTimeout|readTimeout|responseTimeout|requestTimeout|callTimeout)\b""")
         val PROPERTY_ENTRY = Regex("""(?m)^\s*([^#!\s][^=:\s]*)\s*[:=]\s*(.*?)\s*$""")
+        val YAML_KEY = Regex("""[A-Za-z0-9_.\-/]+""")
+        val LIQUIBASE_FORMATTED_SQL = Regex("""(?im)^\s*--\s*liquibase\s+formatted\s+sql\s*$""")
+        val LIQUIBASE_SQL_CHANGESET = Regex(
+            """(?im)^[ \t]*--[ \t]*changeset[ \t]+([A-Za-z0-9_.@-]+):([A-Za-z0-9_.-]+)(?:[ \t]+.*)?$""",
+        )
+        val LIQUIBASE_SQL_INCLUDE = Regex(
+            """(?im)^[ \t]*--[ \t]*include[ \t]+file:[ \t]*([^\s]+)(?:[ \t]+.*)?$""",
+        )
+        val SQL_TABLE_OPERATION = Regex(
+            """(?is)\b(create\s+table|alter\s+table|drop\s+table|insert\s+into|update|delete\s+from|merge\s+into|truncate\s+table)\s+(?:if\s+(?:not\s+)?exists\s+)?(["`\[]?[A-Za-z_][\w$.-]*["`\]]?)""",
+        )
         val SECRET_PROPERTY_KEY = Regex("""(?i)(password|passwd|secret|client-secret|api[-_.]?key|access[-_.]?token|private[-_.]?key)""")
         val HTTP_PROPERTY_VALUE = Regex("""(?i)^https?://""")
         val JPQL_FROM = Regex("""(?i)\bfrom\s+([A-Za-z_][\w.]*)""")
@@ -2001,8 +2978,10 @@ class ApplicationGraphIndexer {
             ArtifactKind.ENUM,
             ArtifactKind.VIEW_CONTROLLER,
             ArtifactKind.REPOSITORY,
+            ArtifactKind.BUSINESS_RULE,
             ArtifactKind.SERVICE,
             ArtifactKind.SERVICE_METHOD,
+            ArtifactKind.INTEGRATION_ENDPOINT,
             ArtifactKind.REST_CONTROLLER,
             ArtifactKind.REST_ENDPOINT,
             ArtifactKind.VALIDATOR,
@@ -2038,9 +3017,11 @@ class ApplicationGraphIndexer {
             "parallelGateway",
             "inclusiveGateway",
             "subProcess",
+            "transaction",
             "callActivity",
             "intermediateCatchEvent",
             "intermediateThrowEvent",
+            "boundaryEvent",
         )
     }
 }
@@ -2050,7 +3031,12 @@ data class GraphSourceFile(
     val content: String,
     val owner: ArtifactOwner,
     val language: SourceLanguage,
-    val origin: ArtifactOrigin = if (language == SourceLanguage.XML || language == SourceLanguage.PROPERTIES) {
+    val origin: ArtifactOrigin = if (
+        language == SourceLanguage.XML ||
+        language == SourceLanguage.PROPERTIES ||
+        language == SourceLanguage.YAML ||
+        language == SourceLanguage.SQL
+    ) {
         ArtifactOrigin.RESOURCE
     } else {
         ArtifactOrigin.SOURCE

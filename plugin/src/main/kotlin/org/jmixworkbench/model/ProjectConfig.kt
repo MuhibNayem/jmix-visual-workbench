@@ -6,7 +6,9 @@ data class ProjectConfig(
     val sourceRoot: String = "src/main/java",
     val resourceRoot: String = "src/main/resources",
     val jmixVersion: String = "2.4.0",
-    val databaseType: DatabaseType = DatabaseType.POSTGRES
+    val projectId: String? = null,
+    val databaseType: DatabaseType = DatabaseType.POSTGRES,
+    val changelogRoot: String? = null,
 ) {
     val sourcePath: String get() = "$projectRoot/$sourceRoot"
     val resourcePath: String get() = "$projectRoot/$resourceRoot"
@@ -30,7 +32,7 @@ data class ProjectConfig(
         "$resourcePath/${packageToPath(pkg)}/messages.properties"
 
     fun changelogPath(): String =
-        "$resourceRoot/db/changelog"
+        changelogRoot ?: "$resourceRoot/db/changelog"
 }
 
 enum class DatabaseType {

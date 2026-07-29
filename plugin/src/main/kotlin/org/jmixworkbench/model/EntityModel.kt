@@ -7,6 +7,9 @@ import com.google.gson.annotations.SerializedName
 data class EntityModel(
     val className: String,
     val packageName: String,
+    val dataStore: String = "main",
+    val generationTarget: EntityGenerationTarget? = null,
+    var entityName: String = "",
     var tableName: String = "",
     val entityType: EntityType = EntityType.ENTITY,
     val id: IdConfig = IdConfig(),
@@ -17,6 +20,7 @@ data class EntityModel(
     val uniqueConstraints: MutableList<UniqueConstraintModel> = mutableListOf(),
     val instanceNamePattern: String? = null,
     val comment: String? = null,
+    val databaseView: Boolean = false,
     val ddlGeneration: DdlGenerationConfig = DdlGenerationConfig(),
     val softDelete: SoftDeleteConfig? = null,
     val multitenancy: MultitenancyConfig? = null,
@@ -30,11 +34,30 @@ data class EntityModel(
     val annotations: MutableList<CustomAnnotation> = mutableListOf()
 ) {
     val fullName: String get() = "$packageName.$className"
+    val resolvedEntityName: String
+        get() = entityName.ifEmpty { className }
     val resolvedTableName: String
         get() = tableName.ifEmpty {
             className.replace(Regex("([a-z])([A-Z])"), "$1_$2").uppercase()
         }
+
+    fun withProjectNaming(projectId: String?): EntityModel {
+        val prefix = projectId?.trim().orEmpty()
+        if (prefix.isEmpty()) return this
+        val defaultTable = className
+            .replace(Regex("([a-z0-9])([A-Z])"), "$1_$2")
+            .uppercase()
+        return copy(
+            entityName = entityName.ifEmpty { "${prefix}_$className" },
+            tableName = tableName.ifEmpty { "${prefix.uppercase()}_$defaultTable" },
+        )
+    }
 }
+
+data class EntityGenerationTarget(
+    val moduleId: String? = null,
+    val storeId: String? = null,
+)
 
 enum class EntityType {
     @SerializedName("entity") ENTITY,
@@ -90,14 +113,20 @@ enum class InheritanceStrategy {
 enum class TraitType(val interfaceName: String, val fields: List<String>) {
     @SerializedName("uuid") UUID_TRAIT("UuidEntity", listOf("id")),
     @SerializedName("softDelete") SOFT_DELETE("SoftDeleteEntity", listOf("deletedDate", "deletedBy")),
-    @SerializedName("hasTenantId") HAS_TENANT_ID("HasTenantId", listOf("tenantId")),
+    @SerializedName("hasTenantId") HAS_TENANT_ID("HasTenantId", listOf("sysTenantId")),
     @SerializedName("hasVersion") HAS_VERSION("HasVersion", listOf("version")),
     @SerializedName("createdBy") CREATED_BY("CreatedBy", listOf("createdBy")),
     @SerializedName("createdDate") CREATED_DATE("CreatedDate", listOf("createdDate")),
-    @SerializedName("updatedBy") UPDATED_BY("UpdatedBy", listOf("updatedBy")),
-    @SerializedName("updatedDate") UPDATED_DATE("UpdatedDate", listOf("updatedDate")),
-    @SerializedName("auditable") AUDITABLE("Auditable", listOf("createdBy", "createdDate", "updatedBy", "updatedDate")),
-    @SerializedName("standardEntity") STANDARD_ENTITY("StandardEntity", listOf("id", "version", "createdBy", "createdDate", "updatedBy", "updatedDate"))
+    @SerializedName("updatedBy") UPDATED_BY("LastModifiedBy", listOf("lastModifiedBy")),
+    @SerializedName("updatedDate") UPDATED_DATE("LastModifiedDate", listOf("lastModifiedDate")),
+    @SerializedName("auditable") AUDITABLE(
+        "Auditable",
+        listOf("createdBy", "createdDate", "lastModifiedBy", "lastModifiedDate"),
+    ),
+    @SerializedName("standardEntity") STANDARD_ENTITY(
+        "StandardEntity",
+        listOf("id", "version", "createdBy", "createdDate", "lastModifiedBy", "lastModifiedDate"),
+    )
 }
 
 // ─── Attributes ──────────────────────────────────────────────────────────────
@@ -148,8 +177,14 @@ data class AttributeModel(
             AttributeType.UUID -> "UUID"
             AttributeType.BYTE_ARRAY -> "byte[]"
             AttributeType.ENUM -> enumClass ?: "Object"
-            AttributeType.ASSOCIATION, AttributeType.COMPOSITION ->
-                association?.relatedEntity ?: "Object"
+            AttributeType.ASSOCIATION, AttributeType.COMPOSITION -> {
+                val related = association?.relatedEntity?.substringAfterLast('.') ?: "Object"
+                when (association?.associationType) {
+                    AssociationType.ONE_TO_MANY, AssociationType.MANY_TO_MANY ->
+                        "${association.collectionType.javaType}<$related>"
+                    else -> related
+                }
+            }
             AttributeType.EMBEDDED -> embeddedClass ?: "Object"
         }
 
@@ -162,8 +197,16 @@ data class AttributeModel(
             AttributeType.LOCAL_TIME -> listOf("java.time.LocalTime")
             AttributeType.OFFSET_DATE_TIME -> listOf("java.time.OffsetDateTime")
             AttributeType.UUID -> listOf("java.util.UUID")
+            AttributeType.ASSOCIATION, AttributeType.COMPOSITION -> when (association?.associationType) {
+                AssociationType.ONE_TO_MANY, AssociationType.MANY_TO_MANY ->
+                    listOf(association.collectionType.importPath)
+                else -> emptyList()
+            }
             else -> emptyList()
         }
+
+    val relationshipIdAttributeName: String
+        get() = association?.localIdAttributeName?.takeIf(String::isNotBlank) ?: "${name}Id"
 }
 
 enum class AttributeType {
@@ -189,14 +232,25 @@ enum class AttributeType {
 data class AssociationConfig(
     val associationType: AssociationType,
     val relatedEntity: String,
+    val relatedTableName: String? = null,
+    val relatedIdColumnName: String = "ID",
+    val relatedIdType: IdType = IdType.UUID,
+    val localIdAttributeName: String? = null,
     val mappedBy: String? = null,
     val joinColumnName: String? = null,
     val joinTable: JoinTableConfig? = null,
     val cascade: MutableList<CascadeType> = mutableListOf(),
     val fetch: FetchType = FetchType.LAZY,
+    val collectionType: AssociationCollectionType = AssociationCollectionType.LIST,
+    val crossDataStore: Boolean = false,
     val orphanRemoval: Boolean = false,
     val onDelete: String? = null
 )
+
+enum class AssociationCollectionType(val javaType: String, val importPath: String) {
+    @SerializedName("list") LIST("List", "java.util.List"),
+    @SerializedName("set") SET("Set", "java.util.Set"),
+}
 
 enum class AssociationType {
     @SerializedName("manyToOne") MANY_TO_ONE,
@@ -272,11 +326,23 @@ data class UniqueConstraintModel(
 
 data class DdlGenerationConfig(
     val enabled: Boolean = true,
+    val mode: DdlGenerationMode = DdlGenerationMode.CREATE_AND_DROP,
+    val unmappedColumns: MutableList<String> = mutableListOf(),
+    val unmappedConstraints: MutableList<String> = mutableListOf(),
     val generateCreateTable: Boolean = true,
     val generateAlterTable: Boolean = true,
     val generateDropTable: Boolean = false,
     val generateCreateIndex: Boolean = true
-)
+) {
+    val effectiveMode: DdlGenerationMode
+        get() = if (enabled) mode else DdlGenerationMode.DISABLED
+}
+
+enum class DdlGenerationMode {
+    @SerializedName("createAndDrop") CREATE_AND_DROP,
+    @SerializedName("createOnly") CREATE_ONLY,
+    @SerializedName("disabled") DISABLED,
+}
 
 // ─── Soft Delete ─────────────────────────────────────────────────────────────
 
