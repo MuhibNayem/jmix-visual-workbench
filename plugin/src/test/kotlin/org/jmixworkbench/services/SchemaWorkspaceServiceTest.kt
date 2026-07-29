@@ -437,6 +437,24 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(
             ambiguousRemoval.issues.any { it.code == "JVW-ENTITY-REMOVAL-REQUIRES-IMPACT" },
         )
+
+        val columnCollision = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            request.copy(
+                entity = entity.copy(
+                    attributes = entity.attributes.map {
+                        if (it.name == "applicationNo") {
+                            it.copy(columnName = "LOAN_AMOUNT")
+                        } else {
+                            it
+                        }
+                    }.toMutableList(),
+                ),
+            ),
+        )
+        assertFalse(columnCollision.accepted)
+        assertTrue(
+            columnCollision.issues.any { it.code == "JVW-ENTITY-COLUMN-RENAME-COLLISION" },
+        )
     }
 
     fun testExistingKotlinEntityAdditionPreservesManualSourceAndAddsRollbackMigration() {
@@ -502,7 +520,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                 AttributeModel(
                     name = "accountNo",
                     type = AttributeType.STRING,
-                    columnName = "ACCOUNT_NO",
+                    columnName = "EXTERNAL_ACCOUNT_NO",
                     mandatory = true,
                     unique = true,
                     length = 128,
@@ -527,7 +545,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(kotlin.contains("import java.math.BigDecimal"))
         assertTrue(
             kotlin.contains(
-                "@Column(name = \"ACCOUNT_NO\", nullable = false, unique = true, length = 128)",
+                "@Column(name = \"EXTERNAL_ACCOUNT_NO\", nullable = false, unique = true, length = 128)",
             ),
         )
         assertTrue(kotlin.contains("@Column(name = \"APPROVED_AMOUNT\", precision = 19, scale = 2)"))
@@ -535,8 +553,30 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
         assertTrue(migration.contains("<addColumn tableName=\"KOTLIN_LOAN_ACCOUNT\">"))
         assertTrue(migration.contains("<addUniqueConstraint tableName=\"KOTLIN_LOAN_ACCOUNT\""))
+        assertTrue(
+            migration.contains(
+                "<renameColumn tableName=\"KOTLIN_LOAN_ACCOUNT\" oldColumnName=\"ACCOUNT_NO\" " +
+                    "newColumnName=\"EXTERNAL_ACCOUNT_NO\"",
+            ),
+        )
+        assertTrue(
+            migration.contains(
+                "<columnExists tableName=\"KOTLIN_LOAN_ACCOUNT\" columnName=\"ACCOUNT_NO\"",
+            ),
+        )
+        assertTrue(
+            migration.contains(
+                "<columnExists tableName=\"KOTLIN_LOAN_ACCOUNT\" columnName=\"EXTERNAL_ACCOUNT_NO\"",
+            ),
+        )
         assertTrue(migration.contains("newDataType=\"VARCHAR(128)\""))
         assertTrue(migration.contains("JVW_DUPLICATES"))
+        assertTrue(
+            migration.contains(
+                "<renameColumn tableName=\"KOTLIN_LOAN_ACCOUNT\" oldColumnName=\"EXTERNAL_ACCOUNT_NO\" " +
+                    "newColumnName=\"ACCOUNT_NO\"",
+            ),
+        )
         assertTrue(migration.contains("<dropColumn tableName=\"KOTLIN_LOAN_ACCOUNT\" columnName=\"APPROVED_AMOUNT\""))
     }
 
@@ -615,7 +655,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                 AttributeModel(
                     name = "applicationNo",
                     type = AttributeType.STRING,
-                    columnName = "APPLICATION_NO",
+                    columnName = "BUSINESS_APPLICATION_NO",
                     mandatory = true,
                     unique = true,
                     length = 512,
@@ -641,13 +681,29 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(java.contains("public int calculateRisk()"))
         assertTrue(
             java.contains(
-                "@Column(name = \"APPLICATION_NO\", nullable = false, unique = true, length = 512)",
+                "@Column(name = \"BUSINESS_APPLICATION_NO\", nullable = false, unique = true, length = 512)",
             ),
         )
         assertTrue(java.contains("@Column(name = \"LOAN_AMOUNT\", precision = 24, scale = 2)"))
         val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
         assertTrue(migration.contains("<sqlCheck expectedResult=\"0\">"))
         assertTrue(migration.contains("JVW_DUPLICATES"))
+        assertTrue(
+            migration.contains(
+                "<renameColumn tableName=\"LOAN_APP\" oldColumnName=\"APPLICATION_NO\" " +
+                    "newColumnName=\"BUSINESS_APPLICATION_NO\"",
+            ),
+        )
+        assertTrue(
+            migration.contains(
+                "<columnExists tableName=\"LOAN_APP\" columnName=\"APPLICATION_NO\"",
+            ),
+        )
+        assertTrue(
+            migration.contains(
+                "<columnExists tableName=\"LOAN_APP\" columnName=\"BUSINESS_APPLICATION_NO\"",
+            ),
+        )
         assertTrue(migration.contains("<addUniqueConstraint tableName=\"LOAN_APP\""))
         assertTrue(migration.contains("<dropNotNullConstraint tableName=\"LOAN_APP\" columnName=\"LOAN_AMOUNT\""))
         assertTrue(migration.contains("newDataType=\"VARCHAR(512)\""))
@@ -655,6 +711,12 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(migration.contains("<rollback>"))
         assertTrue(migration.contains("<dropUniqueConstraint tableName=\"LOAN_APP\""))
         assertTrue(migration.contains("<addNotNullConstraint tableName=\"LOAN_APP\" columnName=\"LOAN_AMOUNT\""))
+        assertTrue(
+            migration.contains(
+                "<renameColumn tableName=\"LOAN_APP\" oldColumnName=\"BUSINESS_APPLICATION_NO\" " +
+                    "newColumnName=\"APPLICATION_NO\"",
+            ),
+        )
     }
 
     private fun addStatusMigration() = MigrationModel(

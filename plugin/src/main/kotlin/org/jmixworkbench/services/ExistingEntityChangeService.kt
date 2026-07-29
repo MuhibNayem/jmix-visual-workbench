@@ -183,15 +183,50 @@ class ExistingEntityChangeService(
                 return rejected(
                     "JVW-ENTITY-TYPE-REFACTOR-REQUIRES-IMPACT",
                     "${current.name} changes Java type from ${current.javaType} ($currentType) to ${desired.type}. " +
-                        "Use a project-wide refactor with call-site impact analysis.",
+                    "Use a project-wide refactor with call-site impact analysis.",
                 )
             }
-            if (desired.resolvedColumnName != current.columnName) {
-                return rejected(
-                    "JVW-ENTITY-COLUMN-RENAME-REQUIRES-IMPACT",
-                    "${current.name} changes column ${current.columnName} to ${desired.resolvedColumnName}. " +
-                        "Use the explicit column-rename workflow.",
-                )
+            val columnRenamed = desired.resolvedColumnName != current.columnName
+            if (columnRenamed) {
+                if (current.association) {
+                    return rejected(
+                        "JVW-ENTITY-RELATIONSHIP-COLUMN-RENAME-REQUIRES-IMPACT",
+                        "${current.name} changes relationship column ${current.columnName} to " +
+                            "${desired.resolvedColumnName}. Use the relationship choreography workflow.",
+                    )
+                }
+                if (!current.persistent) {
+                    return rejected(
+                        "JVW-ENTITY-TRANSIENT-COLUMN-RENAME",
+                        "${current.name} is transient and has no physical column to rename.",
+                    )
+                }
+                if (!DATABASE_IDENTIFIER.matches(desired.resolvedColumnName)) {
+                    return rejected(
+                        "JVW-ENTITY-COLUMN-NAME-INVALID",
+                        "'${desired.resolvedColumnName}' is not a portable unquoted database identifier.",
+                    )
+                }
+                val collision = currentEntity.attributes.firstOrNull {
+                    it.name != current.name &&
+                        it.persistent &&
+                        it.columnName.equals(desired.resolvedColumnName, ignoreCase = true)
+                }
+                if (collision != null) {
+                    return rejected(
+                        "JVW-ENTITY-COLUMN-RENAME-COLLISION",
+                        "${desired.resolvedColumnName} is already mapped by ${collision.name}.",
+                    )
+                }
+                if (
+                    request.entity.databaseView ||
+                    request.entity.ddlGeneration.effectiveMode == DdlGenerationMode.DISABLED
+                ) {
+                    return rejected(
+                        "JVW-ENTITY-COLUMN-RENAME-DDL-REQUIRED",
+                        "Physical column rename requires a managed Liquibase store and enabled DDL generation.",
+                    )
+                }
             }
             if (current.association) return@forEach
             if (!current.persistent) {
@@ -214,10 +249,25 @@ class ExistingEntityChangeService(
                 desired.unique != current.unique ||
                 normalizedLength(desired) != normalizedLength(current) ||
                 desired.precision != current.precision ||
-                desired.scale != current.scale
+                desired.scale != current.scale ||
+                columnRenamed
             ) {
                 metadataChanges += ExistingAttributeMetadataChange(current, desired)
             }
+        }
+        val desiredColumnCollision = request.entity.attributes
+            .asSequence()
+            .filterNot(AttributeModel::transientFlag)
+            .filterNot { it.type in setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION) }
+            .groupBy { it.resolvedColumnName.uppercase(Locale.ROOT) }
+            .entries
+            .firstOrNull { it.value.size > 1 }
+        if (desiredColumnCollision != null) {
+            return rejected(
+                "JVW-ENTITY-COLUMN-MAPPING-DUPLICATE",
+                "${desiredColumnCollision.value.joinToString { it.name }} map to the same column " +
+                    "${desiredColumnCollision.key}.",
+            )
         }
         metadataChanges.firstOrNull {
             it.current.unique && !it.desired.unique
@@ -259,7 +309,8 @@ class ExistingEntityChangeService(
         val metadataEdits = metadataAnnotationEdits(content, entityClass, metadataChanges)
             ?: return rejected(
                 "JVW-ENTITY-METADATA-EDIT-UNSAFE",
-                "A persistence annotation could not be updated without touching unmanaged source.",
+                "A persistence annotation could not be updated without touching unmanaged source. " +
+                    "Column renames require an explicit literal @Column(name = \"...\") mapping.",
             )
         importEdit(psiFile, generated.imports + metadataEdits.imports)?.let(edits::add)
         edits += metadataEdits.edits
@@ -315,6 +366,7 @@ class ExistingEntityChangeService(
             }
             metadataChanges.sortedBy { it.current.name }.forEach { change ->
                 append('\u0000').append(change.current.name)
+                    .append('\u0000').append(change.desired.resolvedColumnName)
                     .append('\u0000').append(change.desired.mandatory)
                     .append('\u0000').append(change.desired.unique)
                     .append('\u0000').append(change.desired.length)
@@ -436,12 +488,47 @@ class ExistingEntityChangeService(
                         "Use a project-wide refactor with call-site impact analysis.",
                 )
             }
-            if (desired.resolvedColumnName != current.columnName) {
-                return rejected(
-                    "JVW-ENTITY-COLUMN-RENAME-REQUIRES-IMPACT",
-                    "${current.name} changes column ${current.columnName} to ${desired.resolvedColumnName}. " +
-                        "Use the explicit column-rename workflow.",
-                )
+            val columnRenamed = desired.resolvedColumnName != current.columnName
+            if (columnRenamed) {
+                if (current.association) {
+                    return rejected(
+                        "JVW-ENTITY-RELATIONSHIP-COLUMN-RENAME-REQUIRES-IMPACT",
+                        "${current.name} changes relationship column ${current.columnName} to " +
+                            "${desired.resolvedColumnName}. Use the relationship choreography workflow.",
+                    )
+                }
+                if (!current.persistent) {
+                    return rejected(
+                        "JVW-ENTITY-TRANSIENT-COLUMN-RENAME",
+                        "${current.name} is transient and has no physical column to rename.",
+                    )
+                }
+                if (!DATABASE_IDENTIFIER.matches(desired.resolvedColumnName)) {
+                    return rejected(
+                        "JVW-ENTITY-COLUMN-NAME-INVALID",
+                        "'${desired.resolvedColumnName}' is not a portable unquoted database identifier.",
+                    )
+                }
+                val collision = snapshot.attributes.firstOrNull {
+                    it.name != current.name &&
+                        it.persistent &&
+                        it.columnName.equals(desired.resolvedColumnName, ignoreCase = true)
+                }
+                if (collision != null) {
+                    return rejected(
+                        "JVW-ENTITY-COLUMN-RENAME-COLLISION",
+                        "${desired.resolvedColumnName} is already mapped by ${collision.name}.",
+                    )
+                }
+                if (
+                    request.entity.databaseView ||
+                    request.entity.ddlGeneration.effectiveMode == DdlGenerationMode.DISABLED
+                ) {
+                    return rejected(
+                        "JVW-ENTITY-COLUMN-RENAME-DDL-REQUIRED",
+                        "Physical column rename requires a managed Liquibase store and enabled DDL generation.",
+                    )
+                }
             }
             if (current.association) return@forEach
             if (!current.persistent) {
@@ -464,10 +551,25 @@ class ExistingEntityChangeService(
                 desired.unique != current.unique ||
                 normalizedLength(desired) != normalizedLength(current) ||
                 desired.precision != current.precision ||
-                desired.scale != current.scale
+                desired.scale != current.scale ||
+                columnRenamed
             ) {
                 metadataChanges += ExistingAttributeMetadataChange(current, desired)
             }
+        }
+        val desiredColumnCollision = request.entity.attributes
+            .asSequence()
+            .filterNot(AttributeModel::transientFlag)
+            .filterNot { it.type in setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION) }
+            .groupBy { it.resolvedColumnName.uppercase(Locale.ROOT) }
+            .entries
+            .firstOrNull { it.value.size > 1 }
+        if (desiredColumnCollision != null) {
+            return rejected(
+                "JVW-ENTITY-COLUMN-MAPPING-DUPLICATE",
+                "${desiredColumnCollision.value.joinToString { it.name }} map to the same column " +
+                    "${desiredColumnCollision.key}.",
+            )
         }
         metadataChanges.firstOrNull { it.current.unique && !it.desired.unique }?.let {
             return rejected(
@@ -512,7 +614,8 @@ class ExistingEntityChangeService(
             changes = metadataChanges,
         ) ?: return rejected(
             "JVW-ENTITY-METADATA-EDIT-UNSAFE",
-            "A Kotlin persistence annotation could not be updated without touching unmanaged source.",
+            "A Kotlin persistence annotation could not be updated without touching unmanaged source. " +
+                "Column renames require an explicit literal @Column(name = \"...\") mapping.",
         )
         val imports = fragments.flatMapTo(linkedSetOf()) { it.imports }
         imports += metadataEdits.imports
@@ -573,6 +676,7 @@ class ExistingEntityChangeService(
             }
             metadataChanges.sortedBy { it.current.name }.forEach {
                 append('\u0000').append(it.current.name)
+                    .append('\u0000').append(it.desired.resolvedColumnName)
                     .append('\u0000').append(it.desired.mandatory)
                     .append('\u0000').append(it.desired.unique)
                     .append('\u0000').append(it.desired.length)
@@ -687,7 +791,8 @@ class ExistingEntityChangeService(
                 additions.joinToString { it.resolvedColumnName },
                 metadataChanges.joinToString {
                     "${it.current.columnName}:${it.desired.mandatory}:${it.desired.unique}:" +
-                        "${it.desired.length}:${it.desired.precision}:${it.desired.scale}"
+                        "${it.desired.length}:${it.desired.precision}:${it.desired.scale}:" +
+                        it.desired.resolvedColumnName
                 },
             ).joinToString("\u0000"),
         ).take(10)
@@ -803,6 +908,38 @@ class ExistingEntityChangeService(
             val desired = change.desired
             val oldType = columnType(current, dbType)
             val newType = columnType(desired, dbType)
+            val columnName = desired.resolvedColumnName
+            if (change.columnRenamed) {
+                preConditions += PreCondition(
+                    type = PreConditionType.COLUMN_EXISTS,
+                    params = mutableMapOf(
+                        "tableName" to entity.resolvedTableName,
+                        "columnName" to current.columnName,
+                    ),
+                )
+                preConditions += PreCondition(
+                    type = PreConditionType.COLUMN_NOT_EXISTS,
+                    params = mutableMapOf(
+                        "tableName" to entity.resolvedTableName,
+                        "columnName" to columnName,
+                    ),
+                )
+                changes += DbChange.RenameColumn(
+                    tableName = entity.resolvedTableName,
+                    oldColumnName = current.columnName,
+                    newColumnName = columnName,
+                    columnDataType = oldType,
+                )
+                rollback.add(
+                    0,
+                    DbChange.RenameColumn(
+                        tableName = entity.resolvedTableName,
+                        oldColumnName = columnName,
+                        newColumnName = current.columnName,
+                        columnDataType = oldType,
+                    ),
+                )
+            }
             if (desired.mandatory != !current.nullable) {
                 if (desired.mandatory) {
                     preConditions += PreCondition(
@@ -810,45 +947,45 @@ class ExistingEntityChangeService(
                         params = mutableMapOf(
                             "expectedResult" to "0",
                             "sql" to "SELECT COUNT(*) FROM ${entity.resolvedTableName} " +
-                                "WHERE ${current.columnName} IS NULL",
+                                "WHERE $columnName IS NULL",
                         ),
                     )
                     changes += DbChange.AddNotNullConstraint(
                         tableName = entity.resolvedTableName,
-                        columnName = current.columnName,
+                        columnName = columnName,
                         columnDataType = newType,
                     )
                     rollback.add(
                         0,
                         DbChange.DropNotNullConstraint(
                             tableName = entity.resolvedTableName,
-                            columnName = current.columnName,
+                            columnName = columnName,
                         ),
                     )
                 } else {
                     changes += DbChange.DropNotNullConstraint(
                         tableName = entity.resolvedTableName,
-                        columnName = current.columnName,
+                        columnName = columnName,
                     )
                     rollback.add(
                         0,
                         DbChange.AddNotNullConstraint(
                             tableName = entity.resolvedTableName,
-                            columnName = current.columnName,
+                            columnName = columnName,
                             columnDataType = oldType,
                         ),
                     )
                 }
             }
             if (!current.unique && desired.unique) {
-                val constraintName = "UQ_${entity.resolvedTableName}_${current.columnName}"
+                val constraintName = "UQ_${entity.resolvedTableName}_$columnName"
                 preConditions += PreCondition(
                     type = PreConditionType.SQL_CHECK,
                     params = mutableMapOf(
                         "expectedResult" to "0",
                         "sql" to "SELECT COUNT(*) FROM (" +
-                            "SELECT ${current.columnName} FROM ${entity.resolvedTableName} " +
-                            "WHERE ${current.columnName} IS NOT NULL GROUP BY ${current.columnName} " +
+                            "SELECT $columnName FROM ${entity.resolvedTableName} " +
+                            "WHERE $columnName IS NOT NULL GROUP BY $columnName " +
                             "HAVING COUNT(*) > 1" +
                             ") JVW_DUPLICATES",
                     ),
@@ -856,7 +993,7 @@ class ExistingEntityChangeService(
                 changes += DbChange.AddUniqueConstraint(
                     tableName = entity.resolvedTableName,
                     constraintName = constraintName,
-                    columnNames = listOf(current.columnName),
+                    columnNames = listOf(columnName),
                 )
                 rollback.add(
                     0,
@@ -869,14 +1006,14 @@ class ExistingEntityChangeService(
             if (oldType != newType) {
                 changes += DbChange.ModifyColumn(
                     tableName = entity.resolvedTableName,
-                    columnName = current.columnName,
+                    columnName = columnName,
                     newDataType = newType,
                 )
                 rollback.add(
                     0,
                     DbChange.ModifyColumn(
                         tableName = entity.resolvedTableName,
-                        columnName = current.columnName,
+                        columnName = columnName,
                         newDataType = oldType,
                     ),
                 )
@@ -900,7 +1037,15 @@ class ExistingEntityChangeService(
                     append("; add ").append(additions.joinToString { it.resolvedColumnName })
                 }
                 if (metadataChanges.isNotEmpty()) {
-                    append("; update ").append(metadataChanges.joinToString { it.current.columnName })
+                    append("; update ").append(
+                        metadataChanges.joinToString {
+                            if (it.columnRenamed) {
+                                "${it.current.columnName}->${it.desired.resolvedColumnName}"
+                            } else {
+                                it.current.columnName
+                            }
+                        },
+                    )
                 }
             },
             changes = changes,
@@ -1066,6 +1211,14 @@ class ExistingEntityChangeService(
                 val name = annotation.nameReferenceElement?.text?.substringAfterLast('.')
                 name == "Column"
             }
+            if (
+                change.columnRenamed &&
+                columnAnnotation?.text?.let {
+                    explicitColumnName(it) == change.current.columnName
+                } != true
+            ) {
+                return null
+            }
             val preserved = linkedMapOf<String, String>()
             columnAnnotation?.parameterList?.attributes.orEmpty().forEach { pair ->
                 val name = pair.name ?: "value"
@@ -1075,7 +1228,7 @@ class ExistingEntityChangeService(
             }
             val desired = change.desired
             val managed = linkedMapOf<String, String>()
-            managed["name"] = "\"${escapeJavaString(change.current.columnName)}\""
+            managed["name"] = "\"${escapeJavaString(desired.resolvedColumnName)}\""
             if (desired.mandatory) managed["nullable"] = "false"
             if (desired.unique) managed["unique"] = "true"
             if (
@@ -1143,6 +1296,14 @@ class ExistingEntityChangeService(
                         .substringAfterLast('.')
                         .removePrefix("@") == "Column"
             }
+            if (
+                change.columnRenamed &&
+                columnAnnotation?.text?.let {
+                    explicitColumnName(it) == change.current.columnName
+                } != true
+            ) {
+                return null
+            }
             val preserved = linkedMapOf<String, String>()
             columnAnnotation?.text?.let { annotationText ->
                 val arguments = annotationText
@@ -1159,7 +1320,7 @@ class ExistingEntityChangeService(
             }
             val desired = change.desired
             val managed = linkedMapOf<String, String>()
-            managed["name"] = "\"${escapeJavaString(change.current.columnName)}\""
+            managed["name"] = "\"${escapeJavaString(desired.resolvedColumnName)}\""
             if (desired.mandatory) managed["nullable"] = "false"
             if (desired.unique) managed["unique"] = "true"
             if (
@@ -1276,6 +1437,9 @@ class ExistingEntityChangeService(
     private fun escapeJavaString(value: String): String =
         value.replace("\\", "\\\\").replace("\"", "\\\"")
 
+    private fun explicitColumnName(annotation: String): String? =
+        COLUMN_NAME_LITERAL.find(annotation)?.groupValues?.get(1)
+
     private fun importEdit(file: PsiJavaFile, requestedImports: Set<String>): WorkspaceTextEdit? {
         val existing = file.importList?.importStatements.orEmpty()
             .map(::importName)
@@ -1375,6 +1539,9 @@ class ExistingEntityChangeService(
 
     companion object {
         private val JAVA_IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")
+        private val DATABASE_IDENTIFIER = Regex("""[A-Za-z_][A-Za-z0-9_$]*""")
+        private val COLUMN_NAME_LITERAL =
+            Regex("""\bname\s*=\s*"((?:\\.|[^"\\])*)"""")
         private val MANAGED_COLUMN_ARGUMENTS = setOf(
             "name",
             "nullable",
@@ -1418,7 +1585,10 @@ private data class GeneratedEntityFragments(
 private data class ExistingAttributeMetadataChange(
     val current: SchemaEntityAttributeSnapshot,
     val desired: AttributeModel,
-)
+) {
+    val columnRenamed: Boolean
+        get() = current.columnName != desired.resolvedColumnName
+}
 
 private data class GeneratedMetadataEdits(
     val edits: List<WorkspaceTextEdit>,
