@@ -4,6 +4,10 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.fileTypes.FileTypeManager
+import com.intellij.psi.PsiErrorElement
+import com.intellij.psi.PsiFileFactory
+import com.intellij.psi.util.PsiTreeUtil
 import com.google.gson.JsonParser
 import org.jmixworkbench.discovery.change.WorkspaceChangeSet
 import org.jmixworkbench.discovery.change.WorkspaceFileChange
@@ -737,10 +741,18 @@ class CodeGenerationService(private val project: Project) {
             .withProjectNaming(target.config.projectId)
         val effectiveConfig = target.config
         val pkgPath = effectiveConfig.packageToPath(effectiveEntity.packageName)
+        val sourceExtension = effectiveEntity.sourceLanguage.fileExtension
+        val entitySource = when (effectiveEntity.sourceLanguage) {
+            EntitySourceLanguage.JAVA -> EntityGenerator.generate(effectiveEntity)
+            EntitySourceLanguage.KOTLIN -> KotlinEntityGenerator.generate(effectiveEntity)
+        }
+        if (effectiveEntity.sourceLanguage == EntitySourceLanguage.KOTLIN) {
+            validateKotlinSource("${effectiveEntity.className}.kt", entitySource)
+        }
         val files = mutableListOf(
             GeneratedSource(
-                "${effectiveConfig.sourceRoot}/$pkgPath/${effectiveEntity.className}.java",
-                EntityGenerator.generate(effectiveEntity),
+                "${effectiveConfig.sourceRoot}/$pkgPath/${effectiveEntity.className}.$sourceExtension",
+                entitySource,
             ),
         )
         val migrationChanges = mutableListOf<WorkspaceFileChange>()
@@ -771,9 +783,16 @@ class CodeGenerationService(private val project: Project) {
         }
 
         if (effectiveEntity.dataRepository?.enabled == true) {
+            val repositorySource = when (effectiveEntity.sourceLanguage) {
+                EntitySourceLanguage.JAVA -> DataRepositoryGenerator.generate(effectiveEntity)
+                EntitySourceLanguage.KOTLIN -> KotlinDataRepositoryGenerator.generate(effectiveEntity)
+            }
+            if (effectiveEntity.sourceLanguage == EntitySourceLanguage.KOTLIN) {
+                validateKotlinSource("${effectiveEntity.className}Repository.kt", repositorySource)
+            }
             files += GeneratedSource(
-                "${effectiveConfig.sourceRoot}/$pkgPath/${effectiveEntity.className}Repository.java",
-                DataRepositoryGenerator.generate(effectiveEntity),
+                "${effectiveConfig.sourceRoot}/$pkgPath/${effectiveEntity.className}Repository.$sourceExtension",
+                repositorySource,
             )
             repositoryActivationSource(effectiveEntity, effectiveConfig)?.let(files::add)
         }
@@ -1128,7 +1147,10 @@ class CodeGenerationService(private val project: Project) {
         val moduleId = requestedModuleId.ifBlank { store?.moduleId.orEmpty() }
         val graph = ApplicationGraphService.getInstance(project).graph()
         val destinations = ProjectSourceDestinationService.getInstance(project)
-        val sourceDestination = destinations.productionJava(graph)
+        val sourceDestination = when (entity.sourceLanguage) {
+            EntitySourceLanguage.JAVA -> destinations.productionJava(graph)
+            EntitySourceLanguage.KOTLIN -> destinations.productionKotlin(graph)
+        }
             .firstOrNull { it.moduleId == moduleId }
             ?.sourceRoot
         val resourceDestination = destinations.productionResources(graph)
@@ -1145,7 +1167,10 @@ class CodeGenerationService(private val project: Project) {
             } else {
                 error("JVW-GENERATION-MODULE-MISSING: The selected module has no writable production source roots.")
             }
-        val sourceRoot = sourceDestination ?: rooted(modulePrefix, "src/main/java")
+        val sourceRoot = sourceDestination ?: rooted(
+            modulePrefix,
+            entity.sourceLanguage.conventionalSourceRoot,
+        )
         val resourceRoot = resourceDestination ?: rooted(modulePrefix, "src/main/resources")
         val projectId = JmixProjectService.getInstance(project)
             .projectIdForModule(modulePrefix)
@@ -1192,19 +1217,36 @@ class CodeGenerationService(private val project: Project) {
         if (containsRepositoryActivation(moduleSourceRoot)) return null
 
         val basePackage = entity.packageName.removeSuffix(".entity")
-        val relativePath =
-            "${config.sourceRoot}/${config.packageToPath(basePackage)}/JmixDataRepositoryConfiguration.java"
-        val content = """
-            package $basePackage;
+        val kotlin = entity.sourceLanguage == EntitySourceLanguage.KOTLIN
+        val relativePath = "${config.sourceRoot}/${config.packageToPath(basePackage)}/" +
+            "JmixDataRepositoryConfiguration.${if (kotlin) "kt" else "java"}"
+        val content = if (kotlin) {
+            """
+                package $basePackage
 
-            import io.jmix.core.repository.EnableJmixDataRepositories;
-            import org.springframework.context.annotation.Configuration;
+                import io.jmix.core.repository.EnableJmixDataRepositories
+                import org.springframework.context.annotation.Configuration
 
-            @Configuration
-            @EnableJmixDataRepositories(basePackages = "${entity.packageName}")
-            public class JmixDataRepositoryConfiguration {
-            }
-        """.trimIndent() + "\n"
+                @Configuration
+                @EnableJmixDataRepositories(basePackages = ["${entity.packageName}"])
+                open class JmixDataRepositoryConfiguration
+            """.trimIndent() + "\n"
+        } else {
+            """
+                package $basePackage;
+
+                import io.jmix.core.repository.EnableJmixDataRepositories;
+                import org.springframework.context.annotation.Configuration;
+
+                @Configuration
+                @EnableJmixDataRepositories(basePackages = "${entity.packageName}")
+                public class JmixDataRepositoryConfiguration {
+                }
+            """.trimIndent() + "\n"
+        }
+        if (kotlin) {
+            validateKotlinSource("JmixDataRepositoryConfiguration.kt", content)
+        }
         return GeneratedSource(relativePath, content)
     }
 
@@ -1212,13 +1254,28 @@ class CodeGenerationService(private val project: Project) {
         if (!Files.isDirectory(sourceRoot)) return false
         return Files.walk(sourceRoot).use { paths ->
             paths
-                .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".java") }
+                .filter {
+                    Files.isRegularFile(it) &&
+                        (it.fileName.toString().endsWith(".java") || it.fileName.toString().endsWith(".kt"))
+                }
                 .anyMatch { path ->
                     runCatching {
                         Files.size(path) <= MAX_REPOSITORY_SCAN_FILE_SIZE &&
                             Files.readString(path).contains("EnableJmixDataRepositories")
                     }.getOrDefault(false)
                 }
+        }
+    }
+
+    private fun validateKotlinSource(fileName: String, source: String) {
+        val fileType = FileTypeManager.getInstance().getFileTypeByExtension("kt")
+        require(fileType.name.contains("kotlin", ignoreCase = true)) {
+            "JVW-KOTLIN-PLUGIN-MISSING: Kotlin entity generation requires the bundled IntelliJ Kotlin plugin."
+        }
+        val psi = PsiFileFactory.getInstance(project).createFileFromText(fileName, fileType, source)
+        val syntax = PsiTreeUtil.findChildOfType(psi, PsiErrorElement::class.java)
+        require(syntax == null) {
+            "JVW-KOTLIN-GENERATION-SYNTAX: Generated $fileName is invalid: ${syntax?.errorDescription}."
         }
     }
 

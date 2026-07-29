@@ -9,6 +9,7 @@ import com.intellij.psi.PsiFileFactory
 import com.intellij.psi.PsiImportStatement
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiModifier
+import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.util.PsiTreeUtil
 import org.jmixworkbench.discovery.change.WorkspaceChangeIssue
 import org.jmixworkbench.discovery.change.WorkspaceChangePlan
@@ -19,6 +20,7 @@ import org.jmixworkbench.discovery.change.WorkspaceTextEdit
 import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
 import org.jmixworkbench.discovery.model.SourceLocator
 import org.jmixworkbench.generator.EntityGenerator
+import org.jmixworkbench.generator.KotlinEntityGenerator
 import org.jmixworkbench.model.AttributeModel
 import org.jmixworkbench.model.AttributeType
 import org.jmixworkbench.model.AssociationType
@@ -86,16 +88,16 @@ class ExistingEntityChangeService(
         val file = resolved.file
         if (
             file.isDirectory ||
-            file.extension != "java" ||
+            file.extension !in setOf("java", "kt") ||
             !VfsUtilCore.isAncestor(resolved.root, file, false)
         ) {
             return rejected(
                 "JVW-ENTITY-SOURCE-INVALID",
-                "Existing entity changes require a Java source inside a registered project content root.",
+                "Existing entity changes require a Java or Kotlin source inside a registered project content root.",
             )
         }
         val content = runCatching {
-            String(file.contentsToByteArray(false), file.charset)
+            ProjectSourceText.read(file)
         }.getOrElse {
             return rejected("JVW-ENTITY-SOURCE-UNREADABLE", "The existing entity source cannot be read.")
         }
@@ -105,6 +107,9 @@ class ExistingEntityChangeService(
                 "JVW-ENTITY-SOURCE-STALE",
                 "The entity changed after it was indexed. Refresh the entity workspace before editing.",
             )
+        }
+        if (file.extension == "kt") {
+            return proposeKotlinAttributeAdditions(request, file.name, file.fileType, content, fingerprint)
         }
         val psiFile = parseJava(file.name, content)
             ?: return rejected("JVW-ENTITY-SOURCE-PARSE", "The existing entity is not a valid Java compilation unit.")
@@ -330,6 +335,184 @@ class ExistingEntityChangeService(
                         if (metadataChanges.size != 1) append('s')
                     }
                 },
+                files = allChanges,
+            ),
+            issues = emptyList(),
+        )
+    }
+
+    private fun proposeKotlinAttributeAdditions(
+        request: ExistingEntityAttributeAdditionRequest,
+        fileName: String,
+        fileType: com.intellij.openapi.fileTypes.FileType,
+        content: String,
+        fingerprint: String,
+    ): ExistingEntityChangeProposal {
+        val psiFile = PsiFileFactory.getInstance(project).createFileFromText(fileName, fileType, content)
+        PsiTreeUtil.findChildOfType(psiFile, PsiErrorElement::class.java)?.let { syntax ->
+            return rejected(
+                "JVW-ENTITY-SOURCE-PARSE",
+                "The existing Kotlin entity contains a syntax error: ${syntax.errorDescription}",
+            )
+        }
+        val packageName = KOTLIN_PACKAGE.find(content)?.groupValues?.get(1).orEmpty()
+        if (packageName != request.entity.packageName) {
+            return rejected(
+                "JVW-ENTITY-IDENTITY-CHANGED",
+                "Package changes are not allowed in additive round-trip mode.",
+            )
+        }
+        val entityClass = PsiTreeUtil.findChildrenOfType(psiFile, PsiNamedElement::class.java)
+            .singleOrNull {
+                it.javaClass.simpleName == "KtClass" &&
+                    it.name == request.entity.className
+            }
+            ?: return rejected(
+                "JVW-ENTITY-CLASS-MISSING",
+                "The indexed Kotlin class ${request.entity.className} no longer exists in this source file.",
+            )
+        val existingNames = PsiTreeUtil.findChildrenOfType(entityClass, PsiNamedElement::class.java)
+            .asSequence()
+            .filter {
+                it.javaClass.simpleName == "KtProperty" &&
+                    it.nearestKotlinClass() === entityClass
+            }
+            .mapNotNull(PsiNamedElement::getName)
+            .toSet()
+        val additions = request.entity.attributes.filter { it.name !in existingNames }
+        val duplicates = additions.groupingBy(AttributeModel::name)
+            .eachCount()
+            .filterValues { it > 1 }
+            .keys
+        if (duplicates.isNotEmpty()) {
+            return rejected(
+                "JVW-ENTITY-ATTRIBUTE-DUPLICATE",
+                "Duplicate attribute names: ${duplicates.sorted().joinToString()}.",
+            )
+        }
+        additions.firstOrNull { !JAVA_IDENTIFIER.matches(it.name) }?.let {
+            return rejected(
+                "JVW-ENTITY-ATTRIBUTE-NAME-INVALID",
+                "'${it.name}' is not a valid Kotlin property name.",
+            )
+        }
+        additions.firstOrNull { it.type == AttributeType.EMBEDDED }?.let {
+            return rejected(
+                "JVW-ENTITY-EMBEDDED-REQUIRES-DESIGNER",
+                "${it.name} is embedded. Use the embedded-type designer so attribute overrides can be reviewed.",
+            )
+        }
+        val snapshot = SchemaWorkspaceService.getInstance(project).load().entities.firstOrNull {
+            it.qualifiedName == request.entity.fullName &&
+                it.sourceLocator.relativePath == request.sourceLocator.relativePath
+        } ?: return rejected(
+            "JVW-ENTITY-SNAPSHOT-MISSING",
+            "The exact existing Kotlin entity metadata could not be reconstructed. Refresh the schema workspace.",
+        )
+        snapshot.attributes.forEach { current ->
+            val desired = request.entity.attributes.firstOrNull { it.name == current.name }
+                ?: return@forEach
+            val currentType = attributeType(
+                current.javaType,
+                current.association,
+                current.associationDetails?.composition == true,
+            )
+            val mappingChanged =
+                desired.type != currentType ||
+                    desired.resolvedColumnName != current.columnName ||
+                    desired.mandatory != !current.nullable ||
+                    desired.unique != current.unique ||
+                    normalizedLength(desired) != normalizedLength(current) ||
+                    desired.precision != current.precision ||
+                    desired.scale != current.scale
+            if (mappingChanged) {
+                return rejected(
+                    "JVW-ENTITY-KOTLIN-MAPPING-REFACTOR-REQUIRES-IMPACT",
+                    "${current.name} changes an existing Kotlin declaration or persistence mapping. " +
+                        "Indexed=${currentType}/${current.columnName}/nullable=${current.nullable}/" +
+                        "unique=${current.unique}/length=${normalizedLength(current)}/" +
+                        "precision=${current.precision}/scale=${current.scale}; " +
+                        "requested=${desired.type}/${desired.resolvedColumnName}/nullable=${!desired.mandatory}/" +
+                        "unique=${desired.unique}/length=${normalizedLength(desired)}/" +
+                        "precision=${desired.precision}/scale=${desired.scale}. " +
+                        "Use the impact-aware mapping refactor; additive round-trip mode will not rewrite it.",
+                )
+            }
+        }
+        if (additions.isEmpty()) {
+            return rejected(
+                "JVW-ENTITY-UPDATE-NOOP",
+                "No new Kotlin entity attributes were found.",
+            )
+        }
+
+        val fragments = runCatching {
+            additions.map { KotlinEntityGenerator.attributeFragment(request.entity, it) }
+        }.getOrElse {
+            return rejected(
+                "JVW-ENTITY-FRAGMENT-GENERATION",
+                it.message ?: "The Kotlin entity generator could not produce safe property fragments.",
+            )
+        }
+        val imports = fragments.flatMapTo(linkedSetOf()) { it.imports }
+        val edits = mutableListOf<WorkspaceTextEdit>()
+        kotlinImportEdit(content, imports)?.let(edits::add)
+        val classEnd = entityClass.textRange.endOffset
+        val rightBrace = content.lastIndexOf('}', (classEnd - 1).coerceAtLeast(0))
+        if (rightBrace < entityClass.textRange.startOffset) {
+            return rejected("JVW-ENTITY-SOURCE-PARSE", "The Kotlin entity class closing brace is missing.")
+        }
+        val body = fragments.joinToString("\n\n") { indent(it.source) }
+        edits += WorkspaceTextEdit(
+            startOffset = rightBrace,
+            endOffset = rightBrace,
+            expectedText = "",
+            replacement = "\n\n$body\n",
+        )
+        val resultingSource = applyEdits(content, edits)
+        val resultingPsi = PsiFileFactory.getInstance(project).createFileFromText(
+            fileName,
+            fileType,
+            resultingSource,
+        )
+        PsiTreeUtil.findChildOfType(resultingPsi, PsiErrorElement::class.java)?.let { syntax ->
+            return rejected(
+                "JVW-ENTITY-SOURCE-SYNTAX",
+                "The proposed Kotlin entity source is invalid: ${syntax.errorDescription}",
+            )
+        }
+        val sourceChange = WorkspaceFileChange(
+            relativePath = request.sourceLocator.relativePath,
+            mode = WorkspaceFileChangeMode.MODIFY,
+            baseRevisionFingerprint = fingerprint,
+            edits = edits,
+        )
+        val persisted = additions.filterNot(AttributeModel::transientFlag)
+        val migrationChanges = if (
+            persisted.isNotEmpty() &&
+            !request.entity.databaseView &&
+            request.entity.ddlGeneration.effectiveMode != DdlGenerationMode.DISABLED
+        ) {
+            val proposal = migrationProposal(request.entity, persisted, emptyList())
+            proposal.changeSet?.files ?: return ExistingEntityChangeProposal(null, proposal.issues)
+        } else {
+            emptyList()
+        }
+        val allChanges = (listOf(sourceChange) + migrationChanges)
+            .distinctBy(WorkspaceFileChange::relativePath)
+        val identity = buildString {
+            append(request.sourceLocator.relativePath).append('\u0000').append(fingerprint)
+            additions.sortedBy(AttributeModel::name).forEach {
+                append('\u0000').append(it.name)
+                    .append('\u0000').append(it.type.name)
+                    .append('\u0000').append(it.resolvedColumnName)
+            }
+        }
+        return ExistingEntityChangeProposal(
+            changeSet = WorkspaceChangeSet(
+                id = "existing-kotlin-entity-update:${CanonicalDiscoveryJson.sha256(identity).take(24)}",
+                label = "Update ${request.entity.className}: add ${additions.size} Kotlin attribute" +
+                    if (additions.size == 1) "" else "s",
                 files = allChanges,
             ),
             issues = emptyList(),
@@ -738,8 +921,8 @@ class ExistingEntityChangeService(
             .trim()
         return when (simple) {
             "String" -> AttributeType.STRING
-            "Character", "char" -> AttributeType.CHARACTER
-            "Integer", "int" -> AttributeType.INTEGER
+            "Character", "Char", "char" -> AttributeType.CHARACTER
+            "Integer", "Int", "int" -> AttributeType.INTEGER
             "Long", "long" -> AttributeType.LONG
             "Double", "double", "Float", "float" -> AttributeType.DOUBLE
             "BigDecimal" -> AttributeType.BIG_DECIMAL
@@ -752,7 +935,7 @@ class ExistingEntityChangeService(
             "OffsetDateTime" -> AttributeType.OFFSET_DATE_TIME
             "UUID" -> AttributeType.UUID
             "URI" -> AttributeType.URI
-            "byte[]" -> AttributeType.BYTE_ARRAY
+            "byte[]", "ByteArray" -> AttributeType.BYTE_ARRAY
             "FileRef" -> AttributeType.FILE_REF
             else -> AttributeType.ENUM
         }
@@ -886,6 +1069,34 @@ class ExistingEntityChangeService(
         return WorkspaceTextEdit(offset, offset, "", replacement)
     }
 
+    private fun kotlinImportEdit(
+        source: String,
+        requestedImports: Set<String>,
+    ): WorkspaceTextEdit? {
+        val existingMatches = KOTLIN_IMPORT.findAll(source).toList()
+        val existing = existingMatches.map { it.groupValues[1] }.toSet()
+        val missing = requestedImports
+            .filterNot { requested ->
+                existing.any { it == requested || covers(it, requested) }
+            }
+            .sorted()
+        if (missing.isEmpty()) return null
+        val statements = missing.joinToString("\n") { "import $it" }
+        val lastImport = existingMatches.lastOrNull()
+        if (lastImport != null) {
+            return WorkspaceTextEdit(
+                startOffset = lastImport.range.last + 1,
+                endOffset = lastImport.range.last + 1,
+                expectedText = "",
+                replacement = "\n$statements",
+            )
+        }
+        val packageStatement = KOTLIN_PACKAGE.find(source)
+        val offset = packageStatement?.range?.last?.plus(1) ?: 0
+        val replacement = if (offset == 0) "$statements\n\n" else "\n\n$statements"
+        return WorkspaceTextEdit(offset, offset, "", replacement)
+    }
+
     private fun importIsReferenced(statement: PsiImportStatement, text: String): Boolean {
         if (statement.isOnDemand) {
             return text.contains("@Column") ||
@@ -941,11 +1152,22 @@ class ExistingEntityChangeService(
             "precision",
             "scale",
         )
+        private val KOTLIN_PACKAGE =
+            Regex("""(?m)^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$""")
+        private val KOTLIN_IMPORT =
+            Regex("""(?m)^\s*import\s+([A-Za-z_][A-Za-z0-9_.*]*)(?:\s+as\s+\w+)?\s*$""")
 
         fun getInstance(project: Project): ExistingEntityChangeService =
             project.getService(ExistingEntityChangeService::class.java)
     }
 }
+
+private fun com.intellij.psi.PsiElement.nearestKotlinClass(): com.intellij.psi.PsiElement? =
+    generateSequence(parent) { it.parent }
+        .firstOrNull {
+            it.javaClass.simpleName == "KtClass" ||
+                it.javaClass.simpleName == "KtObjectDeclaration"
+        }
 
 data class ExistingEntityAttributeAdditionRequest(
     val sourceLocator: SourceLocator,

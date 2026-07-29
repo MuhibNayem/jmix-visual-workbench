@@ -7,6 +7,7 @@ import com.google.gson.annotations.SerializedName
 data class EntityModel(
     val className: String,
     val packageName: String,
+    val sourceLanguage: EntitySourceLanguage = EntitySourceLanguage.JAVA,
     val dataStore: String = "main",
     val generationTarget: EntityGenerationTarget? = null,
     var entityName: String = "",
@@ -61,6 +62,14 @@ data class EntityGenerationTarget(
     val moduleId: String? = null,
     val storeId: String? = null,
 )
+
+enum class EntitySourceLanguage(
+    val fileExtension: String,
+    val conventionalSourceRoot: String,
+) {
+    @SerializedName("java") JAVA("java", "src/main/java"),
+    @SerializedName("kotlin") KOTLIN("kt", "src/main/kotlin"),
+}
 
 enum class EntityType {
     @SerializedName("entity") ENTITY,

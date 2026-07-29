@@ -164,8 +164,9 @@ class SchemaWorkspaceService(
                             fieldDeclaration(source, name),
                         ),
                         association = association != null || run {
-                            val simpleType = type.substringAfterLast('.').substringBefore('<')
-                            type.contains('<') || (
+                            val normalizedType = type.trim().removeSuffix("?").trim()
+                            val simpleType = normalizedType.substringAfterLast('.').substringBefore('<')
+                            normalizedType.contains('<') || (
                                 simpleType.firstOrNull()?.isUpperCase() == true &&
                                     simpleType !in SCALAR_TYPES
                                 )
@@ -1171,14 +1172,14 @@ class SchemaWorkspaceService(
             ?: entity.displayName.replace(Regex("([a-z0-9])([A-Z])"), "$1_$2").uppercase(Locale.ROOT)
 
     private fun idMapping(source: String): Pair<IdType, String> {
-        val declaration = javaFields(source).firstOrNull { field ->
+        val declaration = sourceFields(source).firstOrNull { field ->
             ID_ANNOTATION.containsMatchIn(field.declaration)
         } ?: return IdType.UUID to "ID"
         val typeName = declaration.type.substringAfterLast('.')
         val type = when (typeName) {
             "UUID" -> IdType.UUID
             "Long", "long" -> IdType.LONG
-            "Integer", "int" -> IdType.INTEGER
+            "Integer", "Int", "int" -> IdType.INTEGER
             "String" -> IdType.STRING
             else -> IdType.EMBEDDED
         }
@@ -1200,7 +1201,7 @@ class SchemaWorkspaceService(
     }
 
     private fun columnName(source: String, fieldName: String): String {
-        val declaration = javaField(source, fieldName)?.declaration.orEmpty()
+        val declaration = sourceField(source, fieldName)?.declaration.orEmpty()
         return COLUMN_ANNOTATION.find(declaration)?.groupValues?.get(1)?.takeIf(String::isNotBlank)
             ?: fieldName.replace(Regex("([a-z0-9])([A-Z])"), "$1_$2").uppercase(Locale.ROOT)
     }
@@ -1227,7 +1228,7 @@ class SchemaWorkspaceService(
     }
 
     private fun fieldDeclaration(source: String, fieldName: String): String {
-        return javaField(source, fieldName)?.declaration.orEmpty()
+        return sourceField(source, fieldName)?.declaration.orEmpty()
     }
 
     private fun associationSnapshot(
@@ -1236,7 +1237,7 @@ class SchemaWorkspaceService(
         fallbackType: String,
         ownerQualifiedName: String,
     ): SchemaAssociationSnapshot? {
-        val field = javaField(source, fieldName)
+        val field = sourceField(source, fieldName)
             ?: return null
         val declaration = field.declaration
         val relationName = RELATION_ANNOTATION.find(declaration)?.groupValues?.get(1)
@@ -1366,18 +1367,31 @@ class SchemaWorkspaceService(
         return JoinTableConfig(name, joinColumn, inverseColumn)
     }
 
-    private fun javaFields(source: String): List<ParsedJavaField> =
-        JAVA_FIELD_DECLARATION.findAll(source).map { match ->
+    private fun sourceFields(source: String): List<ParsedSourceField> = buildList {
+        JAVA_FIELD_DECLARATION.findAll(source).forEach { match ->
             val declarationStart = annotationBlockStart(source, match.range.first)
-            ParsedJavaField(
-                type = match.groupValues[1].trim(),
-                name = match.groupValues[2],
-                declaration = source.substring(declarationStart, match.range.last + 1),
+            add(
+                ParsedSourceField(
+                    type = match.groupValues[1].trim(),
+                    name = match.groupValues[2],
+                    declaration = source.substring(declarationStart, match.range.last + 1),
+                ),
             )
-        }.toList()
+        }
+        KOTLIN_PROPERTY_DECLARATION.findAll(source).forEach { match ->
+            val declarationStart = annotationBlockStart(source, match.range.first)
+            add(
+                ParsedSourceField(
+                    type = match.groupValues[2].trim().removeSuffix("?").trim(),
+                    name = match.groupValues[1],
+                    declaration = source.substring(declarationStart, match.range.last + 1),
+                ),
+            )
+        }
+    }.distinctBy(ParsedSourceField::name)
 
-    private fun javaField(source: String, fieldName: String): ParsedJavaField? =
-        javaFields(source).firstOrNull { it.name == fieldName }
+    private fun sourceField(source: String, fieldName: String): ParsedSourceField? =
+        sourceFields(source).firstOrNull { it.name == fieldName }
 
     private fun annotationBlockStart(source: String, fieldStart: Int): Int {
         var cursor = source.lastIndexOf('\n', (fieldStart - 1).coerceAtLeast(0))
@@ -1419,7 +1433,7 @@ class SchemaWorkspaceService(
     private fun read(relativePath: String): String? {
         val file = ProjectFileResolver.getInstance(project).resolveFile(relativePath)?.file ?: return null
         if (file.isDirectory) return null
-        return runCatching { String(file.contentsToByteArray(false), file.charset) }.getOrNull()
+        return runCatching { ProjectSourceText.read(file) }.getOrNull()
     }
 
     private fun classpathPath(relativePath: String): String {
@@ -1483,6 +1497,11 @@ class SchemaWorkspaceService(
         private val JAVA_FIELD_DECLARATION = Regex(
             """(?m)^[\t ]*(?:private|protected|public)[\t ]+([\w.$<>,?\[\]\t ]+?)[\t ]+([A-Za-z_$][A-Za-z0-9_$]*)\s*;""",
         )
+        private val KOTLIN_PROPERTY_DECLARATION = Regex(
+            """(?m)^[\t ]*(?:(?:private|protected|public|internal)[\t ]+)?""" +
+                """(?:lateinit[\t ]+)?(?:val|var)[\t ]+([A-Za-z_$][A-Za-z0-9_$]*)""" +
+                """[\t ]*:[\t ]*([^=\n]+?)[\t ]*(?:=[^\n]*)?$""",
+        )
         private val RELATION_ANNOTATION = Regex(
             """@\s*(?:[\w.]+\.)?(ManyToOne|OneToMany|ManyToMany|OneToOne)\b""",
         )
@@ -1536,9 +1555,10 @@ class SchemaWorkspaceService(
         private val BUSINESS_IDENTIFIER = Regex("""(?i)(number|code|applicationNo|applicationNumber|loanNo|loanNumber)$""")
         private val MONEY_NAME = Regex("""(?i)(amount|balance|salary|wage|rate|price|total|interest|principal|deduction)""")
         private val SCALAR_TYPES = setOf(
-            "String", "Integer", "Long", "Double", "Float", "BigDecimal", "Boolean", "Date",
+            "String", "Character", "Char", "Integer", "Int", "Long", "Double", "Float",
+            "BigDecimal", "Boolean", "Date",
             "LocalDate", "LocalDateTime", "LocalTime", "OffsetDateTime", "UUID", "byte[]",
-            "int", "long", "double", "float", "boolean",
+            "ByteArray", "URI", "FileRef", "int", "long", "double", "float", "boolean",
         )
 
         fun getInstance(project: Project): SchemaWorkspaceService =
@@ -1546,7 +1566,7 @@ class SchemaWorkspaceService(
     }
 }
 
-private data class ParsedJavaField(
+private data class ParsedSourceField(
     val type: String,
     val name: String,
     val declaration: String,

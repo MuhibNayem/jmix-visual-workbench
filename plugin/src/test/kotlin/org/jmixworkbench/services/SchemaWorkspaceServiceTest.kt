@@ -19,6 +19,7 @@ import org.jmixworkbench.model.AssociationType
 import org.jmixworkbench.model.CascadeType
 import org.jmixworkbench.model.EntityGenerationTarget
 import org.jmixworkbench.model.EntityModel
+import org.jmixworkbench.model.EntitySourceLanguage
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.ProjectConfig
 import org.jmixworkbench.model.IdType
@@ -302,6 +303,50 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
     }
 
+    fun testKotlinEntityGenerationTargetsKotlinSourceSetWithNativeRepositoryConfiguration() {
+        createFixture(includeAll = true)
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val store = workspace.stores.single()
+        val entity = EntityModel(
+            className = "KotlinRepaymentSchedule",
+            packageName = "com.acme.entity",
+            sourceLanguage = EntitySourceLanguage.KOTLIN,
+            dataStore = store.name,
+            generationTarget = EntityGenerationTarget(store.moduleId, store.id),
+            dataRepository = DataRepositoryConfig(enabled = true),
+        )
+
+        val preview = CodeGenerationService.getInstance(project).previewEntityGeneration(
+            entity,
+            ProjectConfig(
+                projectRoot = requireNotNull(project.basePath),
+                basePackage = "com.acme",
+            ),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        val source = preview.files.single {
+            it.relativePath.endsWith(
+                "src/main/kotlin/com/acme/entity/KotlinRepaymentSchedule.kt",
+            )
+        }
+        assertTrue(source.resultContent.contains("open class KotlinRepaymentSchedule"))
+        assertTrue(
+            preview.files.any {
+                it.relativePath.endsWith(
+                    "src/main/kotlin/com/acme/entity/KotlinRepaymentScheduleRepository.kt",
+                )
+            },
+        )
+        val activation = preview.files.single {
+            it.relativePath.endsWith(
+                "src/main/kotlin/com/acme/JmixDataRepositoryConfiguration.kt",
+            )
+        }
+        assertTrue(activation.resultContent.contains("basePackages = [\"com.acme.entity\"]"))
+        assertFalse(preview.files.any { it.relativePath.endsWith(".java") })
+    }
+
     fun testExistingEntityAttributeAdditionPreservesSourceAndAddsRollbackMigration() {
         createFixture(includeAll = true)
         val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
@@ -358,6 +403,88 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
         assertFalse(stale.accepted)
         assertTrue(stale.issues.any { it.code == "JVW-ENTITY-SOURCE-STALE" })
+    }
+
+    fun testExistingKotlinEntityAdditionPreservesManualSourceAndAddsRollbackMigration() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/KotlinLoanAccount.kt",
+                """
+                    package com.acme.entity
+
+                    import io.jmix.core.metamodel.annotation.JmixEntity
+                    import jakarta.persistence.Column
+                    import jakarta.persistence.Entity
+                    import jakarta.persistence.Id
+                    import jakarta.persistence.Table
+                    import java.util.UUID
+
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "KOTLIN_LOAN_ACCOUNT")
+                    open class KotlinLoanAccount {
+                        @Id
+                        @Column(name = "ID", nullable = false)
+                        var id: UUID? = null
+
+                        @Column(name = "ACCOUNT_NO", nullable = false, length = 64)
+                        var accountNo: String? = null
+
+                        fun manualRiskScore(): Int = 73
+                    }
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val snapshot = workspace.entities.single { it.className == "KotlinLoanAccount" }
+        val accountNo = snapshot.attributes.single { it.name == "accountNo" }
+        val store = workspace.stores.single()
+        assertEquals("ACCOUNT_NO", accountNo.columnName)
+        assertFalse(accountNo.nullable)
+        assertEquals(64, accountNo.length)
+        assertEquals(IdType.UUID, snapshot.idType)
+
+        val entity = EntityModel(
+            className = snapshot.className,
+            packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+            sourceLanguage = EntitySourceLanguage.KOTLIN,
+            tableName = snapshot.tableName,
+            dataStore = snapshot.storeName,
+            generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "accountNo",
+                    type = AttributeType.STRING,
+                    columnName = "ACCOUNT_NO",
+                    mandatory = true,
+                    length = 64,
+                ),
+                AttributeModel(
+                    name = "approvedAmount",
+                    type = AttributeType.BIG_DECIMAL,
+                    columnName = "APPROVED_AMOUNT",
+                    precision = 19,
+                    scale = 2,
+                ),
+            ),
+        )
+        val preview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(snapshot.sourceLocator, entity),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(2, preview.files.size)
+        val kotlin = preview.files.single { it.relativePath.endsWith(".kt") }.resultContent
+        assertTrue(kotlin.contains("fun manualRiskScore(): Int = 73"))
+        assertTrue(kotlin.contains("import java.math.BigDecimal"))
+        assertTrue(kotlin.contains("@Column(name = \"APPROVED_AMOUNT\", precision = 19, scale = 2)"))
+        assertTrue(kotlin.contains("var approvedAmount: BigDecimal? = null"))
+        val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+        assertTrue(migration.contains("<addColumn tableName=\"KOTLIN_LOAN_ACCOUNT\">"))
+        assertTrue(migration.contains("<dropColumn tableName=\"KOTLIN_LOAN_ACCOUNT\" columnName=\"APPROVED_AMOUNT\""))
     }
 
     fun testExistingEntityCrossStoreRelationshipIsAddedWithoutRewritingManualCodeOrAddingForeignKey() {

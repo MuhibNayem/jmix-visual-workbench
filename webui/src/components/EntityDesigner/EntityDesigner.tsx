@@ -409,7 +409,8 @@ export default function EntityDesigner() {
             </Field>
             {existingEntity && (
               <div className="rounded border border-jmix-500/30 bg-jmix-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-jmix-100/80">
-                Safe round-trip mode preserves manual Java. Existing names, Java types, relationships, and removals are
+                Safe round-trip mode preserves manual {entity.sourceLanguage === 'kotlin' ? 'Kotlin' : 'Java'}.
+                Existing names, types, relationships, and removals are
                 protected; nullability, uniqueness, string length, decimal shape, new fields, and rollback-capable
                 Liquibase changes are previewed and applied atomically.
               </div>
@@ -468,7 +469,7 @@ export default function EntityDesigner() {
             {selectedStore ? (
               <div className="rounded border border-surface-border bg-surface px-2.5 py-2 text-[10px] leading-relaxed text-gray-500">
                 <div className="font-medium text-gray-300">
-                  Java → {selectedStore.moduleId}/src/main/java
+                  {entity.sourceLanguage === 'kotlin' ? 'Kotlin' : 'Java'} → {selectedStore.moduleId}/src/main/{entity.sourceLanguage}
                 </div>
                 <div className="mt-1 break-all">
                   Liquibase → {selectedStore.generatedDirectory ?? 'No writable include-chain destination'}
@@ -481,7 +482,7 @@ export default function EntityDesigner() {
               </div>
             ) : (
               <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-[10px] text-amber-200/80">
-                This module has no managed Liquibase store. Java generation remains available; enable DDL only after
+                This module has no managed Liquibase store. Source generation remains available; enable DDL only after
                 configuring a data store.
               </div>
             )}
@@ -504,6 +505,19 @@ export default function EntityDesigner() {
                 onChange={e => setEntity({ packageName: e.target.value })}
                 className="w-full"
               />
+            </Field>
+            <Field label="Source Language">
+              <select
+                value={entity.sourceLanguage}
+                onChange={e => setEntity({ sourceLanguage: e.target.value as EntityModel['sourceLanguage'] })}
+                className="w-full"
+              >
+                <option value="java">Java</option>
+                <option value="kotlin">Kotlin</option>
+              </select>
+              <p className="mt-1 text-[9px] leading-relaxed text-gray-600">
+                Generates directly into the module&apos;s matching source set.
+              </p>
             </Field>
             <Field label="Jmix Entity Name">
               <input
@@ -1862,6 +1876,7 @@ function existingEntityModel(
   return {
     className: snapshot.className,
     packageName,
+    sourceLanguage: snapshot.sourceLocator.relativePath.endsWith('.kt') ? 'kotlin' : 'java',
     dataStore: snapshot.storeName,
     generationTarget: {
       moduleId: snapshot.moduleId,

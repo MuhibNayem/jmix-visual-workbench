@@ -1,6 +1,7 @@
 package org.jmixworkbench.generator
 
 import org.jmixworkbench.model.EntityGenerationTarget
+import org.jmixworkbench.model.EntitySourceLanguage
 import org.jmixworkbench.model.EntityModel
 import org.jmixworkbench.model.DdlGenerationConfig
 import org.jmixworkbench.model.DdlGenerationMode
@@ -31,6 +32,87 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class EntityAndCrudGeneratorTest {
+    @Test
+    fun `Kotlin entity generation preserves Jmix enum ids relationships and repository contracts`() {
+        val entity = EntityModel(
+            className = "LoanApplication",
+            packageName = "com.company.loan.entity",
+            sourceLanguage = EntitySourceLanguage.KOTLIN,
+            dataStore = "fund",
+            traits = mutableListOf(TraitType.STANDARD_ENTITY),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "status",
+                    type = org.jmixworkbench.model.AttributeType.ENUM,
+                    enumClass = "com.company.loan.entity.LoanStatus",
+                    mandatory = true,
+                    length = 32,
+                ),
+                AttributeModel(
+                    name = "schedules",
+                    type = org.jmixworkbench.model.AttributeType.COMPOSITION,
+                    association = AssociationConfig(
+                        associationType = AssociationType.ONE_TO_MANY,
+                        relatedEntity = "com.company.loan.entity.RepaymentSchedule",
+                        mappedBy = "loanApplication",
+                        cascade = mutableListOf(CascadeType.ALL),
+                        orphanRemoval = true,
+                    ),
+                ),
+            ),
+            dataRepository = DataRepositoryConfig(enabled = true),
+        )
+
+        val source = KotlinEntityGenerator.generate(entity)
+        val repository = KotlinDataRepositoryGenerator.generate(entity)
+
+        assertTrue(source.contains("package com.company.loan.entity"))
+        assertTrue(source.contains("@Store(name = \"fund\")"))
+        assertTrue(source.contains("open class LoanApplication"))
+        assertTrue(source.contains("@JvmField\n    protected var status: String? = null"))
+        assertTrue(source.contains("fun getStatus(): LoanStatus? = status?.let(LoanStatus::fromId)"))
+        assertTrue(source.contains("status = value?.getId()"))
+        assertTrue(source.contains("@OneToMany(fetch = FetchType.LAZY, cascade = [CascadeType.ALL]"))
+        assertTrue(source.contains("var schedules: MutableList<RepaymentSchedule>? = null"))
+        assertTrue(repository.contains("interface LoanApplicationRepository : JmixDataRepository<LoanApplication, UUID>"))
+    }
+
+    @Test
+    fun `Kotlin EnumClass uses stable string and integer identifiers`() {
+        val stringEnum = KotlinEntityGenerator.generate(
+            EntityModel(
+                className = "LoanStatus",
+                packageName = "com.company.loan.entity",
+                sourceLanguage = EntitySourceLanguage.KOTLIN,
+                entityType = EntityType.ENUM,
+                enumConfig = EnumConfig(
+                    values = mutableListOf(
+                        EnumValueModel("NEW", "N"),
+                        EnumValueModel("APPROVED", "A"),
+                    ),
+                ),
+            ),
+        )
+        val integerEnum = KotlinEntityGenerator.generate(
+            EntityModel(
+                className = "RiskBand",
+                packageName = "com.company.loan.entity",
+                sourceLanguage = EntitySourceLanguage.KOTLIN,
+                entityType = EntityType.ENUM,
+                enumConfig = EnumConfig(
+                    idType = EnumIdType.INTEGER,
+                    values = mutableListOf(EnumValueModel("LOW", "10")),
+                ),
+            ),
+        )
+
+        assertTrue(stringEnum.contains("enum class LoanStatus(private val id: String) : EnumClass<String>"))
+        assertTrue(stringEnum.contains("NEW(\"N\")"))
+        assertTrue(stringEnum.contains("entries.firstOrNull { it.id == id }"))
+        assertTrue(integerEnum.contains("enum class RiskBand(private val id: Int) : EnumClass<Int>"))
+        assertTrue(integerEnum.contains("LOW(10)"))
+    }
+
     @Test
     fun `project id prefixes entity table migration and JPQL names exactly like Studio`() {
         val entity = EntityModel(

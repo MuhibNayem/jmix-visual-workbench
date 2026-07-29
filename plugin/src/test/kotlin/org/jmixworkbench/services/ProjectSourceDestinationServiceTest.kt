@@ -22,6 +22,13 @@ class ProjectSourceDestinationServiceTest {
             ),
         )
         assertEquals(
+            "loan/src/main/kotlin",
+            ProjectSourceDestinationService.inferSiblingSourceRoot(
+                "loan/src/main/java/com/acme/Loan.java",
+                ProjectSourceDestinationKind.PRODUCTION_KOTLIN,
+            ),
+        )
+        assertEquals(
             "risk/src/test/java",
             ProjectSourceDestinationService.inferSiblingSourceRoot(
                 "risk/src/integration/kotlin/com/acme/Risk.kt",

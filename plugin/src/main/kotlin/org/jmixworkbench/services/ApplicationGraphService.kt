@@ -2,6 +2,7 @@ package org.jmixworkbench.services
 
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.progress.ProgressManager
@@ -108,7 +109,7 @@ class ApplicationGraphService(
                     return@mapNotNull cachedSource.source
                 }
             val content = runCatching {
-                String(candidate.file.contentsToByteArray(false), candidate.file.charset)
+                ProjectSourceText.read(candidate.file)
             }.getOrNull()
             if (content == null) {
                 unreadableFiles += 1
@@ -266,7 +267,7 @@ class ApplicationGraphService(
             )
         }
         val currentFingerprint = runCatching {
-            CanonicalDiscoveryJson.sha256(String(file.contentsToByteArray(false), file.charset))
+            CanonicalDiscoveryJson.sha256(ProjectSourceText.read(file))
         }.getOrNull() ?: return PreparedSourceNavigation.failure(
             "JVW-NAVIGATION-SOURCE-UNREADABLE",
             "The indexed source file can no longer be read.",
@@ -725,8 +726,12 @@ class ApplicationGraphService(
         }
 
         val language = languageFor(file.extension) ?: return
-        if (file.length > MAX_FILE_BYTES) {
-            onExcluded(file.length)
+        val documentManager = FileDocumentManager.getInstance()
+        val cachedDocument = documentManager.getCachedDocument(file)
+        val unsavedDocument = cachedDocument?.takeIf(documentManager::isDocumentUnsaved)
+        val effectiveLength = unsavedDocument?.textLength?.toLong() ?: file.length
+        if (effectiveLength > MAX_FILE_BYTES) {
+            onExcluded(effectiveLength)
             return
         }
         val relativePath = resolver.locatorPath(file, module) ?: return
@@ -742,7 +747,8 @@ class ApplicationGraphService(
         val stamp = FileStamp(
             relativePath = relativePath,
             modificationStamp = file.modificationStamp,
-            length = file.length,
+            documentModificationStamp = unsavedDocument?.modificationStamp,
+            length = effectiveLength,
             buildId = buildId,
             moduleId = ownerModuleId,
             sourceSetId = sourceSet,
@@ -1889,6 +1895,7 @@ class ApplicationGraphService(
     private data class FileStamp(
         val relativePath: String,
         val modificationStamp: Long,
+        val documentModificationStamp: Long?,
         val length: Long,
         val buildId: String,
         val moduleId: String,

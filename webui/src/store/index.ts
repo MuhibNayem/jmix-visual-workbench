@@ -45,6 +45,7 @@ function defaultEntity(): EntityModel {
   return {
     className: '',
     packageName: 'com.example.app.entity',
+    sourceLanguage: 'java',
     dataStore: 'main',
     entityName: '',
     tableName: '',

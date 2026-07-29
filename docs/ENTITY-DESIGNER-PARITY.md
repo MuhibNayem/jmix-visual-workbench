@@ -42,6 +42,16 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   Additions and supported persistence-metadata changes preserve handwritten
   bodies and unmanaged annotations and are combined with rollback-capable
   Liquibase changes.
+- New Java/Kotlin language selection is module-aware: entities, typed
+  `EnumClass` declarations, repositories and repository activation source are
+  generated directly into the matching production source set.
+- Existing handwritten Kotlin entities now participate in additive round trip.
+  The schema workspace reconstructs Kotlin IDs, columns, nullability, lengths,
+  precision, scale, persistence and relationships; additions preserve manual
+  bodies and imports, read current unsaved IntelliJ documents, reject stale
+  indexed revisions, validate the resulting Kotlin PSI and share the atomic
+  rollback-capable Liquibase plan. Existing Kotlin declaration/mapping changes
+  fail closed until the project-wide impact refactor is implemented.
 - The designer consumes the connected application graph and displays entity
   consumers across views, services, security, REST, workflow, menus and
   migrations.
@@ -54,8 +64,9 @@ This milestone materially expands the entity model and generator but does not
 yet make `STUDIO-CORE-001` or `STUDIO-CORE-011` STRONG. Those claims remain
 blocked until all of the following pass:
 
-1. Exact Java and Kotlin PSI round trip for handwritten entities, including
-   safe rename, type change and removal with project-wide usage refactoring.
+1. Complete impact-aware Java and Kotlin PSI refactoring for handwritten
+   entities, including safe rename, type change and removal with project-wide
+   usage refactoring. Additive Java/Kotlin round trip is implemented.
 2. Partial live-database reverse engineering for selected tables, columns,
    keys and views, plus repeatable merge into existing source.
 3. Attribute propagation into selected FlowUI views, fetch plans,

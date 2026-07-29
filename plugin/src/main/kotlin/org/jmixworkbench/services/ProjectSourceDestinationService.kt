@@ -20,6 +20,9 @@ class ProjectSourceDestinationService(private val project: Project) {
     fun productionJava(graph: ApplicationGraphResponse): List<ProjectSourceDestination> =
         resolve(graph, ProjectSourceDestinationKind.PRODUCTION_JAVA)
 
+    fun productionKotlin(graph: ApplicationGraphResponse): List<ProjectSourceDestination> =
+        resolve(graph, ProjectSourceDestinationKind.PRODUCTION_KOTLIN)
+
     fun productionResources(graph: ApplicationGraphResponse): List<ProjectSourceDestination> =
         resolve(graph, ProjectSourceDestinationKind.PRODUCTION_RESOURCES)
 
@@ -50,6 +53,15 @@ class ProjectSourceDestinationService(private val project: Project) {
                             .mapNotNull { resolver.locatorPath(it, module) }
                             .mapNotNull(::productionJavaRoot)
 
+                    ProjectSourceDestinationKind.PRODUCTION_KOTLIN ->
+                        rootManager.sourceRoots
+                            .filter {
+                                fileIndex.isInSourceContent(it) &&
+                                    !fileIndex.isInTestSourceContent(it)
+                            }
+                            .mapNotNull { resolver.locatorPath(it, module) }
+                            .mapNotNull(::productionKotlinRoot)
+
                     ProjectSourceDestinationKind.TEST_JAVA ->
                         rootManager.sourceRoots
                             .filter(fileIndex::isInTestSourceContent)
@@ -77,6 +89,10 @@ class ProjectSourceDestinationService(private val project: Project) {
                         when (kind) {
                             ProjectSourceDestinationKind.PRODUCTION_JAVA ->
                                 root.kind == ApplicationGraphSourceRootKind.JAVA &&
+                                    root.sourceSetId.isProductionSourceSet()
+
+                            ProjectSourceDestinationKind.PRODUCTION_KOTLIN ->
+                                root.kind == ApplicationGraphSourceRootKind.KOTLIN &&
                                     root.sourceSetId.isProductionSourceSet()
 
                             ProjectSourceDestinationKind.PRODUCTION_RESOURCES ->
@@ -185,6 +201,18 @@ class ProjectSourceDestinationService(private val project: Project) {
         private val CONVENTIONAL_SOURCE_PATH =
             Regex("""^(.*?)(?:^|/)src/([^/]+)/(?:java|kotlin|groovy|resources)(?:/|$)""")
 
+        private fun productionKotlinRoot(sourceRoot: String): String? {
+            val normalized = sourceRoot.trimEnd('/', '\\')
+            return when {
+                normalized.endsWith("/kotlin") || normalized == "kotlin" -> normalized
+                normalized.endsWith("/java") ->
+                    normalized.removeSuffix("/java") + "/kotlin"
+                normalized.endsWith("/groovy") ->
+                    normalized.removeSuffix("/groovy") + "/kotlin"
+                else -> null
+            }
+        }
+
         fun getInstance(project: Project): ProjectSourceDestinationService =
             project.getService(ProjectSourceDestinationService::class.java)
     }
@@ -195,6 +223,7 @@ enum class ProjectSourceDestinationKind(
     val directory: String,
 ) {
     PRODUCTION_JAVA("src/main/java", "java"),
+    PRODUCTION_KOTLIN("src/main/kotlin", "kotlin"),
     PRODUCTION_RESOURCES("src/main/resources", "resources"),
     TEST_JAVA("src/test/java", "java"),
 }

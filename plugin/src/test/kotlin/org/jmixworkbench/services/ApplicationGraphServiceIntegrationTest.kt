@@ -1,6 +1,7 @@
 package org.jmixworkbench.services
 
 import com.intellij.openapi.application.WriteAction
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.module.ModuleType
 import com.intellij.openapi.roots.ModuleRootManager
@@ -18,6 +19,45 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class ApplicationGraphServiceIntegrationTest : HeavyPlatformTestCase() {
+
+    fun testUnsavedJvmDocumentInvalidatesGraphAndBecomesIndexedRevision() {
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/payroll/DraftPayroll.java",
+                "package com.acme.payroll; @JmixEntity public class DraftPayroll {}",
+            )
+        }
+        PsiTestUtil.addContentRoot(module, root)
+        val service = ApplicationGraphService.getInstance(project)
+        val initial = service.graph(forceRefresh = true)
+        assertTrue(initial.artifacts.any {
+            it.kind == ArtifactKind.ENTITY && it.displayName == "DraftPayroll"
+        })
+        val file = requireNotNull(
+            root.findFileByRelativePath("src/main/java/com/acme/payroll/DraftPayroll.java"),
+        )
+        val documentManager = FileDocumentManager.getInstance()
+        val document = requireNotNull(documentManager.getDocument(file))
+        WriteAction.run<RuntimeException> {
+            document.setText(
+                "package com.acme.payroll; @JmixEntity public class ReviewedPayroll {}",
+            )
+        }
+        assertTrue(documentManager.isDocumentUnsaved(document))
+
+        val refreshed = service.graph()
+
+        assertFalse(refreshed.cacheHit)
+        assertTrue(refreshed.artifacts.any {
+            it.kind == ArtifactKind.ENTITY && it.displayName == "ReviewedPayroll"
+        })
+        assertFalse(refreshed.artifacts.any {
+            it.kind == ArtifactKind.ENTITY && it.displayName == "DraftPayroll"
+        })
+        assertTrue(String(file.contentsToByteArray(false), file.charset).contains("DraftPayroll"))
+    }
 
     fun testMostSpecificImportedModuleOwnsFilesUnderOverlappingContentRoots() {
         val root = getOrCreateProjectBaseDir()

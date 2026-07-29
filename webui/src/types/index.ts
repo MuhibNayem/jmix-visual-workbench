@@ -1,6 +1,7 @@
 // ─── Entity Types ────────────────────────────────────────────────────────────
 
 export type EntityType = 'entity' | 'mappedSuperclass' | 'embeddable' | 'dto' | 'enum'
+export type EntitySourceLanguage = 'java' | 'kotlin'
 export type IdType = 'uuid' | 'long' | 'integer' | 'string' | 'embedded'
 export type IdGeneration = 'jmixGenerated' | 'identity' | 'sequence' | 'assigned'
 export type InheritanceStrategy = 'singleTable' | 'joined' | 'tablePerClass'
@@ -96,6 +97,7 @@ export interface IndexModel {
 export interface EntityModel {
   className: string
   packageName: string
+  sourceLanguage: EntitySourceLanguage
   dataStore: string
   generationTarget?: {
     moduleId?: string
