@@ -41,7 +41,7 @@ abstract class JmixCandidateFileIndex(
             ProgressManager.checkCanceled()
             val text = input.contentAsText
             if (isCandidate(input.file, text)) {
-                mapOf(PRESENCE_KEY to contentFingerprint(text))
+                mapOf(PRESENCE_KEY to jmixContentFingerprint(text))
             } else {
                 emptyMap()
             }
@@ -51,7 +51,7 @@ abstract class JmixCandidateFileIndex(
         EnumeratorStringDescriptor.INSTANCE
 
     final override fun getValueExternalizer(): DataExternalizer<Long> =
-        LongExternalizer
+        JmixLongExternalizer
 
     final override fun getVersion(): Int = INDEX_VERSION
 
@@ -67,32 +67,55 @@ abstract class JmixCandidateFileIndex(
         text: CharSequence,
     ): Boolean
 
-    private object LongExternalizer : DataExternalizer<Long> {
-        override fun save(out: DataOutput, value: Long) {
-            out.writeLong(value)
-        }
-
-        override fun read(input: DataInput): Long = input.readLong()
-    }
-
     companion object {
         internal const val PRESENCE_KEY = "present"
         private const val INDEX_VERSION = 1
+    }
+}
 
-        /**
-         * FNV-1a over UTF-16 code units. The value is not a security digest; it
-         * makes the forward-index value change when a candidate file changes,
-         * which advances the per-index modification stamp used by symbol
-         * caches.
-         */
-        private fun contentFingerprint(text: CharSequence): Long {
-            var hash = -3750763034362895579L
-            text.forEach { character ->
-                hash = hash xor character.code.toLong()
-                hash *= 1099511628211L
-            }
-            return hash
+/**
+ * Keyed annotation-usage index used for custom composed Spring stereotypes.
+ *
+ * Unlike broad "all annotated files" candidate discovery, callers query only
+ * the names already proven to be meta-annotated Spring stereotypes. Editing an
+ * unrelated JPA, validation or test annotation therefore cannot evict the
+ * Spring bean inventory.
+ */
+class JmixSpringStereotypeUsageFileIndex :
+    FileBasedIndexExtension<String, Long>() {
+    override fun getName(): ID<String, Long> = NAME
+
+    override fun getIndexer(): DataIndexer<String, Long, FileContent> =
+        DataIndexer { input ->
+            ProgressManager.checkCanceled()
+            val text = input.contentAsText
+            val fingerprint = jmixContentFingerprint(text)
+            JVM_ANNOTATION_USAGE.findAll(text)
+                .map { it.groupValues[1] }
+                .filter(String::isNotBlank)
+                .distinct()
+                .associateWith { fingerprint }
         }
+
+    override fun getKeyDescriptor(): KeyDescriptor<String> =
+        EnumeratorStringDescriptor.INSTANCE
+
+    override fun getValueExternalizer(): DataExternalizer<Long> =
+        JmixLongExternalizer
+
+    override fun getVersion(): Int = 1
+
+    override fun getInputFilter(): FileBasedIndex.InputFilter =
+        FileBasedIndex.InputFilter { file ->
+            file.extension?.lowercase(Locale.ROOT) in JVM_EXTENSIONS
+        }
+
+    override fun dependsOnFileContent(): Boolean = true
+
+    companion object {
+        @JvmField
+        val NAME: ID<String, Long> =
+            ID.create("org.jmixworkbench.springStereotypeUsageFile")
     }
 }
 
@@ -278,6 +301,29 @@ private val STUDIO_METADATA_ANNOTATIONS = setOf(
 )
 private val STUDIO_METADATA_QUALIFIED_MARKERS = STUDIO_METADATA_ANNOTATIONS.map {
     "io.jmix.flowui.kit.meta.$it"
+}
+private val JVM_ANNOTATION_USAGE =
+    Regex("""@(?:(?:file|get|set|field|property|receiver|param):)?(?:[\w.]+\.)?([A-Za-z_]\w*)""")
+
+private object JmixLongExternalizer : DataExternalizer<Long> {
+    override fun save(out: DataOutput, value: Long) {
+        out.writeLong(value)
+    }
+
+    override fun read(input: DataInput): Long = input.readLong()
+}
+
+/**
+ * FNV-1a over UTF-16 code units. The value is not a security digest; it makes
+ * the forward-index value change when a candidate file changes.
+ */
+private fun jmixContentFingerprint(text: CharSequence): Long {
+    var hash = -3750763034362895579L
+    text.forEach { character ->
+        hash = hash xor character.code.toLong()
+        hash *= 1099511628211L
+    }
+    return hash
 }
 
 /**

@@ -47,7 +47,7 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
         val value = valueRange.substring(host.text)
         if ('$' in value) return PsiReference.EMPTY_ARRAY
         val annotation = host.kotlinAnnotationContext()
-        if (annotation?.isJmixSpringBeanNameDeclaration() == true) {
+        if (annotation?.isJmixSpringBeanNameDeclaration(host) == true) {
             return arrayOf(
                 JmixKotlinSpringBeanDeclarationReference(
                     host,

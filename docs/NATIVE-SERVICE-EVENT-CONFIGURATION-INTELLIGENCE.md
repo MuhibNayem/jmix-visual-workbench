@@ -11,6 +11,8 @@ For Jmix `rest-services.xml`, the plugin provides:
 - indexed Java and Kotlin Spring bean completion and navigation;
 - `@RestService`, stereotype bean and Java/Kotlin `@Bean` factory-product
   discovery, including explicit aliases;
+- recursive Java/Kotlin composed Spring stereotypes, including standard
+  `@AliasFor` component-name aliases and safe declaration rename;
 - public method and overload completion with signatures;
 - overload resolution by method name, parameter count and optional JVM type;
 - positional navigation from public XML payload names to source parameters;
@@ -78,6 +80,12 @@ now checks eight independent symbol inventories plus project-version Studio
 metadata, and verifies that a real REST descriptor edit invalidates only its
 own inventory.
 
+Composed stereotype discovery uses a second, annotation-name-keyed index.
+Only annotation names already proven to compose a Spring stereotype are
+queried, so unrelated annotated types do not invalidate or rebuild the bean
+inventory. Recursive Java declarations, recursive Kotlin declarations,
+cross-language usage and alias rename are covered on both supported IDE hosts.
+
 All changes remain ordinary Jmix Java, Kotlin, XML and properties source. No
 generated application requires a proprietary workbench runtime.
 
@@ -85,7 +93,8 @@ generated application requires a proprietary workbench runtime.
 
 This milestone does not yet certify:
 
-- custom Spring composed stereotypes and `@AliasFor` naming;
+- arbitrary custom `BeanNameGenerator` implementations or exotic multi-hop
+  alias graphs beyond standard component-name `@AliasFor` contracts;
 - application-event publisher-to-listener gutters and transitive impact;
 - BPMN/expression consumers of Spring service methods;
 - annotation-only REST endpoint authoring for every `@RestMethod` option;

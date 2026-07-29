@@ -319,9 +319,10 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
             listOf(
                 "org.jmixworkbench.ide.JmixJavaUiComponentPolicyInspection",
                 "org.jmixworkbench.ide.JmixKotlinUiComponentPolicyInspection",
-            ).forEach { inspection ->
-                check(inspection in descriptorText) {
-                    "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register $inspection."
+                "org.jmixworkbench.ide.JmixSpringStereotypeUsageFileIndex",
+            ).forEach { requiredExtension ->
+                check(requiredExtension in descriptorText) {
+                    "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register $requiredExtension."
                 }
             }
             val registered = Regex(

@@ -9,7 +9,9 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.ElementManipulators
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiAnnotation
+import com.intellij.psi.PsiAnnotationMethod
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiClassObjectAccessExpression
 import com.intellij.psi.PsiClassType
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiElementResolveResult
@@ -32,6 +34,7 @@ import com.intellij.psi.search.SearchScope
 import com.intellij.psi.search.PsiShortNamesCache
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.util.PsiUtil
+import com.intellij.util.indexing.FileBasedIndex
 import java.util.Locale
 
 /**
@@ -56,27 +59,157 @@ internal class JmixSpringBeanSymbolService(
             JmixSpringBeanCandidateFileIndex.NAME,
             scope,
         )
-        val stamp = jmixCandidateIndexStamp(
+        val directStamp = jmixCandidateIndexStamp(
             project,
             JmixSpringBeanCandidateFileIndex.NAME,
         )
-        cache?.takeIf { it.stamp == stamp }?.let { return it.beans }
+        cache?.takeIf { it.directStamp == directStamp }?.let { current ->
+            val usage = composedStereotypeUsage(
+                current.composedStereotypeNames,
+                scope,
+            )
+            if (usage.fingerprint == current.composedUsageFingerprint) {
+                return current.beans
+            }
+        }
 
         ProgressManager.checkCanceled()
-        val candidates = indexedJmixCandidateFiles(
+        val directCandidates = indexedJmixCandidateFiles(
             project,
             JmixSpringBeanCandidateFileIndex.NAME,
             scope,
         )
-        val beans = computeBeans(candidates)
+        val composed = composedStereotypeClosure(directCandidates, scope)
+        val beans = computeBeans(composed.files)
+        val finalUsage = composedStereotypeUsage(composed.names, scope)
         cache = JmixSpringBeanCache(
-            jmixCandidateIndexStamp(
+            directStamp = jmixCandidateIndexStamp(
                 project,
                 JmixSpringBeanCandidateFileIndex.NAME,
             ),
-            beans,
+            composedStereotypeNames = composed.names,
+            composedUsageFingerprint = finalUsage.fingerprint,
+            beans = beans,
         )
         return beans
+    }
+
+    private fun composedStereotypeClosure(
+        directCandidates: List<VirtualFile>,
+        scope: GlobalSearchScope,
+    ): JmixComposedStereotypeClosure {
+        val filesByPath = directCandidates.associateByTo(
+            linkedMapOf(),
+            VirtualFile::getPath,
+        )
+        val names = linkedSetOf<String>()
+        var frontier = directCandidates
+        repeat(JMIX_COMPOSED_STEREOTYPE_DEPTH_LIMIT) {
+            ProgressManager.checkCanceled()
+            val discovered = discoverComposedSpringStereotypes(frontier)
+                .filterTo(linkedSetOf()) { it !in names }
+            if (discovered.isEmpty()) {
+                return JmixComposedStereotypeClosure(
+                    filesByPath.values.toList(),
+                    names,
+                )
+            }
+            names += discovered
+            val usage = composedStereotypeUsage(names, scope)
+            frontier = usage.files.filter { file ->
+                filesByPath.putIfAbsent(file.path, file) == null
+            }
+            if (frontier.isEmpty()) {
+                return JmixComposedStereotypeClosure(
+                    filesByPath.values.toList(),
+                    names,
+                )
+            }
+        }
+        return JmixComposedStereotypeClosure(
+            filesByPath.values.toList(),
+            names,
+        )
+    }
+
+    private fun discoverComposedSpringStereotypes(
+        files: List<VirtualFile>,
+    ): Set<String> {
+        val manager = PsiManager.getInstance(project)
+        return files.asSequence()
+            .onEach { ProgressManager.checkCanceled() }
+            .mapNotNull(manager::findFile)
+            .flatMap { file ->
+                when (file.virtualFile.extension?.lowercase(Locale.ROOT)) {
+                    "java" ->
+                        PsiTreeUtil.findChildrenOfType(
+                            file,
+                            PsiClass::class.java,
+                        ).asSequence()
+                            .filter(PsiClass::isAnnotationType)
+                            .filter { annotationClass ->
+                                annotationClass.annotations.any(
+                                    PsiAnnotation::isSpringBeanStereotype,
+                                )
+                            }
+                            .mapNotNull(PsiClass::getName)
+
+                    "kt" ->
+                        PsiTreeUtil.findChildrenOfType(
+                            file,
+                            PsiNamedElement::class.java,
+                        ).asSequence()
+                            .filter {
+                                it.javaClass.simpleName == "KtClass" &&
+                                    it.text.substringBefore('{')
+                                        .contains(KOTLIN_ANNOTATION_CLASS)
+                            }
+                            .filter(PsiNamedElement::hasKotlinSpringStereotype)
+                            .mapNotNull(PsiNamedElement::getName)
+
+                    else -> emptySequence()
+                }
+            }
+            .filter { it !in SPRING_BEAN_STEREOTYPES }
+            .toCollection(linkedSetOf())
+    }
+
+    private fun composedStereotypeUsage(
+        names: Set<String>,
+        scope: GlobalSearchScope,
+    ): JmixComposedStereotypeUsage {
+        if (names.isEmpty()) {
+            return JmixComposedStereotypeUsage(emptyList(), 0L)
+        }
+        val filesByPath = linkedMapOf<String, VirtualFile>()
+        var fingerprint = JMIX_STEREOTYPE_FINGERPRINT_OFFSET
+        names.sorted().forEach { name ->
+            ProgressManager.checkCanceled()
+            fingerprint = fingerprint.mixJmixStereotypeText(name)
+            val indexedValues = mutableListOf<Pair<String, Long>>()
+            FileBasedIndex.getInstance().processValues(
+                JmixSpringStereotypeUsageFileIndex.NAME,
+                name,
+                null,
+                { file, value ->
+                    ProgressManager.checkCanceled()
+                    filesByPath[file.path] = file
+                    indexedValues += file.path to value
+                    true
+                },
+                scope,
+            )
+            indexedValues.sortedBy(Pair<String, Long>::first)
+                .forEach { (path, value) ->
+                    fingerprint = fingerprint
+                        .mixJmixStereotypeText(path)
+                        .mixJmixStereotypeValue(value)
+                }
+        }
+        return JmixComposedStereotypeUsage(
+            filesByPath.values.toList(),
+            fingerprint,
+        )
     }
 
     private fun computeBeans(
@@ -152,8 +285,20 @@ internal class JmixSpringBeanSymbolService(
 }
 
 private data class JmixSpringBeanCache(
-    val stamp: JmixCandidateIndexStamp,
+    val directStamp: JmixCandidateIndexStamp,
+    val composedStereotypeNames: Set<String>,
+    val composedUsageFingerprint: Long,
     val beans: List<JmixSpringBeanDeclaration>,
+)
+
+private data class JmixComposedStereotypeClosure(
+    val files: List<VirtualFile>,
+    val names: Set<String>,
+)
+
+private data class JmixComposedStereotypeUsage(
+    val files: List<VirtualFile>,
+    val fingerprint: Long,
 )
 
 internal data class JmixSpringBeanDeclaration(
@@ -363,16 +508,33 @@ internal fun PsiLiteralExpression.isJmixSpringBeanNameDeclaration(): Boolean {
         PsiAnnotation::class.java,
         false,
     ) ?: return false
-    if (!annotation.isSpringBeanNameAnnotation()) return false
-    val declared = annotation.findDeclaredAttributeValue("value")
-        ?: annotation.findDeclaredAttributeValue("name")
+    val declared = annotation.springBeanNameExpression() ?: return false
     return manager.areElementsEquivalent(declared, this) ||
-        declared?.let { PsiTreeUtil.isAncestor(it, this, false) } == true
+        PsiTreeUtil.isAncestor(declared, this, false)
 }
 
-internal fun KotlinAnnotationContext.isJmixSpringBeanNameDeclaration(): Boolean =
-    name in SPRING_BEAN_STEREOTYPES &&
-        (attributeName == null || attributeName == "value" || attributeName == "name")
+internal fun KotlinAnnotationContext.isJmixSpringBeanNameDeclaration(
+    context: PsiElement,
+): Boolean {
+    if (name == "Bean") {
+        return attributeName in setOf(null, "value", "name")
+    }
+    val annotationClass = context.resolveKotlinAnnotationClass(name)
+    val isStereotype = name in SPRING_BEAN_STEREOTYPES ||
+        annotationClass?.annotations?.any(
+            PsiAnnotation::isSpringBeanStereotype,
+        ) == true
+    if (!isStereotype) return false
+    val acceptedNames = annotationClass
+        ?.springBeanNameAttributeNames()
+        .orEmpty()
+        .ifEmpty { setOf("value", "name") }
+    return if (attributeName == null) {
+        "value" in acceptedNames || acceptedNames.size == 1
+    } else {
+        attributeName in acceptedNames
+    }
+}
 
 private fun explicitBeanDeclarations(
     element: PsiElement,
@@ -386,11 +548,18 @@ private fun explicitBeanDeclarations(
     }
 
 private fun PsiClass.jmixSpringBeanDeclaration(): JmixSpringBeanDeclaration? {
+    if (isAnnotationType) return null
     val annotation = annotations.firstOrNull(PsiAnnotation::isSpringBeanStereotype)
         ?: return null
-    val explicit = annotation.findDeclaredAttributeValue("value")
-        ?: annotation.findDeclaredAttributeValue("name")
-    val literal = explicit as? PsiLiteralExpression
+    val explicit = annotation.springBeanNameExpression()
+    val literal = when (explicit) {
+        is PsiLiteralExpression -> explicit
+        null -> null
+        else -> PsiTreeUtil.findChildrenOfType(
+            explicit,
+            PsiLiteralExpression::class.java,
+        ).singleOrNull { it.value is String }
+    }
     val explicitName = (literal?.value as? String)?.takeIf(String::isNotBlank)
     val className = name?.takeIf(String::isNotBlank) ?: return null
     val navigation = literal ?: nameIdentifier ?: this
@@ -419,18 +588,77 @@ private fun PsiClass.jmixSpringBeanDeclaration(): JmixSpringBeanDeclaration? {
     )
 }
 
-private fun PsiAnnotation.isSpringBeanStereotype(): Boolean {
+private fun PsiAnnotation.isSpringBeanStereotype(
+    visited: MutableSet<String> = linkedSetOf(),
+): Boolean {
     val name = qualifiedName?.substringAfterLast('.')
         ?: nameReferenceElement?.referenceName
         ?: return false
-    return name in SPRING_BEAN_STEREOTYPES
+    if (name in SPRING_BEAN_STEREOTYPES) return true
+    val annotationClass = resolveAnnotationType() ?: return false
+    val identity = annotationClass.qualifiedName ?: annotationClass.name
+        ?: return false
+    if (!visited.add(identity)) return false
+    return annotationClass.annotations.any { meta ->
+        meta.isSpringBeanStereotype(visited)
+    }
 }
 
-private fun PsiAnnotation.isSpringBeanNameAnnotation(): Boolean {
+private fun PsiAnnotation.springBeanNameExpression(): PsiElement? {
     val name = qualifiedName?.substringAfterLast('.')
         ?: nameReferenceElement?.referenceName
+        ?: return null
+    val attributeNames = when {
+        name == "Bean" -> setOf("value", "name")
+        name in SPRING_BEAN_STEREOTYPES -> setOf("value", "name")
+        isSpringBeanStereotype() -> resolveAnnotationType()
+            ?.springBeanNameAttributeNames()
+            .orEmpty()
+
+        else -> emptySet()
+    }
+    return attributeNames.asSequence()
+        .mapNotNull(::findDeclaredAttributeValue)
+        .firstOrNull()
+}
+
+private fun PsiClass.springBeanNameAttributeNames(): Set<String> {
+    val aliases = methods.asSequence()
+        .filterIsInstance<PsiAnnotationMethod>()
+        .filter { method ->
+            method.annotations.any(PsiAnnotation::isSpringComponentNameAlias)
+        }
+        .map(PsiMethod::getName)
+        .toCollection(linkedSetOf())
+    if (aliases.isNotEmpty()) return aliases
+    return methods.asSequence()
+        .filterIsInstance<PsiAnnotationMethod>()
+        .filter { it.name in setOf("value", "name") }
+        .filter { it.returnType?.canonicalText in JAVA_STRING_TYPES }
+        .map(PsiMethod::getName)
+        .toCollection(linkedSetOf())
+}
+
+private fun PsiAnnotation.isSpringComponentNameAlias(): Boolean {
+    val name = qualifiedName?.substringAfterLast('.')
+        ?: nameReferenceElement?.referenceName
+    if (name != "AliasFor") return false
+    val targetExpression = findDeclaredAttributeValue("annotation")
+        as? PsiClassObjectAccessExpression
         ?: return false
-    return name in SPRING_BEAN_STEREOTYPES || name == "Bean"
+    val targetClass = PsiUtil.resolveClassInClassTypeOnly(
+        targetExpression.operand.type,
+    ) ?: return false
+    val targetIsStereotype =
+        targetClass.name in SPRING_BEAN_STEREOTYPES ||
+            targetClass.annotations.any(PsiAnnotation::isSpringBeanStereotype)
+    if (!targetIsStereotype) return false
+    val targetAttribute =
+        (findDeclaredAttributeValue("attribute") as? PsiLiteralExpression)
+            ?.value as? String
+            ?: (findDeclaredAttributeValue("value") as? PsiLiteralExpression)
+                ?.value as? String
+    return targetAttribute in setOf("value", "name")
 }
 
 private fun PsiMethod.jmixBeanFactoryDeclarations():
@@ -560,7 +788,8 @@ private fun PsiType.isMenuPropertiesMap(): Boolean {
 
 private fun PsiNamedElement.jmixKotlinSpringBeanDeclaration(): JmixSpringBeanDeclaration? {
     val header = text.substringBefore('{')
-    if (KOTLIN_SPRING_STEREOTYPE.find(header) == null) return null
+    if (KOTLIN_ANNOTATION_CLASS.containsMatchIn(header)) return null
+    if (!hasKotlinSpringStereotype()) return null
     val className = name?.takeIf(String::isNotBlank) ?: return null
     val explicitHost = PsiTreeUtil.findChildrenOfType(
         this,
@@ -569,10 +798,7 @@ private fun PsiNamedElement.jmixKotlinSpringBeanDeclaration(): JmixSpringBeanDec
         .filter { it.javaClass.simpleName == "KtStringTemplateExpression" }
         .firstOrNull { host ->
             val context = host.kotlinAnnotationContext() ?: return@firstOrNull false
-            context.name in SPRING_BEAN_STEREOTYPES &&
-                (context.attributeName == null ||
-                    context.attributeName == "value" ||
-                    context.attributeName == "name")
+            context.isJmixSpringBeanNameDeclaration(host)
         }
     val explicitName = explicitHost
         ?.kotlinStringContentRange()
@@ -588,6 +814,60 @@ private fun PsiNamedElement.jmixKotlinSpringBeanDeclaration(): JmixSpringBeanDec
         methods = methods,
         implicitNameKind = JmixSpringBeanImplicitNameKind.CLASS,
     )
+}
+
+private fun PsiNamedElement.hasKotlinSpringStereotype(): Boolean {
+    val header = text.substringBefore('{')
+    return KOTLIN_ANNOTATION_ENTRY.findAll(header).any { match ->
+        val annotationName = match.groupValues[1]
+        val shortName = annotationName.substringAfterLast('.')
+        shortName in SPRING_BEAN_STEREOTYPES ||
+            resolveKotlinAnnotationClass(annotationName)
+                ?.annotations
+                ?.any(PsiAnnotation::isSpringBeanStereotype) == true
+    }
+}
+
+private fun PsiElement.resolveKotlinAnnotationClass(
+    annotationName: String,
+): PsiClass? {
+    val scope = ProjectScope.getAllScope(project)
+    if ('.' in annotationName) {
+        JavaPsiFacade.getInstance(project)
+            .findClass(annotationName, scope)
+            ?.let { return it }
+    }
+    val simpleName = annotationName.substringAfterLast('.')
+    val fileText = containingFile?.text.orEmpty()
+    val imported = KOTLIN_IMPORT_DIRECTIVE.findAll(fileText)
+        .mapNotNull { match ->
+            val qualifiedName = match.groupValues[1]
+            val alias = match.groupValues[2].takeIf(String::isNotBlank)
+            if ((alias ?: qualifiedName.substringAfterLast('.')) == simpleName) {
+                qualifiedName
+            } else {
+                null
+            }
+        }
+        .firstOrNull()
+    if (imported != null) {
+        JavaPsiFacade.getInstance(project)
+            .findClass(imported, scope)
+            ?.let { return it }
+    }
+    val packageName = KOTLIN_PACKAGE_DIRECTIVE.find(fileText)
+        ?.groupValues
+        ?.get(1)
+        .orEmpty()
+    if (packageName.isNotBlank()) {
+        JavaPsiFacade.getInstance(project)
+            .findClass("$packageName.$simpleName", scope)
+            ?.let { return it }
+    }
+    return PsiShortNamesCache.getInstance(project)
+        .getClassesByName(simpleName, scope)
+        .filter(PsiClass::isAnnotationType)
+        .singleOrNull()
 }
 
 private fun PsiNamedElement.jmixKotlinBeanFactoryDeclarations():
@@ -1016,8 +1296,11 @@ internal val SPRING_BEAN_STEREOTYPES = setOf(
     "Configuration",
     "Named",
 )
-private val KOTLIN_SPRING_STEREOTYPE =
-    Regex("""@(?:[\w.]+\.)?(?:${SPRING_BEAN_STEREOTYPES.joinToString("|")})\b""")
+private val KOTLIN_ANNOTATION_CLASS =
+    Regex("""\bannotation\s+class\b""")
+private val KOTLIN_ANNOTATION_ENTRY = Regex(
+    """@(?:(?:file|get|set|field|property|receiver|param):)?([\w.]+)""",
+)
 private val KOTLIN_BEAN_FACTORY_ANNOTATION =
     Regex("""@(?:[\w.]+\.)?Bean\b""")
 private val KOTLIN_NON_PUBLIC_MODIFIER =
@@ -1126,3 +1409,23 @@ private val KOTLIN_MAP_PARAMETER =
 private val KOTLIN_UNIT_TYPES = setOf("Unit", "kotlin.Unit")
 private val JAVA_STRING_TYPES = setOf("java.lang.String", "String")
 private val JAVA_OBJECT_TYPES = setOf("java.lang.Object", "Object")
+private const val JMIX_COMPOSED_STEREOTYPE_DEPTH_LIMIT = 16
+private const val JMIX_STEREOTYPE_FINGERPRINT_OFFSET = -3750763034362895579L
+
+private fun Long.mixJmixStereotypeText(value: String): Long {
+    var hash = this
+    value.forEach { character ->
+        hash = hash xor character.code.toLong()
+        hash *= 1099511628211L
+    }
+    return hash
+}
+
+private fun Long.mixJmixStereotypeValue(value: Long): Long {
+    var hash = this
+    repeat(Long.SIZE_BYTES) { byte ->
+        hash = hash xor ((value ushr (byte * 8)) and 0xff)
+        hash *= 1099511628211L
+    }
+    return hash
+}

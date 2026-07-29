@@ -44,6 +44,7 @@
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixViewControllerCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpecificPolicyCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpringBeanCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpringStereotypeUsageFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMenuCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFetchPlanCandidateFileIndex"/>
         <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFlowUiDescriptorCandidateFileIndex"/>
