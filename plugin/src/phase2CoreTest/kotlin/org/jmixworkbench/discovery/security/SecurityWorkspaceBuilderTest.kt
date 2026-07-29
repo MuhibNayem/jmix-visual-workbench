@@ -155,6 +155,111 @@ class SecurityWorkspaceBuilderTest {
         assertTrue(workspace.findings.any { it.code == "P2_ROW_POLICY_NESTED_GRAPH_COVERAGE" })
     }
 
+    @Test
+    fun `maps ui component policy through view actions component actions and fragments`() {
+        val graph = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                listOf(
+                    source(
+                        "app/src/main/java/com/acme/view/LoanListView.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.view;
+                        @ViewController("LoanApplication.list")
+                        @ViewDescriptor("loan-list-view.xml")
+                        public class LoanListView {
+                        }
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "app/src/main/java/com/acme/view/AddressFragment.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.view;
+                        @FragmentDescriptor("address-fragment.xml")
+                        public class AddressFragment {
+                        }
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "app/src/main/resources/com/acme/view/loan-list-view.xml",
+                        SourceLanguage.XML,
+                        """
+                        <view xmlns="http://jmix.io/schema/flowui/view">
+                          <actions><action id="save"/></actions>
+                          <layout>
+                            <dataGrid id="loanGrid">
+                              <actions><action id="approve"/></actions>
+                            </dataGrid>
+                            <fragment id="addressFragment"
+                                      class="com.acme.view.AddressFragment"/>
+                          </layout>
+                        </view>
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "app/src/main/resources/com/acme/view/address-fragment.xml",
+                        SourceLanguage.XML,
+                        """
+                        <fragment xmlns="http://jmix.io/schema/flowui/fragment">
+                          <content>
+                            <formLayout id="addressForm">
+                              <textField id="cityField"/>
+                            </formLayout>
+                          </content>
+                        </fragment>
+                        """.trimIndent(),
+                    ),
+                    source(
+                        "app/src/main/java/com/acme/security/PayrollUiRole.java",
+                        SourceLanguage.JAVA,
+                        """
+                        package com.acme.security;
+                        @ResourceRole(name = "Payroll UI", code = "payroll-ui", scope = "UI")
+                        public interface PayrollUiRole {
+                            @UiComponentPolicy(
+                                viewClass = com.acme.view.LoanListView.class,
+                                componentIds = {
+                                    "save",
+                                    "loanGrid.approve",
+                                    "addressFragment.cityField"
+                                },
+                                action = UiComponentPolicyAction.ENABLED,
+                                effect = UiComponentPolicyEffect.DENY)
+                            void constrain();
+                        }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val workspace = SecurityWorkspaceBuilder.build(
+            SecurityWorkspaceInput(
+                graph.artifacts,
+                graph.relationships,
+                graph.diagnostics,
+                "ui-policy-fixture",
+            ),
+        )
+
+        val policy = workspace.policies.single { it.type == "UiComponentPolicy" }
+        assertEquals(3, policy.targetArtifactIds.size)
+        val targets = policy.targetArtifactIds.mapNotNull { targetId ->
+            workspace.surfaces.firstOrNull { it.artifactId == targetId }
+        }
+        assertEquals(3, targets.size)
+        assertTrue(targets.all { it.kind == SecuritySurfaceKind.COMPONENT })
+        assertTrue(targets.any { it.semanticKey.endsWith("#save") })
+        assertTrue(targets.any { it.semanticKey.endsWith("#loanGrid.approve") })
+        assertTrue(targets.any { it.semanticKey.endsWith("#cityField") })
+        assertTrue(
+            workspace.findings.none {
+                it.code == "JVW-SECURITY-UI-POLICY-COMPONENT-UNRESOLVED"
+            },
+        )
+    }
+
     private fun source(
         path: String,
         language: SourceLanguage,

@@ -196,7 +196,7 @@ class ApplicationGraphIndexer {
             }
         }
 
-        VIEW_DESCRIPTOR.find(file.content)?.groupValues?.get(1)?.let { descriptor ->
+        FLOW_UI_DESCRIPTOR.find(file.content)?.groupValues?.get(1)?.let { descriptor ->
             links += primary.link(
                 target = descriptor.substringBeforeLast('.'),
                 type = RelationshipType.CONTROLS,
@@ -844,6 +844,22 @@ class ApplicationGraphIndexer {
                         )
                     }
                 }
+                "UiComponentPolicy" -> {
+                    val viewTarget = UI_COMPONENT_VIEW_CLASS_ARGUMENT.find(body)
+                        ?.groupValues
+                        ?.get(1)
+                        ?: UI_COMPONENT_VIEW_ID_ARGUMENT.find(body)
+                            ?.groupValues
+                            ?.get(1)
+                    if (!viewTarget.isNullOrBlank()) {
+                        links += policy.link(
+                            viewTarget,
+                            RelationshipType.APPLIES_POLICY_TO,
+                            setOf(ArtifactKind.VIEW_CONTROLLER),
+                            file.locator(viewTarget, policy.semanticKey),
+                        )
+                    }
+                }
                 "JpqlRowLevelPolicy", "PredicateRowLevelPolicy" -> {
                     val entity = policyEntityReference(body)
                     if (entity != null) {
@@ -1022,7 +1038,7 @@ class ApplicationGraphIndexer {
 
         val root = document.documentElement ?: return
         when (root.localTag()) {
-            "view" -> indexViewXml(file, root, artifacts, links)
+            "view", "fragment" -> indexViewXml(file, root, artifacts, links)
             "menu-config", "menu" -> indexMenuXml(file, root, artifacts, links)
             "fetchPlans", "fetch-plans" -> indexFetchPlans(file, root, artifacts)
             "databaseChangeLog" -> indexLiquibase(file, root, artifacts, links)
@@ -1280,18 +1296,37 @@ class ApplicationGraphIndexer {
         root.allElements().forEach { element ->
             val id = element.attr("id")
             if (id.isBlank() || element.localTag() in NON_COMPONENT_VIEW_TAGS) return@forEach
+            val ownerId = element.takeIf { it.localTag() == "action" }
+                ?.ancestors()
+                ?.firstOrNull { ancestor ->
+                    ancestor.localTag() != "actions" &&
+                        ancestor.localTag() !in NON_COMPONENT_VIEW_TAGS &&
+                        ancestor.attr("id").isNotBlank()
+                }
+                ?.attr("id")
+            val componentPath = ownerId?.let { "$it.$id" } ?: id
             val component = addArtifact(
                 artifacts,
                 file,
                 if (element.localTag() == "action") ArtifactKind.UI_ACTION else ArtifactKind.UI_COMPONENT,
-                "$viewId#$id",
-                id,
+                "$viewId#$componentPath",
+                componentPath,
                 element.localTag(),
-                id,
-                setOf("$viewId#$id", id),
+                componentPath,
+                setOf("$viewId#$componentPath", componentPath, id),
                 id,
             )
             links += view.link(component, RelationshipType.DECLARES, file.locator(id, id))
+            if (element.localTag() == "fragment") {
+                element.attr("class").takeIf(String::isNotBlank)?.let { controllerClass ->
+                    links += component.link(
+                        controllerClass,
+                        RelationshipType.IMPLEMENTED_BY,
+                        setOf(ArtifactKind.VIEW_CONTROLLER),
+                        file.locator(controllerClass, component.semanticKey),
+                    )
+                }
+            }
             element.attr("dataContainer").takeIf(String::isNotBlank)?.let { container ->
                 links += component.link(
                     "$viewId#$container",
@@ -2478,7 +2513,8 @@ class ApplicationGraphIndexer {
     private fun jvmKind(content: String, declarationKind: String, typeName: String): ArtifactKind =
         when {
             JMIX_ENTITY.containsMatchIn(content) -> ArtifactKind.ENTITY
-            VIEW_CONTROLLER_ID.containsMatchIn(content) -> ArtifactKind.VIEW_CONTROLLER
+            VIEW_CONTROLLER_ID.containsMatchIn(content) ||
+                FRAGMENT_DESCRIPTOR.containsMatchIn(content) -> ArtifactKind.VIEW_CONTROLLER
             REST_CONTROLLER.containsMatchIn(content) -> ArtifactKind.REST_CONTROLLER
             RESOURCE_ROLE.containsMatchIn(content) -> ArtifactKind.RESOURCE_ROLE
             ROW_ROLE.containsMatchIn(content) -> ArtifactKind.ROW_ROLE
@@ -2696,7 +2732,7 @@ class ApplicationGraphIndexer {
         STRING_LITERAL.findAll(value).map { it.groupValues[1] }.toList()
 
     private fun securityPolicySummary(policyType: String, body: String): String {
-        val compactBody = body.trim().replace(Regex("""\s+"""), " ").take(180)
+        val compactBody = body.trim().replace(Regex("""\s+"""), " ").take(2_200)
         return if (compactBody.isBlank()) policyType else "$policyType: $compactBody"
     }
 
@@ -2856,7 +2892,11 @@ class ApplicationGraphIndexer {
         val JMIX_ENTITY_NAME = Regex("""@JmixEntity\s*\([^)]*\bname\s*=\s*["']([^"']+)["']""")
         val TABLE_NAME = Regex("""@Table\s*\([^)]*\bname\s*=\s*["']([^"']+)["']""")
         val VIEW_CONTROLLER_ID = Regex("""@ViewController\s*\(\s*["']([^"']+)["']""")
-        val VIEW_DESCRIPTOR = Regex("""@ViewDescriptor\s*\(\s*["']([^"']+)["']""")
+        val FLOW_UI_DESCRIPTOR = Regex(
+            """@(?:[\w.]+\.)?(?:ViewDescriptor|FragmentDescriptor)\s*\(\s*(?:(?:value|path)\s*=\s*)?["']([^"']+)["']""",
+        )
+        val FRAGMENT_DESCRIPTOR =
+            Regex("""@(?:[\w.]+\.)?FragmentDescriptor\b""")
         val ROUTE = Regex("""@Route\s*\(\s*(?:value\s*=\s*)?["']([^"']*)["']""")
         val REST_CONTROLLER = Regex("""@(RestController|Controller)\b""")
         val REST_SERVICE_NAME = Regex("""@RestService\s*\(\s*["']([^"']+)["']""")
@@ -2923,6 +2963,10 @@ class ApplicationGraphIndexer {
         val VIEW_IDS_ARGUMENT = Regex("""\bviewIds\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
         val MENU_IDS_ARGUMENT = Regex("""\bmenuIds\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
         val RESOURCES_ARGUMENT = Regex("""\bresources\s*=\s*(\{[^}]*}|["'][^"']+["'])""")
+        val UI_COMPONENT_VIEW_CLASS_ARGUMENT =
+            Regex("""\bviewClass\s*=\s*([A-Za-z_$][\w$.]*)\s*(?:\.class|::class)""")
+        val UI_COMPONENT_VIEW_ID_ARGUMENT =
+            Regex("""\bviewId\s*=\s*["']([^"']+)["']""")
         val STRING_LITERAL = Regex("""["']([^"']+)["']""")
         val JAVA_TYPE_REFERENCE = Regex("""[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
         val UNSAFE_MONEY_FIELD = Regex(
@@ -2993,6 +3037,7 @@ class ApplicationGraphIndexer {
         )
         val NON_COMPONENT_VIEW_TAGS = setOf(
             "view",
+            "content",
             "data",
             "collection",
             "instance",

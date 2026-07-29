@@ -145,10 +145,28 @@ object SecurityWorkspaceBuilder {
         val inheritance = input.relationships
             .filter { it.type == RelationshipType.EXTENDS && it.sourceArtifactId in roleArtifacts.map(ArtifactSnapshot::id) }
             .groupBy(ArtifactRelationship::sourceArtifactId)
-        val policyTargets = input.relationships
+        val directPolicyTargets = input.relationships
             .filter { it.type == RelationshipType.APPLIES_POLICY_TO && it.sourceArtifactId in policyArtifacts.map(ArtifactSnapshot::id) }
             .groupBy(ArtifactRelationship::sourceArtifactId)
             .mapValues { (_, links) -> links.mapNotNull(ArtifactRelationship::targetArtifactId).distinct().sorted() }
+        val outgoingRelationships = input.relationships.groupBy(ArtifactRelationship::sourceArtifactId)
+        val uiPolicyResolution = policyArtifacts
+            .filter { it.displayName == "UiComponentPolicy" }
+            .associate { artifact ->
+                artifact.id to resolveUiComponentPolicyTargets(
+                    artifact,
+                    directPolicyTargets[artifact.id].orEmpty(),
+                    artifactsById,
+                    outgoingRelationships,
+                )
+            }
+        val policyTargets = policyArtifacts.associate { artifact ->
+            artifact.id to if (artifact.displayName == "UiComponentPolicy") {
+                uiPolicyResolution[artifact.id].orEmpty().values.distinct().sorted()
+            } else {
+                directPolicyTargets[artifact.id].orEmpty()
+            }
+        }
         val policyOwner = declaredPolicyIds.flatMap { (roleId, policyIds) ->
             policyIds.map { policyId -> policyId to roleId }
         }.toMap()
@@ -304,6 +322,7 @@ object SecurityWorkspaceBuilder {
             surfaces = surfaces,
             menuRoutes = menuRoutes,
             journeys = journeys,
+            uiPolicyResolution = uiPolicyResolution,
         )
         return SecurityWorkspaceSnapshot(
             graphDigest = input.graphDigest,
@@ -333,6 +352,7 @@ object SecurityWorkspaceBuilder {
         surfaces: List<SecuritySurfaceSnapshot>,
         menuRoutes: List<SecurityMenuRouteSnapshot>,
         journeys: List<SecurityJourneySnapshot>,
+        uiPolicyResolution: Map<String, Map<String, String>>,
     ): List<SecurityFindingSnapshot> {
         val findings = input.diagnostics
             .filter { it.category == DiagnosticCategory.SECURITY }
@@ -348,6 +368,79 @@ object SecurityWorkspaceBuilder {
             }.toMutableList()
         val surfacesById = surfaces.associateBy(SecuritySurfaceSnapshot::artifactId)
         val policiesByRole = policies.groupBy(SecurityPolicySnapshot::roleId)
+        val policyArtifactsById = input.artifacts
+            .filter { it.kind == ArtifactKind.SECURITY_POLICY }
+            .associateBy(ArtifactSnapshot::id)
+
+        policies.filter { it.type == "UiComponentPolicy" }.forEach { policy ->
+            val artifact = policyArtifactsById[policy.id] ?: return@forEach
+            val contract = parseUiComponentPolicyContract(artifact)
+            val targetCount = listOfNotNull(
+                contract.viewId?.takeIf(String::isNotBlank),
+                contract.viewClass?.takeIf(String::isNotBlank),
+            ).size
+            if (targetCount != 1) {
+                findings += SecurityFindingSnapshot(
+                    code = "JVW-SECURITY-UI-POLICY-VIEW-TARGET",
+                    severity = DiagnosticSeverity.ERROR,
+                    title = "UI policy must select exactly one view",
+                    message = if (targetCount == 0) {
+                        "UiComponentPolicy does not select a viewClass or viewId."
+                    } else {
+                        "UiComponentPolicy selects both viewClass and viewId."
+                    },
+                    remediation = "Select exactly one target view and remove the other selector.",
+                    roleId = policy.roleId,
+                    sourceLocator = policy.sourceLocator,
+                )
+            }
+            if (contract.componentIds.isEmpty() ||
+                contract.componentIds.all(String::isBlank)
+            ) {
+                findings += SecurityFindingSnapshot(
+                    code = "JVW-SECURITY-UI-POLICY-COMPONENT-MISSING",
+                    severity = DiagnosticSeverity.ERROR,
+                    title = "UI policy has no component target",
+                    message = "UiComponentPolicy must contain at least one non-empty component ID.",
+                    remediation = "Choose a component or action from the selected view.",
+                    roleId = policy.roleId,
+                    sourceLocator = policy.sourceLocator,
+                )
+            }
+            contract.componentIds
+                .filter(String::isNotBlank)
+                .groupingBy(String::toString)
+                .eachCount()
+                .filterValues { it > 1 }
+                .keys
+                .forEach { duplicate ->
+                    findings += SecurityFindingSnapshot(
+                        code = "JVW-SECURITY-UI-POLICY-COMPONENT-DUPLICATE",
+                        severity = DiagnosticSeverity.WARNING,
+                        title = "Duplicate UI component target",
+                        message = "UiComponentPolicy declares '$duplicate' more than once.",
+                        remediation = "Keep one occurrence so the role remains deterministic and readable.",
+                        roleId = policy.roleId,
+                        sourceLocator = policy.sourceLocator,
+                    )
+                }
+            val resolvedPaths = uiPolicyResolution[policy.id].orEmpty().keys
+            contract.componentIds
+                .filter(String::isNotBlank)
+                .distinct()
+                .filterNot(resolvedPaths::contains)
+                .forEach { unresolved ->
+                    findings += SecurityFindingSnapshot(
+                        code = "JVW-SECURITY-UI-POLICY-COMPONENT-UNRESOLVED",
+                        severity = DiagnosticSeverity.ERROR,
+                        title = "UI component policy target is unresolved",
+                        message = "'$unresolved' does not resolve in the selected view, its component actions, or nested fragments.",
+                        remediation = "Select an indexed ID from the target view or correct the view selector.",
+                        roleId = policy.roleId,
+                        sourceLocator = policy.sourceLocator,
+                    )
+                }
+        }
 
         roles.filter { policiesByRole[it.id].isNullOrEmpty() && it.inheritedRoleIds.isEmpty() }.forEach { role ->
             findings += SecurityFindingSnapshot(
@@ -506,6 +599,99 @@ object SecurityWorkspaceBuilder {
         return unresolved
     }
 
+    private fun resolveUiComponentPolicyTargets(
+        artifact: ArtifactSnapshot,
+        directTargetIds: List<String>,
+        artifactsById: Map<String, ArtifactSnapshot>,
+        outgoing: Map<String, List<ArtifactRelationship>>,
+    ): Map<String, String> {
+        val contract = parseUiComponentPolicyContract(artifact)
+        val rootDescriptors = directTargetIds.flatMap { targetId ->
+            when (artifactsById[targetId]?.kind) {
+                ArtifactKind.VIEW_DESCRIPTOR -> listOf(targetId)
+                ArtifactKind.VIEW_CONTROLLER -> outgoing[targetId].orEmpty()
+                    .filter { it.type == RelationshipType.CONTROLS }
+                    .mapNotNull(ArtifactRelationship::targetArtifactId)
+                    .filter { artifactsById[it]?.kind == ArtifactKind.VIEW_DESCRIPTOR }
+                else -> emptyList()
+            }
+        }.distinct()
+
+        fun resolvePath(
+            descriptorId: String,
+            path: String,
+            visited: MutableSet<String>,
+        ): String? {
+            if (!visited.add("$descriptorId#$path")) return null
+            val declaredIds = outgoing[descriptorId].orEmpty()
+                .filter { it.type == RelationshipType.DECLARES }
+                .mapNotNull(ArtifactRelationship::targetArtifactId)
+                .filter {
+                    artifactsById[it]?.kind in setOf(
+                        ArtifactKind.UI_COMPONENT,
+                        ArtifactKind.UI_ACTION,
+                    )
+                }
+            declaredIds.firstOrNull { targetId ->
+                val target = artifactsById.getValue(targetId)
+                target.semanticKey.substringAfter('#', "") == path ||
+                    target.displayName == path
+            }?.let { return it }
+
+            val separator = path.indexOf('.')
+            if (separator <= 0 || separator == path.lastIndex) return null
+            val fragmentId = path.substring(0, separator)
+            val nestedPath = path.substring(separator + 1)
+            val fragmentComponents = declaredIds.filter { targetId ->
+                val target = artifactsById.getValue(targetId)
+                target.kind == ArtifactKind.UI_COMPONENT &&
+                    (target.semanticKey.substringAfter('#', "") == fragmentId ||
+                        target.displayName == fragmentId) &&
+                    target.summary == "fragment"
+            }
+            return fragmentComponents.asSequence()
+                .flatMap { componentId ->
+                    outgoing[componentId].orEmpty().asSequence()
+                        .filter { it.type == RelationshipType.IMPLEMENTED_BY }
+                        .mapNotNull(ArtifactRelationship::targetArtifactId)
+                }
+                .flatMap { controllerId ->
+                    outgoing[controllerId].orEmpty().asSequence()
+                        .filter { it.type == RelationshipType.CONTROLS }
+                        .mapNotNull(ArtifactRelationship::targetArtifactId)
+                }
+                .filter { artifactsById[it]?.kind == ArtifactKind.VIEW_DESCRIPTOR }
+                .mapNotNull { nestedDescriptorId ->
+                    resolvePath(nestedDescriptorId, nestedPath, visited)
+                }
+                .firstOrNull()
+        }
+
+        return contract.componentIds
+            .filter(String::isNotBlank)
+            .distinct()
+            .mapNotNull { path ->
+                rootDescriptors.asSequence()
+                    .mapNotNull { descriptorId ->
+                        resolvePath(descriptorId, path, linkedSetOf())
+                    }
+                    .firstOrNull()
+                    ?.let { targetId -> path to targetId }
+            }
+            .toMap()
+    }
+
+    private fun parseUiComponentPolicyContract(
+        artifact: ArtifactSnapshot,
+    ): ParsedUiComponentPolicy {
+        val body = artifact.summary.orEmpty().substringAfter(':', "")
+        return ParsedUiComponentPolicy(
+            viewId = stringArgument(body, "viewId"),
+            viewClass = classArgument(body, "viewClass"),
+            componentIds = stringArrayArgument(body, "componentIds"),
+        )
+    }
+
     private fun parseRoleMetadata(artifact: ArtifactSnapshot): ParsedRole {
         val summary = artifact.summary.orEmpty()
         val name = Regex("""(?:^|[:,]\s*)name=([^,]+)""").find(summary)?.groupValues?.get(1)?.trim()
@@ -565,7 +751,9 @@ object SecurityWorkspaceBuilder {
         classArgument(body, "entityClass") ?: stringArgument(body, "entityName")
 
     private fun classArgument(body: String, name: String): String? =
-        Regex("""\b${Regex.escape(name)}\s*=\s*([A-Za-z_$][\w$.]*)\.class""")
+        Regex(
+            """\b${Regex.escape(name)}\s*=\s*([A-Za-z_$][\w$.]*)\s*(?:\.class|::class)""",
+        )
             .find(body)?.groupValues?.get(1)
 
     private fun stringArgument(body: String, name: String): String? =
@@ -573,7 +761,9 @@ object SecurityWorkspaceBuilder {
             .find(body)?.groupValues?.get(1)
 
     private fun stringArrayArgument(body: String, name: String): List<String> {
-        val raw = Regex("""\b${Regex.escape(name)}\s*=\s*(\{[^}]*}|["'][^"']*["'])""")
+        val raw = Regex(
+            """\b${Regex.escape(name)}\s*=\s*(\{[^}]*}|\[[^]]*]|\barrayOf\s*\([^)]*\)|["'][^"']*["'])""",
+        )
             .find(body)?.groupValues?.get(1).orEmpty()
         return Regex("""["']([^"']+)["']""").findAll(raw).map { it.groupValues[1] }.toList()
     }
@@ -636,5 +826,11 @@ object SecurityWorkspaceBuilder {
         val resources: List<String>,
         val wildcard: Boolean,
         val condition: String?,
+    )
+
+    private data class ParsedUiComponentPolicy(
+        val viewId: String?,
+        val viewClass: String?,
+        val componentIds: List<String>,
     )
 }

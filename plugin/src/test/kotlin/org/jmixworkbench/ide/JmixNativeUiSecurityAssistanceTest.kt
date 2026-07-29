@@ -169,6 +169,301 @@ class JmixNativeUiSecurityAssistanceTest : LightJavaCodeInsightFixtureTestCase()
         assertTrue(myFixture.file.text.contains("""viewIds = {"LoanApplication.overview"}"""))
     }
 
+    fun testJavaUiComponentPolicyTraversesComponentActionsAndNestedFragments() {
+        addViewAndSecurityAnnotations()
+        val fragmentDescriptor = myFixture.addFileToProject(
+            "com/company/payroll/view/address/address-fragment.xml",
+            """
+            <fragment xmlns="http://jmix.io/schema/flowui/fragment">
+                <content>
+                    <formLayout id="addressForm">
+                        <textField id="cityField"/>
+                    </formLayout>
+                </content>
+            </fragment>
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package com.company.payroll.view.address;
+
+            import io.jmix.flowui.fragment.FragmentDescriptor;
+
+            @FragmentDescriptor("address-fragment.xml")
+            public class AddressFragment {
+            }
+            """.trimIndent(),
+        )
+        val viewDescriptor = myFixture.addFileToProject(
+            "com/company/payroll/view/loan/loan-application-list-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <actions>
+                    <action id="save"/>
+                </actions>
+                <layout>
+                    <dataGrid id="loanGrid">
+                        <actions>
+                            <action id="approve"/>
+                        </actions>
+                    </dataGrid>
+                    <fragment id="addressFragment"
+                              class="com.company.payroll.view.address.AddressFragment"/>
+                </layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package com.company.payroll.view.loan;
+
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("LoanApplication.list")
+            @ViewDescriptor("loan-application-list-view.xml")
+            public class LoanApplicationListView {
+            }
+            """.trimIndent(),
+        )
+        val role = myFixture.configureByText(
+            "PayrollUiRole.java",
+            """
+            import com.company.payroll.view.loan.LoanApplicationListView;
+            import io.jmix.uiconstraints.annotation.UiComponentPolicy;
+
+            public interface PayrollUiRole {
+                @UiComponentPolicy(
+                    viewClass = LoanApplicationListView.class,
+                    componentIds = {
+                        "save",
+                        "loanGrid.approve",
+                        "addressFragment.cityF<caret>ield"
+                    })
+                void constrainLoanView();
+            }
+            """.trimIndent(),
+        )
+
+        val cityReference = referenceAtCaret<JmixJavaUiComponentPolicyReference>()
+        val cityTarget = cityReference.resolve() as JmixFlowUiIdElement
+        assertEquals("cityField", cityTarget.name)
+        assertEquals(fragmentDescriptor, cityTarget.containingFile)
+        assertTrue(
+            cityReference.variants.filterIsInstance<LookupElement>()
+                .any { it.lookupString == "cityField" },
+        )
+
+        val policyReferences = PsiTreeUtil.findChildrenOfType(
+            role,
+            PsiLiteralExpression::class.java,
+        ).flatMap { literal ->
+            literal.references.filterIsInstance<JmixJavaUiComponentPolicyReference>()
+        }
+        assertTrue(
+            policyReferences.any { reference ->
+                reference.resolve()
+                    ?.let { it as? JmixFlowUiIdElement }
+                    ?.let { it.name == "save" && it.containingFile == viewDescriptor } == true
+            },
+        )
+        assertTrue(
+            policyReferences.any { reference ->
+                reference.resolve()
+                    ?.let { it as? JmixFlowUiIdElement }
+                    ?.name == "approve"
+            },
+        )
+
+        myFixture.renameElement(cityTarget, "municipalityField")
+
+        assertTrue(fragmentDescriptor.text.contains("""id="municipalityField""""))
+        assertTrue(role.text.contains("addressFragment.municipalityField"))
+        assertFalse(role.text.contains("addressFragment.cityField"))
+    }
+
+    fun testKotlinUiComponentPolicyUsesViewIdAndRenamesWithXml() {
+        addViewAndSecurityAnnotations()
+        val descriptor = myFixture.addFileToProject(
+            "com/company/payroll/view/loan/loan-queue-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout>
+                    <button id="approveButton"/>
+                </layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/view/loan/LoanQueueView.kt",
+            """
+            package com.company.payroll.view.loan
+
+            import io.jmix.flowui.view.ViewController
+            import io.jmix.flowui.view.ViewDescriptor
+
+            @ViewController("LoanApplication.queue")
+            @ViewDescriptor("loan-queue-view.xml")
+            class LoanQueueView
+            """.trimIndent(),
+        )
+        val role = myFixture.configureByText(
+            "PayrollUiRole.kt",
+            """
+            package com.company.payroll.security
+
+            import io.jmix.uiconstraints.annotation.UiComponentPolicy
+
+            interface PayrollUiRole {
+                @UiComponentPolicy(
+                    viewId = "LoanApplication.queue",
+                    componentIds = ["approveB<caret>utton"]
+                )
+                fun constrainLoanQueue()
+            }
+            """.trimIndent(),
+        )
+
+        val reference = referenceAtCaret<JmixKotlinUiComponentPolicyReference>()
+        val target = reference.resolve() as JmixFlowUiIdElement
+        assertEquals("approveButton", target.name)
+        assertEquals(descriptor, target.containingFile)
+
+        myFixture.renameElement(target, "authorizeButton")
+
+        assertTrue(descriptor.text.contains("""id="authorizeButton""""))
+        assertTrue(role.text.contains("""componentIds = ["authorizeButton"]"""))
+    }
+
+    fun testUiComponentPolicyContractAndUnresolvedTargetsAreHighlighted() {
+        addViewAndSecurityAnnotations()
+        myFixture.addClass(
+            """
+            package com.company.payroll.view.loan;
+
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("LoanApplication.list")
+            @ViewDescriptor("loan-list-view.xml")
+            public class LoanListView {
+            }
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/view/loan/loan-list-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout><button id="approveButton"/></layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(
+            JmixJavaReferenceInspection(),
+            JmixJavaUiComponentPolicyInspection(),
+        )
+        myFixture.configureByText(
+            "BrokenPayrollUiRole.java",
+            """
+            import com.company.payroll.view.loan.LoanListView;
+            import io.jmix.uiconstraints.annotation.UiComponentPolicy;
+
+            public interface BrokenPayrollUiRole {
+                @UiComponentPolicy(
+                    viewClass = LoanListView.class,
+                    viewId = "LoanApplication.list",
+                    componentIds = {"approveB<caret>uton", "approveButon"})
+                void broken();
+            }
+            """.trimIndent(),
+        )
+
+        val descriptions = myFixture.doHighlighting()
+            .mapNotNull { it.description }
+        assertTrue(
+            descriptions.any {
+                it.contains("must select exactly one target")
+            },
+        )
+        assertTrue(
+            descriptions.any {
+                it.contains("Duplicate UI component policy ID 'approveButon'")
+            },
+        )
+        assertTrue(
+            descriptions.any {
+                it.contains("Unresolved Jmix reference 'approveButon'")
+            },
+        )
+        assertNotNull(
+            myFixture.findSingleIntention("Replace with 'approveButton'"),
+        )
+    }
+
+    fun testKotlinUiComponentPolicyContractAndUnresolvedTargetsAreHighlighted() {
+        addViewAndSecurityAnnotations()
+        myFixture.addClass(
+            """
+            package com.company.payroll.view.loan;
+
+            import io.jmix.flowui.view.ViewController;
+            import io.jmix.flowui.view.ViewDescriptor;
+
+            @ViewController("LoanApplication.list")
+            @ViewDescriptor("loan-list-view.xml")
+            public class LoanListView {
+            }
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/view/loan/loan-list-view.xml",
+            """
+            <view xmlns="http://jmix.io/schema/flowui/view">
+                <layout><button id="approveButton"/></layout>
+            </view>
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(
+            JmixKotlinReferenceInspection(),
+            JmixKotlinUiComponentPolicyInspection(),
+        )
+        myFixture.configureByText(
+            "BrokenPayrollUiRole.kt",
+            """
+            package com.company.payroll.security
+
+            import com.company.payroll.view.loan.LoanListView
+            import io.jmix.uiconstraints.annotation.UiComponentPolicy
+
+            interface BrokenPayrollUiRole {
+                @UiComponentPolicy(
+                    viewClass = LoanListView::class,
+                    viewId = "LoanApplication.list",
+                    componentIds = ["approveB<caret>uton", "approveButon"]
+                )
+                fun broken()
+            }
+            """.trimIndent(),
+        )
+
+        val descriptions = myFixture.doHighlighting()
+            .mapNotNull { it.description }
+        assertTrue(descriptions.any { it.contains("must select exactly one target") })
+        assertTrue(
+            descriptions.any {
+                it.contains("Duplicate UI component policy ID 'approveButon'")
+            },
+        )
+        assertTrue(
+            descriptions.any {
+                it.contains("Unresolved Jmix reference 'approveButon'")
+            },
+        )
+        assertNotNull(
+            myFixture.findSingleIntention("Replace with 'approveButton'"),
+        )
+    }
+
     fun testMenuDeclarationNavigatesAndRenamesJavaAndKotlinPolicies() {
         addViewAndSecurityAnnotations()
         val javaRole = myFixture.addFileToProject(
@@ -756,6 +1051,34 @@ class JmixNativeUiSecurityAssistanceTest : LightJavaCodeInsightFixtureTestCase()
             package io.jmix.securityflowui.role.annotation;
             public @interface ViewPolicy {
                 String[] viewIds();
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package io.jmix.flowui.view;
+            public @interface ViewDescriptor {
+                String value() default "";
+                String path() default "";
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package io.jmix.flowui.fragment;
+            public @interface FragmentDescriptor {
+                String value() default "";
+                String path() default "";
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package io.jmix.uiconstraints.annotation;
+            public @interface UiComponentPolicy {
+                Class<?> viewClass() default Object.class;
+                String viewId() default "";
+                String[] componentIds();
             }
             """.trimIndent(),
         )

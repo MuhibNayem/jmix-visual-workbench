@@ -47,6 +47,9 @@ private fun PsiReference.kotlinCompletionCandidates(): Sequence<String> =
         is JmixKotlinFlowUiIdReference ->
             candidateAttributes().asSequence().mapNotNull { it.value }
 
+        is JmixKotlinUiComponentPolicyReference ->
+            candidateSegments().asSequence().mapNotNull { it.attribute.value }
+
         is JmixKotlinDescriptorReference ->
             findAllJmixDescriptorFiles(element).asSequence().map { it.name }
 
@@ -76,8 +79,9 @@ private fun PsiReference.kotlinCompletionCandidates(): Sequence<String> =
         .distinct()
 
 private fun PsiReference.isJmixKotlinReference(): Boolean =
-    this is JmixKotlinDescriptorReference ||
+        this is JmixKotlinDescriptorReference ||
         this is JmixKotlinFlowUiIdReference ||
+        this is JmixKotlinUiComponentPolicyReference ||
         this is JmixKotlinViewIdReference ||
         this is JmixKotlinMenuIdReference ||
         this is JmixKotlinEntityNameReference ||

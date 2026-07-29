@@ -46,7 +46,6 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
     ): Array<PsiReference> {
         val literal = element as? PsiLiteralExpression ?: return PsiReference.EMPTY_ARRAY
         val value = literal.value as? String ?: return PsiReference.EMPTY_ARRAY
-        if (value.isBlank()) return PsiReference.EMPTY_ARRAY
         if (literal.isJmixSpringBeanNameDeclaration()) {
             return arrayOf(
                 JmixJavaSpringBeanDeclarationReference(
@@ -57,6 +56,7 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
             )
         }
         jmixJavaUiSecurityReferences(literal, value)?.let { return it }
+        if (value.isBlank()) return PsiReference.EMPTY_ARRAY
         if (literal.isViewDescriptorValue()) {
             return arrayOf(
                 JmixViewDescriptorReference(
@@ -243,22 +243,32 @@ private fun PsiLiteralExpression.controllerTargetTags(): Set<String>? {
     return jmixControllerTargetTags(target)
 }
 
-private fun PsiLiteralExpression.associatedDescriptorFiles(): List<XmlFile> {
+internal fun PsiLiteralExpression.associatedDescriptorFiles(): List<XmlFile> {
     val controller = PsiTreeUtil.getParentOfType(this, PsiClass::class.java, false)
         ?: return emptyList()
+    return jmixDescriptorFilesForController(this, controller)
+}
+
+internal fun jmixDescriptorFilesForController(
+    context: PsiElement,
+    controller: PsiClass,
+): List<XmlFile> {
     val descriptorLiteral = controller.annotations.asSequence()
         .filter { annotation ->
             val shortName = annotation.qualifiedName?.substringAfterLast('.')
                 ?: annotation.nameReferenceElement?.referenceName
-            shortName == "ViewDescriptor"
+            shortName == "ViewDescriptor" || shortName == "FragmentDescriptor"
         }
         .mapNotNull { annotation ->
             PsiTreeUtil.findChildOfType(annotation.parameterList, PsiLiteralExpression::class.java)
         }
         .firstOrNull()
+    val path = descriptorLiteral?.value as? String
+        ?: JMIX_DESCRIPTOR_PATH.find(
+            controller.navigationElement.text,
+        )?.groupValues?.get(1)
         ?: return emptyList()
-    val path = descriptorLiteral.value as? String ?: return emptyList()
-    return findJmixDescriptorFiles(this, path)
+    return findJmixDescriptorFiles(context, path)
 }
 
 internal fun findJmixDescriptorFiles(context: PsiElement, path: String): List<XmlFile> {
@@ -294,6 +304,10 @@ private fun quotedValueRange(value: String): TextRange = TextRange(1, value.leng
 
 private fun escapeJavaString(value: String): String =
     value.replace("\\", "\\\\").replace("\"", "\\\"")
+
+private val JMIX_DESCRIPTOR_PATH = Regex(
+    """@(?:[\w.]+\.)?(?:ViewDescriptor|FragmentDescriptor)\s*\(\s*(?:(?:value|path)\s*=\s*)?"([^"$]+)"""",
+)
 
 private enum class ControllerReferenceKind(
     val actionPathAllowed: Boolean,

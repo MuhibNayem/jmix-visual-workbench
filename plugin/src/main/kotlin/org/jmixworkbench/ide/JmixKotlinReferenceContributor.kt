@@ -44,7 +44,7 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
         }
         val valueRange = host.kotlinStringContentRange() ?: return PsiReference.EMPTY_ARRAY
         val value = valueRange.substring(host.text)
-        if (value.isBlank() || '$' in value) return PsiReference.EMPTY_ARRAY
+        if ('$' in value) return PsiReference.EMPTY_ARRAY
         val annotation = host.kotlinAnnotationContext()
         if (annotation?.isJmixSpringBeanNameDeclaration() == true) {
             return arrayOf(
@@ -57,6 +57,7 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
         }
         jmixKotlinUiSecurityReferences(host, valueRange, value, annotation)
             ?.let { return it }
+        if (value.isBlank()) return PsiReference.EMPTY_ARRAY
         annotation ?: return PsiReference.EMPTY_ARRAY
         if (annotation.name == "ViewDescriptor" &&
             (annotation.attributeName == "value" || annotation.attributeName == null)
@@ -230,7 +231,7 @@ private fun PsiLanguageInjectionHost.kotlinControllerTargetTags(): Set<String>? 
     return jmixControllerTargetTags(target)
 }
 
-private fun PsiLanguageInjectionHost.kotlinAssociatedDescriptorFiles(): List<XmlFile> {
+internal fun PsiLanguageInjectionHost.kotlinAssociatedDescriptorFiles(): List<XmlFile> {
     val declaration = generateSequence(parent) { it.parent }
         .firstOrNull {
             it.javaClass.simpleName == "KtClass" ||
@@ -258,7 +259,10 @@ internal fun PsiLanguageInjectionHost.kotlinStringContentRange(): TextRange? {
 private val KOTLIN_ANNOTATION_NAME = Regex("""@(?:[\w.]+\.)?(\w+)""")
 private val KOTLIN_NAMED_ARGUMENT = Regex("""\b(\w+)\s*=""")
 private val KOTLIN_VIEW_DESCRIPTOR =
-    Regex("@(?:[\\w.]+\\.)?ViewDescriptor\\s*\\(\\s*(?:value\\s*=\\s*)?\"([^\"$]+)\"")
+    Regex(
+        "@(?:[\\w.]+\\.)?(?:ViewDescriptor|FragmentDescriptor)\\s*\\(\\s*" +
+            "(?:(?:value|path)\\s*=\\s*)?\"([^\"$]+)\"",
+    )
 private val KOTLIN_CONTROLLER_TARGET =
     Regex("""\btarget\s*=\s*(?:Target\.)?(\w+)""")
 private const val JMIX_KOTLIN_MAX_COMPLETION_FILES = 2_000

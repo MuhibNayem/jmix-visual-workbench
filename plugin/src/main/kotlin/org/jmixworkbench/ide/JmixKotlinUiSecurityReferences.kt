@@ -38,6 +38,14 @@ internal fun jmixKotlinUiSecurityReferences(
                     arrayOf(JmixKotlinViewIdReference(host, valueRange, value))
                 } ?: PsiReference.EMPTY_ARRAY
 
+            annotation.name == "UiComponentPolicy" &&
+                annotation.attributeName == "viewId" ->
+                return arrayOf(JmixKotlinViewIdReference(host, valueRange, value))
+
+            annotation.name == "UiComponentPolicy" &&
+                annotation.attributeName == "componentIds" ->
+                return kotlinUiComponentPolicyReferences(host, valueRange, value)
+
             annotation.name == "MenuPolicy" &&
                 annotation.attributeName == "menuIds" ->
                 return value.takeUnless { it == "*" }?.let {

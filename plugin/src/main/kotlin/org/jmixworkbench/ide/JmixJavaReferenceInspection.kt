@@ -51,6 +51,9 @@ private fun PsiReference.completionCandidates(): Sequence<String> =
         is JmixJavaFlowUiIdReference ->
             candidateAttributes().asSequence().mapNotNull { it.value }
 
+        is JmixJavaUiComponentPolicyReference ->
+            candidateSegments().asSequence().mapNotNull { it.attribute.value }
+
         is JmixViewDescriptorReference ->
             findAllJmixDescriptorFiles(element).asSequence().map { it.name }
 
@@ -80,8 +83,9 @@ private fun PsiReference.completionCandidates(): Sequence<String> =
         .distinct()
 
 private fun PsiReference.isJmixJavaReference(): Boolean =
-    this is JmixViewDescriptorReference ||
+        this is JmixViewDescriptorReference ||
         this is JmixJavaFlowUiIdReference ||
+        this is JmixJavaUiComponentPolicyReference ||
         this is JmixJavaViewIdReference ||
         this is JmixJavaMenuIdReference ||
         this is JmixJavaEntityNameReference ||

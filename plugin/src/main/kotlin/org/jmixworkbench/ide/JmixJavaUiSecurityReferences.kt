@@ -50,6 +50,18 @@ internal fun jmixJavaUiSecurityReferences(
                     )
                 } ?: PsiReference.EMPTY_ARRAY
 
+            annotationName == "UiComponentPolicy" && attributeName == "viewId" ->
+                return arrayOf(
+                    JmixJavaViewIdReference(
+                        literal,
+                        quotedJavaRange(value),
+                        value,
+                    ),
+                )
+
+            annotationName == "UiComponentPolicy" && attributeName == "componentIds" ->
+                return javaUiComponentPolicyReferences(literal, value, annotation)
+
             annotationName == "MenuPolicy" && attributeName == "menuIds" ->
                 return value.takeUnless { it == "*" }?.let {
                     arrayOf(
@@ -591,7 +603,7 @@ private fun PsiElement.jmixContainingClassPackage(): String =
         ?.substringBeforeLast('.', "")
         .orEmpty()
 
-private fun replaceJavaStringLiteral(
+internal fun replaceJavaStringLiteral(
     literal: PsiLiteralExpression,
     replacement: String,
 ): PsiElement {
