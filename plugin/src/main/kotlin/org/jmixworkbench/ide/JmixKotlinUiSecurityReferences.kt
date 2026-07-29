@@ -11,6 +11,7 @@ import com.intellij.psi.PsiLanguageInjectionHost
 import com.intellij.psi.PsiPolyVariantReferenceBase
 import com.intellij.psi.PsiReference
 import com.intellij.psi.ResolveResult
+import com.intellij.psi.search.ProjectScope
 import com.intellij.psi.util.PsiTreeUtil
 
 internal fun jmixKotlinUiSecurityReferences(
@@ -459,7 +460,8 @@ private fun PsiLanguageInjectionHost.kotlinSecurityEntityClass(): PsiClass? {
         if ('.' in className) {
             val resolved = JavaPsiFacade.getInstance(project).findClass(
                 className,
-                com.intellij.psi.search.GlobalSearchScope.allScope(project),
+                ProjectScope.getContentScope(project)
+                    .uniteWith(ProjectScope.getLibrariesScope(project)),
             )
             if (resolved != null) return resolved
         }

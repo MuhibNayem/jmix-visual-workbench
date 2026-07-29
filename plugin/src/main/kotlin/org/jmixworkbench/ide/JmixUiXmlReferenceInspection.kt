@@ -34,7 +34,7 @@ class JmixUiXmlReferenceInspection : LocalInspectionTool() {
                         if (reference.registerSpringBeanProblem(holder, value)) {
                             return@forEach
                         }
-                        if (reference.resolve() != null) return@forEach
+                        if (reference.resolvesToAnyJmixTarget()) return@forEach
                         val unresolved = reference.rangeInElement.substring(value.text)
                         val closest = reference.xmlUiCandidates()
                             .map { candidate ->

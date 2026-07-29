@@ -21,7 +21,7 @@ class JmixJavaReferenceInspection : LocalInspectionTool() {
             override fun visitLiteralExpression(expression: PsiLiteralExpression) {
                 expression.references.asSequence()
                     .filter(PsiReference::isJmixJavaReference)
-                    .filter { it.resolve() == null }
+                    .filterNot(PsiReference::resolvesToAnyJmixTarget)
                     .forEach { reference ->
                         val unresolved = reference.rangeInElement
                             .substring(reference.element.text)

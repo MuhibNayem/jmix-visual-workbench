@@ -56,6 +56,8 @@ index; it does not perform a second global annotation traversal.
 The following are prohibited in editor hot paths:
 
 - `FilenameIndex.getAllFilesByExt(...)`;
+- `GlobalSearchScope.allScope(...)`;
+- `FileTypeIndex`;
 - global PSI modification counters as aggregate cache keys;
 - project-wide VFS or PSI traversal;
 - non-cancellable long read actions;
@@ -65,28 +67,37 @@ The following are prohibited in editor hot paths:
 All JCEF bridge non-blocking reads are expired with the project and scheduled
 in smart mode. Remaining synchronous read scopes use cancellable read actions.
 
+`verifyNativeIndexArchitecture` enforces this contract in every aggregate
+gate. It scans native IDE sources for prohibited APIs and verifies that the
+same eight index implementations are registered in the shared, IntelliJ
+2025.3 and IntelliJ 2026.2 descriptors. A broad-scan or registration regression
+therefore fails the build before packaging.
+
 ## Scale regression
 
 `JmixNativeIndexScaleTest` creates 3,000 unrelated XML, properties and Java
-files alongside real entities, views, menus, messages, fetch plans,
-permissions and Spring menu beans. It proves that:
+files across sixteen module-shaped roots alongside real entities, views, menus,
+messages, fetch plans, permissions and Spring menu beans. It proves that:
 
 - every real symbol remains discoverable;
 - FlowUI discovery excludes unrelated XML;
-- 25 repeated warm reads reuse the exact seven cached inventories;
+- 100 repeated warm reads reuse the exact seven cached inventories;
 - adding unrelated files does not evict any inventory;
 - 20 consecutive in-place typing cycles across unrelated XML, properties and
   Java files preserve the identity of all seven inventories;
+- editing a real message bundle replaces only the message inventory while all
+  other inventories retain object identity;
+- warm and typing-cycle p50/p95/p99 latency stays within explicit budgets;
 - warm and incremental lookup stay below the explicit two-second ceiling and
   the repeated-typing loop stays below its five-second ceiling on both
   supported IntelliJ hosts.
 
 Observed in the 2026-07-29 milestone run:
 
-| Host | 25 warm reads | Lookup after three unrelated edits | 20 three-file typing cycles |
-|---|---:|---:|---:|
-| IntelliJ IDEA 2025.3 | 2 ms | 2 ms | 78 ms |
-| IntelliJ IDEA 2026.2 | 2 ms | 1 ms | 95 ms |
+| Host | 100 warm reads total (p95/p99) | Lookup after unrelated edits | 20 three-file typing cycles total (p95/p99) | Relevant message edit |
+|---|---:|---:|---:|---:|
+| IntelliJ IDEA 2025.3 | 12 ms (0/0 ms) | 3 ms | 136 ms (19/19 ms) | 55 ms |
+| IntelliJ IDEA 2026.2 | 15 ms (0/0 ms) | 3 ms | 217 ms (32/32 ms) | 77 ms |
 
 The light-fixture gate is a deterministic regression, not a substitute for an
 installed-IDE benchmark. Release certification must additionally publish cold

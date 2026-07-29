@@ -67,7 +67,12 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
             )
         }
         return literal.controllerReferenceKind()?.let { kind ->
-            controllerReferences(literal, value, kind)
+            controllerReferences(
+                literal,
+                value,
+                kind,
+                literal.controllerTargetTags(),
+            )
         } ?: PsiReference.EMPTY_ARRAY
     }
 
@@ -75,14 +80,20 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
         literal: PsiLiteralExpression,
         value: String,
         kind: ControllerReferenceKind,
+        targetTags: Set<String>?,
     ): Array<PsiReference> {
         val separator = value.indexOf('.')
-        if (separator <= 0 || separator == value.lastIndex || !kind.actionPathAllowed) {
+        if (separator <= 0 ||
+            separator == value.lastIndex ||
+            !kind.actionPathAllowed ||
+            targetTags != null
+        ) {
             return arrayOf(
                 JmixJavaFlowUiIdReference(
                     literal,
                     quotedValueRange(value),
                     value,
+                    acceptedTags = targetTags,
                 ),
             )
         }
@@ -98,7 +109,7 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
                 literal,
                 TextRange(separator + 2, value.length + 1),
                 actionId,
-                requiredTag = "action",
+                acceptedTags = setOf("action"),
                 ownerId = ownerId,
             ),
         )
@@ -145,7 +156,7 @@ internal class JmixJavaFlowUiIdReference(
     element: PsiLiteralExpression,
     range: TextRange,
     private val id: String,
-    private val requiredTag: String? = null,
+    private val acceptedTags: Set<String>? = null,
     private val ownerId: String? = null,
 ) : PsiPolyVariantReferenceBase<PsiLiteralExpression>(element, range, false) {
     override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> =
@@ -184,7 +195,7 @@ internal class JmixJavaFlowUiIdReference(
             }
             val scope = owner?.let { PsiTreeUtil.findChildrenOfType(it, XmlTag::class.java) } ?: allTags
             scope.asSequence()
-                .filter { requiredTag == null || it.localName == requiredTag }
+                .filter { acceptedTags == null || it.localName in acceptedTags }
                 .mapNotNull { it.getAttribute("id") }
                 .filter { !it.value.isNullOrBlank() }
                 .toList()
@@ -222,6 +233,15 @@ private fun PsiLiteralExpression.controllerReferenceKind(): ControllerReferenceK
 
 private fun PsiLiteralExpression.containingAnnotation(): PsiAnnotation? =
     PsiTreeUtil.getParentOfType(this, PsiAnnotation::class.java, false)
+
+private fun PsiLiteralExpression.controllerTargetTags(): Set<String>? {
+    val target = containingAnnotation()
+        ?.findDeclaredAttributeValue("target")
+        ?.text
+        ?.substringAfterLast('.')
+        ?.trim()
+    return jmixControllerTargetTags(target)
+}
 
 private fun PsiLiteralExpression.associatedDescriptorFiles(): List<XmlFile> {
     val controller = PsiTreeUtil.getParentOfType(this, PsiClass::class.java, false)
@@ -281,3 +301,15 @@ private enum class ControllerReferenceKind(
     COMPONENT(false),
     COMPONENT_OR_ACTION(true),
 }
+
+internal fun jmixControllerTargetTags(target: String?): Set<String>? =
+    when (target) {
+        "DATA_LOADER" -> setOf("loader")
+        "DATA_CONTAINER" -> setOf(
+            "instance",
+            "collection",
+            "keyValueCollection",
+            "dataContext",
+        )
+        else -> null
+    }

@@ -79,7 +79,13 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
 
             else -> null
         } ?: return PsiReference.EMPTY_ARRAY
-        return controllerReferences(host, valueRange, value, actionPathAllowed)
+        return controllerReferences(
+            host,
+            valueRange,
+            value,
+            actionPathAllowed,
+            host.kotlinControllerTargetTags(),
+        )
     }
 
     private fun controllerReferences(
@@ -87,10 +93,22 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
         valueRange: TextRange,
         value: String,
         actionPathAllowed: Boolean,
+        targetTags: Set<String>?,
     ): Array<PsiReference> {
         val separator = value.indexOf('.')
-        if (!actionPathAllowed || separator <= 0 || separator == value.lastIndex) {
-            return arrayOf(JmixKotlinFlowUiIdReference(host, valueRange, value))
+        if (!actionPathAllowed ||
+            separator <= 0 ||
+            separator == value.lastIndex ||
+            targetTags != null
+        ) {
+            return arrayOf(
+                JmixKotlinFlowUiIdReference(
+                    host,
+                    valueRange,
+                    value,
+                    acceptedTags = targetTags,
+                ),
+            )
         }
         val contentStart = valueRange.startOffset
         val ownerId = value.substring(0, separator)
@@ -105,7 +123,7 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
                 host,
                 TextRange(contentStart + separator + 1, valueRange.endOffset),
                 actionId,
-                requiredTag = "action",
+                acceptedTags = setOf("action"),
                 ownerId = ownerId,
             ),
         )
@@ -143,7 +161,7 @@ internal class JmixKotlinFlowUiIdReference(
     element: PsiLanguageInjectionHost,
     range: TextRange,
     private val id: String,
-    private val requiredTag: String? = null,
+    private val acceptedTags: Set<String>? = null,
     private val ownerId: String? = null,
 ) : PsiPolyVariantReferenceBase<PsiLanguageInjectionHost>(element, range, false) {
     override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> =
@@ -174,7 +192,7 @@ internal class JmixKotlinFlowUiIdReference(
             }
             val scope = owner?.let { PsiTreeUtil.findChildrenOfType(it, XmlTag::class.java) } ?: allTags
             scope.asSequence()
-                .filter { requiredTag == null || it.localName == requiredTag }
+                .filter { acceptedTags == null || it.localName in acceptedTags }
                 .mapNotNull { it.getAttribute("id") }
                 .filter { !it.value.isNullOrBlank() }
                 .toList()
@@ -200,6 +218,16 @@ internal fun PsiLanguageInjectionHost.kotlinAnnotationContext(): KotlinAnnotatio
         ?.groupValues
         ?.get(1)
     return KotlinAnnotationContext(name, attributeName)
+}
+
+private fun PsiLanguageInjectionHost.kotlinControllerTargetTags(): Set<String>? {
+    val annotation = generateSequence(parent) { it.parent }
+        .firstOrNull { it.javaClass.simpleName == "KtAnnotationEntry" }
+        ?: return null
+    val target = KOTLIN_CONTROLLER_TARGET.find(annotation.text)
+        ?.groupValues
+        ?.get(1)
+    return jmixControllerTargetTags(target)
 }
 
 private fun PsiLanguageInjectionHost.kotlinAssociatedDescriptorFiles(): List<XmlFile> {
@@ -231,4 +259,6 @@ private val KOTLIN_ANNOTATION_NAME = Regex("""@(?:[\w.]+\.)?(\w+)""")
 private val KOTLIN_NAMED_ARGUMENT = Regex("""\b(\w+)\s*=""")
 private val KOTLIN_VIEW_DESCRIPTOR =
     Regex("@(?:[\\w.]+\\.)?ViewDescriptor\\s*\\(\\s*(?:value\\s*=\\s*)?\"([^\"$]+)\"")
+private val KOTLIN_CONTROLLER_TARGET =
+    Regex("""\btarget\s*=\s*(?:Target\.)?(\w+)""")
 private const val JMIX_KOTLIN_MAX_COMPLETION_FILES = 2_000

@@ -1,5 +1,6 @@
 package org.jmixworkbench.services
 
+import com.intellij.codeInspection.ProblemHighlightType
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtilCore
@@ -12,6 +13,7 @@ import org.jmixworkbench.discovery.model.ArtifactKind
 import org.jmixworkbench.discovery.model.ArtifactSnapshot
 import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
 import org.jmixworkbench.discovery.model.SourceLocator
+import org.jmixworkbench.ide.jmixJavaFlowUiControllerIssues
 
 object FlowUiControllerPsiReader {
     fun read(
@@ -58,6 +60,7 @@ object FlowUiControllerPsiReader {
             ?: return unavailable(controllerArtifact, "No controller class was found in the connected Java source.")
         val document = PsiDocumentManager.getInstance(project).getDocument(psiFile)
             ?: return unavailable(controllerArtifact, "The controller document is unavailable.")
+        val semanticIssues = jmixJavaFlowUiControllerIssues(controllerClass)
 
         val injections = controllerClass.fields.mapNotNull { field ->
             val annotation = field.annotations.firstOrNull { it.shortName() == "ViewComponent" }
@@ -79,6 +82,9 @@ object FlowUiControllerPsiReader {
                     symbol = "${controllerClass.qualifiedName}.${field.name}",
                     fingerprint = fingerprint,
                 ),
+                issues = semanticIssues[field]
+                    .orEmpty()
+                    .map(FlowUiControllerIssueSnapshot::from),
             )
         }.distinctBy(FlowUiControllerInjectionSnapshot::fieldName)
 
@@ -90,6 +96,7 @@ object FlowUiControllerPsiReader {
             val target = when (kind) {
                 "Install", "Supply" -> annotation.stringAttribute("to")
                 else -> annotation.stringAttribute("value")
+                    ?: annotation.stringAttribute("id")
             }
             FlowUiControllerHandlerSnapshot(
                 methodName = method.name,
@@ -106,6 +113,9 @@ object FlowUiControllerPsiReader {
                     symbol = "${controllerClass.qualifiedName}#${method.name}",
                     fingerprint = fingerprint,
                 ),
+                issues = semanticIssues[method]
+                    .orEmpty()
+                    .map(FlowUiControllerIssueSnapshot::from),
             )
         }.distinctBy { "${it.kind}:${it.methodName}:${it.target}:${it.subject}" }
 
@@ -175,6 +185,7 @@ data class FlowUiControllerInjectionSnapshot(
     val type: String,
     val visibility: String?,
     val sourceLocator: SourceLocator,
+    val issues: List<FlowUiControllerIssueSnapshot> = emptyList(),
 )
 
 data class FlowUiControllerHandlerSnapshot(
@@ -186,7 +197,32 @@ data class FlowUiControllerHandlerSnapshot(
     val returnType: String?,
     val parameterTypes: List<String>,
     val sourceLocator: SourceLocator,
+    val issues: List<FlowUiControllerIssueSnapshot> = emptyList(),
 )
+
+data class FlowUiControllerIssueSnapshot(
+    val code: String,
+    val message: String,
+    val severity: String,
+) {
+    companion object {
+        internal fun from(
+            issue: org.jmixworkbench.ide.JmixFlowUiControllerIssue,
+        ): FlowUiControllerIssueSnapshot =
+            FlowUiControllerIssueSnapshot(
+                code = issue.code,
+                message = issue.message,
+                severity = if (
+                    issue.severity == ProblemHighlightType.GENERIC_ERROR_OR_WARNING ||
+                    issue.severity == ProblemHighlightType.WEAK_WARNING
+                ) {
+                    "WARNING"
+                } else {
+                    "ERROR"
+                },
+            )
+    }
+}
 
 data class FlowUiControllerWorkspaceSnapshot(
     val relativePath: String,

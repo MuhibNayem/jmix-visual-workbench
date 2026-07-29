@@ -58,6 +58,8 @@
                                   implementation="org.jmixworkbench.ide.JmixKotlinReferenceContributor"/>
         <useScopeEnlarger implementation="org.jmixworkbench.ide.JmixEntityUseScopeEnlarger"/>
         <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixSpringBeanRenameProcessor"/>
+        <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixMessageBundleRenameProcessor"
+                                   order="last"/>
         <codeInsight.lineMarkerProvider language="JAVA"
                                         implementationClass="org.jmixworkbench.ide.JmixViewDescriptorLineMarkerProvider"/>
         <codeInsight.lineMarkerProvider language="XML"
@@ -97,6 +99,20 @@
                          enabledByDefault="true"
                          level="ERROR"
                          implementationClass="org.jmixworkbench.ide.JmixKotlinReferenceInspection"/>
+        <localInspection language="JAVA"
+                         shortName="JmixFlowUiController"
+                         displayName="Invalid Jmix FlowUI controller contract"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixJavaFlowUiControllerInspection"/>
+        <localInspection language="kotlin"
+                         shortName="JmixKotlinFlowUiController"
+                         displayName="Invalid Jmix Kotlin FlowUI controller contract"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixKotlinFlowUiControllerInspection"/>
     </extensions>
 
     <extensions defaultExtensionNs="org.jetbrains.kotlin">

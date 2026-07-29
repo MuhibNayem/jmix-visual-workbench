@@ -473,6 +473,17 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     [document],
   )
   const selected = selectedKey ? elements.get(selectedKey) ?? null : null
+  const controllerIssueCount = (
+    workspace?.controllerModel?.injections.reduce(
+      (count, injection) => count + (injection.issues?.length ?? 0),
+      0,
+    ) ?? 0
+  ) + (
+    workspace?.controllerModel?.handlers.reduce(
+      (count, handler) => count + (handler.issues?.length ?? 0),
+      0,
+    ) ?? 0
+  )
   const selectedRuntimeTarget = runtime?.targets.find((target) => target.id === selectedRuntimeTargetId)
     ?? runtime?.targets[0]
   const layout = document?.elements.find((element) => element.localTag === 'layout')
@@ -2203,27 +2214,38 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                     </p>
                   )}
                   {workspace.controllerModel.psiSupported && (
-                    <div className="mt-2 grid grid-cols-2 gap-1">
-                      {([
-                        ['VIEW_INIT', 'Init'],
-                        ['VIEW_BEFORE_SHOW', 'Before show'],
-                        ['VIEW_READY', 'Ready'],
-                        ['VIEW_ATTACH', 'Attach'],
-                        ['VIEW_BEFORE_CLOSE', 'Before close'],
-                        ['VIEW_AFTER_CLOSE', 'After close'],
-                        ['VIEW_DETACH', 'Detach'],
-                        ['VIEW_QUERY_PARAMETERS_CHANGE', 'Query parameters'],
-                      ] as const).map(([kind, label]) => (
-                        <button
-                          type="button"
-                          key={kind}
-                          onClick={() => void previewControllerHandler(kind)}
-                          className={quietButton}
-                        >
-                          + {label}
-                        </button>
-                      ))}
-                    </div>
+                    <>
+                      <div className={`mt-2 rounded border px-2 py-1.5 text-[9px] ${
+                        controllerIssueCount > 0
+                          ? 'border-red-500/40 bg-red-500/10 text-red-200'
+                          : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                      }`}>
+                        {controllerIssueCount > 0
+                          ? `${controllerIssueCount} native controller contract issue${controllerIssueCount === 1 ? '' : 's'}`
+                          : 'Native controller contracts verified'}
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-1">
+                        {([
+                          ['VIEW_INIT', 'Init'],
+                          ['VIEW_BEFORE_SHOW', 'Before show'],
+                          ['VIEW_READY', 'Ready'],
+                          ['VIEW_ATTACH', 'Attach'],
+                          ['VIEW_BEFORE_CLOSE', 'Before close'],
+                          ['VIEW_AFTER_CLOSE', 'After close'],
+                          ['VIEW_DETACH', 'Detach'],
+                          ['VIEW_QUERY_PARAMETERS_CHANGE', 'Query parameters'],
+                        ] as const).map(([kind, label]) => (
+                          <button
+                            type="button"
+                            key={kind}
+                            onClick={() => void previewControllerHandler(kind)}
+                            className={quietButton}
+                          >
+                            + {label}
+                          </button>
+                        ))}
+                      </div>
+                    </>
                   )}
                 </div>
               )}
@@ -2232,7 +2254,11 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                   type="button"
                   key={`injection-${injection.fieldName}`}
                   onClick={() => void bridge.navigateToSource(injection.sourceLocator)}
-                  className="w-full rounded border border-surface-border bg-surface px-2 py-1.5 text-left hover:border-jmix-500/50"
+                  className={`w-full rounded border bg-surface px-2 py-1.5 text-left ${
+                    injection.issues?.length
+                      ? 'border-red-500/40 hover:border-red-400/70'
+                      : 'border-surface-border hover:border-jmix-500/50'
+                  }`}
                 >
                   <div className="truncate font-mono text-[10px] text-gray-300">
                     @ViewComponent {injection.fieldName}
@@ -2240,6 +2266,16 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                   <div className="mt-0.5 truncate text-[9px] text-gray-600">
                     {injection.componentId} · {injection.type}
                   </div>
+                  {injection.issues?.map((issue) => (
+                    <div
+                      key={`${injection.fieldName}-${issue.code}`}
+                      className={`mt-1 text-[9px] leading-snug ${
+                        issue.severity === 'ERROR' ? 'text-red-300' : 'text-amber-300'
+                      }`}
+                    >
+                      {issue.message}
+                    </div>
+                  ))}
                 </button>
               ))}
               {workspace.controllerModel?.handlers.map((handler) => (
@@ -2247,7 +2283,11 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                   type="button"
                   key={`handler-${handler.kind}-${handler.methodName}-${handler.target ?? ''}`}
                   onClick={() => void bridge.navigateToSource(handler.sourceLocator)}
-                  className="w-full rounded border border-surface-border bg-surface px-2 py-1.5 text-left hover:border-jmix-500/50"
+                  className={`w-full rounded border bg-surface px-2 py-1.5 text-left ${
+                    handler.issues?.length
+                      ? 'border-red-500/40 hover:border-red-400/70'
+                      : 'border-surface-border hover:border-jmix-500/50'
+                  }`}
                 >
                   <div className="truncate font-mono text-[10px] text-gray-300">
                     @{handler.kind} {handler.methodName}()
@@ -2255,6 +2295,16 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                   <div className="mt-0.5 truncate text-[9px] text-gray-600">
                     {[handler.target, handler.subject, ...handler.parameterTypes].filter(Boolean).join(' · ') || 'view lifecycle'}
                   </div>
+                  {handler.issues?.map((issue) => (
+                    <div
+                      key={`${handler.methodName}-${issue.code}`}
+                      className={`mt-1 text-[9px] leading-snug ${
+                        issue.severity === 'ERROR' ? 'text-red-300' : 'text-amber-300'
+                      }`}
+                    >
+                      {issue.message}
+                    </div>
+                  ))}
                 </button>
               ))}
               {workspace.contextArtifacts.filter((artifact) => logicKinds.has(artifact.kind)).map((artifact) => (

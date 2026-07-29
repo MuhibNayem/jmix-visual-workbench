@@ -273,6 +273,15 @@ class JmixNativeMenuBeanAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
                 public void wrongParameter(String value) {
                 }
 
+                public void rawMap(Map parameters) {
+                }
+
+                public void wrongKey(Map<Long, Object> parameters) {
+                }
+
+                public void wrongValue(Map<String, String> parameters) {
+                }
+
                 public void overloaded() {
                 }
 
@@ -289,6 +298,9 @@ class JmixNativeMenuBeanAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
                 <item bean="BrokenMenu" beanMethod="hidden"/>
                 <item bean="BrokenMenu" beanMethod="wrongReturn"/>
                 <item bean="BrokenMenu" beanMethod="wrongParameter"/>
+                <item bean="BrokenMenu" beanMethod="rawMap"/>
+                <item bean="BrokenMenu" beanMethod="wrongKey"/>
+                <item bean="BrokenMenu" beanMethod="wrongValue"/>
                 <item bean="BrokenMenu" beanMethod="overloaded"/>
                 <item bean="MissingMenu" beanMethod="execute"/>
                 <item bean="BrokenMenu"/>
@@ -301,7 +313,7 @@ class JmixNativeMenuBeanAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
             .mapNotNull { it.description }
         assertTrue(descriptions.any { "must be public" in it })
         assertTrue(descriptions.any { "must return void" in it })
-        assertTrue(descriptions.any { "parameter must be Map" in it })
+        assertEquals(4, descriptions.count { "parameter must be Map" in it })
         assertTrue(descriptions.any { "overloaded methods are not safe" in it })
         assertTrue(descriptions.any { "Unresolved Jmix Spring bean reference" in it })
         assertTrue(descriptions.any { "requires both bean and beanMethod" in it })
@@ -332,6 +344,53 @@ class JmixNativeMenuBeanAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
             myFixture.doHighlighting()
                 .mapNotNull { it.description }
                 .any { "Ambiguous Jmix Spring bean" in it },
+        )
+    }
+
+    fun testKotlinMenuBeanRequiresExactStringAnyMapContract() {
+        myFixture.addFileToProject(
+            "com/company/payroll/menu/KotlinMenu.kt",
+            """
+            package com.company.payroll.menu
+
+            import org.springframework.stereotype.Component
+
+            @Component("KotlinMenu")
+            class KotlinMenu {
+                fun valid(parameters: Map<String, Any>) {
+                }
+
+                fun validNullable(parameters: MutableMap<String, Any?>) {
+                }
+
+                fun wrongKey(parameters: Map<Long, Any>) {
+                }
+
+                fun wrongValue(parameters: Map<String, String>) {
+                }
+            }
+            """.trimIndent(),
+        )
+        myFixture.enableInspections(JmixUiXmlReferenceInspection())
+        myFixture.configureByText(
+            "kotlin-menu.xml",
+            """
+            <menu-config xmlns="http://jmix.io/schema/flowui/menu">
+                <item bean="KotlinMenu" beanMethod="valid"/>
+                <item bean="KotlinMenu" beanMethod="validNullable"/>
+                <item bean="KotlinMenu" beanMethod="wrongKey"/>
+                <item bean="KotlinMenu" beanMethod="wrongValue"/>
+            </menu-config>
+            """.trimIndent(),
+        )
+
+        val descriptions = myFixture.doHighlighting()
+            .filter { it.severity == HighlightSeverity.ERROR }
+            .mapNotNull { it.description }
+        assertEquals(
+            descriptions.joinToString("\n"),
+            2,
+            descriptions.count { "parameter must be Map<String, Any>" in it },
         )
     }
 

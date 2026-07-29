@@ -12,6 +12,7 @@ import com.intellij.psi.PsiReference
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.xml.XmlAttributeValue
+import com.intellij.refactoring.rename.RenamePsiElementProcessor
 import com.intellij.testFramework.fixtures.LightJavaCodeInsightFixtureTestCase
 
 class JmixNativeUiSecurityAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
@@ -271,6 +272,117 @@ class JmixNativeUiSecurityAssistanceTest : LightJavaCodeInsightFixtureTestCase()
                 "LoanListView.caption=Loan applications",
             ),
         )
+    }
+
+    fun testLocalizedMessageReferencesResolveAndRenameAsOneLogicalKey() {
+        val baseBundle = myFixture.addFileToProject(
+            "com/company/payroll/view/loan/messages.properties",
+            "approval.complete=Loan approved",
+        ) as PropertiesFile
+        val bengaliBundle = myFixture.addFileToProject(
+            "com/company/payroll/view/loan/messages_bn.properties",
+            "approval.complete=ঋণ অনুমোদিত",
+        ) as PropertiesFile
+        val xmlUsage = myFixture.addFileToProject(
+            "com/company/payroll/view/loan/loan-view.xml",
+            """
+            <view messagesGroup="com.company.payroll.view.loan"
+                  title="msg://approval.complete">
+                <layout/>
+            </view>
+            """.trimIndent(),
+        )
+        val javaUsage = myFixture.addFileToProject(
+            "com/company/payroll/view/loan/LoanNotifier.java",
+            """
+            package com.company.payroll.view.loan;
+
+            public class LoanNotifier {
+                private Object messageBundle;
+
+                public String text() {
+                    return messageBundle.getMessage("approval.complete");
+                }
+            }
+            """.trimIndent(),
+        )
+        val kotlinUsage = myFixture.addFileToProject(
+            "com/company/payroll/view/loan/LoanNotifications.kt",
+            """
+            package com.company.payroll.view.loan
+
+            class LoanNotifications {
+                lateinit var messageBundle: Any
+
+                fun text(): String =
+                    messageBundle.getMessage("approval.complete")
+            }
+            """.trimIndent(),
+        )
+
+        myFixture.enableInspections(
+            JmixUiXmlReferenceInspection(),
+            JmixJavaReferenceInspection(),
+            JmixKotlinReferenceInspection(),
+        )
+        listOf(xmlUsage, javaUsage, kotlinUsage).forEach { usage ->
+            myFixture.configureFromExistingVirtualFile(usage.virtualFile)
+            assertFalse(
+                "Valid localized key was reported unresolved in ${usage.name}",
+                myFixture.doHighlighting().any {
+                    it.description?.contains("Unresolved Jmix") == true
+                },
+            )
+            val reference = PsiTreeUtil.findChildrenOfType(
+                myFixture.file,
+                PsiLanguageInjectionHost::class.java,
+            ).asSequence()
+                .flatMap { it.references.asSequence() }
+                .filter {
+                    it is JmixXmlMessageReference ||
+                        it is JmixJavaMessageReference ||
+                        it is JmixKotlinMessageReference
+                }
+                .single()
+            val targets = when (reference) {
+                is JmixXmlMessageReference -> reference.multiResolve(false)
+                is JmixJavaMessageReference -> reference.multiResolve(false)
+                is JmixKotlinMessageReference -> reference.multiResolve(false)
+                else -> error("Unexpected reference ${reference.javaClass.name}")
+            }
+            assertEquals(2, targets.size)
+            assertNull(reference.resolve())
+        }
+
+        val baseProperty = baseBundle.properties.single() as Property
+        val processors = RenamePsiElementProcessor.allForElement(baseProperty)
+        assertTrue(processors.any { it is JmixMessageBundleRenameProcessor })
+        val preparedRenames = linkedMapOf<PsiElement, String>(
+            baseProperty to "approval.finished",
+        )
+        processors.forEach { processor ->
+            processor.prepareRenaming(
+                baseProperty,
+                "approval.finished",
+                preparedRenames,
+            )
+        }
+        assertEquals(
+            preparedRenames.keys.joinToString { it.containingFile.name },
+            setOf("messages.properties", "messages_bn.properties"),
+            preparedRenames.keys.map { it.containingFile.name }.toSet(),
+        )
+        myFixture.renameElement(baseProperty, "approval.finished")
+
+        assertTrue(baseBundle.text.contains("approval.finished=Loan approved"))
+        assertTrue(
+            "Localized bundle was not renamed:\n${bengaliBundle.text}",
+            bengaliBundle.text.contains("approval.finished=") &&
+                !bengaliBundle.text.contains("approval.complete="),
+        )
+        assertTrue(xmlUsage.text.contains("msg://approval.finished"))
+        assertTrue(javaUsage.text.contains("""getMessage("approval.finished")"""))
+        assertTrue(kotlinUsage.text.contains("""getMessage("approval.finished")"""))
     }
 
     fun testJavaEntityAttributeAndRowPolicyPathsFollowNestedFieldRename() {

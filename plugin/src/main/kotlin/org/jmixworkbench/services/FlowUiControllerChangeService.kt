@@ -8,7 +8,7 @@ import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiManager
-import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.ProjectScope
 import org.jmixworkbench.discovery.change.WorkspaceChangeIssue
 import org.jmixworkbench.discovery.change.WorkspaceChangePlan
 import org.jmixworkbench.discovery.change.WorkspaceChangeSet
@@ -666,7 +666,11 @@ class FlowUiControllerChangeService(
 
     private fun subscribeSubjectSupported(): Boolean? =
         JavaPsiFacade.getInstance(project)
-            .findClass(SUBSCRIBE_IMPORT, GlobalSearchScope.allScope(project))
+            .findClass(
+                SUBSCRIBE_IMPORT,
+                ProjectScope.getContentScope(project)
+                    .uniteWith(ProjectScope.getLibrariesScope(project)),
+            )
             ?.findMethodsByName("subject", false)
             ?.isNotEmpty()
 

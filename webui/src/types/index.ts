@@ -2101,6 +2101,7 @@ export interface FlowUiControllerInjectionSnapshot {
   type: string
   visibility?: string
   sourceLocator: GraphSourceLocator
+  issues?: FlowUiControllerIssueSnapshot[]
 }
 
 export interface FlowUiControllerHandlerSnapshot {
@@ -2112,6 +2113,13 @@ export interface FlowUiControllerHandlerSnapshot {
   returnType?: string
   parameterTypes: string[]
   sourceLocator: GraphSourceLocator
+  issues?: FlowUiControllerIssueSnapshot[]
+}
+
+export interface FlowUiControllerIssueSnapshot {
+  code: string
+  message: string
+  severity: 'ERROR' | 'WARNING'
 }
 
 export interface FlowUiControllerWorkspaceSnapshot {

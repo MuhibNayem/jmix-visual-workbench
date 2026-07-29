@@ -10,10 +10,11 @@ import kotlin.system.measureNanoTime
 /**
  * Enterprise-scale guard for the native symbol hot path.
  *
- * The fixture deliberately contains 3,000 files accepted by the index input
- * filters but unrelated to Jmix symbols. A broad extension scan would revisit
- * all of them after every PSI modification. The persistent indexes must keep
- * all seven cached symbol inventories stable and descriptor discovery restricted to
+ * The fixture deliberately contains 3,000 files spread over sixteen
+ * module-shaped roots. They are accepted by the index input filters but
+ * unrelated to Jmix symbols. A broad extension scan would revisit all of them
+ * after every PSI modification. The persistent indexes must keep all seven
+ * cached symbol inventories stable and descriptor discovery restricted to
  * actual FlowUI files.
  */
 class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
@@ -89,22 +90,23 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
             </fetchPlans>
             """.trimIndent(),
         )
-        myFixture.addFileToProject(
+        val messageBundle = myFixture.addFileToProject(
             "com/company/payroll/messages.properties",
             "EmployeeListView.title=Employees",
         )
 
         repeat(1_000) { index ->
+            val module = "module-${index % 16}"
             myFixture.addFileToProject(
-                "bulk/xml/config-$index.xml",
+                "bulk/$module/xml/config-$index.xml",
                 "<configuration sequence=\"$index\"/>",
             )
             myFixture.addFileToProject(
-                "bulk/properties/application-$index.properties",
+                "bulk/$module/properties/application-$index.properties",
                 "bulk.sequence=$index",
             )
             myFixture.addFileToProject(
-                "bulk/java/Utility$index.java",
+                "bulk/$module/java/Utility$index.java",
                 """
                 package bulk.java;
                 public class Utility$index {
@@ -149,8 +151,8 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
         assertEquals(listOf("PayrollMenu"), beans.map { it.name })
         assertEquals(listOf("employee-list-view.xml"), descriptors.map { it.name })
 
-        val warmLookupNanos = measureNanoTime {
-            repeat(25) {
+        val warmSamples = LongArray(100) {
+            measureNanoTime {
                 assertSame(entities, domain.entityClasses())
                 assertSame(fetchPlans, domain.fetchPlanDeclarations())
                 assertSame(views, ui.viewIds())
@@ -160,11 +162,25 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
                 assertSame(beans, spring.beans())
             }
         }
+        val warmLookupNanos = warmSamples.sum()
         assertTrue(
             "Warm indexed symbol access took ${warmLookupNanos / 1_000_000} ms",
             warmLookupNanos < 2_000_000_000L,
         )
-        println("JVW_INDEX_WARM_25X_LOOKUP_MS=${warmLookupNanos / 1_000_000}")
+        assertTrue(
+            "Warm indexed p95 was ${warmSamples.percentileMillis(95)} ms",
+            warmSamples.percentileMillis(95) < 100,
+        )
+        assertTrue(
+            "Warm indexed p99 was ${warmSamples.percentileMillis(99)} ms",
+            warmSamples.percentileMillis(99) < 250,
+        )
+        println(
+            "JVW_INDEX_WARM_100X_TOTAL_MS=${warmLookupNanos / 1_000_000} " +
+                "P50_MS=${warmSamples.percentileMillis(50)} " +
+                "P95_MS=${warmSamples.percentileMillis(95)} " +
+                "P99_MS=${warmSamples.percentileMillis(99)}",
+        )
 
         val unrelatedXml = myFixture.addFileToProject(
             "bulk/xml/unrelated-edit.xml",
@@ -202,8 +218,8 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
                 unrelatedEditLookupNanos / 1_000_000,
         )
 
-        val repeatedTypingNanos = measureNanoTime {
-            repeat(20) { edit ->
+        val typingSamples = LongArray(20) { edit ->
+            measureNanoTime {
                 WriteCommandAction.runWriteCommandAction(project) {
                     VfsUtil.saveText(
                         unrelatedXml.virtualFile,
@@ -233,15 +249,64 @@ class JmixNativeIndexScaleTest : LightJavaCodeInsightFixtureTestCase() {
                 assertSame(beans, spring.beans())
             }
         }
+        val repeatedTypingNanos = typingSamples.sum()
         assertTrue(
             "Twenty three-file typing cycles took " +
                 "${repeatedTypingNanos / 1_000_000} ms",
             repeatedTypingNanos < 5_000_000_000L,
         )
+        assertTrue(
+            "Unrelated typing p95 was ${typingSamples.percentileMillis(95)} ms",
+            typingSamples.percentileMillis(95) < 500,
+        )
+        assertTrue(
+            "Unrelated typing p99 was ${typingSamples.percentileMillis(99)} ms",
+            typingSamples.percentileMillis(99) < 1_000,
+        )
         println(
             "JVW_INDEX_20X_TYPING_CYCLE_MS=" +
-                repeatedTypingNanos / 1_000_000,
+                repeatedTypingNanos / 1_000_000 +
+                " P50_MS=${typingSamples.percentileMillis(50)}" +
+                " P95_MS=${typingSamples.percentileMillis(95)}" +
+                " P99_MS=${typingSamples.percentileMillis(99)}",
         )
+
+        val messageEditNanos = measureNanoTime {
+            WriteCommandAction.runWriteCommandAction(project) {
+                VfsUtil.saveText(
+                    messageBundle.virtualFile,
+                    """
+                    EmployeeListView.title=Employees
+                    EmployeeListView.approve=Approve
+                    """.trimIndent(),
+                )
+            }
+            PsiDocumentManager.getInstance(project).commitAllDocuments()
+        }
+        val updatedMessages = ui.messages()
+        assertNotSame(messages, updatedMessages)
+        assertEquals(
+            listOf("EmployeeListView.approve", "EmployeeListView.title"),
+            updatedMessages.map { it.key },
+        )
+        assertSame(entities, domain.entityClasses())
+        assertSame(fetchPlans, domain.fetchPlanDeclarations())
+        assertSame(views, ui.viewIds())
+        assertSame(menus, ui.menuIds())
+        assertSame(policies, ui.specificPolicies())
+        assertSame(beans, spring.beans())
+        println(
+            "JVW_INDEX_RELEVANT_MESSAGE_EDIT_COMMIT_MS=" +
+                messageEditNanos / 1_000_000,
+        )
+    }
+
+    private fun LongArray.percentileMillis(percentile: Int): Long {
+        require(isNotEmpty())
+        require(percentile in 1..100)
+        val ordered = sortedArray()
+        val index = ((ordered.size - 1) * percentile + 99) / 100
+        return ordered[index] / 1_000_000
     }
 
     private fun addFrameworkAnnotations() {

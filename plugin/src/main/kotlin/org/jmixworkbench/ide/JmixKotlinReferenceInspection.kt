@@ -18,7 +18,7 @@ class JmixKotlinReferenceInspection : LocalInspectionTool() {
                 val host = element as? PsiLanguageInjectionHost ?: return
                 host.references.asSequence()
                     .filter(PsiReference::isJmixKotlinReference)
-                    .filter { it.resolve() == null }
+                    .filterNot(PsiReference::resolvesToAnyJmixTarget)
                     .forEach { reference ->
                         val unresolved = reference.rangeInElement.substring(host.text)
                         val closest = reference.kotlinCompletionCandidates()

@@ -266,6 +266,61 @@ tasks.register("verifyHostBuildDefinitions") {
     }
 }
 
+val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitecture") {
+    description = "Rejects broad scopes, global PSI cache keys, and extension-wide scans in native IDE code."
+    val nativeSources = fileTree(layout.projectDirectory.dir("src/main/kotlin")) {
+        include("**/*.kt")
+    }
+    val pluginDescriptors = files(
+        layout.projectDirectory.file("src/main/resources/META-INF/plugin.xml"),
+        layout.projectDirectory.file("hosts/idea253/src/main/resources/META-INF/plugin.xml"),
+        layout.projectDirectory.file("hosts/idea262/src/main/resources/META-INF/plugin.xml"),
+    )
+    inputs.files(nativeSources, pluginDescriptors)
+    doLast {
+        val prohibited = linkedMapOf(
+            "GlobalSearchScope.allScope(" to
+                "Use project-content, project, or project-and-libraries scope.",
+            "PsiModificationTracker" to
+                "Use the owning file-based index modification stamp.",
+            "FilenameIndex.getAllFilesByExt(" to
+                "Register and query a content-sensitive candidate index.",
+            "FileTypeIndex" to
+                "Register and query a content-sensitive candidate index.",
+        )
+        nativeSources.files.sorted().forEach { source ->
+            val text = source.readText()
+            prohibited.forEach { (marker, remediation) ->
+                check(marker !in text) {
+                    "${source.relativeTo(layout.projectDirectory.asFile)} contains prohibited " +
+                        "native-index marker '$marker'. $remediation"
+                }
+            }
+        }
+
+        val indexSource = file(
+            "src/main/kotlin/org/jmixworkbench/ide/JmixSymbolFileIndexes.kt",
+        ).readText()
+        val indexClasses = Regex(
+            """class\s+(Jmix\w+CandidateFileIndex)\s*:\s*JmixCandidateFileIndex""",
+        ).findAll(indexSource).map { it.groupValues[1] }.toSet()
+        check(indexClasses.size == 8) {
+            "Expected eight independent native candidate indexes, found " +
+                "${indexClasses.size}: ${indexClasses.sorted()}"
+        }
+        pluginDescriptors.files.forEach { descriptor ->
+            val registered = Regex(
+                """<fileBasedIndex implementation="org\.jmixworkbench\.ide\.(Jmix\w+CandidateFileIndex)"/>""",
+            ).findAll(descriptor.readText()).map { it.groupValues[1] }.toSet()
+            check(registered == indexClasses) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register exactly " +
+                    "the native candidate indexes. Missing=${indexClasses - registered}, " +
+                    "unexpected=${registered - indexClasses}"
+            }
+        }
+    }
+}
+
 val snapshotLockHashes = tasks.register("snapshotLockHashes") {
     description = "Records SHA-256 values for the two reviewed host dependency lock files."
     inputs.files(dependencyLockFiles)
@@ -550,6 +605,7 @@ tasks.register("phase1FastCheck") {
         verifyWebBundle,
         "verifyHostBuildDefinitions",
         "verifyHostToolchains",
+        verifyNativeIndexArchitecture,
         verifyDependencyIntegrity,
     )
 }

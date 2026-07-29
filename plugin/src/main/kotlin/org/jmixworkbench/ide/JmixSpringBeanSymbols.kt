@@ -10,6 +10,7 @@ import com.intellij.psi.ElementManipulators
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiClassType
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiElementResolveResult
 import com.intellij.psi.PsiLanguageInjectionHost
@@ -505,12 +506,16 @@ private fun PsiMethod.formatJavaMenuSignature(): String =
     }
 
 private fun PsiType.isMenuPropertiesMap(): Boolean {
-    val canonical = canonicalText.substringBefore('<').trim()
-    val presentable = presentableText.substringBefore('<').trim()
-    return canonical == "java.util.Map" ||
-        canonical == "Map" ||
-        presentable == "java.util.Map" ||
-        presentable == "Map"
+    val classType = this as? PsiClassType ?: return false
+    val rawType = classType.rawType()
+    val rawName = rawType.resolve()?.qualifiedName
+        ?: rawType.canonicalText
+    if (rawName != "java.util.Map" && rawName != "Map") return false
+
+    val arguments = classType.parameters
+    if (arguments.size != 2) return false
+    return arguments[0].canonicalText in JAVA_STRING_TYPES &&
+        arguments[1].canonicalText in JAVA_OBJECT_TYPES
 }
 
 private fun PsiNamedElement.jmixKotlinSpringBeanDeclaration(): JmixSpringBeanDeclaration? {
@@ -584,7 +589,7 @@ private fun PsiNamedElement.jmixKotlinMenuMethodDeclaration():
             "Menu bean method must have no parameters or one Map<String, Any> parameter"
 
         signature.parameters.size == 1 &&
-            !KOTLIN_MAP_PARAMETER.containsMatchIn(signature.parameters.single()) ->
+            !signature.parameters.single().isKotlinMenuPropertiesMapParameter() ->
             "Menu bean method parameter must be Map<String, Any>"
 
         else -> null
@@ -689,6 +694,13 @@ private fun splitTopLevelParameters(source: String): List<String> {
     return parameters.filter(String::isNotBlank)
 }
 
+private fun String.isKotlinMenuPropertiesMapParameter(): Boolean {
+    val declaredType = substringAfter(':', "")
+        .substringBefore('=')
+        .trim()
+    return KOTLIN_MAP_PARAMETER.matches(declaredType)
+}
+
 internal fun springDefaultBeanName(className: String): String =
     when {
         className.length > 1 &&
@@ -729,5 +741,11 @@ private val KOTLIN_SUSPEND_MODIFIER = Regex("""\bsuspend\b""")
 private val KOTLIN_RETURN_TYPE =
     Regex("""^\s*:\s*([A-Za-z_][\w.]*)""")
 private val KOTLIN_MAP_PARAMETER =
-    Regex("""\b(?:kotlin\.collections\.|java\.util\.)?(?:Mutable)?Map\s*<""")
+    Regex(
+        """(?:kotlin\.collections\.|java\.util\.)?(?:Mutable)?Map\s*""" +
+            """<\s*(?:kotlin\.)?String\s*,\s*""" +
+            """(?:(?:kotlin\.)?Any|(?:java\.lang\.)?Object)\??\s*>""",
+    )
 private val KOTLIN_UNIT_TYPES = setOf("Unit", "kotlin.Unit")
+private val JAVA_STRING_TYPES = setOf("java.lang.String", "String")
+private val JAVA_OBJECT_TYPES = setOf("java.lang.Object", "Object")
