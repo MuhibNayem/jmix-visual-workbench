@@ -17,6 +17,7 @@
     <depends>com.intellij.modules.jcef</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <fileEditorProvider implementation="org.jmixworkbench.editor.JmixFlowUiFileEditorProvider"/>
         <toolWindow id="Jmix Visual Workbench"
                     anchor="right"
                     factoryClass="org.jmixworkbench.toolwindow.JmixWorkbenchToolWindowFactory"
@@ -87,6 +88,20 @@
                          enabledByDefault="true"
                          level="ERROR"
                          implementationClass="org.jmixworkbench.ide.JmixUiXmlReferenceInspection"/>
+        <localInspection language="JAVA"
+                         shortName="JmixUiComponentPolicy"
+                         displayName="Invalid Jmix UI component policy"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixJavaUiComponentPolicyInspection"/>
+        <localInspection language="kotlin"
+                         shortName="JmixKotlinUiComponentPolicy"
+                         displayName="Invalid Jmix Kotlin UI component policy"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixKotlinUiComponentPolicyInspection"/>
         <localInspection language="JAVA"
                          shortName="JmixJavaReference"
                          displayName="Unresolved Jmix Java reference"

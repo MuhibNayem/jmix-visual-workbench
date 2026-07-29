@@ -332,7 +332,7 @@ function CanvasNode({
 
 export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
   initialLocator: GraphSourceLocator
-  onClose: () => void
+  onClose?: () => void
 }) {
   const addToast = useStore((state) => state.addToast)
   const openFlowUiDesigner = useStore((state) => state.openFlowUiDesigner)
@@ -1134,7 +1134,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           <button type="button" onClick={() => void load(locator)} className={primaryButton}>
             <RefreshCw size={13} /> Retry
           </button>
-          <button type="button" onClick={onClose} className={quietButton}>New view designer</button>
+          {onClose && (
+            <button type="button" onClick={onClose} className={quietButton}>New view designer</button>
+          )}
         </div>
       </div>
     )
@@ -1229,7 +1231,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
         <button type="button" onClick={() => void load(locator)} className={quietButton}>
           <RefreshCw size={11} /> Refresh
         </button>
-        <button type="button" onClick={onClose} className={quietButton}>New view</button>
+        {onClose && (
+          <button type="button" onClick={onClose} className={quietButton}>New view</button>
+        )}
       </header>
 
       {runtimePanelOpen && (

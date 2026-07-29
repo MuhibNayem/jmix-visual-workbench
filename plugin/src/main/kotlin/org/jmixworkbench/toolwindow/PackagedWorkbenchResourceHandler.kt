@@ -18,6 +18,7 @@ import java.net.URI
 
 internal const val PACKAGED_WORKBENCH_ORIGIN = "https://jmix-workbench.invalid"
 internal const val PACKAGED_WORKBENCH_ENTRY_URL = "$PACKAGED_WORKBENCH_ORIGIN/index.html"
+internal const val PACKAGED_FLOW_UI_EDITOR_ENTRY_URL = "$PACKAGED_WORKBENCH_ORIGIN/flowui-editor.html"
 
 private const val DEFAULT_MAXIMUM_RESOURCE_BYTES = 32 * 1024 * 1024
 private const val CONTENT_SECURITY_POLICY =
@@ -132,6 +133,7 @@ internal class PackagedWorkbenchResourceProvider(
 
         val relativePath = when (rawPath) {
             "/", "/index.html" -> "index.html"
+            "/flowui-editor.html" -> "index.html"
             else -> rawPath.removePrefix("/")
         }
         return "/webui/$relativePath"

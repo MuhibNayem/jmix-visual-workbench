@@ -309,9 +309,24 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
                 "${indexClasses.size}: ${indexClasses.sorted()}"
         }
         pluginDescriptors.files.forEach { descriptor ->
+            val descriptorText = descriptor.readText()
+            check(
+                """<fileEditorProvider implementation="org.jmixworkbench.editor.JmixFlowUiFileEditorProvider"/>""" in
+                    descriptorText,
+            ) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register the native FlowUI editor."
+            }
+            listOf(
+                "org.jmixworkbench.ide.JmixJavaUiComponentPolicyInspection",
+                "org.jmixworkbench.ide.JmixKotlinUiComponentPolicyInspection",
+            ).forEach { inspection ->
+                check(inspection in descriptorText) {
+                    "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register $inspection."
+                }
+            }
             val registered = Regex(
                 """<fileBasedIndex implementation="org\.jmixworkbench\.ide\.(Jmix\w+CandidateFileIndex)"/>""",
-            ).findAll(descriptor.readText()).map { it.groupValues[1] }.toSet()
+            ).findAll(descriptorText).map { it.groupValues[1] }.toSet()
             check(registered == indexClasses) {
                 "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register exactly " +
                     "the native candidate indexes. Missing=${indexClasses - registered}, " +

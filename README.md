@@ -92,6 +92,7 @@ host toolchains and runs the shared IDEA 253/262 test lanes.
 
 - [Exact build prerequisites, commands, artifacts, and offline behavior](docs/BUILDING.md)
 - [IntelliJ host and target-project compatibility matrices](docs/COMPATIBILITY.md)
+- [Native FlowUI Design/XML editor and round-trip contract](docs/NATIVE-FLOWUI-EDITOR.md)
 - [Native persistent-index, cache-isolation, and threading contract](docs/NATIVE-INDEX-ARCHITECTURE.md)
 - [Dependency, checksum, CI, and future signing/SBOM policy](docs/RELEASE-INTEGRITY.md)
 

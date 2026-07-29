@@ -722,11 +722,16 @@ function SectionHeader({ icon: Icon, title, count, action }: {
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function ViewDesigner() {
+export default function ViewDesigner({ editorSurface = false }: { editorSurface?: boolean }) {
   const flowUiLocator = useStore((state) => state.flowUiLocator)
   const closeFlowUiDesigner = useStore((state) => state.closeFlowUiDesigner)
   return flowUiLocator
-    ? <ExistingFlowUiDesigner initialLocator={flowUiLocator} onClose={closeFlowUiDesigner} />
+    ? (
+      <ExistingFlowUiDesigner
+        initialLocator={flowUiLocator}
+        onClose={editorSurface ? undefined : closeFlowUiDesigner}
+      />
+    )
     : <NewViewDesigner />
 }
 

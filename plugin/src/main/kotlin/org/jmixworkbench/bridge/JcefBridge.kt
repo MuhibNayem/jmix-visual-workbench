@@ -102,6 +102,7 @@ import org.jmixworkbench.services.WorkspaceChangeService
 import org.jmixworkbench.services.WorkspaceHistoryService
 import org.jmixworkbench.services.WorkflowWorkspaceService
 import org.jmixworkbench.toolwindow.isPackagedWorkbenchOriginUrl
+import org.jmixworkbench.toolwindow.WorkbenchLaunchContext
 import org.cef.browser.CefBrowser
 import org.cef.handler.CefLoadHandlerAdapter
 
@@ -115,11 +116,14 @@ import org.cef.handler.CefLoadHandlerAdapter
  */
 class JcefBridge(
     private val project: Project,
-    private val browser: JBCefBrowser
+    private val browser: JBCefBrowser,
+    initialLaunchContext: WorkbenchLaunchContext? = null,
 ) {
     private val log = Logger.getInstance(JcefBridge::class.java)
     private val gson = Gson()
     private val jsQuery = JBCefJSQuery.create(browser as com.intellij.ui.jcef.JBCefBrowserBase)
+    @Volatile
+    private var launchContext: WorkbenchLaunchContext? = initialLaunchContext
 
     init {
         jsQuery.addHandler { request ->
@@ -141,7 +145,9 @@ class JcefBridge(
 
     private fun injectBridge() {
         val injection = jsQuery.inject("request")
+        val launchContextJson = gson.toJson(launchContext)
         val script = """
+            window.jmixWorkbenchLaunchContext = $launchContextJson;
             window.javaBridge = {
                 send: function(action, payload, requestId) {
                     var request = JSON.stringify({ action: action, payload: payload, requestId: requestId });
@@ -149,6 +155,24 @@ class JcefBridge(
                 }
             };
             if (window.onBridgeReady) { window.onBridgeReady(); }
+            if (window.onWorkbenchLaunchContext) {
+                window.onWorkbenchLaunchContext(window.jmixWorkbenchLaunchContext);
+            }
+        """.trimIndent()
+        browser.cefBrowser.executeJavaScript(script, browser.cefBrowser.url, 0)
+    }
+
+    fun publishLaunchContext(context: WorkbenchLaunchContext) {
+        launchContext = context
+        if (!isPackagedWorkbenchOriginUrl(browser.cefBrowser.url.orEmpty())) {
+            return
+        }
+        val contextJson = gson.toJson(context)
+        val script = """
+            window.jmixWorkbenchLaunchContext = $contextJson;
+            if (window.onWorkbenchLaunchContext) {
+                window.onWorkbenchLaunchContext(window.jmixWorkbenchLaunchContext);
+            }
         """.trimIndent()
         browser.cefBrowser.executeJavaScript(script, browser.cefBrowser.url, 0)
     }

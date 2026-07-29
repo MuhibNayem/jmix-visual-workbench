@@ -556,6 +556,11 @@ export interface GraphSourceLocator {
   revisionFingerprint: string
 }
 
+export interface WorkbenchLaunchContext {
+  surface: 'TOOL_WINDOW' | 'FLOW_UI_EDITOR'
+  sourceLocator?: GraphSourceLocator
+}
+
 // ─── Indexed Menu Workspace ─────────────────────────────────────────────────
 
 export interface MenuNodeSnapshot {

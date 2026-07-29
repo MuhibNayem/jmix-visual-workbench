@@ -225,7 +225,10 @@ body {
 @container view-designer (max-width: 479px) {
   .view-designer-workspace {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(220px, 32vh) minmax(320px, 1fr) minmax(240px, 36vh);
+    grid-template-rows:
+      minmax(520px, 78vh)
+      minmax(420px, 70vh)
+      minmax(480px, 75vh);
     overflow-x: hidden !important;
     overflow-y: auto !important;
   }

@@ -16,6 +16,7 @@
     <depends optional="true" config-file="jmix-kotlin.xml">org.jetbrains.kotlin</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <fileEditorProvider implementation="org.jmixworkbench.editor.JmixFlowUiFileEditorProvider"/>
         <toolWindow id="Jmix Visual Workbench"
                     anchor="right"
                     factoryClass="org.jmixworkbench.toolwindow.JmixWorkbenchToolWindowFactory"

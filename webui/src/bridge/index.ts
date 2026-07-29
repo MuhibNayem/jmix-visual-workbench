@@ -51,6 +51,7 @@ import type {
   VisualLogicWorkspaceResponse,
   VisualRuleModel,
   VisualRuleWorkspaceResponse,
+  WorkbenchLaunchContext,
 } from '../types'
 import {
   developmentApplicationGraph,
@@ -83,11 +84,16 @@ declare global {
     }
     onBridgeResponse?: (action: string, requestId: string | null, result: any) => void
     onBridgeReady?: () => void
+    jmixWorkbenchLaunchContext?: WorkbenchLaunchContext | null
+    onWorkbenchLaunchContext?: (context: WorkbenchLaunchContext | null) => void
   }
 }
 
 class Bridge {
   private listeners: BridgeCallback[] = []
+  private launchContextListeners: ((context: WorkbenchLaunchContext | null) => void)[] = []
+  private launchContext: WorkbenchLaunchContext | null =
+    window.jmixWorkbenchLaunchContext ?? this.developmentLaunchContext()
   private ready = false
   private requestSequence = 0
   private pendingQueue: { action: string; payload: any; requestId: string }[] = []
@@ -103,9 +109,32 @@ class Bridge {
       this.pendingQueue = []
     }
 
+    window.onWorkbenchLaunchContext = (context) => {
+      this.launchContext = context
+      this.launchContextListeners.forEach((listener) => listener(context))
+    }
+
     // If bridge is already available (e.g., dev mode without JCEF)
     if (window.javaBridge) {
       this.ready = true
+    }
+  }
+
+  private developmentLaunchContext(): WorkbenchLaunchContext | null {
+    const document = developmentFlowUiWorkspace.document
+    if (
+      !import.meta.env.DEV ||
+      window.location.pathname !== '/flowui-editor.html' ||
+      !document
+    ) {
+      return null
+    }
+    return {
+      surface: 'FLOW_UI_EDITOR',
+      sourceLocator: {
+        relativePath: document.relativePath,
+        revisionFingerprint: document.revisionFingerprint,
+      },
     }
   }
 
@@ -1256,6 +1285,19 @@ class ${scenario.className} {
     this.listeners.push(callback)
     return () => {
       this.listeners = this.listeners.filter(cb => cb !== callback)
+    }
+  }
+
+  getLaunchContext(): WorkbenchLaunchContext | null {
+    return this.launchContext
+  }
+
+  onLaunchContext(callback: (context: WorkbenchLaunchContext | null) => void) {
+    this.launchContextListeners.push(callback)
+    return () => {
+      this.launchContextListeners = this.launchContextListeners.filter(
+        (listener) => listener !== callback,
+      )
     }
   }
 

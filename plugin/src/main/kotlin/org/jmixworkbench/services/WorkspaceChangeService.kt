@@ -105,7 +105,7 @@ class WorkspaceChangeService(
                                     val target = requireNotNull(prepared.targets[planned.relativePath])
                                     val file = target.root.findFileByRelativePath(target.relativePath)
                                         ?: error("Source disappeared during write: ${planned.relativePath}")
-                                    VfsUtil.saveText(file, planned.resultContent)
+                                    ProjectSourceText.write(project, file, planned.resultContent)
                                     modifiedFiles += planned
                                 }
                             }
@@ -115,7 +115,7 @@ class WorkspaceChangeService(
                             val target = prepared.targets[planned.relativePath]
                             val file = target?.root?.findFileByRelativePath(target.relativePath)
                             if (file != null && planned.originalContent != null) {
-                                runCatching { VfsUtil.saveText(file, planned.originalContent) }
+                                runCatching { ProjectSourceText.write(project, file, planned.originalContent) }
                             }
                         }
                         createdFiles.asReversed().forEach { file ->
@@ -193,7 +193,7 @@ class WorkspaceChangeService(
                 )
             }
             currentContent[change.relativePath] = runCatching {
-                String(file.contentsToByteArray(false), file.charset)
+                ProjectSourceText.read(file)
             }.getOrElse {
                 return rejected(
                     changeSet,
@@ -251,7 +251,7 @@ class WorkspaceChangeService(
                         )
                     }
                     val fingerprint = runCatching {
-                        CanonicalDiscoveryJson.sha256(String(file.contentsToByteArray(false), file.charset))
+                        CanonicalDiscoveryJson.sha256(ProjectSourceText.read(file))
                     }.getOrNull()
                     if (fingerprint == null || fingerprint != planned.beforeFingerprint) {
                         return WorkspaceChangeIssue(

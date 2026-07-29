@@ -326,19 +326,19 @@ class FlowUiWorkspaceService(
                 validated.relativePath,
             )
         }
-        if (file.length > MAX_DESCRIPTOR_BYTES) {
-            return rejectedDescriptor(
-                "JVW-FLOWUI-SOURCE-TOO-LARGE",
-                "The descriptor exceeds the reviewed ${MAX_DESCRIPTOR_BYTES / (1024 * 1024)} MiB editing limit.",
-                validated.relativePath,
-            )
-        }
         val content = runCatching {
-            String(file.contentsToByteArray(false), file.charset)
+            ProjectSourceText.read(file)
         }.getOrElse {
             return rejectedDescriptor(
                 "JVW-FLOWUI-SOURCE-UNREADABLE",
                 "The selected FlowUI descriptor cannot be read.",
+                validated.relativePath,
+            )
+        }
+        if (content.toByteArray(file.charset).size > MAX_DESCRIPTOR_BYTES) {
+            return rejectedDescriptor(
+                "JVW-FLOWUI-SOURCE-TOO-LARGE",
+                "The descriptor exceeds the reviewed ${MAX_DESCRIPTOR_BYTES / (1024 * 1024)} MiB editing limit.",
                 validated.relativePath,
             )
         }

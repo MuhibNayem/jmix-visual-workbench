@@ -16,6 +16,13 @@ class Idea253DescriptorTest {
         assertTrue(Regex("""<idea-version[^>]+since-build="253"[^>]+until-build="253\.\*"""").containsMatchIn(descriptor))
         assertTrue(descriptor.contains("<depends>com.intellij.modules.platform</depends>"))
         assertTrue(descriptor.contains("<depends>com.intellij.modules.java</depends>"))
+        assertTrue(
+            Regex(
+                """<fileEditorProvider\s+implementation="org\.jmixworkbench\.editor\.JmixFlowUiFileEditorProvider"\s*/>""",
+            ).containsMatchIn(descriptor),
+        )
+        assertTrue(descriptor.contains("org.jmixworkbench.ide.JmixJavaUiComponentPolicyInspection"))
+        assertTrue(descriptor.contains("org.jmixworkbench.ide.JmixKotlinUiComponentPolicyInspection"))
         assertFalse(descriptor.contains("<depends>com.intellij.modules.jcef</depends>"))
     }
 

@@ -98,7 +98,7 @@ class WorkspaceHistoryService(
         val beforeMutation = entry.files.associate { planned ->
             val target = requireNotNull(targets[planned.relativePath])
             val file = target.root.findFileByRelativePath(target.relativePath)
-            planned.relativePath to file?.let { String(it.contentsToByteArray(false), it.charset) }
+            planned.relativePath to file?.let(ProjectSourceText::read)
         }
         return try {
             WriteCommandAction.runWriteCommandAction(
@@ -123,7 +123,7 @@ class WorkspaceHistoryService(
                 val file = target.root.findFileByRelativePath(target.relativePath)
                     ?: return@mapNotNull null
                 planned.relativePath to CanonicalDiscoveryJson.sha256(
-                    String(file.contentsToByteArray(false), file.charset),
+                    ProjectSourceText.read(file),
                 )
             }.toMap()
             WorkspaceHistoryMutationResponse(
@@ -170,7 +170,7 @@ class WorkspaceHistoryService(
                         )
                     }
                     val current = CanonicalDiscoveryJson.sha256(
-                        String(file.contentsToByteArray(false), file.charset),
+                        ProjectSourceText.read(file),
                     )
                     val expected = if (direction == Direction.UNDO) planned.afterFingerprint else planned.beforeFingerprint
                     if (current != expected) {
@@ -191,7 +191,7 @@ class WorkspaceHistoryService(
                             )
                         }
                         val current = CanonicalDiscoveryJson.sha256(
-                            String(file.contentsToByteArray(false), file.charset),
+                            ProjectSourceText.read(file),
                         )
                         if (current != planned.afterFingerprint) {
                             return WorkspaceChangeIssue(
@@ -227,7 +227,7 @@ class WorkspaceHistoryService(
                 } else {
                     planned.resultContent
                 }
-                VfsUtil.saveText(file, content)
+                ProjectSourceText.write(project, file, content)
             }
             WorkspaceFileChangeMode.CREATE -> {
                 if (direction == Direction.UNDO) {
@@ -250,7 +250,7 @@ class WorkspaceHistoryService(
             when {
                 content == null && file != null -> runCatching { file.delete(this) }
                 content != null && file == null -> runCatching { createFile(target, path, content) }
-                content != null && file != null -> runCatching { VfsUtil.saveText(file, content) }
+                content != null && file != null -> runCatching { ProjectSourceText.write(project, file, content) }
             }
         }
     }

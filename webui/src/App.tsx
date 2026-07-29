@@ -33,7 +33,26 @@ const workspaces: { id: ActiveTab; label: string; icon: string }[] = [
 ]
 
 export default function App() {
-  const { activeTab, setActiveTab, setProjectConfig } = useStore()
+  const {
+    activeTab,
+    setActiveTab,
+    setProjectConfig,
+    flowUiLocator,
+    openFlowUiDesigner,
+  } = useStore()
+  const nativeFlowUiEditor = window.location.pathname === '/flowui-editor.html'
+  const developmentEditorWidthParameter = import.meta.env.DEV
+    ? new URLSearchParams(window.location.search).get('editorWidth')
+    : null
+  const developmentEditorWidth = developmentEditorWidthParameter === null
+    ? Number.NaN
+    : Number(developmentEditorWidthParameter)
+  const developmentEditorStyle =
+    Number.isFinite(developmentEditorWidth)
+    ? {
+        width: `${Math.max(320, Math.min(1920, Math.round(developmentEditorWidth)))}px`,
+      }
+    : undefined
 
   useEffect(() => {
     bridge.getProjectConfig().then((config) => {
@@ -42,6 +61,36 @@ export default function App() {
       }
     })
   }, [])
+
+  useEffect(() => {
+    const applyLaunchContext = (context: ReturnType<typeof bridge.getLaunchContext>) => {
+      if (context?.surface === 'FLOW_UI_EDITOR' && context.sourceLocator) {
+        openFlowUiDesigner(context.sourceLocator)
+      }
+    }
+    applyLaunchContext(bridge.getLaunchContext())
+    return bridge.onLaunchContext(applyLaunchContext)
+  }, [openFlowUiDesigner])
+
+  if (nativeFlowUiEditor) {
+    return (
+      <div
+        className="workbench-shell flex h-full w-full min-w-0 max-w-full overflow-hidden bg-surface"
+        style={developmentEditorStyle}
+      >
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {flowUiLocator
+            ? <ViewDesigner editorSurface />
+            : (
+              <div className="flex h-full items-center justify-center bg-surface text-xs text-gray-400">
+                Connecting the native FlowUI editor…
+              </div>
+            )}
+        </main>
+        <Toast />
+      </div>
+    )
+  }
 
   return (
     <div className="workbench-shell flex h-full w-full min-w-0 max-w-full overflow-hidden bg-surface">
