@@ -78,11 +78,22 @@ class JmixEntityUseScopeEnlarger : UseScopeEnlarger() {
                 element.isIndexedJmixSpringBeanParameter()
 
             else ->
-                element.isKotlinSpringBeanParameter()
+                element.isKotlinEntityProperty() ||
+                    element.isKotlinSpringBeanParameter()
         }
         return GlobalSearchScope.projectScope(element.project)
             .takeIf { projectWideContract }
     }
+}
+
+private fun PsiElement.isKotlinEntityProperty(): Boolean {
+    if (javaClass.simpleName != "KtProperty") return false
+    val owner = generateSequence(parent) { it.parent }
+        .firstOrNull { it.javaClass.simpleName == "KtClass" }
+        ?: return false
+    val header = owner.text.substringBefore('{')
+    return Regex("""@(?:[\w.]+\.)?(?:JmixEntity|Entity)\b""")
+        .containsMatchIn(header)
 }
 
 private fun PsiClass.isDirectJmixSpringBean(): Boolean =

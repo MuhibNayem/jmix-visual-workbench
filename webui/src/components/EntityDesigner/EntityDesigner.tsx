@@ -1253,15 +1253,15 @@ export default function EntityDesigner() {
                     <p className="mt-3 text-[10px] leading-relaxed text-gray-600">
                       Mapping edits preserve property identity, Java/Kotlin type, manual annotations, accessors, and call sites.
                     </p>
-                    {source && !source.association && (
+                    {source && (
                       <div className="mt-4 rounded-lg border border-jmix-500/20 bg-jmix-500/5 p-3">
                         <div className="text-[10px] font-semibold uppercase tracking-wider text-jmix-300">
                           Native safe rename
                         </div>
                         <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
                           Opens IntelliJ&apos;s usage preview so Java, Kotlin, FlowUI, fetch plans, JPQL, and security
-                          references participate in the IDE refactor. Persistent properties require an explicit stable
-                          column name.
+                          references and JPA mappedBy strings participate in the IDE refactor. Persistent scalar and
+                          owning relationship properties require explicit stable column or join-table mappings.
                         </p>
                         <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                           <input

@@ -47,6 +47,7 @@ internal object JmixViewDescriptorReferenceProvider : PsiReferenceProvider() {
     ): Array<PsiReference> {
         val literal = element as? PsiLiteralExpression ?: return PsiReference.EMPTY_ARRAY
         val value = literal.value as? String ?: return PsiReference.EMPTY_ARRAY
+        jmixJavaMappedByReference(literal, value)?.let { return arrayOf(it) }
         if (literal.isJmixSpringBeanNameDeclaration()) {
             return arrayOf(
                 JmixJavaSpringBeanDeclarationReference(

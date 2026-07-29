@@ -83,12 +83,6 @@ class EntityAttributeRefactorService(
                 "${request.entityClassName} already declares ${request.newName}.",
             )
         }
-        if (attribute.association) {
-            return PreparedEntityAttributeRename.failure(
-                "JVW-ENTITY-RENAME-RELATIONSHIP-IMPACT",
-                "Relationship rename needs mappedBy/join-column inverse-side choreography and is not safe in the scalar workflow.",
-            )
-        }
         val psiFile = PsiManager.getInstance(project).findFile(file)
             ?: return PreparedEntityAttributeRename.failure(
                 "JVW-ENTITY-RENAME-PSI-MISSING",
@@ -135,7 +129,11 @@ class EntityAttributeRefactorService(
                 "The property declaration is not writable.",
             )
         }
-        if (
+        if (attribute.association) {
+            stableRelationshipMapping(attribute, declaration.text)?.let { failure ->
+                return failure
+            }
+        } else if (
             attribute.persistent &&
             !EXPLICIT_COLUMN_NAME.containsMatchIn(declaration.text)
         ) {
@@ -158,10 +156,62 @@ class EntityAttributeRefactorService(
         private val EXPLICIT_COLUMN_NAME = Regex(
             """(?s)@\s*(?:field:)?(?:[\w.]+\.)?Column\s*\([^)]*\bname\s*=""",
         )
+        private val JPA_NAME_LITERAL = Regex(
+            """(?s)@\s*(?:field:)?(?:[\w.]+\.)?(JoinTable|JoinColumn)\s*\([^)]*\bname\s*=\s*"([^"]+)"""",
+        )
 
         fun getInstance(project: Project): EntityAttributeRefactorService =
             project.getService(EntityAttributeRefactorService::class.java)
     }
+
+    private fun stableRelationshipMapping(
+        attribute: SchemaEntityAttributeSnapshot,
+        declaration: String,
+    ): PreparedEntityAttributeRename? {
+        val association = attribute.associationDetails
+            ?: return PreparedEntityAttributeRename.failure(
+                "JVW-ENTITY-RENAME-RELATIONSHIP-METADATA-MISSING",
+                "The relationship mapping could not be reconstructed exactly.",
+            )
+        if (association.crossDataStore || !association.mappedBy.isNullOrBlank()) {
+            return null
+        }
+        association.joinColumnName?.let { joinColumn ->
+            if (explicitJpaName(declaration, "JoinColumn") == joinColumn) return null
+            return PreparedEntityAttributeRename.failure(
+                "JVW-ENTITY-RENAME-INFERRED-JOIN-COLUMN",
+                "Renaming this relationship could change its physical join column. " +
+                    "Declare @JoinColumn(name = \"$joinColumn\") explicitly first.",
+            )
+        }
+        association.joinTable?.let { joinTable ->
+            val explicitMappings = JPA_NAME_LITERAL.findAll(declaration).toList()
+            val explicitNames = explicitMappings.map { it.groupValues[2] }.toSet()
+            if (
+                explicitMappings.any { it.groupValues[1] == "JoinTable" } &&
+                joinTable.name in explicitNames &&
+                joinTable.joinColumnName in explicitNames &&
+                joinTable.inverseJoinColumnName in explicitNames
+            ) {
+                return null
+            }
+            return PreparedEntityAttributeRename.failure(
+                "JVW-ENTITY-RENAME-INFERRED-JOIN-TABLE",
+                "Renaming this relationship could change its join table. " +
+                    "Declare the table and both join-column names explicitly first.",
+            )
+        }
+        return PreparedEntityAttributeRename.failure(
+            "JVW-ENTITY-RENAME-INFERRED-RELATIONSHIP-MAPPING",
+            "The relationship relies on a property-derived physical mapping. " +
+                "Make its join mapping explicit before native rename.",
+        )
+    }
+
+    private fun explicitJpaName(source: String, annotation: String): String? =
+        Regex(
+            """(?s)@\s*(?:field:)?(?:[\w.]+\.)?$annotation\s*\([^)]*\bname\s*=\s*"([^"]+)"""",
+        ).find(source)?.groupValues?.get(1)
 }
 
 data class EntityAttributeRenameRequest(

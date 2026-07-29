@@ -55,15 +55,17 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   generate checked forward/rollback migrations. Explicit scalar column renames
   now update Java/Kotlin `@Column` mappings and generate a preconditioned
   Liquibase `renameColumn` with reverse rollback in the same atomic preview.
-  Inferred columns, collisions, disabled DDL, relationships, type/removal and
-  unsafe narrowing fail closed instead of guessing.
-- Existing scalar properties with stable explicit database columns can launch
-  IntelliJ's native rename processor directly from Entity Designer. The exact
-  revision and live Java/Kotlin PSI declaration are resolved first; collisions,
-  associations, inferred columns, stale source and read-only declarations fail
-  closed. IntelliJ usage preview then includes plugin-contributed FlowUI, fetch
-  plan, JPQL and security references. A missing existing property in the normal
-  update request is rejected rather than being misread as an addition.
+  Inferred columns, collisions, disabled DDL, relationship join-column changes,
+  type/removal and unsafe narrowing fail closed instead of guessing.
+- Existing scalar and relationship properties with stable explicit physical
+  mappings can launch IntelliJ's native rename processor directly from Entity
+  Designer. The exact revision and live Java/Kotlin PSI declaration are
+  resolved first; collisions, inferred scalar/join mappings, stale source and
+  read-only declarations fail closed. JPA `mappedBy` strings now provide native
+  Java/Kotlin navigation, completion, indexed Find Usages and rename references;
+  usage preview also includes plugin-contributed FlowUI, fetch-plan, JPQL and
+  security references. A missing existing property in the normal update request
+  is rejected rather than being misread as an addition.
 - The designer consumes the connected application graph and displays entity
   consumers across views, services, security, REST, workflow, menus and
   migrations.
@@ -77,11 +79,12 @@ yet make `STUDIO-CORE-001` or `STUDIO-CORE-011` STRONG. Those claims remain
 blocked until all of the following pass:
 
 1. Complete schema-aware Java and Kotlin PSI refactoring for handwritten
-   entities. Stable-column scalar property rename delegates to IntelliJ usage
-   preview, and explicit scalar physical-column rename is atomic with checked
-   Liquibase rollback. Relationship rename/join-column choreography, combined
-   property-and-relationship changes, type change and removal remain. Additive
-   and managed-mapping Java/Kotlin round trip is implemented.
+   entities. Stable-mapping scalar and relationship property rename delegates
+   to IntelliJ usage preview, including native `mappedBy` references, and
+   explicit scalar physical-column rename is atomic with checked Liquibase
+   rollback. Relationship join-column changes, combined property-and-physical
+   mapping changes, type change and removal remain. Additive and
+   managed-mapping Java/Kotlin round trip is implemented.
 2. Partial live-database reverse engineering for selected tables, columns,
    keys and views, plus repeatable merge into existing source.
 3. Attribute propagation into selected FlowUI views, fetch plans,

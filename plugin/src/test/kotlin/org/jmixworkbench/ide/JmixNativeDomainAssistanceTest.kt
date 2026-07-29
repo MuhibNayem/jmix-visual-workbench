@@ -307,6 +307,87 @@ class JmixNativeDomainAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
         assertTrue(myFixture.file.text.contains("""property="legalName""""))
     }
 
+    fun testJavaJpaMappedByNavigatesFindsUsagesAndFollowsNativeRename() {
+        addJpaOneToManyAnnotation()
+        addJmixEntityAnnotation()
+        val employee = myFixture.addClass(
+            """
+            package com.company.payroll.entity;
+
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+
+            @JmixEntity
+            public class Employee {
+                private Department department;
+            }
+            """.trimIndent(),
+        )
+        myFixture.configureByText(
+            "Department.java",
+            """
+            package com.company.payroll.entity;
+
+            import jakarta.persistence.OneToMany;
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+            import java.util.List;
+
+            @JmixEntity
+            public class Department {
+                @OneToMany(mappedBy = "depart<caret>ment")
+                private List<Employee> employees;
+            }
+            """.trimIndent(),
+        )
+
+        val reference = codeReferenceAtCaret<JmixJavaMappedByReference>()
+        val resolved = reference.resolve()
+        assertNotNull(
+            "mappedBy candidates=${reference.variants.joinToString()}",
+            resolved,
+        )
+        val field = resolved as PsiField
+        assertEquals("department", field.name)
+
+        myFixture.renameElement(field, "organizationalUnit")
+        assertTrue(employee.containingFile.text.contains("organizationalUnit"))
+        assertTrue(myFixture.file.text.contains("""mappedBy = "organizationalUnit""""))
+    }
+
+    fun testKotlinJpaMappedByNavigatesAndFollowsNativeRename() {
+        addJpaOneToManyAnnotation()
+        val employee = myFixture.addFileToProject(
+            "com/company/payroll/entity/Employee.kt",
+            """
+            package com.company.payroll.entity
+
+            class Employee {
+                var department: Department? = null
+            }
+            """.trimIndent(),
+        )
+        myFixture.configureByText(
+            "Department.kt",
+            """
+            package com.company.payroll.entity
+
+            import jakarta.persistence.OneToMany
+
+            class Department {
+                @OneToMany(mappedBy = "depart<caret>ment")
+                var employees: MutableList<Employee> = mutableListOf()
+            }
+            """.trimIndent(),
+        )
+
+        val reference = codeReferenceAtCaret<JmixKotlinMappedByReference>()
+        val property = reference.resolve() as PsiNamedElement
+        assertEquals("department", property.name)
+
+        myFixture.renameElement(property, "organizationalUnit")
+        assertTrue(employee.text.contains("var organizationalUnit: Department?"))
+        assertTrue(myFixture.file.text.contains("""mappedBy = "organizationalUnit""""))
+    }
+
     fun testSharedFetchPlanRequiresAnEntityDeclaration() {
         myFixture.enableInspections(JmixDomainXmlReferenceInspection())
         myFixture.configureByText(
@@ -641,6 +722,20 @@ class JmixNativeDomainAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
         )
     }
 
+    private inline fun <reified T : PsiReference> codeReferenceAtCaret(): T {
+        val leaf = myFixture.file.findElementAt(myFixture.caretOffset - 1)
+            ?: error("No PSI at caret")
+        return generateSequence(leaf as com.intellij.psi.PsiElement?) { it.parent }
+            .flatMap { element ->
+                val offset = myFixture.caretOffset - element.textRange.startOffset
+                element.references.asSequence()
+                    .filterIsInstance<T>()
+                    .filter { it.rangeInElement.containsOffset(offset) }
+            }
+            .firstOrNull()
+            ?: error("No ${T::class.java.simpleName} at caret in ${myFixture.file.name}")
+    }
+
     private fun attributeValueAtCaret(): XmlAttributeValue {
         val leaf = myFixture.file.findElementAt(myFixture.caretOffset - 1)
             ?: error("No PSI at caret")
@@ -657,6 +752,18 @@ class JmixNativeDomainAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
             public @interface JmixEntity {
                 String name() default "";
                 String value() default "";
+            }
+            """.trimIndent(),
+        )
+    }
+
+    private fun addJpaOneToManyAnnotation() {
+        myFixture.addClass(
+            """
+            package jakarta.persistence;
+
+            public @interface OneToMany {
+                String mappedBy() default "";
             }
             """.trimIndent(),
         )

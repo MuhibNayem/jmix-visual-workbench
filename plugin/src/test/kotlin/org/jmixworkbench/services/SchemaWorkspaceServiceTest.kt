@@ -719,6 +719,118 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
     }
 
+    fun testExistingJavaAndKotlinRelationshipRenameRequiresStablePhysicalMapping() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/Department.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity @Entity @Table(name = "DEPARTMENT")
+                    public class Department {
+                        @Id @Column(name = "ID")
+                        private java.util.UUID id;
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/Employee.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity @Entity @Table(name = "EMPLOYEE")
+                    public class Employee {
+                        @Id @Column(name = "ID")
+                        private java.util.UUID id;
+                        @ManyToOne
+                        @JoinColumn(name = "DEPARTMENT_ID")
+                        private Department department;
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/UnsafeEmployee.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity @Entity @Table(name = "UNSAFE_EMPLOYEE")
+                    public class UnsafeEmployee {
+                        @Id @Column(name = "ID")
+                        private java.util.UUID id;
+                        @ManyToOne
+                        private Department department;
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/KotlinEmployee.kt",
+                """
+                    package com.acme.entity
+                    import io.jmix.core.metamodel.annotation.JmixEntity
+                    import jakarta.persistence.*
+                    import java.util.UUID
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "KOTLIN_EMPLOYEE")
+                    class KotlinEmployee {
+                        @Id
+                        @Column(name = "ID")
+                        var id: UUID? = null
+                        @ManyToOne
+                        @JoinColumn(name = "DEPARTMENT_ID")
+                        var department: Department? = null
+                    }
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val refactors = EntityAttributeRefactorService.getInstance(project)
+
+        val employee = workspace.entities.single { it.className == "Employee" }
+        val javaRename = refactors.prepareRename(
+            EntityAttributeRenameRequest(
+                employee.sourceLocator,
+                employee.className,
+                "department",
+                "organizationalUnit",
+            ),
+        )
+        assertTrue(javaRename.accepted, "${javaRename.code}: ${javaRename.message}")
+
+        val kotlinEmployee = workspace.entities.single { it.className == "KotlinEmployee" }
+        val kotlinRename = refactors.prepareRename(
+            EntityAttributeRenameRequest(
+                kotlinEmployee.sourceLocator,
+                kotlinEmployee.className,
+                "department",
+                "organizationalUnit",
+            ),
+        )
+        assertTrue(kotlinRename.accepted, "${kotlinRename.code}: ${kotlinRename.message}")
+        assertEquals("KtProperty", kotlinRename.element?.javaClass?.simpleName)
+
+        val unsafe = workspace.entities.single { it.className == "UnsafeEmployee" }
+        val rejected = refactors.prepareRename(
+            EntityAttributeRenameRequest(
+                unsafe.sourceLocator,
+                unsafe.className,
+                "department",
+                "organizationalUnit",
+            ),
+        )
+        assertFalse(rejected.accepted)
+        assertEquals("JVW-ENTITY-RENAME-INFERRED-RELATIONSHIP-MAPPING", rejected.code)
+    }
+
     private fun addStatusMigration() = MigrationModel(
         changelogId = "loan-status",
         author = "team",

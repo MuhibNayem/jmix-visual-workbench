@@ -66,6 +66,7 @@
         <psi.referenceContributor language="Properties"
                                   implementation="org.jmixworkbench.ide.JmixConfigurationReferenceContributor"/>
         <useScopeEnlarger implementation="org.jmixworkbench.ide.JmixEntityUseScopeEnlarger"/>
+        <referencesSearch implementation="org.jmixworkbench.ide.JmixJpaMappedByReferenceSearchExecutor"/>
         <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixSpringBeanRenameProcessor"/>
         <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixMessageBundleRenameProcessor"
                                    order="last"/>
