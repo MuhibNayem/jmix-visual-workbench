@@ -470,6 +470,7 @@ object CrudOrchestrator {
                 if ((attr.length ?: 0) > 255) ComponentType.TEXT_AREA
                 else ComponentType.TEXT_FIELD
             }
+            AttributeType.CHARACTER -> ComponentType.TEXT_FIELD
             AttributeType.INTEGER -> ComponentType.INTEGER_FIELD
             AttributeType.LONG -> ComponentType.INTEGER_FIELD
             AttributeType.DOUBLE -> ComponentType.NUMBER_FIELD
@@ -479,8 +480,12 @@ object CrudOrchestrator {
             AttributeType.LOCAL_DATE -> ComponentType.DATE_PICKER
             AttributeType.LOCAL_DATE_TIME -> ComponentType.DATE_TIME_PICKER
             AttributeType.LOCAL_TIME -> ComponentType.TIME_PICKER
+            AttributeType.OFFSET_TIME -> ComponentType.TIME_PICKER
             AttributeType.OFFSET_DATE_TIME -> ComponentType.DATE_TIME_PICKER
+            AttributeType.SQL_DATE -> ComponentType.DATE_PICKER
+            AttributeType.SQL_TIME -> ComponentType.TIME_PICKER
             AttributeType.UUID -> ComponentType.TEXT_FIELD
+            AttributeType.URI -> ComponentType.TEXT_FIELD
             AttributeType.ENUM -> ComponentType.COMBO_BOX
             AttributeType.ASSOCIATION -> {
                 attr.association?.let { assoc ->
@@ -497,6 +502,8 @@ object CrudOrchestrator {
             AttributeType.COMPOSITION -> ComponentType.ENTITY_PICKER
             AttributeType.EMBEDDED -> ComponentType.FORM_LAYOUT
             AttributeType.BYTE_ARRAY -> ComponentType.FILE_UPLOAD_FIELD
+            AttributeType.FILE_REF -> ComponentType.FILE_UPLOAD_FIELD
+            AttributeType.CUSTOM -> ComponentType.TEXT_FIELD
         }
     }
 

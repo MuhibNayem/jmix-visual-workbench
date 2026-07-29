@@ -28,6 +28,7 @@ import org.jmixworkbench.model.DatabaseType
 import org.jmixworkbench.model.DbChange
 import org.jmixworkbench.model.DdlGenerationMode
 import org.jmixworkbench.model.EntityModel
+import org.jmixworkbench.model.EnumIdType
 import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.PreCondition
@@ -673,6 +674,7 @@ class ExistingEntityChangeService(
 
     private fun columnType(attribute: AttributeModel, dbType: DatabaseType): String = when (attribute.type) {
         AttributeType.STRING -> "VARCHAR(${attribute.length ?: 255})"
+        AttributeType.CHARACTER -> "CHAR(1)"
         AttributeType.INTEGER -> "INT"
         AttributeType.LONG -> "BIGINT"
         AttributeType.DOUBLE -> "DOUBLE"
@@ -680,16 +682,27 @@ class ExistingEntityChangeService(
         AttributeType.BOOLEAN -> "BOOLEAN"
         AttributeType.DATE, AttributeType.LOCAL_DATE -> "DATE"
         AttributeType.LOCAL_DATE_TIME, AttributeType.OFFSET_DATE_TIME -> "TIMESTAMP"
-        AttributeType.LOCAL_TIME -> "TIME"
+        AttributeType.LOCAL_TIME, AttributeType.OFFSET_TIME -> "TIME"
+        AttributeType.SQL_DATE -> "DATE"
+        AttributeType.SQL_TIME -> "TIME"
         AttributeType.UUID -> if (dbType == DatabaseType.MSSQL) "UNIQUEIDENTIFIER" else "UUID"
+        AttributeType.URI -> "VARCHAR(${attribute.length ?: 255})"
         AttributeType.BYTE_ARRAY -> if (dbType == DatabaseType.POSTGRES) "BYTEA" else "BLOB"
-        AttributeType.ENUM -> "VARCHAR(${attribute.length ?: 255})"
+        AttributeType.FILE_REF -> "VARCHAR(${attribute.length ?: 1024})"
+        AttributeType.ENUM ->
+            if (attribute.enumIdType == EnumIdType.INTEGER) {
+                "INT"
+            } else {
+                "VARCHAR(${attribute.length ?: 255})"
+            }
+        AttributeType.CUSTOM -> requireNotNull(attribute.sqlType)
         else -> error("Unsupported additive migration type: ${attribute.type}")
     }
 
     private fun columnType(attribute: SchemaEntityAttributeSnapshot, dbType: DatabaseType): String =
         when (attributeType(attribute.javaType, attribute.association, false)) {
             AttributeType.STRING -> "VARCHAR(${attribute.length ?: 255})"
+            AttributeType.CHARACTER -> "CHAR(1)"
             AttributeType.INTEGER -> "INT"
             AttributeType.LONG -> "BIGINT"
             AttributeType.DOUBLE -> "DOUBLE"
@@ -697,9 +710,13 @@ class ExistingEntityChangeService(
             AttributeType.BOOLEAN -> "BOOLEAN"
             AttributeType.DATE, AttributeType.LOCAL_DATE -> "DATE"
             AttributeType.LOCAL_DATE_TIME, AttributeType.OFFSET_DATE_TIME -> "TIMESTAMP"
-            AttributeType.LOCAL_TIME -> "TIME"
+            AttributeType.LOCAL_TIME, AttributeType.OFFSET_TIME -> "TIME"
+            AttributeType.SQL_DATE -> "DATE"
+            AttributeType.SQL_TIME -> "TIME"
             AttributeType.UUID -> if (dbType == DatabaseType.MSSQL) "UNIQUEIDENTIFIER" else "UUID"
+            AttributeType.URI -> "VARCHAR(${attribute.length ?: 255})"
             AttributeType.BYTE_ARRAY -> if (dbType == DatabaseType.POSTGRES) "BYTEA" else "BLOB"
+            AttributeType.FILE_REF -> "VARCHAR(${attribute.length ?: 1024})"
             AttributeType.ENUM -> "VARCHAR(${attribute.length ?: 255})"
             else -> error("Unsupported existing migration type: ${attribute.javaType}")
         }
@@ -711,13 +728,17 @@ class ExistingEntityChangeService(
     ): AttributeType {
         if (composition) return AttributeType.COMPOSITION
         if (association) return AttributeType.ASSOCIATION
-        val simple = javaType
+        val normalized = javaType.removeSuffix("?").trim()
+        if (normalized == "java.sql.Date") return AttributeType.SQL_DATE
+        if (normalized == "java.sql.Time") return AttributeType.SQL_TIME
+        val simple = normalized
             .removeSuffix("?")
             .substringAfterLast('.')
             .substringBefore('<')
             .trim()
         return when (simple) {
             "String" -> AttributeType.STRING
+            "Character", "char" -> AttributeType.CHARACTER
             "Integer", "int" -> AttributeType.INTEGER
             "Long", "long" -> AttributeType.LONG
             "Double", "double", "Float", "float" -> AttributeType.DOUBLE
@@ -727,16 +748,26 @@ class ExistingEntityChangeService(
             "LocalDate" -> AttributeType.LOCAL_DATE
             "LocalDateTime" -> AttributeType.LOCAL_DATE_TIME
             "LocalTime" -> AttributeType.LOCAL_TIME
+            "OffsetTime" -> AttributeType.OFFSET_TIME
             "OffsetDateTime" -> AttributeType.OFFSET_DATE_TIME
             "UUID" -> AttributeType.UUID
+            "URI" -> AttributeType.URI
             "byte[]" -> AttributeType.BYTE_ARRAY
+            "FileRef" -> AttributeType.FILE_REF
             else -> AttributeType.ENUM
         }
     }
 
     private fun normalizedLength(attribute: AttributeModel): Int? =
-        if (attribute.type == AttributeType.STRING || attribute.type == AttributeType.ENUM) {
-            attribute.length ?: 255
+        if (
+            attribute.type in setOf(
+                AttributeType.STRING,
+                AttributeType.ENUM,
+                AttributeType.URI,
+                AttributeType.FILE_REF,
+            )
+        ) {
+            attribute.length ?: if (attribute.type == AttributeType.FILE_REF) 1024 else 255
         } else {
             null
         }
@@ -745,9 +776,13 @@ class ExistingEntityChangeService(
         if (attributeType(attribute.javaType, attribute.association) in setOf(
                 AttributeType.STRING,
                 AttributeType.ENUM,
+                AttributeType.URI,
+                AttributeType.FILE_REF,
             )
         ) {
-            attribute.length ?: 255
+            attribute.length ?: if (
+                attributeType(attribute.javaType, attribute.association) == AttributeType.FILE_REF
+            ) 1024 else 255
         } else {
             null
         }
@@ -778,7 +813,15 @@ class ExistingEntityChangeService(
             managed["name"] = "\"${escapeJavaString(change.current.columnName)}\""
             if (desired.mandatory) managed["nullable"] = "false"
             if (desired.unique) managed["unique"] = "true"
-            if (desired.type in setOf(AttributeType.STRING, AttributeType.ENUM) && desired.length != null) {
+            if (
+                desired.type in setOf(
+                    AttributeType.STRING,
+                    AttributeType.ENUM,
+                    AttributeType.URI,
+                    AttributeType.FILE_REF,
+                ) &&
+                desired.length != null
+            ) {
                 managed["length"] = desired.length.toString()
             }
             if (desired.precision != null) managed["precision"] = desired.precision.toString()

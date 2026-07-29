@@ -29,8 +29,14 @@ class JavaClassBuilder(private val className: String) {
     fun package_(pkg: String) = apply { packageName = pkg }
     fun import_(vararg fqns: String) = apply { imports.addAll(fqns) }
     fun staticImport_(vararg fqns: String) = apply { staticImports.addAll(fqns) }
-    fun extends_(fqcn: String) = apply { extendsClass = fqcn; imports.add(fqcn) }
-    fun implements_(vararg fqcns: String) = apply { implementsList.addAll(fqcns); imports.addAll(fqcns) }
+    fun extends_(typeExpression: String) = apply {
+        extendsClass = typeExpression
+        collectTypeImports(typeExpression)
+    }
+    fun implements_(vararg typeExpressions: String) = apply {
+        implementsList.addAll(typeExpressions)
+        typeExpressions.forEach(::collectTypeImports)
+    }
     fun comment_(text: String) = apply { classComment = text }
     fun asEnum() = apply { isEnum = true }
     fun asInterface() = apply { isInterface = true }
@@ -160,7 +166,23 @@ class JavaClassBuilder(private val className: String) {
         }
     }
 
-    private fun simpleName(fqcn: String): String = fqcn.substringAfterLast('.')
+    private fun collectTypeImports(typeExpression: String) {
+        QUALIFIED_TYPE.findAll(typeExpression)
+            .map(MatchResult::value)
+            .filterNot { it.startsWith("java.lang.") }
+            .forEach(imports::add)
+    }
+
+    private fun simpleName(typeExpression: String): String =
+        QUALIFIED_TYPE.replace(typeExpression) { match ->
+            match.value.substringAfterLast('.')
+        }
+
+    private companion object {
+        val QUALIFIED_TYPE = Regex(
+            """[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+""",
+        )
+    }
 
     // ─── Nested builders ─────────────────────────────────────────────────────
 

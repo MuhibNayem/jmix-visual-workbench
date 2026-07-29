@@ -16,8 +16,15 @@ import org.jmixworkbench.model.AssociationCollectionType
 import org.jmixworkbench.model.AssociationConfig
 import org.jmixworkbench.model.AssociationType
 import org.jmixworkbench.model.CascadeType
+import org.jmixworkbench.model.DtoConfig
+import org.jmixworkbench.model.EntityType
+import org.jmixworkbench.model.EnumConfig
+import org.jmixworkbench.model.EnumIdType
+import org.jmixworkbench.model.EnumValueModel
 import org.jmixworkbench.model.JoinTableConfig
 import org.jmixworkbench.model.UniqueConstraintModel
+import org.jmixworkbench.model.ValidationModel
+import org.jmixworkbench.model.ValidationType
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -324,5 +331,170 @@ class EntityAndCrudGeneratorTest {
         assertFalse(source.contains("@ManyToOne"))
         assertTrue(migration.contains("<column name=\"FUND_PROFILE_ID\" type=\"UUID\""))
         assertFalse(migration.contains("FK_LOAN_APP_FUND_PROFILE_ID"))
+    }
+
+    @Test
+    fun `Jmix enum uses typed EnumClass IDs and entity fields persist the ID without Enumerated`() {
+        val enumSource = EntityGenerator.generate(
+            EntityModel(
+                className = "ApprovalState",
+                packageName = "com.company.loan.entity",
+                entityType = EntityType.ENUM,
+                enumConfig = EnumConfig(
+                    idType = EnumIdType.INTEGER,
+                    values = mutableListOf(
+                        EnumValueModel("DRAFT", "10"),
+                        EnumValueModel("APPROVED", "20"),
+                    ),
+                ),
+            ),
+        )
+        val entitySource = EntityGenerator.generate(
+            EntityModel(
+                className = "LoanApp",
+                packageName = "com.company.loan.entity",
+                attributes = mutableListOf(
+                    AttributeModel(
+                        name = "state",
+                        type = org.jmixworkbench.model.AttributeType.ENUM,
+                        enumClass = "com.company.loan.entity.ApprovalState",
+                        enumIdType = EnumIdType.INTEGER,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(enumSource.contains("implements EnumClass<Integer>"))
+        assertTrue(enumSource.contains("DRAFT(10)"))
+        assertFalse(enumSource.contains("import EnumClass<Integer>"))
+        assertTrue(entitySource.contains("protected Integer state;"))
+        assertTrue(entitySource.contains("public ApprovalState getState()"))
+        assertTrue(entitySource.contains("ApprovalState.fromId(state)"))
+        assertTrue(entitySource.contains("state.getId()"))
+        assertFalse(entitySource.contains("@Enumerated"))
+    }
+
+    @Test
+    fun `DTO metadata stays Jmix-only and honors annotated properties and read-only access`() {
+        val source = EntityGenerator.generate(
+            EntityModel(
+                className = "LoanDecision",
+                packageName = "com.company.loan.dto",
+                entityType = EntityType.DTO,
+                annotatedPropertiesOnly = true,
+                dtoConfig = DtoConfig(readOnly = true),
+                attributes = mutableListOf(
+                    AttributeModel(
+                        name = "reason",
+                        mandatory = true,
+                        readOnly = true,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(source.contains("@JmixEntity(name = \"LoanDecision\", annotatedPropertiesOnly = true)"))
+        assertTrue(source.contains("@JmixId"))
+        assertTrue(source.contains("@JmixProperty"))
+        assertTrue(source.contains("@NotNull"))
+        assertFalse(source.contains("jakarta.persistence"))
+        assertFalse(source.contains("@Column"))
+        assertFalse(source.contains("setReason"))
+        assertFalse(source.contains("setId"))
+    }
+
+    @Test
+    fun `embedded identifier repository and entity use the configured embeddable class`() {
+        val entity = EntityModel(
+            className = "LedgerEntry",
+            packageName = "com.company.ledger.entity",
+            id = IdConfig(
+                type = IdType.EMBEDDED,
+                embeddedIdClass = "com.company.ledger.entity.LedgerEntryId",
+            ),
+        )
+
+        val source = EntityGenerator.generate(entity)
+        val repository = DataRepositoryGenerator.generate(entity)
+
+        assertTrue(source.contains("@EmbeddedId"))
+        assertTrue(source.contains("protected LedgerEntryId id;"))
+        assertTrue(repository.contains("JmixDataRepository<LedgerEntry, LedgerEntryId>"))
+        assertTrue(repository.contains("import com.company.ledger.entity.LedgerEntryId;"))
+    }
+
+    @Test
+    fun `advanced property metadata comments validation groups and read-only fields are generated`() {
+        val source = EntityGenerator.generate(
+            EntityModel(
+                className = "EmployeeProfile",
+                packageName = "com.company.payroll.entity",
+                comment = "Enterprise employee profile",
+                systemLevel = true,
+                annotatedPropertiesOnly = true,
+                instanceNameAttribute = "displayName",
+                attributes = mutableListOf(
+                    AttributeModel(
+                        name = "displayName",
+                        mandatory = true,
+                        readOnly = true,
+                        comment = "Computed display label",
+                        dependsOnProperties = mutableListOf("firstName", "lastName"),
+                        propertyDatatype = "employeeName",
+                        validations = mutableListOf(
+                            ValidationModel(
+                                type = ValidationType.NOT_BLANK,
+                                groups = mutableListOf("com.company.validation.PayrollChecks"),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(source.contains("@SystemLevel"))
+        assertTrue(source.contains("@Comment(\"Enterprise employee profile\")"))
+        assertTrue(source.contains("@InstanceName"))
+        assertTrue(source.contains("@DependsOnProperties({\"firstName\", \"lastName\"})"))
+        assertTrue(source.contains("@PropertyDatatype(\"employeeName\")"))
+        assertTrue(source.contains("@NotBlank(groups = {PayrollChecks.class})"))
+        assertTrue(source.contains("import com.company.validation.PayrollChecks;"))
+        assertFalse(source.contains("setDisplayName"))
+    }
+
+    @Test
+    fun `all official scalar datatypes stay aligned between Java and Liquibase`() {
+        val entity = EntityModel(
+            className = "DatatypeMatrix",
+            packageName = "com.company.test.entity",
+            attributes = mutableListOf(
+                AttributeModel("initial", org.jmixworkbench.model.AttributeType.CHARACTER),
+                AttributeModel("offsetTime", org.jmixworkbench.model.AttributeType.OFFSET_TIME),
+                AttributeModel("sqlDate", org.jmixworkbench.model.AttributeType.SQL_DATE),
+                AttributeModel("sqlTime", org.jmixworkbench.model.AttributeType.SQL_TIME),
+                AttributeModel("homepage", org.jmixworkbench.model.AttributeType.URI),
+                AttributeModel("attachment", org.jmixworkbench.model.AttributeType.FILE_REF),
+                AttributeModel(
+                    "money",
+                    org.jmixworkbench.model.AttributeType.CUSTOM,
+                    javaTypeName = "com.company.money.Money",
+                    sqlType = "numeric(19,4)",
+                ),
+            ),
+        )
+        val source = EntityGenerator.generate(entity)
+        val migration = MigrationGenerator.generate(
+            MigrationGenerator.generateFromEntity(entity, DatabaseType.POSTGRES),
+        )
+
+        assertTrue(source.contains("protected Character initial;"))
+        assertTrue(source.contains("protected OffsetTime offsetTime;"))
+        assertTrue(source.contains("protected java.sql.Date sqlDate;"))
+        assertTrue(source.contains("protected URI homepage;"))
+        assertTrue(source.contains("protected FileRef attachment;"))
+        assertTrue(source.contains("protected Money money;"))
+        assertTrue(source.contains("columnDefinition = \"numeric(19,4)\""))
+        assertTrue(migration.contains("name=\"ATTACHMENT\" type=\"VARCHAR(1024)\""))
+        assertTrue(migration.contains("name=\"MONEY\" type=\"numeric(19,4)\""))
     }
 }

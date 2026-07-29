@@ -569,6 +569,7 @@ object MigrationGenerator {
     private fun resolveColumnType(attr: AttributeModel, dbType: DatabaseType): String {
         return when (attr.type) {
             AttributeType.STRING -> "VARCHAR(${attr.length ?: 255})"
+            AttributeType.CHARACTER -> "CHAR(1)"
             AttributeType.INTEGER -> "INT"
             AttributeType.LONG -> "BIGINT"
             AttributeType.DOUBLE -> "DOUBLE"
@@ -578,10 +579,22 @@ object MigrationGenerator {
             AttributeType.LOCAL_DATE -> "DATE"
             AttributeType.LOCAL_DATE_TIME -> "TIMESTAMP"
             AttributeType.LOCAL_TIME -> "TIME"
+            AttributeType.OFFSET_TIME -> "TIME"
             AttributeType.OFFSET_DATE_TIME -> "TIMESTAMP"
-            AttributeType.UUID -> "UUID"
+            AttributeType.SQL_DATE -> "DATE"
+            AttributeType.SQL_TIME -> "TIME"
+            AttributeType.UUID ->
+                if (dbType == DatabaseType.MSSQL) "UNIQUEIDENTIFIER" else "UUID"
+            AttributeType.URI -> "VARCHAR(${attr.length ?: 255})"
             AttributeType.BYTE_ARRAY -> "BLOB"
-            AttributeType.ENUM -> "VARCHAR(255)"
+            AttributeType.FILE_REF -> "VARCHAR(${attr.length ?: 1024})"
+            AttributeType.ENUM ->
+                if (attr.enumIdType == EnumIdType.INTEGER) {
+                    "INT"
+                } else {
+                    "VARCHAR(${attr.length ?: 255})"
+                }
+            AttributeType.CUSTOM -> requireNotNull(attr.sqlType)
             else -> "VARCHAR(255)"
         }
     }

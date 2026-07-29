@@ -15,13 +15,15 @@ import type {
   ValidationType,
   SchemaWorkspaceResponse,
   WorkspaceChangePreviewResponse,
+  ApplicationGraphResponse,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
 const ATTRIBUTE_TYPES: AttributeType[] = [
-  'string', 'integer', 'long', 'double', 'bigDecimal', 'boolean',
-  'date', 'localDate', 'localDateTime', 'localTime', 'offsetDateTime',
-  'uuid', 'byteArray', 'enum', 'association', 'composition', 'embedded',
+  'string', 'character', 'integer', 'long', 'double', 'bigDecimal', 'boolean',
+  'date', 'localDate', 'localDateTime', 'localTime', 'offsetTime', 'offsetDateTime',
+  'sqlDate', 'sqlTime', 'uuid', 'uri', 'byteArray', 'fileRef',
+  'enum', 'association', 'composition', 'embedded', 'custom',
 ]
 
 const TRAITS: { value: TraitType; label: string }[] = [
@@ -63,6 +65,7 @@ export default function EntityDesigner() {
   const [schemaLoading, setSchemaLoading] = useState(true)
   const [generationPreview, setGenerationPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
   const [existingEntity, setExistingEntity] = useState<SchemaEntitySnapshot | null>(null)
+  const [applicationGraph, setApplicationGraph] = useState<ApplicationGraphResponse | null>(null)
 
   useEffect(() => {
     let active = true
@@ -90,6 +93,11 @@ export default function EntityDesigner() {
     }).finally(() => {
       if (active) setSchemaLoading(false)
     })
+    bridge.getApplicationGraph().then((graph) => {
+      if (active) setApplicationGraph(graph)
+    }).catch((error) => {
+      if (active) addToast(`Cannot load entity impact graph: ${error.message}`, 'error')
+    })
     return () => {
       active = false
     }
@@ -112,6 +120,32 @@ export default function EntityDesigner() {
     () => new Set(existingEntity?.attributes.map((attribute) => attribute.name) ?? []),
     [existingEntity],
   )
+  const entityImpact = useMemo(() => {
+    if (!applicationGraph) return []
+    const qualifiedName = existingEntity?.qualifiedName || `${entity.packageName}.${entity.className}`
+    const entityArtifacts = applicationGraph.artifacts.filter(artifact =>
+      artifact.kind.toLowerCase().includes('entity') &&
+      (
+        artifact.semanticKey === qualifiedName ||
+        artifact.displayName === qualifiedName ||
+        artifact.displayName === entity.className
+      ),
+    )
+    const ids = new Set(entityArtifacts.map(artifact => artifact.id))
+    const relatedIds = new Set<string>()
+    applicationGraph.relationships.forEach(relationship => {
+      if (ids.has(relationship.sourceArtifactId) && relationship.targetArtifactId) {
+        relatedIds.add(relationship.targetArtifactId)
+      }
+      if (relationship.targetArtifactId && ids.has(relationship.targetArtifactId)) {
+        relatedIds.add(relationship.sourceArtifactId)
+      }
+    })
+    return applicationGraph.artifacts
+      .filter(artifact => relatedIds.has(artifact.id))
+      .sort((left, right) =>
+        left.kind.localeCompare(right.kind) || left.displayName.localeCompare(right.displayName))
+  }, [applicationGraph, entity.className, entity.packageName, existingEntity])
 
   const handleGenerate = async () => {
     if (!entity.className.trim()) {
@@ -484,18 +518,34 @@ export default function EntityDesigner() {
                 </p>
               )}
             </Field>
-            <Field label="Table Name">
-              <input
-                value={entity.tableName}
-                onChange={e => setEntity({ tableName: e.target.value })}
-                placeholder={resolvedTableName(entity, effectiveProjectId)}
-                className="w-full"
-              />
-            </Field>
+            {entity.entityType === 'entity' && (
+              <Field label="Table Name">
+                <input
+                  value={entity.tableName}
+                  onChange={e => setEntity({ tableName: e.target.value })}
+                  placeholder={resolvedTableName(entity, effectiveProjectId)}
+                  className="w-full"
+                />
+              </Field>
+            )}
             <Field label="Entity Type">
               <select
                 value={entity.entityType}
-                onChange={e => setEntity({ entityType: e.target.value as any })}
+                onChange={e => {
+                  const entityType = e.target.value as EntityModel['entityType']
+                  setEntity({
+                    entityType,
+                    traits: ['entity', 'mappedSuperclass'].includes(entityType)
+                      ? entity.traits.length ? entity.traits : ['standardEntity']
+                      : [],
+                    ...(entityType === 'enum' && !entity.enumConfig
+                      ? { enumConfig: { idType: 'string' as const, values: [] } }
+                      : {}),
+                    ...(entityType === 'dto' && !entity.dtoConfig
+                      ? { dtoConfig: { readOnly: false } }
+                      : {}),
+                  })
+                }}
                 className="w-full"
               >
                 <option value="entity">Entity (JPA)</option>
@@ -505,14 +555,28 @@ export default function EntityDesigner() {
                 <option value="enum">Enumeration</option>
               </select>
             </Field>
-            <Field label="Instance Name Pattern">
+            {entity.entityType !== 'enum' && <Field label="Instance Name Pattern">
               <input
                 value={entity.instanceNamePattern || ''}
                 onChange={e => setEntity({ instanceNamePattern: e.target.value || undefined })}
                 placeholder="name"
                 className="w-full"
               />
-            </Field>
+            </Field>}
+            {entity.entityType !== 'enum' && <Field label="Instance Name Attribute">
+              <select
+                value={entity.instanceNameAttribute || ''}
+                onChange={e => setEntity({ instanceNameAttribute: e.target.value || undefined })}
+                className="w-full"
+              >
+                <option value="">Use pattern / none</option>
+                {entity.attributes
+                  .filter(attribute => attribute.name)
+                  .map(attribute => (
+                    <option key={attribute.name} value={attribute.name}>{attribute.name}</option>
+                  ))}
+              </select>
+            </Field>}
             <Field label="Comment">
               <input
                 value={entity.comment || ''}
@@ -523,6 +587,7 @@ export default function EntityDesigner() {
           </Section>
 
           {/* ID Configuration */}
+          {!['embeddable', 'enum'].includes(entity.entityType) && (
           <Section title="Identifier">
             <Field label="ID Type">
               <select
@@ -566,6 +631,18 @@ export default function EntityDesigner() {
                 />
               </Field>
             )}
+            {entity.id.type === 'embedded' && (
+              <Field label="Embedded ID Class">
+                <input
+                  value={entity.id.embeddedIdClass || ''}
+                  onChange={e => setEntity({
+                    id: { ...entity.id, embeddedIdClass: e.target.value || undefined },
+                  })}
+                  placeholder="com.example.entity.OrderId"
+                  className="w-full"
+                />
+              </Field>
+            )}
             {entity.id.generation === 'sequence' && (
               <Field label="Sequence Name">
                 <input
@@ -576,8 +653,106 @@ export default function EntityDesigner() {
               </Field>
             )}
           </Section>
+          )}
+
+          {entity.entityType === 'enum' && (
+            <Section title="Enumeration Values">
+              <Field label="Stored ID Type">
+                <select
+                  value={entity.enumConfig?.idType ?? 'string'}
+                  onChange={e => setEntity({
+                    enumConfig: {
+                      idType: e.target.value as 'string' | 'integer',
+                      values: entity.enumConfig?.values ?? [],
+                    },
+                  })}
+                  className="w-full"
+                >
+                  <option value="string">String</option>
+                  <option value="integer">Integer</option>
+                </select>
+              </Field>
+              <div className="space-y-2">
+                {(entity.enumConfig?.values ?? []).map((value, index) => (
+                  <div key={`${value.name}-${index}`} className="grid grid-cols-[1fr_1fr_auto] gap-1.5">
+                    <input
+                      value={value.name}
+                      aria-label={`Enum constant ${index + 1}`}
+                      placeholder="APPROVED"
+                      onChange={e => setEntity({
+                        enumConfig: {
+                          idType: entity.enumConfig?.idType ?? 'string',
+                          values: (entity.enumConfig?.values ?? []).map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, name: e.target.value } : item),
+                        },
+                      })}
+                    />
+                    <input
+                      value={value.storedValue}
+                      aria-label={`Stored enum ID ${index + 1}`}
+                      placeholder={entity.enumConfig?.idType === 'integer' ? '10' : 'A'}
+                      onChange={e => setEntity({
+                        enumConfig: {
+                          idType: entity.enumConfig?.idType ?? 'string',
+                          values: (entity.enumConfig?.values ?? []).map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, storedValue: e.target.value } : item),
+                        },
+                      })}
+                    />
+                    <button
+                      type="button"
+                      aria-label={`Remove enum value ${index + 1}`}
+                      onClick={() => setEntity({
+                        enumConfig: {
+                          idType: entity.enumConfig?.idType ?? 'string',
+                          values: (entity.enumConfig?.values ?? []).filter((_, itemIndex) => itemIndex !== index),
+                        },
+                      })}
+                      className="px-2 text-red-400 hover:text-red-300"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setEntity({
+                    enumConfig: {
+                      idType: entity.enumConfig?.idType ?? 'string',
+                      values: [
+                        ...(entity.enumConfig?.values ?? []),
+                        {
+                          name: `VALUE_${(entity.enumConfig?.values.length ?? 0) + 1}`,
+                          storedValue: entity.enumConfig?.idType === 'integer'
+                            ? String((entity.enumConfig?.values.length ?? 0) + 1)
+                            : `V${(entity.enumConfig?.values.length ?? 0) + 1}`,
+                        },
+                      ],
+                    },
+                  })}
+                  className="w-full rounded border border-dashed border-surface-border py-1.5 text-[10px] text-jmix-300 hover:bg-jmix-500/10"
+                >
+                  + Add enum value
+                </button>
+              </div>
+            </Section>
+          )}
+
+          {entity.entityType === 'dto' && (
+            <Section title="DTO Behavior">
+              <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={entity.dtoConfig?.readOnly ?? false}
+                  onChange={e => setEntity({ dtoConfig: { readOnly: e.target.checked } })}
+                />
+                Read-only DTO (no generated setters)
+              </label>
+            </Section>
+          )}
 
           {/* Traits */}
+          {['entity', 'mappedSuperclass'].includes(entity.entityType) && (
           <Section title="Traits & Interfaces">
             <div className="space-y-1.5">
               {TRAITS.map(t => (
@@ -593,8 +768,10 @@ export default function EntityDesigner() {
               ))}
             </div>
           </Section>
+          )}
 
           {/* Inheritance */}
+          {['entity', 'mappedSuperclass'].includes(entity.entityType) && (
           <Section title="Inheritance">
             <Field label="Extends Class">
               <input
@@ -625,10 +802,29 @@ export default function EntityDesigner() {
               </Field>
             )}
           </Section>
+          )}
 
           {/* Options */}
           <Section title="Options">
-            <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+            {entity.entityType !== 'enum' && <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={entity.systemLevel}
+                onChange={e => setEntity({ systemLevel: e.target.checked })}
+                className="rounded border-surface-border"
+              />
+              System-level entity
+            </label>}
+            {entity.entityType !== 'enum' && <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={entity.annotatedPropertiesOnly}
+                onChange={e => setEntity({ annotatedPropertiesOnly: e.target.checked })}
+                className="rounded border-surface-border"
+              />
+              Include annotated properties only
+            </label>}
+            {entity.entityType === 'entity' && <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
                 checked={entity.databaseView}
@@ -636,8 +832,8 @@ export default function EntityDesigner() {
                 className="rounded border-surface-border"
               />
               Maps an existing database view
-            </label>
-            <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+            </label>}
+            {entity.entityType === 'entity' && <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
               <input
                 type="checkbox"
                 checked={entity.ddlGeneration.enabled}
@@ -651,8 +847,8 @@ export default function EntityDesigner() {
                 className="rounded border-surface-border"
               />
               DDL Generation
-            </label>
-            {entity.ddlGeneration.enabled && !entity.databaseView && (
+            </label>}
+            {entity.entityType === 'entity' && entity.ddlGeneration.enabled && !entity.databaseView && (
               <>
                 <Field label="DDL Safety Mode">
                   <select
@@ -698,7 +894,7 @@ export default function EntityDesigner() {
                 </Field>
               </>
             )}
-            <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer mt-1.5">
+            {entity.entityType === 'entity' && <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer mt-1.5">
               <input
                 type="checkbox"
                 checked={entity.dataRepository?.enabled || false}
@@ -706,7 +902,7 @@ export default function EntityDesigner() {
                 className="rounded border-surface-border"
               />
               Generate Data Repository
-            </label>
+            </label>}
           </Section>
           </fieldset>
         </div>
@@ -714,18 +910,79 @@ export default function EntityDesigner() {
         {/* Center: Attributes Table */}
         <div className={`${activePane === 'attributes' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto p-3 sm:p-4 lg:block`}>
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider">Attributes</h3>
-            <button
+            <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider">
+              {entity.entityType === 'enum' ? 'Enumeration' : 'Attributes'}
+            </h3>
+            {entity.entityType !== 'enum' && <button
               onClick={addAttribute}
               className="px-3 py-1 text-xs rounded bg-jmix-500/20 text-jmix-400 hover:bg-jmix-500/30 transition-colors"
             >
               + Add Attribute
-            </button>
+            </button>}
           </div>
 
-          {entity.attributes.length === 0 ? (
-            <div className="text-center py-12 text-gray-600 text-xs">
-              No attributes yet. Click "+ Add Attribute" to start.
+          {entity.entityType === 'enum' ? (
+            <div className="grid min-h-[24rem] place-items-center rounded-xl border border-surface-border bg-gradient-to-br from-surface-light/70 to-surface p-4 sm:p-6">
+              <div className="w-full max-w-2xl">
+                <div className="text-center">
+                  <div className="text-xs font-semibold text-gray-200">Typed Jmix enumeration</div>
+                  <p className="mt-2 text-[10px] leading-relaxed text-gray-500">
+                    Each constant has a stable persisted {entity.enumConfig?.idType ?? 'string'} ID. Entity
+                    attributes store that ID and expose the enum through null-safe EnumClass accessors.
+                  </p>
+                </div>
+                <div className="mt-5 space-y-2">
+                  {(entity.enumConfig?.values ?? []).map((value, index) => (
+                    <div key={`${value.name}-${index}`} className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-lg border border-surface-border bg-surface p-3">
+                      <span className="rounded bg-jmix-500/15 px-2 py-1 text-[9px] text-jmix-300">{index + 1}</span>
+                      <span className="truncate font-mono text-[10px] text-gray-200">{value.name}</span>
+                      <span className="font-mono text-[10px] text-gray-500">{value.storedValue}</span>
+                    </div>
+                  ))}
+                  {(entity.enumConfig?.values.length ?? 0) === 0 && (
+                    <div className="rounded-lg border border-dashed border-surface-border p-6 text-center text-[10px] text-gray-600">
+                      Add the first enumeration value in Entity setup.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : entity.attributes.length === 0 ? (
+            <div className="grid min-h-[24rem] place-items-center rounded-xl border border-dashed border-surface-border bg-gradient-to-br from-surface-light/70 to-surface p-4 sm:p-6">
+              <div className="w-full max-w-3xl">
+                <div className="mx-auto max-w-xl text-center">
+                  <div className="text-xs font-semibold text-gray-200">Design the entity contract</div>
+                  <p className="mt-2 text-[10px] leading-relaxed text-gray-500">
+                    Add persistent fields, Jmix enums, files, embedded values, or cross-module relationships.
+                    Java metadata, Liquibase, localization, repositories, and connected usage impact stay aligned.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={addAttribute}
+                    className="mt-4 rounded bg-jmix-500 px-4 py-2 text-xs font-medium text-white hover:bg-jmix-600"
+                  >
+                    + Add first attribute
+                  </button>
+                </div>
+                <div className="mt-6 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  {[
+                    ['Scalar data', 'Strings, numbers, money, dates, URI, files, LOBs, and custom datatypes'],
+                    ['Domain values', 'Typed Jmix EnumClass storage with string or integer identifiers'],
+                    ['Relationships', 'Associations, compositions, ownership, cascades, and cross-store references'],
+                    ['Safe evolution', 'Atomic source + Liquibase preview with rollback and project-wide impact'],
+                  ].map(([title, description]) => (
+                    <div key={title} className="rounded-lg border border-surface-border bg-surface/80 p-3">
+                      <div className="text-[10px] font-medium text-jmix-300">{title}</div>
+                      <p className="mt-1 text-[9px] leading-relaxed text-gray-600">{description}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-4 grid gap-2 rounded-lg border border-surface-border bg-black/10 p-3 text-[9px] text-gray-500 sm:grid-cols-3">
+                  <div><span className="text-gray-300">Target</span><br />{selectedModuleId || 'Unresolved module'}</div>
+                  <div><span className="text-gray-300">Store</span><br />{entity.dataStore || 'main'}</div>
+                  <div><span className="text-gray-300">DDL policy</span><br />{entity.ddlGeneration.enabled ? entity.ddlGeneration.mode : 'disabled'}</div>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-surface-border">
@@ -804,7 +1061,7 @@ export default function EntityDesigner() {
                           />
                         </td>
                         <td className="px-3 py-2">
-                          {attr.type === 'string' && (
+                          {['string', 'enum', 'uri', 'fileRef'].includes(attr.type) && (
                             <input
                               type="number"
                               value={attr.length || ''}
@@ -879,7 +1136,7 @@ export default function EntityDesigner() {
                             className="ml-2"
                           />
                         </label>
-                        {(selected.type === 'string' || selected.type === 'enum') && (
+                        {['string', 'enum', 'uri', 'fileRef'].includes(selected.type) && (
                           <Field label="Length">
                             <input
                               type="number"
@@ -974,6 +1231,46 @@ export default function EntityDesigner() {
                 })}
               />
             </div>
+          )}
+
+          {(existingEntity || entity.className) && (
+            <section className="mt-5 rounded-lg border border-surface-border bg-surface-light/50 p-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-300">
+                    Project-wide impact
+                  </h3>
+                  <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+                    Views, fetch plans, repositories, services, security, REST, workflow, menu, and migration
+                    artifacts connected to this entity. Safe structural changes must account for every listed consumer.
+                  </p>
+                </div>
+                <span className="rounded bg-surface-lighter px-2 py-1 text-[10px] text-jmix-300">
+                  {entityImpact.length} connected
+                </span>
+              </div>
+              {entityImpact.length ? (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  {entityImpact.map(artifact => (
+                    <div
+                      key={artifact.id}
+                      className="min-w-0 rounded border border-surface-border bg-surface px-2.5 py-2"
+                      title={artifact.sourceLocator.relativePath}
+                    >
+                      <div className="truncate text-[10px] font-medium text-gray-200">{artifact.displayName}</div>
+                      <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-gray-600">
+                        <span className="truncate">{artifact.kind}</span>
+                        <span className="shrink-0">{artifact.owner.moduleId}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-3 rounded border border-dashed border-surface-border p-3 text-center text-[10px] text-gray-600">
+                  No indexed consumers are connected yet. New consumers appear here after project indexing.
+                </div>
+              )}
+            </section>
           )}
         </div>
 
@@ -1352,14 +1649,26 @@ function AttributeDetail({
         )}
 
         {attr.type === 'enum' && (
-          <Field label="Enum Class">
-            <input
-              value={attr.enumClass || ''}
-              onChange={e => onChange({ enumClass: e.target.value || undefined })}
-              placeholder="com.example.entity.Status"
-              className="w-full"
-            />
-          </Field>
+          <>
+            <Field label="Jmix Enum Class">
+              <input
+                value={attr.enumClass || ''}
+                onChange={e => onChange({ enumClass: e.target.value || undefined })}
+                placeholder="com.example.entity.Status"
+                className="w-full"
+              />
+            </Field>
+            <Field label="Stored Enum ID Type">
+              <select
+                value={attr.enumIdType}
+                onChange={e => onChange({ enumIdType: e.target.value as AttributeModel['enumIdType'] })}
+                className="w-full"
+              >
+                <option value="string">String</option>
+                <option value="integer">Integer</option>
+              </select>
+            </Field>
+          </>
         )}
 
         {attr.type === 'embedded' && (
@@ -1370,6 +1679,27 @@ function AttributeDetail({
               className="w-full"
             />
           </Field>
+        )}
+
+        {attr.type === 'custom' && (
+          <>
+            <Field label="Java Type">
+              <input
+                value={attr.javaTypeName || ''}
+                onChange={e => onChange({ javaTypeName: e.target.value || undefined })}
+                placeholder="com.example.money.Money"
+                className="w-full"
+              />
+            </Field>
+            <Field label="SQL Column Definition">
+              <input
+                value={attr.sqlType || ''}
+                onChange={e => onChange({ sqlType: e.target.value || undefined })}
+                placeholder="numeric(19, 4)"
+                className="w-full"
+              />
+            </Field>
+          </>
         )}
 
         {(attr.type === 'bigDecimal') && (
@@ -1415,11 +1745,45 @@ function AttributeDetail({
             className="w-full"
           />
         </Field>
+        <Field label="Property Datatype">
+          <input
+            value={attr.propertyDatatype || ''}
+            onChange={e => onChange({ propertyDatatype: e.target.value || undefined })}
+            placeholder="customDatatypeId"
+            className="w-full"
+          />
+        </Field>
+        <Field label="Depends On Properties">
+          <input
+            value={attr.dependsOnProperties.join(', ')}
+            onChange={e => onChange({
+              dependsOnProperties: e.target.value.split(',').map(value => value.trim()).filter(Boolean),
+            })}
+            placeholder="firstName, lastName"
+            className="w-full"
+          />
+        </Field>
 
-        <div className="col-span-2 flex gap-4 mt-1">
+        <div className="col-span-2 flex flex-wrap gap-x-4 gap-y-2 mt-1">
           <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
             <input type="checkbox" checked={attr.transientFlag} onChange={e => onChange({ transientFlag: e.target.checked })} />
             Transient
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+            <input type="checkbox" checked={attr.readOnly} onChange={e => onChange({ readOnly: e.target.checked })} />
+            Read-only (no setter)
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+            <input type="checkbox" checked={attr.jmixProperty} onChange={e => onChange({ jmixProperty: e.target.checked })} />
+            Explicit Jmix property
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+            <input type="checkbox" checked={attr.systemLevel} onChange={e => onChange({ systemLevel: e.target.checked })} />
+            System level
+          </label>
+          <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+            <input type="checkbox" checked={attr.lob} onChange={e => onChange({ lob: e.target.checked })} />
+            Large object
           </label>
           <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
             <input type="checkbox" checked={attr.inBaseFetchPlan} onChange={e => onChange({ inBaseFetchPlan: e.target.checked })} />
@@ -1527,6 +1891,11 @@ function existingEntityModel(
         scale: attribute.scale,
         transientFlag: !attribute.persistent,
         systemLevel: false,
+        readOnly: false,
+        jmixProperty: false,
+        dependsOnProperties: [],
+        lob: false,
+        enumIdType: 'string',
         validations: [],
         annotations: [],
         inBaseFetchPlan: true,
@@ -1568,6 +1937,8 @@ function existingEntityModel(
     entityListeners: [],
     implementsInterfaces: [],
     annotations: [],
+    systemLevel: false,
+    annotatedPropertiesOnly: false,
   }
 }
 
@@ -1576,6 +1947,8 @@ function schemaAttributeType(javaType: string, association: boolean): AttributeT
   const simple = javaType.replace(/\??$/, '').split('.').pop()?.replace(/<.*>/, '') ?? javaType
   const mapping: Record<string, AttributeType> = {
     String: 'string',
+    Character: 'character',
+    char: 'character',
     Integer: 'integer',
     int: 'integer',
     Long: 'long',
@@ -1589,7 +1962,10 @@ function schemaAttributeType(javaType: string, association: boolean): AttributeT
     LocalDate: 'localDate',
     LocalDateTime: 'localDateTime',
     LocalTime: 'localTime',
+    OffsetTime: 'offsetTime',
     OffsetDateTime: 'offsetDateTime',
+    URI: 'uri',
+    FileRef: 'fileRef',
     UUID: 'uuid',
     'byte[]': 'byteArray',
   }
@@ -1654,6 +2030,7 @@ function generateExistingUpdatePreview(entity: EntityModel, snapshot: SchemaEnti
 function previewJavaType(type: AttributeType): string {
   const mapping: Partial<Record<AttributeType, string>> = {
     string: 'String',
+    character: 'Character',
     integer: 'Integer',
     long: 'Long',
     double: 'Double',
@@ -1663,9 +2040,16 @@ function previewJavaType(type: AttributeType): string {
     localDate: 'LocalDate',
     localDateTime: 'LocalDateTime',
     localTime: 'LocalTime',
+    offsetTime: 'OffsetTime',
     offsetDateTime: 'OffsetDateTime',
+    sqlDate: 'java.sql.Date',
+    sqlTime: 'java.sql.Time',
     uuid: 'UUID',
+    uri: 'URI',
     byteArray: 'byte[]',
+    fileRef: 'FileRef',
+    enum: 'String',
+    custom: 'Object',
   }
   return mapping[type] ?? 'Object'
 }
@@ -1745,13 +2129,27 @@ function generatePreview(entity: EntityModel, projectId?: string): string {
   if (entity.id.generation === 'jmixGenerated') {
     lines.push('    @JmixGeneratedValue')
   }
-  const idType = entity.id.type === 'uuid' ? 'UUID' : entity.id.type === 'long' ? 'Long' : entity.id.type === 'integer' ? 'Integer' : 'String'
+  const idType = entity.id.type === 'uuid'
+    ? 'UUID'
+    : entity.id.type === 'long'
+      ? 'Long'
+      : entity.id.type === 'integer'
+        ? 'Integer'
+        : entity.id.type === 'embedded'
+          ? entity.id.embeddedIdClass?.split('.').pop() || 'Object'
+          : 'String'
   lines.push(`    protected ${idType} id;`)
   lines.push('')
   entity.attributes.forEach((attr: any) => {
     if (attr.mandatory) lines.push('    @NotNull')
     lines.push(`    @Column(name = "${(attr.columnName || attr.name.replace(/([a-z])([A-Z])/g, '$1_$2').toUpperCase())}")`)
-    const type = attr.type === 'string' ? 'String' : attr.type === 'integer' ? 'Integer' : attr.type === 'long' ? 'Long' : attr.type === 'boolean' ? 'Boolean' : attr.type === 'bigDecimal' ? 'BigDecimal' : attr.type === 'localDate' ? 'LocalDate' : attr.type === 'localDateTime' ? 'LocalDateTime' : 'Object'
+    const type = attr.type === 'enum'
+      ? attr.enumClass?.split('.').pop() || 'Object'
+      : attr.type === 'embedded'
+        ? attr.embeddedClass?.split('.').pop() || 'Object'
+        : attr.type === 'custom'
+          ? attr.javaTypeName?.split('.').pop() || 'Object'
+          : previewJavaType(attr.type)
     lines.push(`    protected ${type} ${attr.name};`)
     lines.push('')
   })

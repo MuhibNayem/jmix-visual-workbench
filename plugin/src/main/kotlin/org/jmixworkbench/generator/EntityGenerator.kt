@@ -43,7 +43,58 @@ object EntityGenerator {
             require(JAVA_IDENTIFIER.matches(attribute.name)) {
                 "JVW-ENTITY-ATTRIBUTE-NAME-INVALID: '${attribute.name}' is not a valid Java field name."
             }
+            if (attribute.type == AttributeType.CUSTOM) {
+                require(!attribute.javaTypeName.isNullOrBlank()) {
+                    "JVW-ENTITY-CUSTOM-JAVA-TYPE-MISSING: ${attribute.name} needs a Java type."
+                }
+                require(attribute.transientFlag || !attribute.sqlType.isNullOrBlank()) {
+                    "JVW-ENTITY-CUSTOM-SQL-TYPE-MISSING: persisted custom attribute " +
+                        "${attribute.name} needs an explicit SQL type."
+                }
+            }
+            if (attribute.type == AttributeType.ENUM) {
+                require(!attribute.enumClass.isNullOrBlank()) {
+                    "JVW-ENTITY-ENUM-CLASS-MISSING: ${attribute.name} needs a Jmix EnumClass."
+                }
+            }
             validateRelationship(attribute)
+        }
+        if (
+            entity.id.type == IdType.EMBEDDED &&
+            entity.entityType in setOf(EntityType.ENTITY, EntityType.MAPPED_SUPERCLASS)
+        ) {
+            require(!entity.id.embeddedIdClass.isNullOrBlank()) {
+                "JVW-ENTITY-EMBEDDED-ID-CLASS-MISSING: an embedded identifier needs an embeddable class."
+            }
+        }
+        if (entity.entityType == EntityType.DTO) {
+            require(entity.id.type != IdType.EMBEDDED) {
+                "JVW-ENTITY-DTO-EMBEDDED-ID-UNSUPPORTED: DTO entities need a scalar Jmix identifier."
+            }
+        }
+        if (entity.entityType == EntityType.ENUM) {
+            val enumConfig = requireNotNull(entity.enumConfig) {
+                "JVW-ENTITY-ENUM-CONFIG-MISSING: an enumeration needs values and an ID type."
+            }
+            require(enumConfig.values.isNotEmpty()) {
+                "JVW-ENTITY-ENUM-VALUES-MISSING: an enumeration needs at least one value."
+            }
+            val invalidNames = enumConfig.values.map(EnumValueModel::name)
+                .filterNot(JAVA_IDENTIFIER::matches)
+            require(invalidNames.isEmpty()) {
+                "JVW-ENTITY-ENUM-VALUE-NAME-INVALID: ${invalidNames.joinToString()}."
+            }
+            require(enumConfig.values.map(EnumValueModel::name).distinct().size == enumConfig.values.size) {
+                "JVW-ENTITY-ENUM-VALUE-NAME-DUPLICATE: enumeration constant names must be unique."
+            }
+            require(enumConfig.values.map(EnumValueModel::storedValue).distinct().size == enumConfig.values.size) {
+                "JVW-ENTITY-ENUM-ID-DUPLICATE: stored enumeration IDs must be unique."
+            }
+            if (enumConfig.idType == EnumIdType.INTEGER) {
+                require(enumConfig.values.all { it.storedValue.toIntOrNull() != null }) {
+                    "JVW-ENTITY-ENUM-INTEGER-ID-INVALID: every stored ID must be a 32-bit integer."
+                }
+            }
         }
         val schemaNames = (entity.indexes.map(IndexModel::name) +
             entity.uniqueConstraints.map(UniqueConstraintModel::name))
@@ -217,6 +268,9 @@ object EntityGenerator {
             if (entity.entityType != EntityType.ENTITY) {
                 param("name", "\"${entity.resolvedEntityName}\"")
             }
+            if (entity.annotatedPropertiesOnly) {
+                param("annotatedPropertiesOnly", "true")
+            }
         }
 
         if (entity.dataStore.isNotBlank() && entity.dataStore != "main") {
@@ -231,6 +285,35 @@ object EntityGenerator {
             b.annotation {
                 name = "DbView"
                 importPath = "io.jmix.data.DbView"
+            }
+        }
+
+        if (entity.systemLevel) {
+            b.annotation {
+                name = "SystemLevel"
+                importPath = "io.jmix.core.entity.annotation.SystemLevel"
+            }
+        }
+
+        entity.comment?.let { comment ->
+            b.annotation {
+                name = "Comment"
+                importPath = "io.jmix.core.metamodel.annotation.Comment"
+                value("\"${escapeJavaString(comment)}\"")
+            }
+        }
+
+        if (entity.entityListeners.isNotEmpty()) {
+            entity.entityListeners.filter { '.' in it }.forEach { b.import_(it) }
+            b.annotation {
+                name = "EntityListeners"
+                importPath = "jakarta.persistence.EntityListeners"
+                value(
+                    entity.entityListeners.joinToString(
+                        prefix = "{",
+                        postfix = "}",
+                    ) { "${it.substringAfterLast('.')}.class" },
+                )
             }
         }
 
@@ -265,7 +348,7 @@ object EntityGenerator {
         entity.extendsClass?.let { b.extends_(it) }
         entity.implementsInterfaces.forEach { b.implements_(it) }
 
-        // Comment
+        // JavaDoc mirrors the metadata comment for source readability.
         entity.comment?.let { b.comment_(it) }
 
         // Custom annotations
@@ -278,7 +361,9 @@ object EntityGenerator {
         }
 
         // ── ID field ──
-        generateIdField(b, entity)
+        if (entity.entityType != EntityType.EMBEDDABLE) {
+            generateIdField(b, entity)
+        }
 
         // ── Version field (if trait) ──
         if (entity.traits.any { it == TraitType.HAS_VERSION || it == TraitType.STANDARD_ENTITY }) {
@@ -308,7 +393,9 @@ object EntityGenerator {
         }
 
         // ── Getters and setters ──
-        generateIdAccessors(b, entity)
+        if (entity.entityType != EntityType.EMBEDDABLE) {
+            generateIdAccessors(b, entity)
+        }
         if (entity.traits.any { it == TraitType.HAS_VERSION || it == TraitType.STANDARD_ENTITY }) {
             generateGetterSetter(b, "version", "Integer")
         }
@@ -324,7 +411,7 @@ object EntityGenerator {
                     idJavaType(attr.association.relatedIdType),
                 )
             }
-            generateGetterSetter(b, attr.name, attr.javaType)
+            generateAttributeAccessors(b, attr)
         }
 
         // ── Instance name ──
@@ -362,9 +449,11 @@ object EntityGenerator {
 
     private fun generateIdField(b: JavaClassBuilder, entity: EntityModel) {
         if (entity.id.type == IdType.EMBEDDED) {
+            val embeddedIdClass = requireNotNull(entity.id.embeddedIdClass)
+            if ('.' in embeddedIdClass) b.import_(embeddedIdClass)
             b.field {
                 name = "id"
-                type = "EmbeddedId"
+                type = embeddedIdClass.substringAfterLast('.')
                 visibility = JavaClassBuilder.Visibility.PROTECTED
                 annotation {
                     name = "EmbeddedId"
@@ -545,6 +634,10 @@ object EntityGenerator {
     }
 
     private fun generateAttributeField(b: JavaClassBuilder, attr: AttributeModel, entity: EntityModel) {
+        attr.validations
+            .flatMap(ValidationModel::groups)
+            .filter { '.' in it }
+            .forEach { b.import_(it) }
         if (
             attr.type in setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION) &&
             attr.association?.crossDataStore == true
@@ -554,11 +647,18 @@ object EntityGenerator {
         }
         b.field {
             name = attr.name
-            type = attr.javaType
+            type = attr.persistentJavaType
             visibility = JavaClassBuilder.Visibility.PROTECTED
             if (attr.transientFlag) isTransient = true
+            attr.defaultValue?.takeIf(String::isNotBlank)?.let {
+                initializer = it
+            }
 
             attr.requiresImport.forEach { b.import_(it) }
+            attr.enumClass?.takeIf { attr.type == AttributeType.ENUM && '.' in it }
+                ?.let { b.import_(it) }
+
+            addEntityAttributeMetadata(attr, entity)
 
             // Association / Composition annotations
             if (attr.type == AttributeType.ASSOCIATION || attr.type == AttributeType.COMPOSITION) {
@@ -672,12 +772,7 @@ object EntityGenerator {
 
             // Enum
             if (attr.type == AttributeType.ENUM) {
-                annotation {
-                    name = "Enumerated"
-                    importPath = "jakarta.persistence.Enumerated"
-                    param("value", "EnumType.STRING")
-                }
-                attr.enumClass?.let { b.import_(it) }
+                attr.enumClass?.takeIf { '.' in it }?.let { b.import_(it) }
             }
 
             // Transient
@@ -696,49 +791,137 @@ object EntityGenerator {
                 param("name", "\"${attr.resolvedColumnName}\"")
                 if (attr.mandatory) param("nullable", "false")
                 if (attr.unique) param("unique", "true")
-                if (attr.length != null && attr.type == AttributeType.STRING) {
+                if (
+                    attr.length != null &&
+                    attr.type in setOf(
+                        AttributeType.STRING,
+                        AttributeType.ENUM,
+                        AttributeType.URI,
+                        AttributeType.FILE_REF,
+                    )
+                ) {
                     param("length", attr.length.toString())
                 }
                 if (attr.precision != null) param("precision", attr.precision.toString())
                 if (attr.scale != null) param("scale", attr.scale.toString())
+                attr.sqlType?.takeIf(String::isNotBlank)?.let {
+                    param("columnDefinition", "\"${escapeJavaString(it)}\"")
+                }
             }
+        }
+    }
 
-            // Validations
-            attr.validations.forEach { v ->
-                annotation {
-                    name = v.type.annotation
-                    importPath = v.type.importPath
-                    when (v.type) {
-                        ValidationType.SIZE -> {
-                            v.value?.let { param("min", it) }
-                            v.value2?.let { param("max", it) }
-                        }
-                        ValidationType.MIN, ValidationType.MAX -> {
-                            v.value?.let { param("value", it) }
-                        }
-                        ValidationType.DECIMAL_MIN, ValidationType.DECIMAL_MAX -> {
-                            v.value?.let { param("value", "\"$it\"") }
-                        }
-                        ValidationType.PATTERN -> {
-                            v.value?.let { param("regexp", "\"$it\"") }
-                        }
-                        ValidationType.DIGITS -> {
-                            v.value?.let { param("integer", it) }
-                            v.value2?.let { param("fraction", it) }
-                        }
-                        else -> {}
+    private fun JavaClassBuilder.FieldBuilder.addEntityAttributeMetadata(
+        attribute: AttributeModel,
+        entity: EntityModel,
+    ) {
+        if (
+            attribute.mandatory &&
+            attribute.validations.none { it.type == ValidationType.NOT_NULL }
+        ) {
+            annotation {
+                name = "NotNull"
+                importPath = "jakarta.validation.constraints.NotNull"
+            }
+        }
+        if (attribute.name == entity.instanceNameAttribute) {
+            annotation {
+                name = "InstanceName"
+                importPath = "io.jmix.core.metamodel.annotation.InstanceName"
+            }
+        }
+        if (attribute.systemLevel) {
+            annotation {
+                name = "SystemLevel"
+                importPath = "io.jmix.core.entity.annotation.SystemLevel"
+            }
+        }
+        attribute.comment?.let { comment ->
+            annotation {
+                name = "Comment"
+                importPath = "io.jmix.core.metamodel.annotation.Comment"
+                value("\"${escapeJavaString(comment)}\"")
+            }
+        }
+        if (attribute.lob) {
+            annotation {
+                name = "Lob"
+                importPath = "jakarta.persistence.Lob"
+            }
+        }
+        if (
+            attribute.jmixProperty ||
+            entity.annotatedPropertiesOnly ||
+            attribute.transientFlag
+        ) {
+            annotation {
+                name = "JmixProperty"
+                importPath = "io.jmix.core.metamodel.annotation.JmixProperty"
+                if (attribute.mandatory) param("mandatory", "true")
+            }
+        }
+        attribute.dependsOnProperties.takeIf(List<String>::isNotEmpty)?.let { dependencies ->
+            annotation {
+                name = "DependsOnProperties"
+                importPath = "io.jmix.core.metamodel.annotation.DependsOnProperties"
+                value(
+                    dependencies.joinToString(prefix = "{", postfix = "}") {
+                        "\"${escapeJavaString(it)}\""
+                    },
+                )
+            }
+        }
+        attribute.propertyDatatype?.takeIf(String::isNotBlank)?.let { datatype ->
+            annotation {
+                name = "PropertyDatatype"
+                importPath = "io.jmix.core.metamodel.annotation.PropertyDatatype"
+                value("\"${escapeJavaString(datatype)}\"")
+            }
+        }
+        attribute.validations.forEach { validation ->
+            annotation {
+                name = validation.type.annotation
+                importPath = validation.type.importPath
+                when (validation.type) {
+                    ValidationType.SIZE -> {
+                        validation.value?.let { param("min", it) }
+                        validation.value2?.let { param("max", it) }
                     }
-                    v.message?.let { param("message", "\"$it\"") }
+                    ValidationType.MIN, ValidationType.MAX -> {
+                        validation.value?.let { param("value", it) }
+                    }
+                    ValidationType.DECIMAL_MIN, ValidationType.DECIMAL_MAX -> {
+                        validation.value?.let { param("value", "\"${escapeJavaString(it)}\"") }
+                    }
+                    ValidationType.PATTERN -> {
+                        validation.value?.let {
+                            param("regexp", "\"${escapeJavaString(it)}\"")
+                        }
+                    }
+                    ValidationType.DIGITS -> {
+                        validation.value?.let { param("integer", it) }
+                        validation.value2?.let { param("fraction", it) }
+                    }
+                    else -> Unit
+                }
+                validation.message?.let {
+                    param("message", "\"${escapeJavaString(it)}\"")
+                }
+                if (validation.groups.isNotEmpty()) {
+                    param(
+                        "groups",
+                        validation.groups.joinToString(prefix = "{", postfix = "}") {
+                            "${it.substringAfterLast('.')}.class"
+                        },
+                    )
                 }
             }
-
-            // Custom annotations
-            attr.annotations.forEach { ann ->
-                annotation {
-                    name = ann.name
-                    importPath = ann.importPath
-                    ann.parameters.forEach { (k, v) -> param(k, v) }
-                }
+        }
+        attribute.annotations.forEach { custom ->
+            annotation {
+                name = custom.name
+                importPath = custom.importPath
+                custom.parameters.forEach(::param)
             }
         }
     }
@@ -807,9 +990,48 @@ object EntityGenerator {
             IdType.LONG -> "Long"
             IdType.INTEGER -> "Integer"
             IdType.STRING -> "String"
-            IdType.EMBEDDED -> "Object"
+            IdType.EMBEDDED -> requireNotNull(entity.id.embeddedIdClass)
+                .substringAfterLast('.')
         }
         generateGetterSetter(b, "id", idType)
+    }
+
+    private fun generateAttributeAccessors(
+        b: JavaClassBuilder,
+        attribute: AttributeModel,
+    ) {
+        if (attribute.type == AttributeType.ENUM) {
+            val enumType = requireNotNull(attribute.enumClass).substringAfterLast('.')
+            val suffix = attribute.name.replaceFirstChar(Char::uppercase)
+            b.method {
+                name = "get$suffix"
+                returnType = enumType
+                visibility = JavaClassBuilder.Visibility.PUBLIC
+                line(
+                    "return ${attribute.name} == null ? null : " +
+                        "$enumType.fromId(${attribute.name});",
+                )
+            }
+            if (!attribute.readOnly) {
+                b.method {
+                    name = "set$suffix"
+                    returnType = "void"
+                    visibility = JavaClassBuilder.Visibility.PUBLIC
+                    param(enumType, attribute.name)
+                    line(
+                        "this.${attribute.name} = ${attribute.name} == null ? null : " +
+                            "${attribute.name}.getId();",
+                    )
+                }
+            }
+            return
+        }
+        generateGetterSetter(
+            b,
+            attribute.name,
+            attribute.javaType,
+            includeSetter = !attribute.readOnly,
+        )
     }
 
     private fun generateTraitAccessors(b: JavaClassBuilder, entity: EntityModel) {
@@ -839,7 +1061,12 @@ object EntityGenerator {
         }
     }
 
-    private fun generateGetterSetter(b: JavaClassBuilder, fieldName: String, type: String) {
+    private fun generateGetterSetter(
+        b: JavaClassBuilder,
+        fieldName: String,
+        type: String,
+        includeSetter: Boolean = true,
+    ) {
         val capName = fieldName.replaceFirstChar { it.uppercase() }
         val getterPrefix = if (type == "Boolean" || type == "boolean") "is" else "get"
 
@@ -849,12 +1076,14 @@ object EntityGenerator {
             visibility = JavaClassBuilder.Visibility.PUBLIC
             line("return $fieldName;")
         }
-        b.method {
-            name = "set$capName"
-            returnType = "void"
-            visibility = JavaClassBuilder.Visibility.PUBLIC
-            param(type, fieldName)
-            line("this.$fieldName = $fieldName;")
+        if (includeSetter) {
+            b.method {
+                name = "set$capName"
+                returnType = "void"
+                visibility = JavaClassBuilder.Visibility.PUBLIC
+                param(type, fieldName)
+                line("this.$fieldName = $fieldName;")
+            }
         }
     }
 
@@ -865,10 +1094,10 @@ object EntityGenerator {
         val b = JavaClassBuilder(entity.className)
         b.package_(entity.packageName)
         b.asEnum()
-        b.implements_("io.jmix.core.metamodel.datatype.EnumClass")
 
         val idType = if (enumCfg.idType == EnumIdType.INTEGER) "Integer" else "String"
         b.import_("io.jmix.core.metamodel.datatype.EnumClass")
+        b.implements_("EnumClass<$idType>")
 
         b.field {
             name = "id"
@@ -920,7 +1149,13 @@ object EntityGenerator {
         enumCfg.values.forEach { v ->
             b.enumConstant {
                 name = v.name
-                arg(if (enumCfg.idType == EnumIdType.INTEGER) v.storedValue else "\"${v.storedValue}\"")
+                arg(
+                    if (enumCfg.idType == EnumIdType.INTEGER) {
+                        v.storedValue
+                    } else {
+                        "\"${escapeJavaString(v.storedValue)}\""
+                    },
+                )
             }
         }
 
@@ -941,32 +1176,61 @@ object EntityGenerator {
             name = "JmixEntity"
             importPath = "io.jmix.core.metamodel.annotation.JmixEntity"
             param("name", "\"${entity.resolvedEntityName}\"")
-        }
-
-        entity.dtoConfig?.let { dto ->
-            if (dto.readOnly) {
-                b.annotation {
-                    name = "JmixEntity"
-                    importPath = "io.jmix.core.metamodel.annotation.JmixEntity"
-                }
+            if (entity.annotatedPropertiesOnly) {
+                param("annotatedPropertiesOnly", "true")
             }
         }
 
-        entity.comment?.let { b.comment_(it) }
+        if (entity.dataStore.isNotBlank() && entity.dataStore != "main") {
+            b.annotation {
+                name = "Store"
+                importPath = "io.jmix.core.metamodel.annotation.Store"
+                param("name", "\"${entity.dataStore}\"")
+            }
+        }
+
+        if (entity.systemLevel) {
+            b.annotation {
+                name = "SystemLevel"
+                importPath = "io.jmix.core.entity.annotation.SystemLevel"
+            }
+        }
+
+        entity.comment?.let { comment ->
+            b.comment_(comment)
+            b.annotation {
+                name = "Comment"
+                importPath = "io.jmix.core.metamodel.annotation.Comment"
+                value("\"${escapeJavaString(comment)}\"")
+            }
+        }
 
         // ID
-        generateIdField(b, entity)
-        generateIdAccessors(b, entity)
+        generateDtoIdField(b, entity)
 
         // Attributes
         entity.attributes.forEach { attr ->
+            attr.validations
+                .flatMap(ValidationModel::groups)
+                .filter { '.' in it }
+                .forEach { b.import_(it) }
             b.field {
                 name = attr.name
                 type = attr.javaType
                 visibility = JavaClassBuilder.Visibility.PROTECTED
+                attr.defaultValue?.takeIf(String::isNotBlank)?.let {
+                    initializer = it
+                }
                 attr.requiresImport.forEach { b.import_(it) }
+                attr.enumClass?.takeIf { '.' in it }?.let { b.import_(it) }
+                addEntityAttributeMetadata(attr, entity)
             }
-            generateGetterSetter(b, attr.name, attr.javaType)
+            generateGetterSetter(
+                b,
+                attr.name,
+                attr.javaType,
+                includeSetter = !attr.readOnly && entity.dtoConfig?.readOnly != true,
+            )
         }
 
         // Instance name
@@ -984,4 +1248,54 @@ object EntityGenerator {
 
         return b.build()
     }
+
+    private fun generateDtoIdField(
+        b: JavaClassBuilder,
+        entity: EntityModel,
+    ) {
+        require(entity.id.type != IdType.EMBEDDED) {
+            "JVW-ENTITY-DTO-EMBEDDED-ID-UNSUPPORTED: DTO entities need a scalar Jmix identifier."
+        }
+        val idType = when (entity.id.type) {
+            IdType.UUID -> "UUID"
+            IdType.LONG -> "Long"
+            IdType.INTEGER -> "Integer"
+            IdType.STRING -> "String"
+            IdType.EMBEDDED -> error("Validated above")
+        }
+        if (entity.id.type == IdType.UUID) b.import_("java.util.UUID")
+        b.field {
+            name = "id"
+            type = idType
+            visibility = JavaClassBuilder.Visibility.PROTECTED
+            annotation {
+                name = "JmixId"
+                importPath = "io.jmix.core.metamodel.annotation.JmixId"
+            }
+            if (entity.annotatedPropertiesOnly) {
+                annotation {
+                    name = "JmixProperty"
+                    importPath = "io.jmix.core.metamodel.annotation.JmixProperty"
+                }
+            }
+            if (entity.id.generation == IdGeneration.JMIX_GENERATED) {
+                annotation {
+                    name = "JmixGeneratedValue"
+                    importPath = "io.jmix.core.entity.annotation.JmixGeneratedValue"
+                }
+            }
+        }
+        generateGetterSetter(
+            b,
+            "id",
+            idType,
+            includeSetter = entity.dtoConfig?.readOnly != true,
+        )
+    }
+
+    private fun escapeJavaString(value: String): String =
+        value.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
 }

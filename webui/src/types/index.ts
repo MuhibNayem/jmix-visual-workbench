@@ -5,9 +5,10 @@ export type IdType = 'uuid' | 'long' | 'integer' | 'string' | 'embedded'
 export type IdGeneration = 'jmixGenerated' | 'identity' | 'sequence' | 'assigned'
 export type InheritanceStrategy = 'singleTable' | 'joined' | 'tablePerClass'
 export type AttributeType =
-  | 'string' | 'integer' | 'long' | 'double' | 'bigDecimal' | 'boolean'
-  | 'date' | 'localDate' | 'localDateTime' | 'localTime' | 'offsetDateTime'
-  | 'uuid' | 'byteArray' | 'enum' | 'association' | 'composition' | 'embedded'
+  | 'string' | 'character' | 'integer' | 'long' | 'double' | 'bigDecimal' | 'boolean'
+  | 'date' | 'localDate' | 'localDateTime' | 'localTime' | 'offsetTime' | 'offsetDateTime'
+  | 'sqlDate' | 'sqlTime' | 'uuid' | 'uri' | 'byteArray' | 'fileRef'
+  | 'enum' | 'association' | 'composition' | 'embedded' | 'custom'
 export type AssociationType = 'manyToOne' | 'oneToMany' | 'manyToMany' | 'oneToOne'
 export type AssociationCollectionType = 'list' | 'set'
 export type FetchType = 'lazy' | 'eager'
@@ -38,9 +39,17 @@ export interface AttributeModel {
   defaultValue?: string
   transientFlag: boolean
   systemLevel: boolean
+  readOnly: boolean
+  jmixProperty: boolean
+  dependsOnProperties: string[]
+  propertyDatatype?: string
+  lob: boolean
+  javaTypeName?: string
+  sqlType?: string
   association?: AssociationConfig
   embeddedClass?: string
   enumClass?: string
+  enumIdType: 'string' | 'integer'
   validations: ValidationModel[]
   annotations: CustomAnnotation[]
   inBaseFetchPlan: boolean
@@ -69,6 +78,7 @@ export interface ValidationModel {
   value?: string
   value2?: string
   message?: string
+  groups?: string[]
 }
 
 export interface CustomAnnotation {
@@ -100,6 +110,7 @@ export interface EntityModel {
     columnName: string
     length?: number
     sequenceName?: string
+    embeddedIdClass?: string
   }
   inheritance?: {
     strategy: InheritanceStrategy
@@ -112,7 +123,10 @@ export interface EntityModel {
   indexes: IndexModel[]
   uniqueConstraints: { name: string; columns: string[] }[]
   instanceNamePattern?: string
+  instanceNameAttribute?: string
   comment?: string
+  systemLevel: boolean
+  annotatedPropertiesOnly: boolean
   databaseView: boolean
   ddlGeneration: {
     enabled: boolean

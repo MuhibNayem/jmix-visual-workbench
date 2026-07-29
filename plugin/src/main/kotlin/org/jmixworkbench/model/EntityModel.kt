@@ -19,7 +19,10 @@ data class EntityModel(
     val indexes: MutableList<IndexModel> = mutableListOf(),
     val uniqueConstraints: MutableList<UniqueConstraintModel> = mutableListOf(),
     val instanceNamePattern: String? = null,
+    val instanceNameAttribute: String? = null,
     val comment: String? = null,
+    val systemLevel: Boolean = false,
+    val annotatedPropertiesOnly: Boolean = false,
     val databaseView: Boolean = false,
     val ddlGeneration: DdlGenerationConfig = DdlGenerationConfig(),
     val softDelete: SoftDeleteConfig? = null,
@@ -75,6 +78,7 @@ data class IdConfig(
     val columnName: String = "ID",
     val length: Int? = null,
     val sequenceName: String? = null,
+    val embeddedIdClass: String? = null,
     val embeddedAttributes: MutableList<AttributeModel> = mutableListOf()
 )
 
@@ -145,12 +149,20 @@ data class AttributeModel(
     val defaultValue: String? = null,
     val transientFlag: Boolean = false,
     val systemLevel: Boolean = false,
+    val readOnly: Boolean = false,
+    val jmixProperty: Boolean = false,
+    val dependsOnProperties: MutableList<String> = mutableListOf(),
+    val propertyDatatype: String? = null,
+    val lob: Boolean = false,
+    val javaTypeName: String? = null,
+    val sqlType: String? = null,
     // Association / Composition
     val association: AssociationConfig? = null,
     // Embedded
     val embeddedClass: String? = null,
     // Enum
     val enumClass: String? = null,
+    val enumIdType: EnumIdType = EnumIdType.STRING,
     // Validation
     val validations: MutableList<ValidationModel> = mutableListOf(),
     // Custom annotations
@@ -164,6 +176,7 @@ data class AttributeModel(
     val javaType: String
         get() = when (type) {
             AttributeType.STRING -> "String"
+            AttributeType.CHARACTER -> "Character"
             AttributeType.INTEGER -> "Integer"
             AttributeType.LONG -> "Long"
             AttributeType.DOUBLE -> "Double"
@@ -173,9 +186,14 @@ data class AttributeModel(
             AttributeType.LOCAL_DATE -> "LocalDate"
             AttributeType.LOCAL_DATE_TIME -> "LocalDateTime"
             AttributeType.LOCAL_TIME -> "LocalTime"
+            AttributeType.OFFSET_TIME -> "OffsetTime"
             AttributeType.OFFSET_DATE_TIME -> "OffsetDateTime"
+            AttributeType.SQL_DATE -> "java.sql.Date"
+            AttributeType.SQL_TIME -> "java.sql.Time"
             AttributeType.UUID -> "UUID"
+            AttributeType.URI -> "URI"
             AttributeType.BYTE_ARRAY -> "byte[]"
+            AttributeType.FILE_REF -> "FileRef"
             AttributeType.ENUM -> enumClass ?: "Object"
             AttributeType.ASSOCIATION, AttributeType.COMPOSITION -> {
                 val related = association?.relatedEntity?.substringAfterLast('.') ?: "Object"
@@ -186,6 +204,10 @@ data class AttributeModel(
                 }
             }
             AttributeType.EMBEDDED -> embeddedClass ?: "Object"
+            AttributeType.CUSTOM -> javaTypeName
+                ?.substringAfterLast('.')
+                ?.takeIf(String::isNotBlank)
+                ?: "Object"
         }
 
     val requiresImport: List<String>
@@ -195,8 +217,15 @@ data class AttributeModel(
             AttributeType.LOCAL_DATE -> listOf("java.time.LocalDate")
             AttributeType.LOCAL_DATE_TIME -> listOf("java.time.LocalDateTime")
             AttributeType.LOCAL_TIME -> listOf("java.time.LocalTime")
+            AttributeType.OFFSET_TIME -> listOf("java.time.OffsetTime")
             AttributeType.OFFSET_DATE_TIME -> listOf("java.time.OffsetDateTime")
             AttributeType.UUID -> listOf("java.util.UUID")
+            AttributeType.URI -> listOf("java.net.URI")
+            AttributeType.FILE_REF -> listOf("io.jmix.core.FileRef")
+            AttributeType.CUSTOM -> javaTypeName
+                ?.takeIf { '.' in it }
+                ?.let { listOf(it) }
+                .orEmpty()
             AttributeType.ASSOCIATION, AttributeType.COMPOSITION -> when (association?.associationType) {
                 AssociationType.ONE_TO_MANY, AssociationType.MANY_TO_MANY ->
                     listOf(association.collectionType.importPath)
@@ -205,12 +234,20 @@ data class AttributeModel(
             else -> emptyList()
         }
 
+    val persistentJavaType: String
+        get() = if (type == AttributeType.ENUM) {
+            if (enumIdType == EnumIdType.INTEGER) "Integer" else "String"
+        } else {
+            javaType
+        }
+
     val relationshipIdAttributeName: String
         get() = association?.localIdAttributeName?.takeIf(String::isNotBlank) ?: "${name}Id"
 }
 
 enum class AttributeType {
     @SerializedName("string") STRING,
+    @SerializedName("character") CHARACTER,
     @SerializedName("integer") INTEGER,
     @SerializedName("long") LONG,
     @SerializedName("double") DOUBLE,
@@ -220,13 +257,19 @@ enum class AttributeType {
     @SerializedName("localDate") LOCAL_DATE,
     @SerializedName("localDateTime") LOCAL_DATE_TIME,
     @SerializedName("localTime") LOCAL_TIME,
+    @SerializedName("offsetTime") OFFSET_TIME,
     @SerializedName("offsetDateTime") OFFSET_DATE_TIME,
+    @SerializedName("sqlDate") SQL_DATE,
+    @SerializedName("sqlTime") SQL_TIME,
     @SerializedName("uuid") UUID,
+    @SerializedName("uri") URI,
     @SerializedName("byteArray") BYTE_ARRAY,
+    @SerializedName("fileRef") FILE_REF,
     @SerializedName("enum") ENUM,
     @SerializedName("association") ASSOCIATION,
     @SerializedName("composition") COMPOSITION,
-    @SerializedName("embedded") EMBEDDED
+    @SerializedName("embedded") EMBEDDED,
+    @SerializedName("custom") CUSTOM
 }
 
 data class AssociationConfig(

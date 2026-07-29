@@ -30,10 +30,16 @@ object DataRepositoryGenerator {
             IdType.LONG -> "Long"
             IdType.INTEGER -> "Integer"
             IdType.STRING -> "String"
-            IdType.EMBEDDED -> "Object"
+            IdType.EMBEDDED -> requireNotNull(entity.id.embeddedIdClass)
+                .substringAfterLast('.')
         }
         if (entity.id.type == IdType.UUID) {
             b.import_("java.util.UUID")
+        } else if (
+            entity.id.type == IdType.EMBEDDED &&
+            '.' in requireNotNull(entity.id.embeddedIdClass)
+        ) {
+            b.import_(requireNotNull(entity.id.embeddedIdClass))
         }
 
         b.extends_("JmixDataRepository<${entity.className}, $idType>")
