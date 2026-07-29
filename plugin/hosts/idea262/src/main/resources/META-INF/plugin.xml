@@ -33,13 +33,17 @@
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiControllerChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.JmixRuntimeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
+        <projectService serviceImplementation="org.jmixworkbench.ide.JmixDomainSymbolService"/>
 
         <psi.referenceContributor language="XML"
                                   implementation="org.jmixworkbench.ide.JmixFlowUiReferenceContributor"/>
+        <psi.referenceContributor language="XML"
+                                  implementation="org.jmixworkbench.ide.JmixDomainXmlReferenceContributor"/>
         <psi.referenceContributor language="JAVA"
                                   implementation="org.jmixworkbench.ide.JmixJavaReferenceContributor"/>
         <psi.referenceContributor language="kotlin"
                                   implementation="org.jmixworkbench.ide.JmixKotlinReferenceContributor"/>
+        <useScopeEnlarger implementation="org.jmixworkbench.ide.JmixEntityUseScopeEnlarger"/>
         <codeInsight.lineMarkerProvider language="JAVA"
                                         implementationClass="org.jmixworkbench.ide.JmixViewDescriptorLineMarkerProvider"/>
         <codeInsight.lineMarkerProvider language="XML"
@@ -51,6 +55,13 @@
                          enabledByDefault="true"
                          level="ERROR"
                          implementationClass="org.jmixworkbench.ide.JmixFlowUiReferenceInspection"/>
+        <localInspection language="XML"
+                         shortName="JmixDomainXmlReference"
+                         displayName="Unresolved Jmix entity, property, or fetch plan"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixDomainXmlReferenceInspection"/>
         <localInspection language="JAVA"
                          shortName="JmixJavaReference"
                          displayName="Unresolved Jmix controller reference"
