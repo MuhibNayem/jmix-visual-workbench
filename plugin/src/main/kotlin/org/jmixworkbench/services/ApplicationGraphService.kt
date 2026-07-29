@@ -1,7 +1,6 @@
 package org.jmixworkbench.services
 
 import com.intellij.openapi.Disposable
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
@@ -1747,16 +1746,16 @@ class ApplicationGraphService(
         ) {
             return JvmSyntaxInspection.NotApplicable
         }
-        return ReadAction.compute<JvmSyntaxInspection, RuntimeException> {
+        return cancellableRead {
             val psiFile = PsiManager.getInstance(project).findFile(file)
-                ?: return@compute JvmSyntaxInspection.ParserUnavailable
+                ?: return@cancellableRead JvmSyntaxInspection.ParserUnavailable
             val actualLanguage = psiFile.language.id.lowercase()
             val expectedLanguage = language.name.lowercase()
             if (actualLanguage != expectedLanguage) {
-                return@compute JvmSyntaxInspection.ParserUnavailable
+                return@cancellableRead JvmSyntaxInspection.ParserUnavailable
             }
             val syntax = PsiTreeUtil.findChildOfType(psiFile, PsiErrorElement::class.java)
-                ?: return@compute JvmSyntaxInspection.Valid
+                ?: return@cancellableRead JvmSyntaxInspection.Valid
             val document = psiFile.viewProvider.document
             val offset = syntax.textOffset.coerceAtLeast(0)
             val line = document?.getLineNumber(offset)?.plus(1)

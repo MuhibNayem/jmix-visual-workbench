@@ -250,9 +250,9 @@ internal fun findJmixDescriptorFiles(context: PsiElement, path: String): List<Xm
 }
 
 internal fun findAllJmixDescriptorFiles(context: PsiElement): List<XmlFile> =
-    FilenameIndex.getAllFilesByExt(
+    indexedJmixCandidateFiles(
         context.project,
-        "xml",
+        JmixFlowUiDescriptorCandidateFileIndex.NAME,
         GlobalSearchScope.projectScope(context.project),
     ).asSequence()
         .mapNotNull { PsiManager.getInstance(context.project).findFile(it) }

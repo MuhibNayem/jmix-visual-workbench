@@ -2,9 +2,11 @@ package org.jmixworkbench.ide
 
 import com.intellij.codeInsight.lookup.LookupElementBuilder
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.patterns.PlatformPatterns
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiAnnotation
@@ -26,13 +28,11 @@ import com.intellij.psi.PsiReferenceRegistrar
 import com.intellij.psi.PsiType
 import com.intellij.psi.ResolveResult
 import com.intellij.psi.impl.FakePsiElement
-import com.intellij.psi.search.FilenameIndex
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.SearchScope
 import com.intellij.psi.search.UseScopeEnlarger
 import com.intellij.psi.search.searches.AnnotatedElementsSearch
 import com.intellij.psi.util.InheritanceUtil
-import com.intellij.psi.util.PsiModificationTracker
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.xml.XmlAttribute
 import com.intellij.psi.xml.XmlAttributeValue
@@ -91,28 +91,42 @@ class JmixDomainSymbolService(
     @Volatile
     private var fetchPlanCache: JmixDomainSymbolCache<XmlAttribute>? = null
 
-    fun entityClasses(): List<PsiClass> {
-        if (DumbService.isDumb(project)) return emptyList()
-        val stamp = PsiModificationTracker.getInstance(project).modificationCount
-        entityCache?.takeIf { it.stamp == stamp }?.let { return it.values }
-        return synchronized(this) {
-            entityCache?.takeIf { it.stamp == stamp }?.values
-                ?: computeEntityClasses().also { values ->
-                    entityCache = JmixDomainSymbolCache(stamp, values)
-                }
-        }
-    }
+    fun entityClasses(): List<PsiClass> =
+        cached(
+            current = { entityCache },
+            indexId = JmixEntityCandidateFileIndex.NAME,
+            scope = GlobalSearchScope.projectScope(project),
+            compute = { computeEntityClasses() },
+            store = { entityCache = it },
+        )
 
-    fun fetchPlanDeclarations(): List<XmlAttribute> {
+    fun fetchPlanDeclarations(): List<XmlAttribute> =
+        cached(
+            current = { fetchPlanCache },
+            indexId = JmixFetchPlanCandidateFileIndex.NAME,
+            scope = GlobalSearchScope.projectScope(project),
+            compute = ::computeFetchPlanDeclarations,
+            store = { fetchPlanCache = it },
+        )
+
+    private fun <T> cached(
+        current: () -> JmixDomainSymbolCache<T>?,
+        indexId: com.intellij.util.indexing.ID<String, Long>,
+        scope: GlobalSearchScope,
+        compute: (List<VirtualFile>) -> List<T>,
+        store: (JmixDomainSymbolCache<T>) -> Unit,
+    ): List<T> {
         if (DumbService.isDumb(project)) return emptyList()
-        val stamp = PsiModificationTracker.getInstance(project).modificationCount
-        fetchPlanCache?.takeIf { it.stamp == stamp }?.let { return it.values }
-        return synchronized(this) {
-            fetchPlanCache?.takeIf { it.stamp == stamp }?.values
-                ?: computeFetchPlanDeclarations().also { values ->
-                    fetchPlanCache = JmixDomainSymbolCache(stamp, values)
-                }
-        }
+        ensureJmixCandidateIndexUpToDate(project, indexId, scope)
+        val stamp = jmixCandidateIndexStamp(project, indexId)
+        current()?.takeIf { it.stamp == stamp }?.let { return it.values }
+
+        ProgressManager.checkCanceled()
+        val candidates = indexedJmixCandidateFiles(project, indexId, scope)
+        val values = compute(candidates)
+        val completedStamp = jmixCandidateIndexStamp(project, indexId)
+        store(JmixDomainSymbolCache(completedStamp, values))
+        return values
     }
 
     private fun computeEntityClasses(): List<PsiClass> {
@@ -120,6 +134,7 @@ class JmixDomainSymbolService(
         val facade = JavaPsiFacade.getInstance(project)
         return JMIX_ENTITY_ANNOTATIONS.asSequence()
             .mapNotNull { annotationName ->
+                ProgressManager.checkCanceled()
                 runCatching { facade.findClass(annotationName, scope) }.getOrNull()
             }
             .flatMap { annotationClass ->
@@ -135,16 +150,19 @@ class JmixDomainSymbolService(
             .toList()
     }
 
-    private fun computeFetchPlanDeclarations(): List<XmlAttribute> {
-        val scope = GlobalSearchScope.projectScope(project)
+    private fun computeFetchPlanDeclarations(
+        candidates: List<VirtualFile>,
+    ): List<XmlAttribute> {
         val psiManager = PsiManager.getInstance(project)
-        return FilenameIndex.getAllFilesByExt(project, "xml", scope)
+        return candidates
             .asSequence()
+            .onEach { ProgressManager.checkCanceled() }
             .mapNotNull { psiManager.findFile(it) as? XmlFile }
             .filter(XmlFile::isJmixFetchPlanDescriptor)
             .flatMap { file ->
                 PsiTreeUtil.findChildrenOfType(file, XmlTag::class.java).asSequence()
             }
+            .onEach { ProgressManager.checkCanceled() }
             .filter { it.localName == "fetchPlan" }
             .mapNotNull { it.getAttribute("name") }
             .filter { !it.value.isNullOrBlank() }
@@ -163,7 +181,7 @@ class JmixDomainSymbolService(
 }
 
 private data class JmixDomainSymbolCache<T>(
-    val stamp: Long,
+    val stamp: JmixCandidateIndexStamp,
     val values: List<T>,
 )
 

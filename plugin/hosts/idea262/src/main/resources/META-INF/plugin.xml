@@ -37,6 +37,14 @@
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixDomainSymbolService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixUiSecuritySymbolService"/>
 
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixEntityCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixViewControllerCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpecificPolicyCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMenuCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFetchPlanCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFlowUiDescriptorCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMessageBundleCandidateFileIndex"/>
+
         <psi.referenceContributor language="XML"
                                   implementation="org.jmixworkbench.ide.JmixFlowUiReferenceContributor"/>
         <psi.referenceContributor language="XML"

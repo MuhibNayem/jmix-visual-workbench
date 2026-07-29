@@ -572,6 +572,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.ApplicationGraphResponse> {
             ApplicationGraphService.getInstance(project).graph(forceRefresh)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -584,6 +585,7 @@ class JcefBridge(
         ReadAction.nonBlocking<ScenarioWorkspaceResponse> {
             ScenarioWorkspaceService.getInstance(project).load(forceRefresh)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -609,6 +611,7 @@ class JcefBridge(
         ReadAction.nonBlocking<VisualLogicWorkspaceResponse> {
             VisualLogicWorkspaceService.getInstance(project).load(forceRefresh)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -634,6 +637,7 @@ class JcefBridge(
         ReadAction.nonBlocking<IntegrationConnectorWorkspaceResponse> {
             IntegrationConnectorWorkspaceService.getInstance(project).load(forceRefresh)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -659,6 +663,7 @@ class JcefBridge(
         ReadAction.nonBlocking<VisualRuleWorkspaceResponse> {
             VisualRuleWorkspaceService.getInstance(project).load(forceRefresh)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -684,6 +689,7 @@ class JcefBridge(
         ReadAction.nonBlocking<DmnDecisionWorkspaceResponse> {
             DmnDecisionWorkspaceService.getInstance(project).load(forceRefresh)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -715,6 +721,7 @@ class JcefBridge(
         ReadAction.nonBlocking<SchemaWorkspaceResponse> {
             SchemaWorkspaceService.getInstance(project).load(forceRefresh)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -727,6 +734,7 @@ class JcefBridge(
         ReadAction.nonBlocking<RestApiWorkspaceResponse> {
             RestApiWorkspaceService.getInstance(project).load(forceRefresh)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -790,6 +798,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             RestApiChangeService.getInstance(project).previewAddition(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -831,6 +840,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             RestApiChangeService.getInstance(project).prepareAddition(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -907,6 +917,7 @@ class JcefBridge(
         ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
             RestApiChangeService.getInstance(project).previewMutation(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -948,6 +959,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             RestApiChangeService.getInstance(project).prepareMutation(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1008,6 +1020,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             SchemaWorkspaceService.getInstance(project).previewMigration(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -1045,6 +1058,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             SchemaWorkspaceService.getInstance(project).prepareMigration(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1074,6 +1088,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             CodeGenerationService.getInstance(project).previewEntityGeneration(entity, config)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -1101,6 +1116,7 @@ class JcefBridge(
                 expectedPlanDigest,
             )
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1123,6 +1139,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -1144,6 +1161,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             ExistingEntityChangeService.getInstance(project).prepareAttributeAdditions(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1172,6 +1190,7 @@ class JcefBridge(
                 request.second,
             )
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -1201,6 +1220,7 @@ class JcefBridge(
                 expectedPlanDigest,
             )
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1224,6 +1244,7 @@ class JcefBridge(
         ReadAction.nonBlocking<WorkflowLoadResponse> {
             WorkflowWorkspaceService.getInstance(project).load(relativePath, processId, moduleId)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -1246,6 +1267,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             CodeGenerationService.getInstance(project).previewWorkflowGeneration(workflow, config)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -1273,6 +1295,7 @@ class JcefBridge(
                 expectedPlanDigest,
             )
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1347,6 +1370,7 @@ class JcefBridge(
                 runtime = RuntimeSecurityEvidenceService.getInstance(project).snapshot(sourceWorkspace),
             )
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
@@ -1375,6 +1399,7 @@ class JcefBridge(
         ReadAction.nonBlocking<RuntimeSecurityEvidenceImportResponse> {
             RuntimeSecurityEvidenceService.getInstance(project).importEvidence(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -1424,6 +1449,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedSourceNavigation> {
             ApplicationGraphService.getInstance(project).prepareNavigation(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 if (prepared.success && prepared.file != null) {
@@ -1466,6 +1492,7 @@ class JcefBridge(
         ReadAction.nonBlocking<FlowUiWorkspaceResponse> {
             FlowUiWorkspaceService.getInstance(project).load(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -1500,6 +1527,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             FlowUiWorkspaceService.getInstance(project).previewPropertyChange(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -1534,6 +1562,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiWorkspaceService.getInstance(project).preparePropertyChange(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1569,6 +1598,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             FlowUiWorkspaceService.getInstance(project).previewStructureChange(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -1603,6 +1633,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiWorkspaceService.getInstance(project).prepareStructureChange(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1638,6 +1669,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             FlowUiWorkspaceService.getInstance(project).previewDirectTextChange(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -1672,6 +1704,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiWorkspaceService.getInstance(project).prepareDirectTextChange(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1707,6 +1740,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             FlowUiControllerChangeService.getInstance(project).previewInjection(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -1741,6 +1775,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiControllerChangeService.getInstance(project).prepareInjection(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1776,6 +1811,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             FlowUiControllerChangeService.getInstance(project).previewHandler(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -1810,6 +1846,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiControllerChangeService.getInstance(project).prepareHandler(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -1970,6 +2007,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             WorkspaceChangeService.getInstance(project).preview(changeSet)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -2004,6 +2042,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             WorkspaceChangeService.getInstance(project).prepareApply(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -2039,6 +2078,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             SecurityRoleChangeService.getInstance(project).previewCreate(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -2050,6 +2090,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.SecurityRoleDestinationsResponse> {
             SecurityRoleChangeService.getInstance(project).destinations()
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -2084,6 +2125,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             SecurityRoleChangeService.getInstance(project).prepareCreate(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -2123,6 +2165,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             SecurityRoleChangeService.getInstance(project).previewPolicyAddition(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -2161,6 +2204,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             SecurityRoleChangeService.getInstance(project).preparePolicyAddition(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -2198,6 +2242,7 @@ class JcefBridge(
         ReadAction.nonBlocking<SecurityRolePolicyInspectionResponse> {
             SecurityRoleChangeService.getInstance(project).inspectPolicies(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { response ->
                 sendResponse(action, requestId, gson.toJson(response))
@@ -2219,6 +2264,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             SecurityRoleChangeService.getInstance(project).previewPolicyReplacement(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -2240,6 +2286,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             SecurityRoleChangeService.getInstance(project).preparePolicyReplacement(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
@@ -2262,6 +2309,7 @@ class JcefBridge(
         ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
             SecurityRoleChangeService.getInstance(project).previewPolicyRemoval(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { preview ->
                 sendResponse(action, requestId, gson.toJson(preview))
@@ -2283,6 +2331,7 @@ class JcefBridge(
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             SecurityRoleChangeService.getInstance(project).preparePolicyRemoval(request)
         }
+            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)

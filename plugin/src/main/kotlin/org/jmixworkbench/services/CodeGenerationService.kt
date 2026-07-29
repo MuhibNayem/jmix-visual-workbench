@@ -1,7 +1,6 @@
 package org.jmixworkbench.services
 
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
@@ -977,7 +976,7 @@ class CodeGenerationService(private val project: Project) {
             )
         }
 
-        val changes = ReadAction.compute<List<WorkspaceFileChange>, RuntimeException> {
+        val changes = cancellableRead {
             val generatedChanges = files.distinctBy(GeneratedSource::relativePath).mapNotNull { source ->
                 toWorkspaceChange(source)
             }
@@ -1001,7 +1000,7 @@ class CodeGenerationService(private val project: Project) {
             files = changes,
         )
         val changeService = WorkspaceChangeService.getInstance(project)
-        val preview = ReadAction.compute<WorkspaceChangePreviewResponse, RuntimeException> {
+        val preview = cancellableRead {
             changeService.preview(changeSet)
         }
         if (!preview.accepted || preview.planDigest == null) {
@@ -1010,7 +1009,7 @@ class CodeGenerationService(private val project: Project) {
                 errors = preview.issues.map { "${it.code}: ${it.message}${it.relativePath?.let { path -> " ($path)" }.orEmpty()}" },
             )
         }
-        val prepared = ReadAction.compute<PreparedWorkspaceChange, RuntimeException> {
+        val prepared = cancellableRead {
             changeService.prepareApply(
                 WorkspaceChangeApplyRequest(changeSet, preview.planDigest),
             )

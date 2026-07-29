@@ -3,9 +3,11 @@ package org.jmixworkbench.ide
 import com.intellij.lang.properties.psi.PropertiesFile
 import com.intellij.lang.properties.psi.Property
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectFileIndex
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.ElementManipulators
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiAnnotation
@@ -18,11 +20,9 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiNameValuePair
 import com.intellij.psi.PsiNamedElement
 import com.intellij.psi.impl.FakePsiElement
-import com.intellij.psi.search.FilenameIndex
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.SearchScope
 import com.intellij.psi.search.searches.AnnotatedElementsSearch
-import com.intellij.psi.util.PsiModificationTracker
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.psi.xml.XmlAttribute
 import com.intellij.psi.xml.XmlFile
@@ -51,43 +51,71 @@ internal class JmixUiSecuritySymbolService(
     private var specificPolicyCache: JmixUiSymbolCache<JmixSpecificPolicyDeclaration>? = null
 
     fun viewIds(): List<JmixViewIdDeclaration> =
-        cached({ viewCache }, ::computeViewIds) { viewCache = it }
+        cached(
+            current = { viewCache },
+            indexId = JmixViewControllerCandidateFileIndex.NAME,
+            scope = GlobalSearchScope.allScope(project),
+            compute = ::computeViewIds,
+            store = { viewCache = it },
+        )
 
     fun menuIds(): List<JmixMenuIdDeclaration> =
-        cached({ menuCache }, ::computeMenuIds) { menuCache = it }
+        cached(
+            current = { menuCache },
+            indexId = JmixMenuCandidateFileIndex.NAME,
+            scope = GlobalSearchScope.allScope(project),
+            compute = ::computeMenuIds,
+            store = { menuCache = it },
+        )
 
     fun messages(): List<JmixMessageDeclaration> =
-        cached({ messageCache }, ::computeMessages) { messageCache = it }
+        cached(
+            current = { messageCache },
+            indexId = JmixMessageBundleCandidateFileIndex.NAME,
+            scope = GlobalSearchScope.allScope(project),
+            compute = ::computeMessages,
+            store = { messageCache = it },
+        )
 
     fun specificPolicies(): List<JmixSpecificPolicyDeclaration> =
         cached(
-            { specificPolicyCache },
-            ::computeSpecificPolicies,
-        ) { specificPolicyCache = it }
+            current = { specificPolicyCache },
+            indexId = JmixSpecificPolicyCandidateFileIndex.NAME,
+            scope = GlobalSearchScope.projectScope(project),
+            compute = ::computeSpecificPolicies,
+            store = { specificPolicyCache = it },
+        )
 
     private fun <T> cached(
         current: () -> JmixUiSymbolCache<T>?,
-        compute: () -> List<T>,
+        indexId: com.intellij.util.indexing.ID<String, Long>,
+        scope: GlobalSearchScope,
+        compute: (List<VirtualFile>) -> List<T>,
         store: (JmixUiSymbolCache<T>) -> Unit,
     ): List<T> {
         if (DumbService.isDumb(project)) return emptyList()
-        val stamp = PsiModificationTracker.getInstance(project).modificationCount
+        ensureJmixCandidateIndexUpToDate(project, indexId, scope)
+        val stamp = jmixCandidateIndexStamp(project, indexId)
         current()?.takeIf { it.stamp == stamp }?.let { return it.values }
-        return synchronized(this) {
-            current()?.takeIf { it.stamp == stamp }?.values
-                ?: compute().also { values ->
-                    store(JmixUiSymbolCache(stamp, values))
-                }
-        }
+
+        ProgressManager.checkCanceled()
+        val candidates = indexedJmixCandidateFiles(project, indexId, scope)
+        val values = compute(candidates)
+        val completedStamp = jmixCandidateIndexStamp(project, indexId)
+        store(JmixUiSymbolCache(completedStamp, values))
+        return values
     }
 
-    private fun computeViewIds(): List<JmixViewIdDeclaration> {
+    private fun computeViewIds(
+        candidates: List<VirtualFile>,
+    ): List<JmixViewIdDeclaration> {
         val allScope = GlobalSearchScope.allScope(project)
-        val projectScope = GlobalSearchScope.projectScope(project)
         val facade = JavaPsiFacade.getInstance(project)
+        val manager = PsiManager.getInstance(project)
         val declarations = mutableListOf<JmixViewIdDeclaration>()
 
         JMIX_VIEW_CONTROLLER_ANNOTATIONS.forEach { annotationName ->
+            ProgressManager.checkCanceled()
             val annotationClass = facade.findClass(annotationName, allScope)
                 ?: return@forEach
             declarations += AnnotatedElementsSearch.searchPsiClasses(annotationClass, allScope)
@@ -95,24 +123,32 @@ internal class JmixUiSecuritySymbolService(
                 .mapNotNull(PsiClass::jmixViewIdDeclaration)
         }
 
-        FilenameIndex.getAllFilesByExt(project, "java", projectScope)
+        val sourceFiles = candidates
             .asSequence()
-            .mapNotNull { PsiManager.getInstance(project).findFile(it) }
+            .onEach { ProgressManager.checkCanceled() }
+            .mapNotNull(manager::findFile)
+            .toList()
+
+        sourceFiles
+            .asSequence()
+            .filter { it.virtualFile.extension.equals("java", ignoreCase = true) }
             .flatMap { file ->
                 PsiTreeUtil.findChildrenOfType(file, PsiClass::class.java).asSequence()
             }
+            .onEach { ProgressManager.checkCanceled() }
             .mapNotNull(PsiClass::jmixViewIdDeclaration)
             .forEach(declarations::add)
 
-        FilenameIndex.getAllFilesByExt(project, "kt", projectScope)
+        sourceFiles
             .asSequence()
-            .mapNotNull { PsiManager.getInstance(project).findFile(it) }
+            .filter { it.virtualFile.extension.equals("kt", ignoreCase = true) }
             .flatMap { file ->
                 PsiTreeUtil.findChildrenOfType(
                     file,
                     PsiLanguageInjectionHost::class.java,
                 ).asSequence()
             }
+            .onEach { ProgressManager.checkCanceled() }
             .filter { it.javaClass.simpleName == "KtStringTemplateExpression" }
             .mapNotNull { host ->
                 val context = host.kotlinAnnotationContext() ?: return@mapNotNull null
@@ -140,16 +176,19 @@ internal class JmixUiSecuritySymbolService(
             )
     }
 
-    private fun computeMenuIds(): List<JmixMenuIdDeclaration> {
-        val scope = GlobalSearchScope.allScope(project)
+    private fun computeMenuIds(
+        candidates: List<VirtualFile>,
+    ): List<JmixMenuIdDeclaration> {
         val manager = PsiManager.getInstance(project)
-        return FilenameIndex.getAllFilesByExt(project, "xml", scope)
+        return candidates
             .asSequence()
+            .onEach { ProgressManager.checkCanceled() }
             .mapNotNull { manager.findFile(it) as? XmlFile }
             .filter(XmlFile::isJmixMenuDescriptor)
             .flatMap { file ->
                 PsiTreeUtil.findChildrenOfType(file, XmlTag::class.java).asSequence()
             }
+            .onEach { ProgressManager.checkCanceled() }
             .filter { it.localName == "menu" || it.localName == "item" }
             .mapNotNull { tag ->
                 val explicit = tag.getAttribute("id")
@@ -189,15 +228,18 @@ internal class JmixUiSecuritySymbolService(
             .toList()
     }
 
-    private fun computeMessages(): List<JmixMessageDeclaration> {
-        val scope = GlobalSearchScope.allScope(project)
+    private fun computeMessages(
+        candidates: List<VirtualFile>,
+    ): List<JmixMessageDeclaration> {
         val manager = PsiManager.getInstance(project)
-        return FilenameIndex.getAllFilesByExt(project, "properties", scope)
+        return candidates
             .asSequence()
+            .onEach { ProgressManager.checkCanceled() }
             .filter { JMIX_MESSAGE_FILE.matches(it.name) }
             .mapNotNull { manager.findFile(it) }
             .mapNotNull { it as? PropertiesFile }
             .flatMap { propertiesFile ->
+                ProgressManager.checkCanceled()
                 val psiFile = propertiesFile.containingFile
                 val packageGroup = psiFile.jmixResourcePackage()
                 propertiesFile.properties.asSequence()
@@ -224,20 +266,28 @@ internal class JmixUiSecuritySymbolService(
             .toList()
     }
 
-    private fun computeSpecificPolicies(): List<JmixSpecificPolicyDeclaration> {
-        val scope = GlobalSearchScope.projectScope(project)
+    private fun computeSpecificPolicies(
+        candidates: List<VirtualFile>,
+    ): List<JmixSpecificPolicyDeclaration> {
         val manager = PsiManager.getInstance(project)
         val declarations = mutableListOf<JmixSpecificPolicyDeclaration>()
 
-        FilenameIndex.getAllFilesByExt(project, "java", scope)
+        val sourceFiles = candidates
             .asSequence()
+            .onEach { ProgressManager.checkCanceled() }
             .mapNotNull(manager::findFile)
+            .toList()
+
+        sourceFiles
+            .asSequence()
+            .filter { it.virtualFile.extension.equals("java", ignoreCase = true) }
             .flatMap { file ->
                 PsiTreeUtil.findChildrenOfType(
                     file,
                     PsiLiteralExpression::class.java,
                 ).asSequence()
             }
+            .onEach { ProgressManager.checkCanceled() }
             .mapNotNull { literal ->
                 val resource = literal.value as? String ?: return@mapNotNull null
                 if (resource.isBlank() || resource == "*") return@mapNotNull null
@@ -261,15 +311,16 @@ internal class JmixUiSecuritySymbolService(
             }
             .forEach(declarations::add)
 
-        FilenameIndex.getAllFilesByExt(project, "kt", scope)
+        sourceFiles
             .asSequence()
-            .mapNotNull(manager::findFile)
+            .filter { it.virtualFile.extension.equals("kt", ignoreCase = true) }
             .flatMap { file ->
                 PsiTreeUtil.findChildrenOfType(
                     file,
                     PsiLanguageInjectionHost::class.java,
                 ).asSequence()
             }
+            .onEach { ProgressManager.checkCanceled() }
             .filter { it.javaClass.simpleName == "KtStringTemplateExpression" }
             .mapNotNull { host ->
                 val context = host.kotlinAnnotationContext() ?: return@mapNotNull null
@@ -304,7 +355,7 @@ internal class JmixUiSecuritySymbolService(
 }
 
 private data class JmixUiSymbolCache<T>(
-    val stamp: Long,
+    val stamp: JmixCandidateIndexStamp,
     val values: List<T>,
 )
 

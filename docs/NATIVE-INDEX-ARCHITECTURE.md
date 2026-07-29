@@ -1,0 +1,101 @@
+# Native Index Architecture
+
+The native IntelliJ assistance layer must never discover Jmix symbols by
+enumerating every file during completion, reference resolution, highlighting
+or Find Usages. This document defines the production invariant and the
+verification required to preserve it.
+
+## Persistent artifact indexes
+
+The plugin registers independent content-sensitive IntelliJ file-based indexes
+for:
+
+| Index | Candidate sources |
+|---|---|
+| Entity declarations | Java and Kotlin files containing a Jmix/JPA entity annotation marker |
+| View controller declarations | Java and Kotlin files containing `ViewController` or legacy `UiController` markers |
+| Specific permissions | Java and Kotlin files containing `SpecificPolicy` markers |
+| Menu declarations | XML descriptors whose root is `menu-config` or `menu` |
+| Shared fetch plans | XML descriptors whose root is `fetchPlans` or `fetch-plans` |
+| FlowUI descriptors | XML descriptors whose root is `view` or `fragment` |
+| Message bundles | `messages.properties` and locale variants |
+
+Indexers inspect text only and never construct PSI. Classification is
+conservative: the native services validate returned candidates with real PSI,
+so a false positive is harmless while an unsupported declaration cannot become
+a silent false negative.
+
+Every index stores a 64-bit content fingerprint as its forward value. Editing
+a candidate therefore advances only that artifact family's modification stamp.
+For example, editing a message bundle cannot evict the entity, menu, view or
+security inventories.
+
+## Hot-path contract
+
+Native symbol access follows this sequence:
+
+1. Return no index-dependent variants during IntelliJ dumb mode.
+2. Bring only the requested artifact index up to date.
+3. Compare its modification stamp and the project-root stamp with the cached
+   inventory.
+4. Return the same cached inventory on a hit without enumerating candidate
+   files or parsing PSI.
+5. On a miss, retrieve only files classified by that index, validate them with
+   PSI and check cancellation while walking files and declarations.
+6. Store the completed inventory against the artifact-specific stamp.
+
+Project-root changes are included because dependency and included-build changes
+can introduce symbols without editing an existing source file.
+
+The following are prohibited in editor hot paths:
+
+- `FilenameIndex.getAllFilesByExt(...)`;
+- global PSI modification counters as aggregate cache keys;
+- project-wide VFS or PSI traversal;
+- non-cancellable long read actions;
+- index-dependent non-blocking reads without smart-mode scheduling;
+- holding a write action while preparing or validating a change.
+
+All JCEF bridge non-blocking reads are expired with the project and scheduled
+in smart mode. Remaining synchronous read scopes use cancellable read actions.
+
+## Scale regression
+
+`JmixNativeIndexScaleTest` creates 3,000 unrelated XML, properties and Java
+files alongside real entities, views, menus, messages, fetch plans and
+permissions. It proves that:
+
+- every real symbol remains discoverable;
+- FlowUI discovery excludes unrelated XML;
+- 25 repeated warm reads reuse the exact six cached inventories;
+- adding unrelated files does not evict any inventory;
+- warm and incremental lookup stay below the explicit two-second failure
+  ceiling on both supported IntelliJ hosts.
+
+Observed in the 2026-07-29 milestone run:
+
+| Host | 25 warm reads | Lookup after three unrelated edits |
+|---|---:|---:|
+| IntelliJ IDEA 2025.3 | 1 ms | 2 ms |
+| IntelliJ IDEA 2026.2 | 1 ms | 1 ms |
+
+The light-fixture gate is a deterministic regression, not a substitute for an
+installed-IDE benchmark. Release certification must additionally publish cold
+indexing, completion p50/p95/p99, navigation, memory and leak results on
+representative 16–100-module repositories.
+
+## Extension rule
+
+Any new native symbol family must provide:
+
+1. an independent index or a proven key-specific invalidation mechanism;
+2. a content-sensitive forward value;
+3. a candidate classifier that does not use PSI;
+4. PSI validation with cancellation checks;
+5. dumb-mode behavior;
+6. an unrelated-edit cache-stability test;
+7. a candidate-change invalidation test;
+8. coverage on every supported IntelliJ host.
+
+Adding a convenience fallback that scans all files violates this architecture,
+even if it appears fast on a small sample project.

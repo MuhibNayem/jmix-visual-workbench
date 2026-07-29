@@ -16,6 +16,102 @@ import com.intellij.testFramework.fixtures.LightJavaCodeInsightFixtureTestCase
 
 class JmixNativeUiSecurityAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
 
+    fun testIndependentIndexesPreventCrossArtifactCacheEviction() {
+        addViewAndSecurityAnnotations()
+        myFixture.addClass(
+            """
+            package com.company.payroll.view.loan;
+
+            import io.jmix.flowui.view.ViewController;
+
+            @ViewController("LoanApplication.list")
+            public class LoanApplicationListView {
+            }
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/security/LoanApprovalRole.java",
+            """
+            package com.company.payroll.security;
+
+            import io.jmix.security.role.annotation.SpecificPolicy;
+
+            public interface LoanApprovalRole {
+                @SpecificPolicy(resources = {"loan.approve"})
+                void approve();
+            }
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/menu.xml",
+            """
+            <menu-config xmlns="http://jmix.io/schema/flowui/menu">
+                <menu id="payroll"/>
+            </menu-config>
+            """.trimIndent(),
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/messages.properties",
+            "menu.payroll=Payroll",
+        )
+        myFixture.configureByText("empty-view.xml", "<view><layout/></view>")
+
+        val service = JmixUiSecuritySymbolService.getInstance(project)
+        val initialViews = service.viewIds()
+        val initialMenus = service.menuIds()
+        val initialMessages = service.messages()
+        val initialPolicies = service.specificPolicies()
+
+        myFixture.addFileToProject(
+            "com/company/payroll/messages_bn.properties",
+            "menu.payroll=বেতন",
+        )
+
+        val localizedMessages = service.messages()
+        assertNotSame(initialMessages, localizedMessages)
+        assertEquals(2, localizedMessages.size)
+        assertSame(initialViews, service.viewIds())
+        assertSame(initialMenus, service.menuIds())
+        assertSame(initialPolicies, service.specificPolicies())
+
+        myFixture.addFileToProject(
+            "com/company/payroll/operations-menu.xml",
+            """
+            <menu-config xmlns="http://jmix.io/schema/flowui/menu">
+                <menu id="operations"/>
+            </menu-config>
+            """.trimIndent(),
+        )
+
+        assertNotSame(initialMenus, service.menuIds())
+        assertEquals(2, service.menuIds().size)
+        assertSame(initialViews, service.viewIds())
+        assertSame(localizedMessages, service.messages())
+        assertSame(initialPolicies, service.specificPolicies())
+    }
+
+    fun testXmlCandidateClassifierSkipsPrologCommentsAndDoctype() {
+        val descriptor = """
+            <?xml version="1.0"?>
+            <!-- generated comment -->
+            <!DOCTYPE menu-config [
+                <!ENTITY product "Payroll">
+            ]>
+            <flow:menu-config xmlns:flow="http://jmix.io/schema/flowui/menu">
+                <flow:menu id="payroll"/>
+            </flow:menu-config>
+        """.trimIndent()
+
+        assertEquals("menu-config", firstXmlElementLocalName(descriptor))
+        assertEquals(
+            "fetchPlans",
+            firstXmlElementLocalName(
+                "<!-- comment --><fetchPlans xmlns=\"http://jmix.io/schema/core/fetch-plans\"/>",
+            ),
+        )
+        assertNull(firstXmlElementLocalName("<!-- no root -->"))
+    }
+
     fun testJavaViewPolicyMenuRouteAndViewDeclarationRenameTogether() {
         addViewAndSecurityAnnotations()
         val controller = myFixture.addClass(

@@ -495,7 +495,7 @@ class JmixNativeDomainAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
         )
     }
 
-    fun testDomainSymbolCacheReusesAndInvalidatesTheCompleteProjectIndex() {
+    fun testDomainSymbolCacheIgnoresUnrelatedPsiAndInvalidatesOnlyEntityIndex() {
         addJmixEntityAnnotation()
         myFixture.addClass(
             """
@@ -514,6 +514,27 @@ class JmixNativeDomainAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
         val second = jmixEntityClasses(myFixture.file)
         assertSame(first, second)
         assertEquals(listOf("Employee"), first.mapNotNull(PsiClass::getName))
+
+        myFixture.addFileToProject(
+            "com/company/payroll/view/unrelated-view.xml",
+            "<view><layout><span text=\"Unrelated edit\"/></layout></view>",
+        )
+        myFixture.addFileToProject(
+            "com/company/payroll/PlainUtility.java",
+            """
+            package com.company.payroll;
+            public class PlainUtility {
+                public String label() { return "unrelated"; }
+            }
+            """.trimIndent(),
+        )
+
+        val afterUnrelatedChanges = jmixEntityClasses(myFixture.file)
+        assertSame(
+            "Unrelated XML and Java files must not evict the entity inventory",
+            first,
+            afterUnrelatedChanges,
+        )
 
         myFixture.addClass(
             """

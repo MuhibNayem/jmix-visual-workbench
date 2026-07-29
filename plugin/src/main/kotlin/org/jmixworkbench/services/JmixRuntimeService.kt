@@ -1,7 +1,6 @@
 package org.jmixworkbench.services
 
 import com.intellij.openapi.components.Service
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.module.ModuleUtilCore
@@ -47,14 +46,14 @@ class JmixRuntimeService(
         )
         val descriptor = parsed.document
             ?: return JmixRuntimeInspectionResponse(false, null, emptyList(), parsed.issues)
-        val graph = ReadAction.compute<ApplicationGraphResponse, RuntimeException> {
+        val graph = cancellableRead {
             ApplicationGraphService.getInstance(project).graph()
         }
         val route = routeForDescriptor(request.descriptorLocator.relativePath, graph)
-        val ownerModule = ReadAction.compute<Module?, RuntimeException> {
+        val ownerModule = cancellableRead {
             ModuleUtilCore.findModuleForFile(source.virtualFile!!, project)
         }
-        val modules = ReadAction.compute<List<RuntimeModule>, RuntimeException> {
+        val modules = cancellableRead {
             applicationModules(ownerModule, source.path)
         }
         if (modules.isEmpty()) {
@@ -339,7 +338,7 @@ class JmixRuntimeService(
             moduleId = module.moduleId,
             moduleRoot = module.relativeRoot,
             profile = candidate.profile,
-            preferred = module.module == ownerModule || ReadAction.compute<Boolean, RuntimeException> {
+            preferred = module.module == ownerModule || cancellableRead {
                 moduleDependsOn(module.module, ownerModule)
             },
             baseUrl = baseUrl,

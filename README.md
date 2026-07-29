@@ -92,6 +92,7 @@ host toolchains and runs the shared IDEA 253/262 test lanes.
 
 - [Exact build prerequisites, commands, artifacts, and offline behavior](docs/BUILDING.md)
 - [IntelliJ host and target-project compatibility matrices](docs/COMPATIBILITY.md)
+- [Native persistent-index, cache-isolation, and threading contract](docs/NATIVE-INDEX-ARCHITECTURE.md)
 - [Dependency, checksum, CI, and future signing/SBOM policy](docs/RELEASE-INTEGRITY.md)
 
 Java 17, Java 21 and current-JDK target projects are the compatibility
