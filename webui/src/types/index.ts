@@ -468,6 +468,46 @@ export interface DatabaseEntityTableInspectionResponse {
   issues: WorkspaceChangeIssue[]
 }
 
+export type EntityAttributePropagationTargetKind =
+  | 'VIEW_FORM'
+  | 'VIEW_GRID'
+  | 'INLINE_FETCH_PLAN'
+  | 'SHARED_FETCH_PLAN'
+  | 'MESSAGE_BUNDLE'
+  | 'RESOURCE_ROLE'
+
+export interface EntityAttributePropagationInspectionRequest {
+  entityQualifiedName: string
+  entityName: string
+  className: string
+  attributeNames: string[]
+}
+
+export interface EntityAttributePropagationChangeRequest {
+  inspection: EntityAttributePropagationInspectionRequest
+  targetIds: string[]
+}
+
+export interface EntityAttributePropagationTargetSnapshot {
+  id: string
+  kind: EntityAttributePropagationTargetKind
+  label: string
+  relativePath: string
+  detail: string
+  missingAttributes: string[]
+  recommended: boolean
+  supported: boolean
+  securityExpanding: boolean
+}
+
+export interface EntityAttributePropagationInspectionResponse {
+  accepted: boolean
+  entityQualifiedName: string
+  attributes: string[]
+  targets: EntityAttributePropagationTargetSnapshot[]
+  issues: WorkspaceChangeIssue[]
+}
+
 export interface DatabaseProductSnapshot {
   name: string
   version: string

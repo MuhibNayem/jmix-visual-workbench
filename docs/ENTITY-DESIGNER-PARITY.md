@@ -81,6 +81,21 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   the developer chooses an explicit supported datatype. An optional schema
   selector resolves multi-schema databases; duplicate table names without an
   explicit schema fail closed instead of depending on driver return order.
+- Existing attributes now have a connected, revision-bound propagation
+  workflow beyond Studio's basic "Add to Views" operation. The impact review
+  discovers every matching FlowUI instance/collection container, form, grid,
+  inline fetch plan, shared fetch plan, default entity message bundle and
+  exact non-wildcard resource-role attribute policy across indexed modules.
+  It inserts type-appropriate bound fields, grid columns and association fetch
+  properties, understands `_base` coverage for local scalar attributes,
+  expands self-closing XML without reformatting handwritten source, creates or
+  extends the default message bundle, and can extend several existing
+  attribute policies in one role. Recommended presentation/localization
+  targets are preselected; privilege-expanding role changes are supported but
+  visibly marked and never preselected. Locale-specific bundles are reported
+  for human translation rather than populated with guessed text. All selected
+  files share one digest-bound preview/apply, stale target rejection, atomic
+  rollback and post-apply idempotency contract.
 - The designer consumes the connected application graph and displays entity
   consumers across views, services, security, REST, workflow, menus and
   migrations.
@@ -105,9 +120,11 @@ blocked until all of the following pass:
    composite-key and join-table mapping, all FK dependency import, database
    catalog browsing, saved mapping overrides and repeatable regeneration
    across schema evolution remain.
-3. Attribute propagation into selected FlowUI views, fetch plans,
-   localization bundles and security policies through one impact-reviewed
-   atomic plan.
+3. Deeper propagation remains for controller code that constructs components
+   dynamically, inherited fetch-plan coverage, fragment-owned bindings and
+   translation-catalog/provider integration. Static FlowUI forms/grids,
+   inline/shared fetch plans, default messages and exact resource-role
+   attribute policies are implemented in one impact-reviewed atomic plan.
 4. Composite-ID migration generation from a proven embeddable structure.
 5. Populated PostgreSQL, MySQL/MariaDB, MSSQL and Oracle reverse-engineering
    and migration fixtures.

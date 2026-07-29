@@ -30,6 +30,11 @@ import org.jmixworkbench.services.EntityAttributeRefactorService
 import org.jmixworkbench.services.EntityAttributeRenameLaunchResponse
 import org.jmixworkbench.services.EntityAttributeRenameRequest
 import org.jmixworkbench.services.PreparedEntityAttributeRename
+import org.jmixworkbench.services.EntityAttributePropagationApplyRequest
+import org.jmixworkbench.services.EntityAttributePropagationChangeRequest
+import org.jmixworkbench.services.EntityAttributePropagationInspectionRequest
+import org.jmixworkbench.services.EntityAttributePropagationInspectionResponse
+import org.jmixworkbench.services.EntityAttributePropagationService
 import org.jmixworkbench.services.DatabaseEntityTableInspectionRequest
 import org.jmixworkbench.services.DatabaseReverseEngineeringService
 import org.jmixworkbench.services.ApplicationGraphService
@@ -325,6 +330,18 @@ class JcefBridge(
             }
             if (action == "inspectDatabaseEntityTable") {
                 handleInspectDatabaseEntityTable(action, requestId, payload)
+                return
+            }
+            if (action == "inspectEntityAttributePropagation") {
+                handleInspectEntityAttributePropagation(action, requestId, payload)
+                return
+            }
+            if (action == "previewEntityAttributePropagation") {
+                handlePreviewEntityAttributePropagation(action, requestId, payload)
+                return
+            }
+            if (action == "applyEntityAttributePropagation") {
+                handleApplyEntityAttributePropagation(action, requestId, payload)
                 return
             }
             if (action == "previewCrudGeneration") {
@@ -1320,6 +1337,73 @@ class JcefBridge(
                 }
             }, ModalityState.any())
         }
+    }
+
+    private fun handleInspectEntityAttributePropagation(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributePropagationInspectionRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<EntityAttributePropagationInspectionResponse> {
+            EntityAttributePropagationService.getInstance(project).inspect(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { response ->
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewEntityAttributePropagation(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributePropagationChangeRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
+            EntityAttributePropagationService.getInstance(project).preview(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { response ->
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyEntityAttributePropagation(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributePropagationApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationApplyError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            EntityAttributePropagationService.getInstance(project).prepareApply(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handlePreviewCrudGeneration(action: String, requestId: String?, payload: JsonObject) {

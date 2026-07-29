@@ -253,6 +253,194 @@ class SecurityRoleChangeService(
         )
     }
 
+    /**
+     * Builds one source-safe role edit for several existing attribute policies.
+     * This is intentionally internal to compound workspace operations: callers
+     * must still present the security-expanding change as an explicit,
+     * unselected-by-default review target.
+     */
+    internal fun proposeAttributePropagation(
+        request: SecurityRoleAttributePropagationRequest,
+    ): SecurityRoleAttributePropagationProposal {
+        val loaded = loadRoleSource(request.roleLocator, request.roleClassName)
+        val context = loaded.context ?: return SecurityRoleAttributePropagationProposal(
+            null,
+            listOfNotNull(loaded.issue),
+        )
+        if (context.scope != RoleScope.RESOURCE) {
+            return SecurityRoleAttributePropagationProposal(
+                null,
+                listOf(
+                    WorkspaceChangeIssue(
+                        "JVW-ROLE-ATTRIBUTE-PROPAGATION-SCOPE",
+                        "Entity attribute grants can be propagated only in a resource role.",
+                        request.roleLocator.relativePath,
+                    ),
+                ),
+            )
+        }
+        val attributeNames = request.attributeNames.map(String::trim).distinct()
+        if (
+            attributeNames.isEmpty() ||
+            attributeNames.size != request.attributeNames.size ||
+            attributeNames.any { !JAVA_IDENTIFIER.matches(it) }
+        ) {
+            return SecurityRoleAttributePropagationProposal(
+                null,
+                listOf(
+                    WorkspaceChangeIssue(
+                        "JVW-ROLE-ATTRIBUTE-PROPAGATION-INVALID",
+                        "Propagated attribute names must be unique Java identifiers.",
+                        request.roleLocator.relativePath,
+                    ),
+                ),
+            )
+        }
+        if (request.policyLocators.isEmpty()) {
+            return SecurityRoleAttributePropagationProposal(
+                null,
+                listOf(
+                    WorkspaceChangeIssue(
+                        "JVW-ROLE-ATTRIBUTE-PROPAGATION-EMPTY",
+                        "Select at least one exact entity attribute policy.",
+                        request.roleLocator.relativePath,
+                    ),
+                ),
+            )
+        }
+        val edits = mutableListOf<WorkspaceTextEdit>()
+        val missingImports = mutableSetOf<String>()
+        val resultingAnnotations = mutableSetOf<String>()
+        val selectedSymbols = request.policyLocators.mapNotNull(SourceLocator::symbol).toSet()
+        val unselectedAnnotationKeys = policyTargets(context)
+            .filterNot { it.locator.symbol in selectedSymbols }
+            .map { normalizeJavaFragment(it.annotation.text) }
+            .toSet()
+        request.policyLocators.forEach { locator ->
+            val target = findPolicyTarget(context, locator)
+                ?: return SecurityRoleAttributePropagationProposal(
+                    null,
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ROLE-POLICY-TARGET-STALE",
+                            "An entity attribute policy no longer matches this role revision.",
+                            request.roleLocator.relativePath,
+                        ),
+                    ),
+                )
+            if (target.type != SecurityRolePolicyType.ENTITY_ATTRIBUTE) {
+                return SecurityRoleAttributePropagationProposal(
+                    null,
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ROLE-ATTRIBUTE-PROPAGATION-KIND",
+                            "Only exact entity attribute policies can receive propagated attributes.",
+                            request.roleLocator.relativePath,
+                        ),
+                    ),
+                )
+            }
+            val parsed = parsePolicy(target, context)
+            val current = parsed.policy
+                ?: return SecurityRoleAttributePropagationProposal(
+                    null,
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ROLE-ATTRIBUTE-PROPAGATION-CUSTOM",
+                            parsed.issue ?: "The selected attribute policy cannot be represented safely.",
+                            request.roleLocator.relativePath,
+                        ),
+                    ),
+                )
+            if (current.entityClass != request.entityQualifiedName || current.allowWildcard) {
+                return SecurityRoleAttributePropagationProposal(
+                    null,
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ROLE-ATTRIBUTE-PROPAGATION-ENTITY",
+                            "The selected policy is not an exact non-wildcard policy for ${request.entityQualifiedName}.",
+                            request.roleLocator.relativePath,
+                        ),
+                    ),
+                )
+            }
+            val replacement = current.copy(
+                attributes = (current.attributes + attributeNames).distinct().sorted().toMutableList(),
+            )
+            val generatedResult = generatePolicyMethod(
+                policy = replacement,
+                scope = context.scope,
+                packageName = context.psiFile.packageName,
+            )
+            val generated = generatedResult.policy
+                ?: return SecurityRoleAttributePropagationProposal(
+                    null,
+                    listOfNotNull(generatedResult.issue),
+                )
+            val adapted = adaptMethodToExistingImports(
+                methodText = generated.annotationText,
+                requestedImports = generated.imports,
+                existingFile = context.psiFile,
+            )
+            missingImports += adapted.missingImports
+            val normalized = normalizeJavaFragment(adapted.methodText)
+            if (normalized in unselectedAnnotationKeys || !resultingAnnotations.add(normalized)) {
+                return SecurityRoleAttributePropagationProposal(
+                    null,
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ROLE-POLICY-DUPLICATE",
+                            "Propagation would create duplicate entity attribute policies.",
+                            request.roleLocator.relativePath,
+                        ),
+                    ),
+                )
+            }
+            edits += WorkspaceTextEdit(
+                startOffset = target.annotation.textRange.startOffset,
+                endOffset = target.annotation.textRange.endOffset,
+                expectedText = target.annotation.text,
+                replacement = adapted.methodText,
+            )
+        }
+        importEdit(context.psiFile, missingImports.toSortedSet())?.let(edits::add)
+        val result = applyEdits(context.content, edits)
+        javaSyntaxError(context.fileNameWithoutExtension, result)?.let { syntax ->
+            return SecurityRoleAttributePropagationProposal(
+                null,
+                listOf(
+                    WorkspaceChangeIssue(
+                        "JVW-ROLE-SOURCE-SYNTAX",
+                        "Attribute policy propagation would produce invalid Java: ${syntax.errorDescription}",
+                        request.roleLocator.relativePath,
+                    ),
+                ),
+            )
+        }
+        val identity = buildString {
+            append(request.roleLocator.relativePath).append('\u0000').append(context.fingerprint)
+            request.policyLocators.sortedBy { it.symbol }.forEach {
+                append('\u0000').append(it.symbol)
+            }
+            attributeNames.sorted().forEach { append('\u0000').append(it) }
+        }
+        return SecurityRoleAttributePropagationProposal(
+            WorkspaceChangeSet(
+                id = "security-role-attribute-propagation:${CanonicalDiscoveryJson.sha256(identity).take(24)}",
+                label = "Propagate entity attributes in ${context.roleClass.name}",
+                files = listOf(
+                    WorkspaceFileChange(
+                        relativePath = request.roleLocator.relativePath,
+                        mode = WorkspaceFileChangeMode.MODIFY,
+                        baseRevisionFingerprint = context.fingerprint,
+                        edits = edits,
+                    ),
+                ),
+            ),
+            emptyList(),
+        )
+    }
+
     private fun proposeCreate(request: SecurityRoleCreateRequest): SecurityRoleChangeProposal {
         val availableDestinations = destinations()
         val destination = request.destinationId
@@ -1246,6 +1434,8 @@ class SecurityRoleChangeService(
         )
 
     companion object {
+        private val JAVA_IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")
+
         fun getInstance(project: Project): SecurityRoleChangeService =
             project.getService(SecurityRoleChangeService::class.java)
     }
@@ -1315,6 +1505,19 @@ data class SecurityRolePolicyRemovalRequest(
 data class SecurityRolePolicyRemovalApplyRequest(
     val change: SecurityRolePolicyRemovalRequest,
     val expectedPlanDigest: String,
+)
+
+data class SecurityRoleAttributePropagationRequest(
+    val roleLocator: SourceLocator,
+    val roleClassName: String,
+    val entityQualifiedName: String,
+    val policyLocators: List<SourceLocator>,
+    val attributeNames: List<String>,
+)
+
+internal data class SecurityRoleAttributePropagationProposal(
+    val changeSet: WorkspaceChangeSet?,
+    val issues: List<WorkspaceChangeIssue>,
 )
 
 data class SecurityRolePolicyModel(

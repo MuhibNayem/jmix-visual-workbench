@@ -13,6 +13,9 @@ import type {
   DatabaseEntityTableInspectionRequest,
   DatabaseEntityTableInspectionResponse,
   DatabaseColumnSnapshot,
+  EntityAttributePropagationChangeRequest,
+  EntityAttributePropagationInspectionRequest,
+  EntityAttributePropagationInspectionResponse,
   EntityAttributeRenameRequest,
   EntityAttributeRenameLaunchResponse,
   GenerationResult,
@@ -795,6 +798,108 @@ class ${scenario.className} {
                   },
                   issues: [],
                 } satisfies DatabaseEntityTableInspectionResponse
+              case 'inspectEntityAttributePropagation': {
+                const attributeNames = payload.attributeNames ?? []
+                return {
+                  accepted: true,
+                  entityQualifiedName: payload.entityQualifiedName,
+                  attributes: attributeNames,
+                  targets: [
+                    {
+                      id: 'development-detail-form',
+                      kind: 'VIEW_FORM',
+                      label: 'Form loanAppForm',
+                      relativePath: 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-detail-view.xml',
+                      detail: `Add ${attributeNames.length} bound fields for loanAppDc.`,
+                      missingAttributes: attributeNames,
+                      recommended: true,
+                      supported: true,
+                      securityExpanding: false,
+                    },
+                    {
+                      id: 'development-list-grid',
+                      kind: 'VIEW_GRID',
+                      label: 'Grid loanAppsDataGrid',
+                      relativePath: 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-list-view.xml',
+                      detail: `Add ${attributeNames.length} bound columns for loanAppsDc.`,
+                      missingAttributes: attributeNames,
+                      recommended: true,
+                      supported: true,
+                      securityExpanding: false,
+                    },
+                    {
+                      id: 'development-message-bundle',
+                      kind: 'MESSAGE_BUNDLE',
+                      label: 'Entity message bundle',
+                      relativePath: 'loan/src/main/resources/com/company/loan/entity/messages.properties',
+                      detail: `Add ${attributeNames.length} default-locale caption keys.`,
+                      missingAttributes: attributeNames,
+                      recommended: true,
+                      supported: true,
+                      securityExpanding: false,
+                    },
+                    {
+                      id: 'development-security-impact',
+                      kind: 'RESOURCE_ROLE',
+                      label: 'Security role PayrollUserRole',
+                      relativePath: 'loan/src/main/java/com/company/loan/security/PayrollUserRole.java',
+                      detail: 'Explicitly extend the existing VIEW attribute policy. This expands privileges.',
+                      missingAttributes: attributeNames,
+                      recommended: false,
+                      supported: true,
+                      securityExpanding: true,
+                    },
+                  ],
+                  issues: [],
+                } satisfies EntityAttributePropagationInspectionResponse
+              }
+              case 'previewEntityAttributePropagation': {
+                const selected = new Set<string>(payload.targetIds ?? [])
+                const paths = [
+                  selected.has('development-detail-form')
+                    ? 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-detail-view.xml'
+                    : null,
+                  selected.has('development-list-grid')
+                    ? 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-list-view.xml'
+                    : null,
+                  selected.has('development-message-bundle')
+                    ? 'loan/src/main/resources/com/company/loan/entity/messages.properties'
+                    : null,
+                ].filter((path): path is string => Boolean(path))
+                return {
+                  accepted: paths.length > 0,
+                  changeSetId: 'entity-attribute-propagation:development',
+                  label: `Propagate ${payload.inspection?.attributeNames?.length ?? 0} entity attributes`,
+                  planDigest: paths.length ? 'development-entity-attribute-propagation' : undefined,
+                  files: paths.map(relativePath => ({
+                    relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: 'development-before',
+                    afterFingerprint: 'development-after',
+                    resultContent: '<!-- source-preserving propagated attributes -->',
+                    appliedEditCount: 1,
+                  })),
+                  issues: paths.length ? [] : [{
+                    code: 'JVW-PROPAGATION-TARGETS-EMPTY',
+                    message: 'Select at least one reviewed propagation target.',
+                  }],
+                }
+              }
+              case 'applyEntityAttributePropagation':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: 'Propagate entity attributes',
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'entity-attribute-propagation:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: ['loan/src/main/resources/com/company/loan/entity/messages.properties'],
+                  issues: [],
+                }
               case 'previewCrudGeneration': {
                 const entity = payload.entity as any
                 const moduleId = entity.generationTarget?.moduleId ?? 'loan'
@@ -1457,6 +1562,30 @@ class ${scenario.className} {
     return this.request<DatabaseEntityTableInspectionResponse>(
       'inspectDatabaseEntityTable',
       request,
+    )
+  }
+
+  inspectEntityAttributePropagation(request: EntityAttributePropagationInspectionRequest) {
+    return this.request<EntityAttributePropagationInspectionResponse>(
+      'inspectEntityAttributePropagation',
+      request,
+    )
+  }
+
+  previewEntityAttributePropagation(change: EntityAttributePropagationChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewEntityAttributePropagation',
+      change,
+    )
+  }
+
+  applyEntityAttributePropagation(
+    change: EntityAttributePropagationChangeRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyEntityAttributePropagation',
+      { change, expectedPlanDigest },
     )
   }
 

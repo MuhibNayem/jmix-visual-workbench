@@ -18,6 +18,8 @@ import type {
   ApplicationGraphResponse,
   DatabaseEntityTableInspectionResponse,
   DatabaseColumnSnapshot,
+  EntityAttributePropagationChangeRequest,
+  EntityAttributePropagationInspectionResponse,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
@@ -83,6 +85,12 @@ export default function EntityDesigner() {
     useState<Record<string, DatabaseColumnDraft>>({})
   const [databaseInspectBusy, setDatabaseInspectBusy] = useState(false)
   const [databaseSchemaName, setDatabaseSchemaName] = useState('')
+  const [propagationInspection, setPropagationInspection] =
+    useState<EntityAttributePropagationInspectionResponse | null>(null)
+  const [propagationSelection, setPropagationSelection] = useState<string[]>([])
+  const [propagationPreview, setPropagationPreview] =
+    useState<WorkspaceChangePreviewResponse | null>(null)
+  const [propagationBusy, setPropagationBusy] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -355,6 +363,11 @@ export default function EntityDesigner() {
 
   const handleApplyGeneration = async () => {
     if (!generationPreview?.planDigest) return
+    const addedAttributeNames = existingEntity
+      ? entity.attributes
+          .filter(attribute => !existingAttributeNames.has(attribute.name))
+          .map(attribute => attribute.name)
+      : []
     setIsGenerating(true)
     try {
       const result = existingEntity
@@ -386,6 +399,9 @@ export default function EntityDesigner() {
             )
             setExistingEntity(updated)
             setEntity(existingEntityModel(updated, store?.id))
+            if (addedAttributeNames.length) {
+              await inspectAttributePropagation(updated, addedAttributeNames)
+            }
           }
         }
       } else {
@@ -395,6 +411,104 @@ export default function EntityDesigner() {
       addToast(`Error: ${e.message}`, 'error')
     } finally {
       setIsGenerating(false)
+    }
+  }
+
+  const propagationChange = (): EntityAttributePropagationChangeRequest | null => {
+    if (!propagationInspection || !existingEntity) return null
+    return {
+      inspection: {
+        entityQualifiedName: existingEntity.qualifiedName,
+        entityName: existingEntity.entityName,
+        className: existingEntity.className,
+        attributeNames: propagationInspection.attributes,
+      },
+      targetIds: propagationSelection,
+    }
+  }
+
+  const inspectAttributePropagation = async (
+    snapshot: SchemaEntitySnapshot,
+    attributeNames: string[],
+  ) => {
+    if (!attributeNames.length) {
+      addToast('Select an existing attribute to inspect its connected surfaces', 'error')
+      return
+    }
+    setPropagationBusy(true)
+    setPropagationPreview(null)
+    try {
+      const response = await bridge.inspectEntityAttributePropagation({
+        entityQualifiedName: snapshot.qualifiedName,
+        entityName: snapshot.entityName,
+        className: snapshot.className,
+        attributeNames,
+      })
+      setPropagationInspection(response)
+      setPropagationSelection(
+        response.targets
+          .filter(target => target.recommended && target.supported && !target.securityExpanding)
+          .map(target => target.id),
+      )
+      if (response.accepted) {
+        const editable = response.targets.filter(target => target.supported).length
+        addToast(
+          `Impact review found ${response.targets.length} connected targets; ${editable} can be updated safely`,
+          'info',
+        )
+      } else {
+        addToast(response.issues.map(issue => issue.message).join(', '), 'error')
+      }
+    } catch (error: any) {
+      addToast(`Cannot inspect attribute propagation: ${error.message}`, 'error')
+    } finally {
+      setPropagationBusy(false)
+    }
+  }
+
+  const handlePreviewPropagation = async () => {
+    const change = propagationChange()
+    if (!change) return
+    setPropagationBusy(true)
+    setPropagationPreview(null)
+    try {
+      const preview = await bridge.previewEntityAttributePropagation(change)
+      setPropagationPreview(preview)
+      if (!preview.accepted) {
+        addToast(preview.issues.map(issue => issue.message).join(', '), 'error')
+      }
+    } catch (error: any) {
+      addToast(`Cannot preview propagation: ${error.message}`, 'error')
+    } finally {
+      setPropagationBusy(false)
+    }
+  }
+
+  const handleApplyPropagation = async () => {
+    const change = propagationChange()
+    if (!change || !propagationPreview?.planDigest) return
+    setPropagationBusy(true)
+    try {
+      const result = await bridge.applyEntityAttributePropagation(
+        change,
+        propagationPreview.planDigest,
+      )
+      if (result.success) {
+        addToast(
+          `Propagated attributes atomically across ${result.filesChanged.length} files`,
+          'success',
+        )
+        setPropagationInspection(null)
+        setPropagationSelection([])
+        setPropagationPreview(null)
+        bridge.getApplicationGraph(true).then(setApplicationGraph).catch(() => undefined)
+      } else {
+        addToast(result.issues.map(issue => issue.message).join(', '), 'error')
+      }
+    } catch (error: any) {
+      addToast(`Cannot apply propagation: ${error.message}`, 'error')
+    } finally {
+      setPropagationBusy(false)
     }
   }
 
@@ -465,6 +579,9 @@ export default function EntityDesigner() {
     setDatabaseInspection(null)
     setDatabaseColumnDrafts({})
     setDatabaseSchemaName('')
+    setPropagationInspection(null)
+    setPropagationSelection([])
+    setPropagationPreview(null)
     resetEntity()
   }
 
@@ -484,6 +601,9 @@ export default function EntityDesigner() {
     setDatabaseInspection(null)
     setDatabaseColumnDrafts({})
     setDatabaseSchemaName('')
+    setPropagationInspection(null)
+    setPropagationSelection([])
+    setPropagationPreview(null)
     setEntity(existingEntityModel(snapshot, store?.id))
   }
 
@@ -1131,6 +1251,24 @@ export default function EntityDesigner() {
                     >
                       {databaseInspectBusy ? 'Inspecting database…' : '↻ Import missing DB columns'}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const attribute = selectedAttr === null ? null : entity.attributes[selectedAttr]
+                        inspectAttributePropagation(
+                          existingEntity,
+                          attribute && existingAttributeNames.has(attribute.name) ? [attribute.name] : [],
+                        )
+                      }}
+                      disabled={
+                        propagationBusy ||
+                        selectedAttr === null ||
+                        !existingAttributeNames.has(entity.attributes[selectedAttr]?.name ?? '')
+                      }
+                      className="rounded border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-xs text-violet-200 transition-colors hover:bg-violet-500/20 disabled:opacity-50"
+                    >
+                      {propagationBusy ? 'Mapping impact…' : '⇢ Add selected attribute to views'}
+                    </button>
                   </>
                 )}
                 <button
@@ -1165,6 +1303,156 @@ export default function EntityDesigner() {
               }}
               onStage={stageSelectedDatabaseColumns}
             />
+          )}
+
+          {(propagationBusy || propagationInspection) && (
+            <div className="mb-4 min-w-0 rounded-xl border border-violet-500/30 bg-violet-500/5 p-3 sm:p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-violet-100">
+                    Connected attribute impact
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+                    Review each exact source target. View, fetch-plan, and default-locale changes are
+                    source-preserving. Privilege-expanding security updates are never selected automatically.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPropagationInspection(null)
+                    setPropagationSelection([])
+                    setPropagationPreview(null)
+                  }}
+                  className="rounded border border-surface-border px-2 py-1 text-[10px] text-gray-400 hover:text-gray-200"
+                >
+                  Close
+                </button>
+              </div>
+
+              {propagationBusy && !propagationInspection ? (
+                <div className="mt-3 text-[10px] text-violet-200">Indexing connected surfaces…</div>
+              ) : propagationInspection && (
+                <>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {propagationInspection.attributes.map(attribute => (
+                      <span
+                        key={attribute}
+                        className="rounded border border-violet-500/20 bg-violet-500/10 px-2 py-1 font-mono text-[9px] text-violet-100"
+                      >
+                        {attribute}
+                      </span>
+                    ))}
+                  </div>
+                  {propagationInspection.issues.length > 0 && (
+                    <div className="mt-3 space-y-1.5">
+                      {propagationInspection.issues.map((issue, index) => (
+                        <div
+                          key={`${issue.code}-${issue.relativePath ?? index}`}
+                          className="rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2 text-[9px] leading-relaxed text-amber-100/80"
+                        >
+                          {issue.message}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-3 grid min-w-0 gap-2 xl:grid-cols-2">
+                    {propagationInspection.targets.map(target => {
+                      const checked = propagationSelection.includes(target.id)
+                      return (
+                        <label
+                          key={target.id}
+                          className={`flex min-w-0 gap-3 rounded-lg border p-3 ${
+                            target.securityExpanding
+                              ? 'border-amber-500/25 bg-amber-500/5'
+                              : checked
+                                ? 'border-violet-500/35 bg-violet-500/10'
+                                : 'border-surface-border bg-black/10'
+                          } ${target.supported ? 'cursor-pointer' : 'cursor-not-allowed opacity-80'}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={!target.supported || propagationBusy}
+                            onChange={event => {
+                              setPropagationPreview(null)
+                              setPropagationSelection(current => event.target.checked
+                                ? [...current, target.id]
+                                : current.filter(id => id !== target.id))
+                            }}
+                            className="mt-0.5"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-[10px] font-medium text-gray-200">{target.label}</span>
+                              <span className="rounded bg-surface-lighter px-1.5 py-0.5 text-[8px] text-gray-500">
+                                {target.kind.replace(/_/g, ' ')}
+                              </span>
+                              {target.securityExpanding && (
+                                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[8px] text-amber-200">
+                                  privilege review
+                                </span>
+                              )}
+                            </span>
+                            <span className="mt-1 block text-[9px] leading-relaxed text-gray-500">
+                              {target.detail}
+                            </span>
+                            <span
+                              className="mt-1 block truncate font-mono text-[8px] text-gray-600"
+                              title={target.relativePath}
+                            >
+                              {target.relativePath}
+                            </span>
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+
+                  {propagationInspection.targets.length === 0 && (
+                    <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-[10px] text-emerald-200">
+                      No connected source requires this attribute.
+                    </div>
+                  )}
+
+                  {propagationPreview && (
+                    <div className="mt-3 rounded-lg border border-violet-500/25 bg-black/15 p-3">
+                      <div className="text-[10px] font-medium text-violet-100">{propagationPreview.label}</div>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {propagationPreview.files.map(file => (
+                          <span
+                            key={file.relativePath}
+                            className="max-w-full truncate rounded border border-violet-500/20 px-2 py-1 font-mono text-[8px] text-violet-100/70"
+                            title={file.relativePath}
+                          >
+                            {file.mode} · {file.relativePath}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-3 flex flex-wrap justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={handlePreviewPropagation}
+                      disabled={propagationBusy || propagationSelection.length === 0}
+                      className="rounded border border-violet-500/30 px-3 py-1.5 text-[10px] text-violet-200 hover:bg-violet-500/10 disabled:opacity-50"
+                    >
+                      Preview selected targets
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleApplyPropagation}
+                      disabled={propagationBusy || !propagationPreview?.planDigest}
+                      className="rounded bg-violet-500 px-3 py-1.5 text-[10px] font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+                    >
+                      Apply atomic propagation
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           )}
 
           {entity.entityType === 'enum' ? (
