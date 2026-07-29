@@ -9,6 +9,7 @@ import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.refactoring.rename.RenameProcessor
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
@@ -25,6 +26,10 @@ import org.jmixworkbench.services.CodeGenerationService
 import org.jmixworkbench.services.ExistingEntityAttributeAdditionApplyRequest
 import org.jmixworkbench.services.ExistingEntityAttributeAdditionRequest
 import org.jmixworkbench.services.ExistingEntityChangeService
+import org.jmixworkbench.services.EntityAttributeRefactorService
+import org.jmixworkbench.services.EntityAttributeRenameLaunchResponse
+import org.jmixworkbench.services.EntityAttributeRenameRequest
+import org.jmixworkbench.services.PreparedEntityAttributeRename
 import org.jmixworkbench.services.ApplicationGraphService
 import org.jmixworkbench.services.FlowUiPropertyChangeRequest
 import org.jmixworkbench.services.FlowUiPropertyApplyRequest
@@ -310,6 +315,10 @@ class JcefBridge(
             }
             if (action == "applyExistingEntityAttributeAdditions") {
                 handleApplyExistingEntityAttributeAdditions(action, requestId, payload)
+                return
+            }
+            if (action == "launchEntityAttributeRename") {
+                handleLaunchEntityAttributeRename(action, requestId, payload)
                 return
             }
             if (action == "previewCrudGeneration") {
@@ -1208,6 +1217,64 @@ class JcefBridge(
             .finishOnUiThread(ModalityState.any()) { prepared ->
                 val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
                 sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleLaunchEntityAttributeRename(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeRenameRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedEntityAttributeRename> {
+            EntityAttributeRefactorService.getInstance(project).prepareRename(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val element = prepared.element
+                val newName = prepared.newName
+                if (!prepared.accepted || element == null || newName == null) {
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(
+                            EntityAttributeRenameLaunchResponse(
+                                success = false,
+                                code = prepared.code,
+                                message = prepared.message,
+                            ),
+                        ),
+                    )
+                    return@finishOnUiThread
+                }
+                sendResponse(
+                    action,
+                    requestId,
+                    gson.toJson(
+                        EntityAttributeRenameLaunchResponse(
+                            success = true,
+                            message = "IntelliJ usage preview opened for ${request.attributeName} → $newName.",
+                        ),
+                    ),
+                )
+                ApplicationManager.getApplication().invokeLater({
+                    RenameProcessor(
+                        project,
+                        element,
+                        newName,
+                        false,
+                        false,
+                    ).apply {
+                        setPreviewUsages(true)
+                    }.run()
+                }, ModalityState.nonModal())
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

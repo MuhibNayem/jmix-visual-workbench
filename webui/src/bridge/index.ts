@@ -10,6 +10,8 @@ import type {
   FlowUiControllerHandlerRequest,
   FlowUiWorkspaceResponse,
   ExistingEntityAttributeAdditionRequest,
+  EntityAttributeRenameRequest,
+  EntityAttributeRenameLaunchResponse,
   GenerationResult,
   GraphSourceLocator,
   IntegrationConnectorModel,
@@ -700,6 +702,11 @@ class ${scenario.className} {
                   ],
                   issues: [],
                 }
+              case 'launchEntityAttributeRename':
+                return {
+                  success: true,
+                  message: `IntelliJ usage preview opened for ${payload.attributeName} → ${payload.newName}.`,
+                }
               case 'previewCrudGeneration': {
                 const entity = payload.entity as any
                 const moduleId = entity.generationTarget?.moduleId ?? 'loan'
@@ -1348,6 +1355,13 @@ class ${scenario.className} {
     return this.request<WorkspaceChangeApplyResponse>(
       'applyExistingEntityAttributeAdditions',
       { change, expectedPlanDigest },
+    )
+  }
+
+  launchEntityAttributeRename(change: EntityAttributeRenameRequest) {
+    return this.request<EntityAttributeRenameLaunchResponse>(
+      'launchEntityAttributeRename',
+      change,
     )
   }
 

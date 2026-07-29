@@ -383,6 +383,26 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             ),
         )
         val request = ExistingEntityAttributeAdditionRequest(snapshot.sourceLocator, entity)
+        val rename = EntityAttributeRefactorService.getInstance(project).prepareRename(
+            EntityAttributeRenameRequest(
+                sourceLocator = snapshot.sourceLocator,
+                entityClassName = snapshot.className,
+                attributeName = "applicationNo",
+                newName = "businessApplicationNo",
+            ),
+        )
+        assertTrue(rename.accepted, "${rename.code}: ${rename.message}")
+        assertEquals("applicationNo", rename.element?.name)
+        val collision = EntityAttributeRefactorService.getInstance(project).prepareRename(
+            EntityAttributeRenameRequest(
+                sourceLocator = snapshot.sourceLocator,
+                entityClassName = snapshot.className,
+                attributeName = "applicationNo",
+                newName = "loanAmount",
+            ),
+        )
+        assertFalse(collision.accepted)
+        assertEquals("JVW-ENTITY-RENAME-COLLISION", collision.code)
         val preview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(request)
 
         assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
@@ -403,6 +423,20 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
         assertFalse(stale.accepted)
         assertTrue(stale.issues.any { it.code == "JVW-ENTITY-SOURCE-STALE" })
+
+        val ambiguousRemoval = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            request.copy(
+                entity = entity.copy(
+                    attributes = entity.attributes
+                        .filterNot { it.name == "applicationNo" }
+                        .toMutableList(),
+                ),
+            ),
+        )
+        assertFalse(ambiguousRemoval.accepted)
+        assertTrue(
+            ambiguousRemoval.issues.any { it.code == "JVW-ENTITY-REMOVAL-REQUIRES-IMPACT" },
+        )
     }
 
     fun testExistingKotlinEntityAdditionPreservesManualSourceAndAddsRollbackMigration() {
@@ -446,6 +480,16 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertFalse(accountNo.nullable)
         assertEquals(64, accountNo.length)
         assertEquals(IdType.UUID, snapshot.idType)
+        val rename = EntityAttributeRefactorService.getInstance(project).prepareRename(
+            EntityAttributeRenameRequest(
+                sourceLocator = snapshot.sourceLocator,
+                entityClassName = snapshot.className,
+                attributeName = "accountNo",
+                newName = "externalAccountNo",
+            ),
+        )
+        assertTrue(rename.accepted, "${rename.code}: ${rename.message}")
+        assertEquals("KtProperty", rename.element?.javaClass?.simpleName)
 
         val entity = EntityModel(
             className = snapshot.className,
@@ -513,6 +557,14 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                     type = AttributeType.STRING,
                     columnName = "APPLICATION_NO",
                     mandatory = true,
+                ),
+                AttributeModel(
+                    name = "loanAmount",
+                    type = AttributeType.BIG_DECIMAL,
+                    columnName = "LOAN_AMOUNT",
+                    mandatory = true,
+                    precision = 19,
+                    scale = 2,
                 ),
                 AttributeModel(
                     name = "fundProfile",

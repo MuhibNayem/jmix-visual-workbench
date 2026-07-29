@@ -55,6 +55,13 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   generate checked forward/rollback migrations. Type, property/column rename,
   removal and unsafe narrowing still fail closed until the project-wide impact
   refactor is implemented.
+- Existing scalar properties with stable explicit database columns can launch
+  IntelliJ's native rename processor directly from Entity Designer. The exact
+  revision and live Java/Kotlin PSI declaration are resolved first; collisions,
+  associations, inferred columns, stale source and read-only declarations fail
+  closed. IntelliJ usage preview then includes plugin-contributed FlowUI, fetch
+  plan, JPQL and security references. A missing existing property in the normal
+  update request is rejected rather than being misread as an addition.
 - The designer consumes the connected application graph and displays entity
   consumers across views, services, security, REST, workflow, menus and
   migrations.
@@ -67,9 +74,11 @@ This milestone materially expands the entity model and generator but does not
 yet make `STUDIO-CORE-001` or `STUDIO-CORE-011` STRONG. Those claims remain
 blocked until all of the following pass:
 
-1. Complete impact-aware Java and Kotlin PSI refactoring for handwritten
-   entities, including safe rename, type change and removal with project-wide
-   usage refactoring. Additive Java/Kotlin round trip is implemented.
+1. Complete schema-aware Java and Kotlin PSI refactoring for handwritten
+   entities. Stable-column scalar property rename now delegates to IntelliJ
+   usage preview; relationship/property+column rename, type change and removal
+   with migration choreography remain. Additive and managed-mapping Java/Kotlin
+   round trip is implemented.
 2. Partial live-database reverse engineering for selected tables, columns,
    keys and views, plus repeatable merge into existing source.
 3. Attribute propagation into selected FlowUI views, fetch plans,

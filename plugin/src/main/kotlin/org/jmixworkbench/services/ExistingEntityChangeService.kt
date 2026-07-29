@@ -167,8 +167,13 @@ class ExistingEntityChangeService(
         )
         val metadataChanges = mutableListOf<ExistingAttributeMetadataChange>()
         currentEntity.attributes.forEach { current ->
+            if (current.name == "id") return@forEach
             val desired = request.entity.attributes.firstOrNull { it.name == current.name }
-                ?: return@forEach
+                ?: return rejected(
+                    "JVW-ENTITY-REMOVAL-REQUIRES-IMPACT",
+                    "${current.name} is missing from the requested entity model. " +
+                        "Removal or rename requires the explicit native impact workflow; it will not be interpreted as an addition.",
+                )
             val currentType = attributeType(
                 current.javaType,
                 current.association,
@@ -412,8 +417,13 @@ class ExistingEntityChangeService(
         )
         val metadataChanges = mutableListOf<ExistingAttributeMetadataChange>()
         snapshot.attributes.forEach { current ->
+            if (current.name == "id") return@forEach
             val desired = request.entity.attributes.firstOrNull { it.name == current.name }
-                ?: return@forEach
+                ?: return rejected(
+                    "JVW-ENTITY-REMOVAL-REQUIRES-IMPACT",
+                    "${current.name} is missing from the requested Kotlin entity model. " +
+                        "Removal or rename requires the explicit native impact workflow; it will not be interpreted as an addition.",
+                )
             val currentType = attributeType(
                 current.javaType,
                 current.association,

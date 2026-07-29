@@ -66,6 +66,9 @@ export default function EntityDesigner() {
   const [generationPreview, setGenerationPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
   const [existingEntity, setExistingEntity] = useState<SchemaEntitySnapshot | null>(null)
   const [applicationGraph, setApplicationGraph] = useState<ApplicationGraphResponse | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [renameLaunched, setRenameLaunched] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -171,6 +174,57 @@ export default function EntityDesigner() {
       addToast(`Error: ${e.message}`, 'error')
     } finally {
       setIsGenerating(false)
+    }
+  }
+
+  const handleNativeAttributeRename = async (attributeName: string) => {
+    if (!existingEntity) return
+    const newName = renameDraft.trim()
+    if (!newName || newName === attributeName) {
+      addToast('Enter a different property name', 'error')
+      return
+    }
+    setRenameBusy(true)
+    try {
+      const response = await bridge.launchEntityAttributeRename({
+        sourceLocator: existingEntity.sourceLocator,
+        entityClassName: existingEntity.className,
+        attributeName,
+        newName,
+      })
+      addToast(response.message, response.success ? 'info' : 'error')
+      if (response.success) setRenameLaunched(true)
+    } catch (error: any) {
+      addToast(`Native rename failed: ${error.message}`, 'error')
+    } finally {
+      setRenameBusy(false)
+    }
+  }
+
+  const refreshAfterNativeRefactor = async () => {
+    if (!existingEntity) return
+    setSchemaLoading(true)
+    try {
+      const refreshed = await bridge.getSchemaWorkspace(true)
+      setSchemaWorkspace(refreshed)
+      const updated = refreshed.entities.find(
+        candidate => candidate.qualifiedName === existingEntity.qualifiedName,
+      )
+      if (updated) {
+        const store = refreshed.stores.find(
+          candidate => candidate.moduleId === updated.moduleId && candidate.name === updated.storeName,
+        )
+        setExistingEntity(updated)
+        setEntity(existingEntityModel(updated, store?.id))
+        setSelectedAttr(null)
+        setRenameDraft('')
+        setRenameLaunched(false)
+        addToast('Entity workspace refreshed after native refactor', 'success')
+      }
+    } catch (error: any) {
+      addToast(`Cannot refresh entity workspace: ${error.message}`, 'error')
+    } finally {
+      setSchemaLoading(false)
     }
   }
 
@@ -1023,7 +1077,12 @@ export default function EntityDesigner() {
                     return (
                       <tr
                         key={`${attr.name}-${i}`}
-                        onClick={() => setSelectedAttr(selectedAttr === i ? null : i)}
+                        onClick={() => {
+                          const next = selectedAttr === i ? null : i
+                          setSelectedAttr(next)
+                          setRenameDraft(next === null ? '' : attr.name)
+                          setRenameLaunched(false)
+                        }}
                         className={`border-t border-surface-border cursor-pointer transition-colors ${
                           selectedAttr === i ? 'bg-jmix-500/10' : 'hover:bg-surface-lighter'
                         } ${locked ? 'text-gray-500' : ''}`}
@@ -1192,8 +1251,46 @@ export default function EntityDesigner() {
                       </div>
                     )}
                     <p className="mt-3 text-[10px] leading-relaxed text-gray-600">
-                      Field identity, Java type, manual annotations, accessors, and call sites remain untouched.
+                      Mapping edits preserve property identity, Java/Kotlin type, manual annotations, accessors, and call sites.
                     </p>
+                    {source && !source.association && (
+                      <div className="mt-4 rounded-lg border border-jmix-500/20 bg-jmix-500/5 p-3">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-jmix-300">
+                          Native safe rename
+                        </div>
+                        <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+                          Opens IntelliJ&apos;s usage preview so Java, Kotlin, FlowUI, fetch plans, JPQL, and security
+                          references participate in the IDE refactor. Persistent properties require an explicit stable
+                          column name.
+                        </p>
+                        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                          <input
+                            value={renameDraft}
+                            onChange={event => setRenameDraft(event.target.value)}
+                            className="min-w-0 flex-1"
+                            aria-label={`New name for ${selected.name}`}
+                          />
+                          <button
+                            type="button"
+                            disabled={renameBusy || !renameDraft.trim() || renameDraft.trim() === selected.name}
+                            onClick={() => handleNativeAttributeRename(selected.name)}
+                            className="rounded bg-jmix-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-jmix-600 disabled:opacity-50"
+                          >
+                            {renameBusy ? 'Resolving…' : 'Open usage preview'}
+                          </button>
+                          {renameLaunched && (
+                            <button
+                              type="button"
+                              disabled={schemaLoading}
+                              onClick={refreshAfterNativeRefactor}
+                              className="rounded border border-surface-border px-3 py-1.5 text-xs text-gray-300 hover:bg-surface-lighter"
+                            >
+                              Refresh after apply
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )
               })()

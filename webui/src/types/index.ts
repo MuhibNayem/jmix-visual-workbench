@@ -437,6 +437,19 @@ export interface ExistingEntityAttributeAdditionRequest {
   entity: EntityModel
 }
 
+export interface EntityAttributeRenameRequest {
+  sourceLocator: GraphSourceLocator
+  entityClassName: string
+  attributeName: string
+  newName: string
+}
+
+export interface EntityAttributeRenameLaunchResponse {
+  success: boolean
+  code?: string
+  message: string
+}
+
 export interface SchemaChangelogSnapshot {
   artifactId: string
   moduleId: string
