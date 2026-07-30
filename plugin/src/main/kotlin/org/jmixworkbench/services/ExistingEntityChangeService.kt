@@ -79,7 +79,7 @@ class ExistingEntityChangeService(
         )
     }
 
-    private fun proposeAttributeAdditions(
+    internal fun proposeAttributeAdditions(
         request: ExistingEntityAttributeAdditionRequest,
     ): ExistingEntityChangeProposal {
         val resolved = ProjectFileResolver.getInstance(project)
@@ -1722,7 +1722,7 @@ private data class GeneratedMetadataEdits(
     val imports: Set<String>,
 )
 
-private data class ExistingEntityChangeProposal(
+internal data class ExistingEntityChangeProposal(
     val changeSet: WorkspaceChangeSet?,
     val issues: List<WorkspaceChangeIssue>,
 ) {

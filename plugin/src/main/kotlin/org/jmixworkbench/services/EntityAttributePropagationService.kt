@@ -13,6 +13,8 @@ import org.jmixworkbench.discovery.flowui.FlowUiDescriptorSnapshot
 import org.jmixworkbench.discovery.flowui.FlowUiElementSnapshot
 import org.jmixworkbench.discovery.model.ArtifactKind
 import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
+import org.jmixworkbench.model.AttributeModel
+import org.jmixworkbench.model.AttributeType
 import java.io.StringReader
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
@@ -35,7 +37,7 @@ class EntityAttributePropagationService(
             entityQualifiedName = request.entityQualifiedName,
             attributes = discovery.attributes.map { it.name },
             targets = discovery.candidates.map(PropagationCandidate::snapshot),
-            issues = discovery.issues,
+            issues = discovery.issues + discovery.entityChangeIssues,
         )
     }
 
@@ -188,8 +190,23 @@ class EntityAttributePropagationService(
                 "The selected targets no longer require propagation.",
             )
         }
+        val entityFiles = discovery.entityChangeSet?.files.orEmpty()
+        val collisions = (entityFiles + files)
+            .groupingBy(WorkspaceFileChange::relativePath)
+            .eachCount()
+            .filterValues { it > 1 }
+            .keys
+        if (collisions.isNotEmpty()) {
+            return rejected(
+                "JVW-PROPAGATION-ATOMIC-COLLISION",
+                "The entity update and connected-surface update both modify " +
+                    "${collisions.sorted().joinToString()}; the combined plan was rejected rather than merging edits unsafely.",
+            )
+        }
+        val allFiles = entityFiles + files
         val identity = buildString {
             append(request.inspection.entityQualifiedName)
+            discovery.entityChangeSet?.let { append('\u0000').append(it.id) }
             discovery.attributes.sortedBy { it.name }.forEach { append('\u0000').append(it.name) }
             selected.sortedBy { it.snapshot.id }.forEach { candidate ->
                 append('\u0000').append(candidate.snapshot.id)
@@ -199,11 +216,15 @@ class EntityAttributePropagationService(
         return PropagationProposal(
             WorkspaceChangeSet(
                 id = "entity-attribute-propagation:${CanonicalDiscoveryJson.sha256(identity).take(24)}",
-                label = "Propagate ${discovery.attributes.size} ${request.inspection.className} attribute" +
-                    if (discovery.attributes.size == 1) "" else "s",
-                files = files,
+                label = buildString {
+                    if (discovery.entityChangeSet != null) append("Add and propagate ") else append("Propagate ")
+                    append(discovery.attributes.size).append(' ')
+                        .append(request.inspection.className).append(" attribute")
+                    if (discovery.attributes.size != 1) append('s')
+                },
+                files = allFiles,
             ),
-            discovery.issues,
+            discovery.issues + discovery.entityChangeIssues,
         )
     }
 
@@ -232,14 +253,63 @@ class EntityAttributePropagationService(
         if (entity.entityName != request.entityName || entity.className != request.className) {
             return requestRejected("The requested entity identity no longer matches the indexed schema.")
         }
+        val entityChangeProposal = request.entityChange?.let { change ->
+            if (
+                change.sourceLocator.relativePath != entity.sourceLocator.relativePath ||
+                change.sourceLocator.revisionFingerprint != entity.sourceLocator.revisionFingerprint ||
+                change.entity.fullName != entity.qualifiedName ||
+                change.entity.entityName != entity.entityName ||
+                change.entity.className != entity.className
+            ) {
+                return requestRejected(
+                    "The provisional entity change does not match the exact indexed entity revision.",
+                )
+            }
+            ExistingEntityChangeService.getInstance(project).proposeAttributeAdditions(change)
+        }
+        if (entityChangeProposal != null && entityChangeProposal.changeSet == null) {
+            return PropagationDiscovery(
+                attributes = emptyList(),
+                candidates = emptyList(),
+                issues = entityChangeProposal.issues.map {
+                    WorkspaceChangeIssue(
+                        code = "JVW-PROPAGATION-REQUEST-ENTITY-CHANGE-${it.code}",
+                        message = it.message,
+                        relativePath = it.relativePath,
+                    )
+                },
+                entityChangeSet = null,
+                entityChangeIssues = emptyList(),
+            )
+        }
         val attributesByName = entity.attributes.associateBy { it.name }
-        val missing = requestedNames.filterNot(attributesByName::containsKey)
+        val provisionalByName = request.entityChange
+            ?.entity
+            ?.attributes
+            ?.associateBy(AttributeModel::name)
+            .orEmpty()
+        val provisionalAdditions = provisionalByName.keys - attributesByName.keys
+        val requestedAdditions = requestedNames.toSet() - attributesByName.keys
+        if (request.entityChange != null && provisionalAdditions != requestedAdditions) {
+            return requestRejected(
+                "The atomic entity change must add exactly the newly requested attributes. " +
+                    "Unreviewed additions cannot be hidden inside a connected-surface plan.",
+            )
+        }
+        val missing = requestedNames.filter {
+            it !in attributesByName && it !in provisionalByName
+        }
         if (missing.isNotEmpty()) {
             return requestRejected(
                 "Attributes are not present in the indexed entity: ${missing.sorted().joinToString()}.",
             )
         }
-        val attributes = requestedNames.map(attributesByName::getValue)
+        val attributes = requestedNames.map { name ->
+            attributesByName[name] ?: provisionalAttribute(
+                entity = entity,
+                attribute = requireNotNull(provisionalByName[name]),
+            )
+        }
         val graph = ApplicationGraphService.getInstance(project).graph()
         val issues = mutableListOf<WorkspaceChangeIssue>()
         val candidates = mutableListOf<PropagationCandidate>()
@@ -319,6 +389,49 @@ class EntityAttributePropagationService(
                     .thenBy { it.snapshot.label },
             ),
             issues = issues,
+            entityChangeSet = entityChangeProposal?.changeSet,
+            entityChangeIssues = entityChangeProposal?.issues.orEmpty(),
+        )
+    }
+
+    private fun provisionalAttribute(
+        entity: SchemaEntitySnapshot,
+        attribute: AttributeModel,
+    ): SchemaEntityAttributeSnapshot {
+        val association = attribute.association?.let { configured ->
+            SchemaAssociationSnapshot(
+                associationType = configured.associationType,
+                relatedEntity = configured.relatedEntity,
+                relatedTableName = configured.relatedTableName,
+                relatedIdColumnName = configured.relatedIdColumnName,
+                relatedIdType = configured.relatedIdType,
+                localIdAttributeName = configured.localIdAttributeName,
+                mappedBy = configured.mappedBy,
+                joinColumnName = configured.joinColumnName,
+                joinTable = configured.joinTable,
+                cascade = configured.cascade,
+                fetch = configured.fetch,
+                collectionType = configured.collectionType,
+                crossDataStore = configured.crossDataStore,
+                orphanRemoval = configured.orphanRemoval,
+                composition = attribute.type == AttributeType.COMPOSITION,
+                onDelete = configured.onDelete,
+            )
+        }
+        return SchemaEntityAttributeSnapshot(
+            artifactId = "provisional:${entity.qualifiedName}#${attribute.name}",
+            name = attribute.name,
+            javaType = attribute.javaTypeName ?: attribute.javaType,
+            columnName = attribute.association?.joinColumnName ?: attribute.resolvedColumnName,
+            nullable = !attribute.mandatory,
+            unique = attribute.unique,
+            length = attribute.length,
+            precision = attribute.precision,
+            scale = attribute.scale,
+            persistent = !attribute.transientFlag,
+            association = association != null,
+            associationDetails = association,
+            moneyCandidate = MONEY_NAME.containsMatchIn(attribute.name),
         )
     }
 
@@ -860,6 +973,8 @@ class EntityAttributePropagationService(
     companion object {
         private const val MAX_ATTRIBUTES = 100
         private val JAVA_IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")
+        private val MONEY_NAME =
+            Regex("""(?i)(amount|balance|salary|wage|rate|price|total|interest|principal|deduction)""")
         private val DATA_CONTAINER_TAGS = setOf("instance", "collection")
         private val FORM_CONTAINER_TAGS = setOf("formLayout", "form")
         private val FETCH_PLAN_START = Regex("""<(?:(?:[A-Za-z_][\w.-]*):)?fetchPlan\b[^>]*>""")
@@ -1002,6 +1117,7 @@ data class EntityAttributePropagationInspectionRequest(
     val entityName: String,
     val className: String,
     val attributeNames: List<String>,
+    val entityChange: ExistingEntityAttributeAdditionRequest? = null,
 )
 
 data class EntityAttributePropagationChangeRequest(
@@ -1047,6 +1163,8 @@ private data class PropagationDiscovery(
     val attributes: List<SchemaEntityAttributeSnapshot>,
     val candidates: List<PropagationCandidate>,
     val issues: List<WorkspaceChangeIssue>,
+    val entityChangeSet: WorkspaceChangeSet? = null,
+    val entityChangeIssues: List<WorkspaceChangeIssue> = emptyList(),
 )
 
 private data class PropagationCandidate(

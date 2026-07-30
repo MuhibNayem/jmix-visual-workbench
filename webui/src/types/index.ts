@@ -699,6 +699,7 @@ export interface EntityAttributePropagationInspectionRequest {
   entityName: string
   className: string
   attributeNames: string[]
+  entityChange?: ExistingEntityAttributeAdditionRequest
 }
 
 export interface EntityAttributePropagationChangeRequest {

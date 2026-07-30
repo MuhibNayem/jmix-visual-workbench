@@ -1029,6 +1029,7 @@ class ${scenario.className} {
               case 'previewEntityAttributePropagation': {
                 const selected = new Set<string>(payload.targetIds ?? [])
                 const paths = [
+                  payload.inspection?.entityChange?.sourceLocator?.relativePath ?? null,
                   selected.has('development-detail-form')
                     ? 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-detail-view.xml'
                     : null,
@@ -1042,7 +1043,9 @@ class ${scenario.className} {
                 return {
                   accepted: paths.length > 0,
                   changeSetId: 'entity-attribute-propagation:development',
-                  label: `Propagate ${payload.inspection?.attributeNames?.length ?? 0} entity attributes`,
+                  label: payload.inspection?.entityChange
+                    ? `Add and propagate ${payload.inspection?.attributeNames?.length ?? 0} entity attributes`
+                    : `Propagate ${payload.inspection?.attributeNames?.length ?? 0} entity attributes`,
                   planDigest: paths.length ? 'development-entity-attribute-propagation' : undefined,
                   files: paths.map(relativePath => ({
                     relativePath,

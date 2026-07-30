@@ -24,6 +24,7 @@ import type {
   DatabaseEntityImportPlanResponse,
   DatabaseEntityImportProfileWorkspaceResponse,
   EntityAttributePropagationChangeRequest,
+  EntityAttributePropagationInspectionRequest,
   EntityAttributePropagationInspectionResponse,
   EntityAttributeTypeSchemaImpact,
   EntityAttributeTypeMigrationRequest,
@@ -144,6 +145,8 @@ export default function EntityDesigner() {
   const [databaseInspectionMergeAllowed, setDatabaseInspectionMergeAllowed] = useState(true)
   const [propagationInspection, setPropagationInspection] =
     useState<EntityAttributePropagationInspectionResponse | null>(null)
+  const [propagationRequest, setPropagationRequest] =
+    useState<EntityAttributePropagationInspectionRequest | null>(null)
   const [propagationSelection, setPropagationSelection] = useState<string[]>([])
   const [propagationPreview, setPropagationPreview] =
     useState<WorkspaceChangePreviewResponse | null>(null)
@@ -938,14 +941,9 @@ export default function EntityDesigner() {
   }
 
   const propagationChange = (): EntityAttributePropagationChangeRequest | null => {
-    if (!propagationInspection || !existingEntity) return null
+    if (!propagationInspection || !propagationRequest) return null
     return {
-      inspection: {
-        entityQualifiedName: existingEntity.qualifiedName,
-        entityName: existingEntity.entityName,
-        className: existingEntity.className,
-        attributeNames: propagationInspection.attributes,
-      },
+      inspection: propagationRequest,
       targetIds: propagationSelection,
     }
   }
@@ -961,12 +959,39 @@ export default function EntityDesigner() {
     setPropagationBusy(true)
     setPropagationPreview(null)
     try {
-      const response = await bridge.inspectEntityAttributePropagation({
+      const provisional = attributeNames.some(
+        name => !snapshot.attributes.some(attribute => attribute.name === name),
+      )
+      const requestedNames = new Set(attributeNames)
+      const baselineAttributes = existingEntityModel(
+        snapshot,
+        entity.generationTarget?.storeId,
+      ).attributes ?? []
+      const atomicEntity = provisional
+        ? {
+            ...entity,
+            attributes: [
+              ...baselineAttributes,
+              ...entity.attributes.filter(attribute =>
+                requestedNames.has(attribute.name) &&
+                !snapshot.attributes.some(existing => existing.name === attribute.name)),
+            ],
+          }
+        : entity
+      const request: EntityAttributePropagationInspectionRequest = {
         entityQualifiedName: snapshot.qualifiedName,
         entityName: snapshot.entityName,
         className: snapshot.className,
         attributeNames,
-      })
+        ...(provisional ? {
+          entityChange: {
+            sourceLocator: snapshot.sourceLocator,
+            entity: atomicEntity,
+          },
+        } : {}),
+      }
+      const response = await bridge.inspectEntityAttributePropagation(request)
+      setPropagationRequest(request)
       setPropagationInspection(response)
       setPropagationSelection(
         response.targets
@@ -976,7 +1001,9 @@ export default function EntityDesigner() {
       if (response.accepted) {
         const editable = response.targets.filter(target => target.supported).length
         addToast(
-          `Impact review found ${response.targets.length} connected targets; ${editable} can be updated safely`,
+          provisional
+            ? `Atomic review found ${response.targets.length} connected targets; the entity and selected surfaces will change together`
+            : `Impact review found ${response.targets.length} connected targets; ${editable} can be updated safely`,
           'info',
         )
       } else {
@@ -1018,13 +1045,32 @@ export default function EntityDesigner() {
       )
       if (result.success) {
         addToast(
-          `Propagated attributes atomically across ${result.filesChanged.length} files`,
+          change.inspection.entityChange
+            ? `Added the entity attribute and connected surfaces atomically across ${result.filesChanged.length} files`
+            : `Propagated attributes atomically across ${result.filesChanged.length} files`,
           'success',
         )
         setPropagationInspection(null)
+        setPropagationRequest(null)
         setPropagationSelection([])
         setPropagationPreview(null)
         bridge.getApplicationGraph(true).then(setApplicationGraph).catch(() => undefined)
+        if (change.inspection.entityChange) {
+          const refreshed = await bridge.getSchemaWorkspace(true)
+          setSchemaWorkspace(refreshed)
+          const updated = refreshed.entities.find(
+            candidate => candidate.qualifiedName === change.inspection.entityQualifiedName,
+          )
+          if (updated) {
+            const store = refreshed.stores.find(
+              candidate => candidate.moduleId === updated.moduleId && candidate.name === updated.storeName,
+            )
+            setExistingEntity(updated)
+            setEntity(existingEntityModel(updated, store?.id))
+            setSelectedAttr(null)
+            setGenerationPreview(null)
+          }
+        }
       } else {
         addToast(result.issues.map(issue => issue.message).join(', '), 'error')
       }
@@ -1113,6 +1159,7 @@ export default function EntityDesigner() {
     setDatabaseProfileLabel('')
     setSelectedDatabaseProfileId('')
     setPropagationInspection(null)
+    setPropagationRequest(null)
     setPropagationSelection([])
     setPropagationPreview(null)
     resetEntity()
@@ -1145,6 +1192,7 @@ export default function EntityDesigner() {
     setDatabaseProfileLabel('')
     setSelectedDatabaseProfileId('')
     setPropagationInspection(null)
+    setPropagationRequest(null)
     setPropagationSelection([])
     setPropagationPreview(null)
     setEntity(existingEntityModel(snapshot, store?.id))
@@ -1833,22 +1881,34 @@ export default function EntityDesigner() {
                         const attribute = selectedAttr === null ? null : entity.attributes[selectedAttr]
                         inspectAttributePropagation(
                           existingEntity,
-                          attribute && existingAttributeNames.has(attribute.name) ? [attribute.name] : [],
+                          attribute ? [attribute.name] : [],
                         )
                       }}
                       disabled={
                         propagationBusy ||
-                        selectedAttr === null ||
-                        !existingAttributeNames.has(entity.attributes[selectedAttr]?.name ?? '')
+                        selectedAttr === null
                       }
                       className="rounded border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-xs text-violet-200 transition-colors hover:bg-violet-500/20 disabled:opacity-50"
                     >
-                      {propagationBusy ? 'Mapping impact…' : '⇢ Add selected attribute to views'}
+                      {propagationBusy
+                        ? 'Mapping impact…'
+                        : selectedAttr === null
+                          ? '⇢ Select attribute for connected impact'
+                          : existingAttributeNames.has(entity.attributes[selectedAttr]?.name ?? '')
+                          ? '⇢ Add selected attribute to views'
+                          : '⇢ Add attribute + connected surfaces'}
                     </button>
                   </>
                 )}
                 <button
-                  onClick={addAttribute}
+                  onClick={() => {
+                    addAttribute()
+                    setSelectedAttr(entity.attributes.length)
+                    setPropagationInspection(null)
+                    setPropagationRequest(null)
+                    setPropagationSelection([])
+                    setPropagationPreview(null)
+                  }}
                   className="rounded bg-jmix-500/20 px-3 py-1 text-xs text-jmix-400 transition-colors hover:bg-jmix-500/30"
                 >
                   + Add Attribute
@@ -1979,14 +2039,16 @@ export default function EntityDesigner() {
                     Connected attribute impact
                   </div>
                   <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
-                    Review each exact source target. View, fetch-plan, and default-locale changes are
-                    source-preserving. Privilege-expanding security updates are never selected automatically.
+                    Review each exact source target. New entity attributes can be committed with their
+                    views, fetch plans, captions, and explicit role policies in one transaction.
+                    Privilege-expanding security updates are never selected automatically.
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => {
                     setPropagationInspection(null)
+                    setPropagationRequest(null)
                     setPropagationSelection([])
                     setPropagationPreview(null)
                   }}
@@ -2105,7 +2167,9 @@ export default function EntityDesigner() {
                       disabled={propagationBusy || propagationSelection.length === 0}
                       className="rounded border border-violet-500/30 px-3 py-1.5 text-[10px] text-violet-200 hover:bg-violet-500/10 disabled:opacity-50"
                     >
-                      Preview selected targets
+                      {propagationRequest?.entityChange
+                        ? 'Preview atomic entity + surfaces'
+                        : 'Preview selected targets'}
                     </button>
                     <button
                       type="button"
@@ -2113,7 +2177,9 @@ export default function EntityDesigner() {
                       disabled={propagationBusy || !propagationPreview?.planDigest}
                       className="rounded bg-violet-500 px-3 py-1.5 text-[10px] font-medium text-white hover:bg-violet-600 disabled:opacity-50"
                     >
-                      Apply atomic propagation
+                      {propagationRequest?.entityChange
+                        ? 'Apply entity + surfaces atomically'
+                        : 'Apply atomic propagation'}
                     </button>
                   </div>
                 </>
