@@ -433,6 +433,47 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                 }
                 """.trimIndent(),
             )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/EstablishedDepartment.kt",
+                """
+                package com.acme.entity
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.util.UUID
+                @JmixEntity
+                @Entity
+                @Table(name = "ESTABLISHED_DEPARTMENT")
+                open class EstablishedDepartment {
+                    @Id
+                    var id: UUID? = null
+                    fun manualDepartmentCode(): String = "department"
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/EstablishedWorker.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "ESTABLISHED_WORKER")
+                public class EstablishedWorker {
+                    @Id
+                    private UUID id;
+
+                    @ManyToOne(fetch = FetchType.LAZY)
+                    @JoinColumn(name = "DEPARTMENT_ID")
+                    private EstablishedDepartment department;
+
+                    public String manualWorkerCode() { return "worker"; }
+                }
+                """.trimIndent(),
+            )
         }
         val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
         val store = workspace.stores.single()
@@ -489,6 +530,94 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(migration.contains("""name="WORKER_ID""""))
         assertTrue(migration.contains("""referencedTableName="KOTLIN_WORKER""""))
         assertFalse(migration.contains("""tableName="KOTLIN_WORKER""""))
+
+        val establishedSource = workspace.entities.single { it.className == "EstablishedWorker" }
+        val establishedTarget = workspace.entities.single { it.className == "EstablishedDepartment" }
+        val establishedCurrent = establishedSource.attributes.single { it.name == "department" }
+        val establishedRelation = requireNotNull(establishedCurrent.associationDetails)
+        val establishedModel = EntityModel(
+            className = establishedSource.className,
+            packageName = establishedSource.qualifiedName.substringBeforeLast('.'),
+            tableName = establishedSource.tableName,
+            dataStore = establishedSource.storeName,
+            generationTarget = EntityGenerationTarget(establishedSource.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = establishedCurrent.name,
+                    type = AttributeType.ASSOCIATION,
+                    columnName = establishedCurrent.columnName,
+                    mandatory = !establishedCurrent.nullable,
+                    unique = establishedCurrent.unique,
+                    association = AssociationConfig(
+                        associationType = establishedRelation.associationType,
+                        relatedEntity = establishedRelation.relatedEntity,
+                        relatedTableName = establishedRelation.relatedTableName,
+                        relatedIdColumnName = establishedRelation.relatedIdColumnName,
+                        relatedIdType = establishedRelation.relatedIdType,
+                        mappedBy = establishedRelation.mappedBy,
+                        joinColumnName = establishedRelation.joinColumnName,
+                        joinTable = establishedRelation.joinTable,
+                        cascade = establishedRelation.cascade.toMutableList(),
+                        fetch = FetchType.EAGER,
+                        collectionType = establishedRelation.collectionType,
+                        crossDataStore = establishedRelation.crossDataStore,
+                        orphanRemoval = establishedRelation.orphanRemoval,
+                        onDelete = establishedRelation.onDelete,
+                        generateInverse = true,
+                        inverseAttributeName = "workers",
+                    ),
+                ),
+            ),
+        )
+        val establishedPreview = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(establishedSource.sourceLocator, establishedModel),
+        )
+        assertTrue(
+            establishedPreview.accepted,
+            establishedPreview.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        assertEquals(2, establishedPreview.files.size)
+        val establishedJava = establishedPreview.files.single {
+            it.relativePath.endsWith("EstablishedWorker.java")
+        }.resultContent
+        val establishedKotlin = establishedPreview.files.single {
+            it.relativePath.endsWith("EstablishedDepartment.kt")
+        }.resultContent
+        assertTrue(establishedJava.contains("@ManyToOne(fetch = FetchType.EAGER)"))
+        assertTrue(establishedJava.contains("""@JoinColumn(name = "DEPARTMENT_ID")"""))
+        assertTrue(establishedJava.contains("manualWorkerCode"))
+        assertTrue(establishedKotlin.contains("@OneToMany("))
+        assertTrue(establishedKotlin.contains("mappedBy = \"department\""))
+        assertTrue(establishedKotlin.contains("workers"))
+        assertTrue(establishedKotlin.contains("manualDepartmentCode"))
+        assertFalse(establishedPreview.files.any { it.relativePath.endsWith(".xml") })
+        assertEquals(
+            establishedTarget.qualifiedName,
+            establishedRelation.relatedEntity,
+        )
+        val inverseOnlyModel = establishedModel.copy(
+            attributes = establishedModel.attributes.map { attribute ->
+                attribute.copy(
+                    association = attribute.association?.copy(
+                        fetch = establishedRelation.fetch,
+                        inverseAttributeName = "members",
+                    ),
+                )
+            }.toMutableList(),
+        )
+        val inverseOnlyPreview = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(establishedSource.sourceLocator, inverseOnlyModel),
+        )
+        assertTrue(
+            inverseOnlyPreview.accepted,
+            inverseOnlyPreview.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        assertEquals(1, inverseOnlyPreview.files.size)
+        assertTrue(
+            inverseOnlyPreview.files.single().relativePath.endsWith("EstablishedDepartment.kt"),
+        )
+        assertTrue(inverseOnlyPreview.files.single().resultContent.contains("members"))
+        assertFalse(inverseOnlyPreview.files.any { it.relativePath.endsWith(".xml") })
 
         val orgUnit = workspace.entities.single { it.className == "OrgUnit" }
         val selfModel = EntityModel(

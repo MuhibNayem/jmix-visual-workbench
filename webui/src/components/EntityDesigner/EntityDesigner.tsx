@@ -2430,6 +2430,8 @@ export default function EntityDesigner() {
                         attribute={selected}
                         sourceAssociation={sourceAssociation}
                         sourceUnique={source?.unique ?? false}
+                        sourceEntity={existingEntity!}
+                        schemaWorkspace={schemaWorkspace}
                         onChange={(change) => updateAttribute(selectedAttr, change)}
                       />
                     )}
@@ -3665,11 +3667,15 @@ function ExistingRelationshipSemanticsEditor({
   attribute,
   sourceAssociation,
   sourceUnique,
+  sourceEntity,
+  schemaWorkspace,
   onChange,
 }: {
   attribute: AttributeModel
   sourceAssociation: NonNullable<SchemaEntityAttributeSnapshot['associationDetails']>
   sourceUnique: boolean
+  sourceEntity: SchemaEntitySnapshot
+  schemaWorkspace: SchemaWorkspaceResponse | null
   onChange: (change: Partial<AttributeModel>) => void
 }) {
   const association = attribute.association!
@@ -3681,6 +3687,24 @@ function ExistingRelationshipSemanticsEditor({
     !sourceAssociation.crossDataStore &&
     !sourceAssociation.mappedBy &&
     Boolean(sourceAssociation.joinColumnName)
+  const relatedEntitySnapshot = schemaWorkspace?.entities.find(
+    candidate => candidate.qualifiedName === sourceAssociation.relatedEntity,
+  )
+  const inverseRepairSupported = Boolean(
+    relatedEntitySnapshot?.entityType === 'entity' &&
+    relatedEntitySnapshot.moduleId === sourceEntity.moduleId &&
+    relatedEntitySnapshot.storeName === sourceEntity.storeName &&
+    !sourceAssociation.crossDataStore &&
+    !sourceAssociation.mappedBy &&
+    (
+      sourceAssociation.associationType === 'manyToOne' ||
+      sourceAssociation.associationType === 'oneToOne' ||
+      (sourceAssociation.associationType === 'manyToMany' && sourceAssociation.joinTable)
+    ),
+  )
+  const suggestedInverseName = sourceAssociation.associationType === 'manyToOne'
+    ? `${sourceEntity.className.charAt(0).toLowerCase()}${sourceEntity.className.slice(1)}s`
+    : `${sourceEntity.className.charAt(0).toLowerCase()}${sourceEntity.className.slice(1)}`
   const updateAssociation = (change: Partial<AssociationConfig>) => {
     onChange({ association: { ...association, ...change } })
   }
@@ -3769,6 +3793,53 @@ function ExistingRelationshipSemanticsEditor({
               </select>
             </Field>
           </div>
+          {inverseRepairSupported && (
+            <div className="mt-3 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.05] p-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-200">
+                    Established inverse side
+                  </div>
+                  <p className="mt-1 text-[9px] leading-relaxed text-gray-500">
+                    Add or repair the matching property in {relatedEntitySnapshot?.className}. The indexed owning
+                    mapping must remain exact; both handwritten sources are checked and previewed as one revision.
+                  </p>
+                </div>
+                <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[10px] text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(association.generateInverse)}
+                    onChange={event => updateAssociation({
+                      generateInverse: event.target.checked,
+                      inverseAttributeName: event.target.checked
+                        ? association.inverseAttributeName || suggestedInverseName
+                        : association.inverseAttributeName,
+                    })}
+                  />
+                  add or repair inverse
+                </label>
+              </div>
+              {association.generateInverse && (
+                <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
+                  <Field label={`Property in ${relatedEntitySnapshot?.className}`}>
+                    <input
+                      value={association.inverseAttributeName || ''}
+                      onChange={event => updateAssociation({
+                        inverseAttributeName: event.target.value || undefined,
+                      })}
+                      placeholder={suggestedInverseName}
+                      className="w-full min-w-0 font-mono"
+                      aria-label={`Established inverse attribute for ${attribute.name}`}
+                    />
+                  </Field>
+                  <div className="min-w-0 rounded border border-emerald-500/15 bg-black/10 p-2 text-[9px] leading-relaxed text-emerald-100/70">
+                    The inverse uses <code>mappedBy=&quot;{attribute.name}&quot;</code>. Existing matching mappings
+                    are idempotent; collisions, stale sources, cross-store targets, and module cycles fail closed.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           <div className="mt-3 border-t border-cyan-500/15 pt-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-[9px] font-medium uppercase tracking-wider text-gray-500">

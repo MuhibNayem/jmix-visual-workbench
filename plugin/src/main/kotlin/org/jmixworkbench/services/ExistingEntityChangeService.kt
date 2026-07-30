@@ -96,10 +96,19 @@ class ExistingEntityChangeService(
             return ExistingEntityChangeProposal(null, planned.issues)
         }
         val proposals = planned.requests.map(::proposeSingleEntityAttributeAdditions)
-        proposals.firstOrNull { it.changeSet == null }?.let { return it }
+        val blockingProposal = proposals.firstOrNull { proposal ->
+            proposal.changeSet == null &&
+                proposal.issues.any { it.code != "JVW-ENTITY-UPDATE-NOOP" }
+        }
+        if (blockingProposal != null) return blockingProposal
+        val effectiveProposals = proposals.filter { it.changeSet != null }
+        if (effectiveProposals.isEmpty()) {
+            return proposals.firstOrNull()
+                ?: rejected("JVW-ENTITY-UPDATE-NOOP", "No entity relationship changes were found.")
+        }
         if (proposals.size == 1) return proposals.single()
 
-        val allFiles = proposals.flatMap { requireNotNull(it.changeSet).files }
+        val allFiles = effectiveProposals.flatMap { requireNotNull(it.changeSet).files }
         val conflictingPath = allFiles.groupBy(WorkspaceFileChange::relativePath)
             .entries
             .firstOrNull { (_, changes) -> changes.distinct().size > 1 }
@@ -111,7 +120,7 @@ class ExistingEntityChangeService(
             )
         }
         val files = allFiles.distinct()
-        val identity = proposals.joinToString("\u0000") { requireNotNull(it.changeSet).id }
+        val identity = effectiveProposals.joinToString("\u0000") { requireNotNull(it.changeSet).id }
         return ExistingEntityChangeProposal(
             changeSet = WorkspaceChangeSet(
                 id = "existing-bidirectional-relationship:" +
@@ -145,20 +154,25 @@ class ExistingEntityChangeService(
                 ),
             ),
         )
-        val existingSourceNames = sourceSnapshot.attributes.mapTo(mutableSetOf()) { it.name }
         val targetAdditions = linkedMapOf<String, MutableList<AttributeModel>>()
         val targets = linkedMapOf<String, SchemaEntitySnapshot>()
         var primaryEntity = request.entity
 
         requestedInverseRelationships.forEach { sourceAttribute ->
-            if (sourceAttribute.name in existingSourceNames) {
+            val currentSourceAttribute = sourceSnapshot.attributes.firstOrNull {
+                it.name == sourceAttribute.name
+            }
+            if (
+                currentSourceAttribute != null &&
+                !matchesExistingInverseSource(currentSourceAttribute, sourceAttribute)
+            ) {
                 return BidirectionalRequestPlan(
                     emptyList(),
                     listOf(
                         WorkspaceChangeIssue(
-                            "JVW-ENTITY-INVERSE-EXISTING-RELATIONSHIP-REQUIRES-IMPACT",
-                            "${sourceAttribute.name} already exists. Adding an inverse to an established relationship " +
-                                "requires the dedicated two-sided impact workflow.",
+                            "JVW-ENTITY-INVERSE-SOURCE-SHAPE-MISMATCH",
+                            "${sourceAttribute.name} does not exactly match its indexed owning relationship. " +
+                                "Refresh before adding or repairing the inverse side.",
                         ),
                     ),
                 )
@@ -392,6 +406,32 @@ class ExistingEntityChangeService(
             currentAssociation.associationType == expectedAssociation.associationType &&
             currentAssociation.relatedEntity == expectedAssociation.relatedEntity &&
             currentAssociation.mappedBy == expectedAssociation.mappedBy
+    }
+
+    private fun matchesExistingInverseSource(
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): Boolean {
+        val currentAssociation = current.associationDetails ?: return false
+        val desiredAssociation = desired.association ?: return false
+        return current.association &&
+            desired.type in RELATIONSHIP_ATTRIBUTE_TYPES &&
+            currentAssociation.associationType == desiredAssociation.associationType &&
+            currentAssociation.associationType in setOf(
+                AssociationType.MANY_TO_ONE,
+                AssociationType.ONE_TO_ONE,
+                AssociationType.MANY_TO_MANY,
+            ) &&
+            currentAssociation.relatedEntity == desiredAssociation.relatedEntity &&
+            currentAssociation.mappedBy.isNullOrBlank() &&
+            desiredAssociation.mappedBy.isNullOrBlank() &&
+            currentAssociation.joinColumnName == desiredAssociation.joinColumnName &&
+            currentAssociation.joinTable == desiredAssociation.joinTable &&
+            currentAssociation.collectionType == desiredAssociation.collectionType &&
+            !currentAssociation.crossDataStore &&
+            !desiredAssociation.crossDataStore &&
+            desired.mandatory == !current.nullable &&
+            desired.unique == current.unique
     }
 
     private fun matchesGeneratedInverse(
