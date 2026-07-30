@@ -270,9 +270,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 263 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 264 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 263 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 264 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -453,11 +453,13 @@ inspection control rather than relying on a hard-to-hit table-row target.
 
 ## Recommended next execution order
 
-1. Expose the high-frequency entity workflows that remain modeled but hidden:
-   copy/reorder, inherited/trait visibility,
-   callbacks/listeners, view actions, discriminator fields, embedded overrides
-   and repository methods.
-2. Split the 5,870-line Entity Designer into bounded feature modules and add
+1. Complete the remaining high-frequency entity workflows: listener class
+   creation/navigation, view actions, discriminator fields, embedded overrides,
+   mature repository methods, localized-caption workflows and safe enum-usage
+   migration. Copy/reorder, inherited/trait visibility, callback authoring and
+   listener discovery are now implemented with source-protected existing
+   declarations.
+2. Split the 6,077-line central Entity Designer into bounded feature modules and add
    component, interaction, responsive and accessibility regression tests.
 3. Complete arbitrary handwritten Java/Kotlin fixtures, database-first
    usability and installed-IDE dual-host performance/memory/leak certification.

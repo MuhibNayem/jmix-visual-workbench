@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
+import { ChevronDown, ChevronUp, Copy, LockKeyhole, Trash2 } from 'lucide-react'
 import { useStore } from '../../store'
 import { bridge } from '../../bridge'
 import type {
   AttributeModel,
   AttributeType,
   TraitType,
+  LifecycleCallback,
   IdType,
   IdGeneration,
   AssociationConfig,
@@ -36,6 +38,10 @@ import type {
   GraphSourceLocator,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
+import {
+  EntitySourceContractEvidence,
+  InheritedAttributeEvidence,
+} from './EntitySourceEvidence'
 
 const ATTRIBUTE_TYPES: AttributeType[] = [
   'string', 'character', 'integer', 'long', 'double', 'bigDecimal', 'boolean',
@@ -61,10 +67,33 @@ const TRAITS: { value: TraitType; label: string }[] = [
   { value: 'updatedDate', label: 'Last Modified Date' },
 ]
 
+const TRAIT_ATTRIBUTE_NAMES: Record<TraitType, string[]> = {
+  standardEntity: ['id', 'version', 'createdBy', 'createdDate', 'lastModifiedBy', 'lastModifiedDate'],
+  uuid: ['uuid'],
+  softDelete: ['deletedDate', 'deletedBy'],
+  hasTenantId: ['sysTenantId'],
+  hasVersion: ['version'],
+  createdBy: ['createdBy'],
+  createdDate: ['createdDate'],
+  updatedBy: ['lastModifiedBy'],
+  updatedDate: ['lastModifiedDate'],
+  auditable: ['createdBy', 'createdDate', 'lastModifiedBy', 'lastModifiedDate'],
+}
+
 const VALIDATIONS: ValidationType[] = [
   'notNull', 'notEmpty', 'notBlank', 'size', 'min', 'max',
   'decimalMin', 'decimalMax', 'pattern', 'email', 'past', 'future',
   'positive', 'negative', 'digits', 'assertTrue',
+]
+
+const LIFECYCLE_CALLBACKS: { value: LifecycleCallback; label: string }[] = [
+  { value: 'prePersist', label: 'Before persist' },
+  { value: 'postPersist', label: 'After persist' },
+  { value: 'preUpdate', label: 'Before update' },
+  { value: 'postUpdate', label: 'After update' },
+  { value: 'preRemove', label: 'Before remove' },
+  { value: 'postRemove', label: 'After remove' },
+  { value: 'postLoad', label: 'After load' },
 ]
 
 interface DatabaseColumnDraft {
@@ -96,6 +125,8 @@ export default function EntityDesigner({
     projectConfig,
     setEntity,
     addAttribute,
+    duplicateAttribute,
+    moveAttribute,
     updateAttribute,
     removeAttribute,
     resetEntity,
@@ -109,6 +140,7 @@ export default function EntityDesigner({
   const [schemaWorkspace, setSchemaWorkspace] = useState<SchemaWorkspaceResponse | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(true)
   const [nativeSourceIssue, setNativeSourceIssue] = useState<string | null>(null)
+  const [showTraitAttributes, setShowTraitAttributes] = useState(false)
   const [generationPreview, setGenerationPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
   const [existingEntity, setExistingEntity] = useState<SchemaEntitySnapshot | null>(null)
   const [applicationGraph, setApplicationGraph] = useState<ApplicationGraphResponse | null>(null)
@@ -207,6 +239,7 @@ export default function EntityDesigner({
         setExistingEntity(selected)
         setGenerationPreview(null)
         setSelectedAttr(null)
+        setShowTraitAttributes(false)
         setRenameDraft('')
         setRenameLaunched(false)
         setCoordinatedRename(null)
@@ -316,6 +349,41 @@ export default function EntityDesigner({
     () => new Set(existingEntity?.attributes.map((attribute) => attribute.name) ?? []),
     [existingEntity],
   )
+  const traitManagedAttributeNames = useMemo(
+    () => new Set(
+      (existingEntity?.traits ?? []).flatMap(trait => TRAIT_ATTRIBUTE_NAMES[trait]),
+    ),
+    [existingEntity],
+  )
+  const hiddenTraitAttributeCount = entity.attributes.filter(
+    attribute => traitManagedAttributeNames.has(attribute.name),
+  ).length
+  const visibleAttributeEntries = entity.attributes
+    .map((attribute, index) => ({ attribute, index }))
+    .filter(({ attribute }) =>
+      showTraitAttributes || !traitManagedAttributeNames.has(attribute.name))
+  const duplicateDraftAttribute = (index: number, locked: boolean) => {
+    const inserted = duplicateAttribute(index)
+    if (inserted === null) return
+    const selected = locked ? entity.attributes.length : inserted
+    if (locked && inserted !== selected) {
+      moveAttribute(inserted, selected)
+    }
+    setSelectedAttr(selected)
+    setGenerationPreview(null)
+    addToast(
+      locked
+        ? 'Copied as a new source-safe draft. Physical mappings were regenerated and constraint expansion was cleared.'
+        : 'Attribute copied. Review its generated mapping before preview.',
+      'info',
+    )
+  }
+
+  const reorderDraftAttribute = (index: number, target: number) => {
+    if (!moveAttribute(index, target)) return
+    setSelectedAttr(target)
+    setGenerationPreview(null)
+  }
   const entityImpact = useMemo(() => {
     if (!applicationGraph) return []
     const qualifiedName = existingEntity?.qualifiedName || `${entity.packageName}.${entity.className}`
@@ -1368,6 +1436,7 @@ export default function EntityDesigner({
     setExistingEntity(snapshot)
     setGenerationPreview(null)
     setSelectedAttr(null)
+    setShowTraitAttributes(false)
     setRenameDraft('')
     setRenameLaunched(false)
     setCoordinatedRename(null)
@@ -1601,6 +1670,8 @@ export default function EntityDesigner({
               </div>
             )}
           </Section>
+
+          {existingEntity && <EntitySourceContractEvidence entity={existingEntity} />}
 
           <fieldset disabled={Boolean(existingEntity)} className="space-y-4 disabled:opacity-60">
           {/* Basic Info */}
@@ -1932,6 +2003,55 @@ export default function EntityDesigner({
           </Section>
           )}
 
+          {entity.entityType !== 'enum' && (
+            <Section title="Lifecycle & Listeners">
+              <div className="grid grid-cols-2 gap-1.5">
+                {LIFECYCLE_CALLBACKS.map(callback => {
+                  const active = entity.lifecycleCallbacks.includes(callback.value)
+                  return (
+                    <label
+                      key={callback.value}
+                      className={`flex min-w-0 items-center gap-1.5 rounded border px-2 py-1.5 text-[9px] ${
+                        active
+                          ? 'border-jmix-500/35 bg-jmix-500/10 text-jmix-200'
+                          : 'border-surface-border bg-black/10 text-gray-500'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={() => setEntity({
+                          lifecycleCallbacks: active
+                            ? entity.lifecycleCallbacks.filter(item => item !== callback.value)
+                            : [...entity.lifecycleCallbacks, callback.value],
+                        })}
+                      />
+                      <span className="truncate">{callback.label}</span>
+                    </label>
+                  )
+                })}
+              </div>
+              <Field label="Entity listener classes">
+                <textarea
+                  rows={3}
+                  value={entity.entityListeners.join(', ')}
+                  onChange={event => setEntity({
+                    entityListeners: event.target.value
+                      .split(/[\n,]/)
+                      .map(value => value.trim())
+                      .filter(Boolean),
+                  })}
+                  placeholder="com.example.listener.CustomerEntityListener"
+                  className="w-full resize-y"
+                />
+              </Field>
+              <p className="text-[9px] leading-relaxed text-gray-600">
+                Generated callback methods are intentionally empty. Business side effects belong in reviewed
+                services or listeners with explicit transaction behavior.
+              </p>
+            </Section>
+          )}
+
           {/* Options */}
           <Section title="Options">
             {entity.entityType !== 'enum' && <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
@@ -2043,6 +2163,32 @@ export default function EntityDesigner({
             </h3>
             {entity.entityType !== 'enum' && (
               <div className="flex flex-wrap justify-end gap-2">
+                {hiddenTraitAttributeCount > 0 && (
+                  <button
+                    type="button"
+                    aria-pressed={showTraitAttributes}
+                    onClick={() => {
+                      setShowTraitAttributes(current => {
+                        const next = !current
+                        if (!next && selectedAttr !== null) {
+                          const selectedName = entity.attributes[selectedAttr]?.name
+                          if (selectedName && traitManagedAttributeNames.has(selectedName)) {
+                            setSelectedAttr(null)
+                          }
+                        }
+                        return next
+                      })
+                    }}
+                    className={`rounded border px-2.5 py-1 text-[10px] transition-colors ${
+                      showTraitAttributes
+                        ? 'border-sky-500/35 bg-sky-500/10 text-sky-100'
+                        : 'border-surface-border bg-black/10 text-gray-500 hover:text-gray-300'
+                    }`}
+                  >
+                    {showTraitAttributes ? 'Hide' : 'Show'} {hiddenTraitAttributeCount} trait field
+                    {hiddenTraitAttributeCount === 1 ? '' : 's'}
+                  </button>
+                )}
                 {!existingEntity && entity.entityType === 'entity' &&
                   Boolean(databaseProfileWorkspace?.profiles.length) && (
                     <div className="flex min-w-0 max-w-full items-center gap-1 rounded border border-violet-500/25 bg-violet-500/[0.07] p-1">
@@ -2134,6 +2280,8 @@ export default function EntityDesigner({
               </div>
             )}
           </div>
+
+          {existingEntity && <InheritedAttributeEvidence entity={existingEntity} />}
 
           {(databaseBrowseBusy || databaseBrowse) && (
             <DatabaseBrowsePanel
@@ -2470,7 +2618,7 @@ export default function EntityDesigner({
             </div>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-surface-border">
-              <table className="w-full min-w-[40rem] text-xs">
+              <table className="w-full min-w-[44rem] text-xs">
                 <thead>
                   <tr className="bg-surface-light text-gray-400 text-left">
                     <th className="px-3 py-2 font-medium">Name</th>
@@ -2482,7 +2630,7 @@ export default function EntityDesigner({
                   </tr>
                 </thead>
                 <tbody>
-                  {entity.attributes.map((attr, i) => {
+                  {visibleAttributeEntries.map(({ attribute: attr, index: i }) => {
                     const locked = existingAttributeNames.has(attr.name)
                     const sourceAttribute = existingEntity?.attributes.find(
                       (candidate) => candidate.name === attr.name,
@@ -2573,23 +2721,81 @@ export default function EntityDesigner({
                           )}
                         </td>
                         <td className="px-3 py-2">
-                          {locked ? (
-                            <span
-                              title={mappingLocked
-                                ? 'Relationship or transient source mapping is protected'
-                                : 'Name, Java type, and removal are protected; mapping metadata remains editable'}
-                              className="text-[10px] text-gray-600"
-                            >
-                              {mappingLocked ? 'Protected' : 'Mapping only'}
-                            </span>
-                          ) : (
+                          <div className="flex items-center gap-0.5">
                             <button
-                              onClick={e => { e.stopPropagation(); removeAttribute(i); setSelectedAttr(null) }}
-                              className="text-red-400 hover:text-red-300 text-xs"
+                              type="button"
+                              aria-label={`Copy ${attr.name}`}
+                              title="Copy as a new attribute draft"
+                              onClick={event => {
+                                event.stopPropagation()
+                                duplicateDraftAttribute(i, locked)
+                              }}
+                              className="rounded p-1 text-gray-500 transition-colors hover:bg-jmix-500/10 hover:text-jmix-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-jmix-400"
                             >
-                              ✕
+                              <Copy size={13} aria-hidden="true" />
                             </button>
-                          )}
+                            {locked ? (
+                              <span
+                                title={mappingLocked
+                                  ? 'Relationship or transient source mapping is protected'
+                                  : 'Existing declaration order and destructive shape edits are source-protected'}
+                                aria-label={`${attr.name} source declaration is order locked`}
+                                className="inline-flex items-center gap-1 rounded px-1 py-1 text-[9px] text-gray-600"
+                              >
+                                <LockKeyhole size={12} aria-hidden="true" />
+                                <span>{mappingLocked ? 'Protected' : 'Source'}</span>
+                              </span>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  aria-label={`Move ${attr.name} up`}
+                                  title="Move draft up"
+                                  disabled={
+                                    i === 0 ||
+                                    existingAttributeNames.has(entity.attributes[i - 1]?.name ?? '')
+                                  }
+                                  onClick={event => {
+                                    event.stopPropagation()
+                                    reorderDraftAttribute(i, i - 1)
+                                  }}
+                                  className="rounded p-1 text-gray-500 transition-colors hover:bg-white/5 hover:text-gray-200 disabled:cursor-not-allowed disabled:opacity-20"
+                                >
+                                  <ChevronUp size={13} aria-hidden="true" />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`Move ${attr.name} down`}
+                                  title="Move draft down"
+                                  disabled={
+                                    i === entity.attributes.length - 1 ||
+                                    existingAttributeNames.has(entity.attributes[i + 1]?.name ?? '')
+                                  }
+                                  onClick={event => {
+                                    event.stopPropagation()
+                                    reorderDraftAttribute(i, i + 1)
+                                  }}
+                                  className="rounded p-1 text-gray-500 transition-colors hover:bg-white/5 hover:text-gray-200 disabled:cursor-not-allowed disabled:opacity-20"
+                                >
+                                  <ChevronDown size={13} aria-hidden="true" />
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`Delete ${attr.name}`}
+                                  title="Delete draft attribute"
+                                  onClick={event => {
+                                    event.stopPropagation()
+                                    removeAttribute(i)
+                                    setSelectedAttr(null)
+                                    setGenerationPreview(null)
+                                  }}
+                                  className="rounded p-1 text-red-400 transition-colors hover:bg-red-500/10 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+                                >
+                                  <Trash2 size={13} aria-hidden="true" />
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     )
@@ -5579,7 +5785,7 @@ function existingEntityModel(
       generation: 'jmixGenerated',
       columnName: snapshot.idColumnName,
     },
-    traits: [],
+    traits: [...snapshot.traits],
     attributes: snapshot.attributes.map((attribute) => {
       const discovered = attribute.associationDetails
       const attributeType = discovered?.composition
@@ -5644,9 +5850,10 @@ function existingEntityModel(
       unmappedColumns: [],
       unmappedConstraints: [],
     },
-    lifecycleCallbacks: [],
-    entityListeners: [],
-    implementsInterfaces: [],
+    lifecycleCallbacks: [...snapshot.lifecycleCallbacks],
+    entityListeners: [...snapshot.entityListeners],
+    extendsClass: snapshot.extendsClass,
+    implementsInterfaces: [...snapshot.implementsInterfaces],
     annotations: [],
     systemLevel: false,
     annotatedPropertiesOnly: false,

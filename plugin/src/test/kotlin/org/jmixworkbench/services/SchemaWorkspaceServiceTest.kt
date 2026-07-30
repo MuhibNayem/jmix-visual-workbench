@@ -30,6 +30,8 @@ import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.ProjectConfig
 import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.FetchType
+import org.jmixworkbench.model.LifecycleCallback
+import org.jmixworkbench.model.TraitType
 import org.jmixworkbench.model.ValidationModel
 import org.jmixworkbench.model.ValidationType
 import kotlin.test.assertEquals
@@ -38,6 +40,125 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
+    fun testEntitySourceContractAndInheritedEvidenceRoundTripForJavaAndKotlin() {
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            val module = ModuleManager.getInstance(project).modules.first()
+            if (ModuleRootManager.getInstance(module).contentRoots.none { it == root }) {
+                val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+                rootModel.addContentEntry(root)
+                rootModel.commit()
+            }
+            write(
+                root,
+                "build.gradle.kts",
+                """plugins { id("io.jmix") version "2.8.3" }""",
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/BaseRecord.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.annotation.TenantId;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.time.OffsetDateTime;
+                import java.util.UUID;
+                import org.springframework.data.annotation.*;
+
+                @JmixEntity
+                @MappedSuperclass
+                @EntityListeners(BaseRecordListener.class)
+                public abstract class BaseRecord {
+                    @Id
+                    protected UUID id;
+
+                    @Version
+                    protected Integer version;
+
+                    @CreatedBy
+                    protected String createdBy;
+
+                    @CreatedDate
+                    protected OffsetDateTime createdDate;
+
+                    @LastModifiedBy
+                    protected String lastModifiedBy;
+
+                    @LastModifiedDate
+                    protected OffsetDateTime lastModifiedDate;
+
+                    @TenantId
+                    protected String sysTenantId;
+
+                    @Column(name = "BRANCH_CODE", nullable = false)
+                    protected String branchCode;
+
+                    @PrePersist
+                    protected void initializeAudit() {}
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/LoanApp.kt",
+                """
+                package com.acme.entity
+
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.math.BigDecimal
+
+                @JmixEntity
+                @Entity
+                @Table(name = "LOAN_APP")
+                @EntityListeners(LoanAppListener::class)
+                open class LoanApp : BaseRecord(), Approvable {
+                    @Column(name = "AMOUNT", nullable = false)
+                    var amount: BigDecimal? = null
+
+                    @PreUpdate
+                    protected fun beforeUpdate() {}
+                }
+
+                interface Approvable
+                """.trimIndent(),
+            )
+        }
+
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val base = workspace.entities.single { it.className == "BaseRecord" }
+        val loan = workspace.entities.single { it.className == "LoanApp" }
+
+        assertEquals(
+            listOf(TraitType.STANDARD_ENTITY, TraitType.HAS_TENANT_ID),
+            base.traits,
+        )
+        assertEquals(listOf(LifecycleCallback.PRE_PERSIST), base.lifecycleCallbacks)
+        assertEquals(
+            listOf("com.acme.entity.BaseRecordListener"),
+            base.entityListeners,
+        )
+
+        assertEquals("com.acme.entity.BaseRecord", loan.extendsClass)
+        assertEquals(listOf("com.acme.entity.Approvable"), loan.implementsInterfaces)
+        assertEquals(listOf(LifecycleCallback.PRE_UPDATE), loan.lifecycleCallbacks)
+        assertEquals(listOf("com.acme.entity.LoanAppListener"), loan.entityListeners)
+        assertTrue(
+            loan.inheritedAttributes.any {
+                it.attribute.name == "branchCode" &&
+                    it.declaredBy == "com.acme.entity.BaseRecord" &&
+                    it.depth == 1
+            },
+            loan.inheritedAttributes.toString(),
+        )
+        assertEquals(
+            setOf(TraitType.STANDARD_ENTITY, TraitType.HAS_TENANT_ID),
+            loan.inheritedTraits.map { it.trait }.toSet(),
+        )
+    }
+
     fun testCustomGradleResourceRootKeepsLiquibaseClasspathAndGenerationDestination() {
         val root = getOrCreateProjectBaseDir()
         WriteAction.run<RuntimeException> {

@@ -41,6 +41,73 @@ function defaultAttribute(name: string = ''): AttributeModel {
   }
 }
 
+function databaseName(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^A-Za-z0-9_]/g, '_')
+    .toUpperCase()
+}
+
+function nextCopyName(sourceName: string, attributes: AttributeModel[]): string {
+  const names = new Set(attributes.map(attribute => attribute.name))
+  const stem = `${sourceName || 'field'}Copy`
+  if (!names.has(stem)) return stem
+  let suffix = 2
+  while (names.has(`${stem}${suffix}`)) suffix += 1
+  return `${stem}${suffix}`
+}
+
+function copyAttributeDraft(
+  source: AttributeModel,
+  name: string,
+  entity: EntityModel,
+): AttributeModel {
+  const association = source.association
+    ? {
+        ...source.association,
+        cascade: [...source.association.cascade],
+        joinColumns: source.association.joinColumns?.map(column => ({ ...column })),
+        mappedBy: undefined,
+        joinColumnName: ['manyToOne', 'oneToOne'].includes(source.association.associationType)
+          ? `${databaseName(name)}_ID`
+          : undefined,
+        localIdAttributeName: source.association.crossDataStore ? `${name}Id` : undefined,
+        generateInverse: false,
+        inverseAttributeName: undefined,
+        ownershipTransfer: undefined,
+        ownershipJoinColumnName: undefined,
+        cardinalityChoreography: undefined,
+        joinTable: source.association.joinTable
+          ? {
+              ...source.association.joinTable,
+              name: `${databaseName(entity.tableName || entity.className || 'ENTITY')}_${databaseName(name)}_LINK`,
+              joinColumns: source.association.joinTable.joinColumns?.map(column => ({ ...column })),
+              inverseJoinColumns: source.association.joinTable.inverseJoinColumns
+                ?.map(column => ({ ...column })),
+            }
+          : undefined,
+      }
+    : undefined
+  return {
+    ...source,
+    name,
+    columnName: source.transientFlag || source.association
+      ? undefined
+      : databaseName(name),
+    unique: false,
+    dependsOnProperties: [...source.dependsOnProperties],
+    validations: source.validations.map(validation => ({
+      ...validation,
+      groups: validation.groups ? [...validation.groups] : undefined,
+    })),
+    annotations: source.annotations.map(annotation => ({
+      ...annotation,
+      parameters: { ...annotation.parameters },
+    })),
+    association,
+  }
+}
+
 function defaultEntity(): EntityModel {
   return {
     className: '',
@@ -86,6 +153,8 @@ interface AppState {
   entity: EntityModel
   setEntity: (entity: Partial<EntityModel>) => void
   addAttribute: () => void
+  duplicateAttribute: (index: number) => number | null
+  moveAttribute: (fromIndex: number, toIndex: number) => boolean
   updateAttribute: (index: number, attr: Partial<AttributeModel>) => void
   removeAttribute: (index: number) => void
   resetEntity: () => void
@@ -119,6 +188,42 @@ export const useStore = create<AppState>((set, get) => ({
   addAttribute: () => set((s) => ({
     entity: { ...s.entity, attributes: [...s.entity.attributes, defaultAttribute(`field${s.entity.attributes.length + 1}`)] }
   })),
+  duplicateAttribute: (index) => {
+    const state = get()
+    const source = state.entity.attributes[index]
+    if (!source) return null
+    const name = nextCopyName(source.name, state.entity.attributes)
+    const duplicate = copyAttributeDraft(source, name, state.entity)
+    const insertionIndex = index + 1
+    set({
+      entity: {
+        ...state.entity,
+        attributes: [
+          ...state.entity.attributes.slice(0, insertionIndex),
+          duplicate,
+          ...state.entity.attributes.slice(insertionIndex),
+        ],
+      },
+    })
+    return insertionIndex
+  },
+  moveAttribute: (fromIndex, toIndex) => {
+    const state = get()
+    if (
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= state.entity.attributes.length ||
+      toIndex >= state.entity.attributes.length ||
+      fromIndex === toIndex
+    ) {
+      return false
+    }
+    const attributes = [...state.entity.attributes]
+    const [moved] = attributes.splice(fromIndex, 1)
+    attributes.splice(toIndex, 0, moved)
+    set({ entity: { ...state.entity, attributes } })
+    return true
+  },
   updateAttribute: (index, attr) => set((s) => ({
     entity: {
       ...s.entity,

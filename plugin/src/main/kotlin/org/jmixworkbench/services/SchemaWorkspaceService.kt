@@ -22,6 +22,8 @@ import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.JoinTableConfig
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.EntityType
+import org.jmixworkbench.model.LifecycleCallback
+import org.jmixworkbench.model.TraitType
 import org.jmixworkbench.model.ValidationModel
 import org.jmixworkbench.model.ValidationType
 import java.time.LocalDate
@@ -153,6 +155,7 @@ class SchemaWorkspaceService(
                     SchemaDdlMode.DISABLED
                 }
                 val idMapping = idMapping(source)
+                val hierarchy = entityHierarchy(source, entity.displayName)
                 val attributes = attributesByEntity[entity.id].orEmpty().map { attribute ->
                     val name = attribute.displayName
                     val type = attribute.summary.orEmpty().substringBefore(" attribute of").trim()
@@ -247,12 +250,17 @@ class SchemaWorkspaceService(
                         else -> SchemaMigrationCoverage.MISSING
                     },
                     migrationArtifactIds = migratedBy,
+                    traits = entityTraits(source, idMapping.first),
+                    extendsClass = hierarchy.extendsClass,
+                    implementsInterfaces = hierarchy.interfaces,
+                    lifecycleCallbacks = lifecycleCallbacks(source),
+                    entityListeners = entityListeners(source),
                 )
             }
             .sortedWith(compareBy(SchemaEntitySnapshot::moduleId, SchemaEntitySnapshot::qualifiedName))
         val entitiesByType = rawEntities.associateBy(SchemaEntitySnapshot::qualifiedName)
         val entitiesBySimpleName = rawEntities.groupBy(SchemaEntitySnapshot::className)
-        val entities = rawEntities.map { owner ->
+        val associationEnrichedEntities = rawEntities.map { owner ->
             owner.copy(
                 attributes = owner.attributes.map { attribute ->
                     val association = attribute.associationDetails ?: return@map attribute
@@ -267,6 +275,13 @@ class SchemaWorkspaceService(
                         ),
                     )
                 },
+            )
+        }
+        val entities = associationEnrichedEntities.map { owner ->
+            val inheritance = inheritedEntityEvidence(owner, associationEnrichedEntities)
+            owner.copy(
+                inheritedAttributes = inheritance.attributes,
+                inheritedTraits = inheritance.traits,
             )
         }
 
@@ -1694,6 +1709,203 @@ class SchemaWorkspaceService(
         return "$normalized.xml"
     }
 
+    private fun entityTraits(source: String, idType: IdType): List<TraitType> {
+        fun annotation(name: String): Boolean = Regex(
+            """@\s*(?:[\w.]+\.)?${Regex.escape(name)}\b""",
+        ).containsMatchIn(source)
+
+        val version = annotation("Version")
+        val createdBy = annotation("CreatedBy")
+        val createdDate = annotation("CreatedDate")
+        val updatedBy = annotation("LastModifiedBy")
+        val updatedDate = annotation("LastModifiedDate")
+        val completeAudit = createdBy && createdDate && updatedBy && updatedDate
+        return buildList {
+            if (idType == IdType.UUID && version && completeAudit) {
+                add(TraitType.STANDARD_ENTITY)
+            } else {
+                if (version) add(TraitType.HAS_VERSION)
+                if (completeAudit) {
+                    add(TraitType.AUDITABLE)
+                } else {
+                    if (createdBy) add(TraitType.CREATED_BY)
+                    if (createdDate) add(TraitType.CREATED_DATE)
+                    if (updatedBy) add(TraitType.UPDATED_BY)
+                    if (updatedDate) add(TraitType.UPDATED_DATE)
+                }
+            }
+            if (
+                idType != IdType.UUID &&
+                sourceFields(source).any { field ->
+                    field.name == "uuid" &&
+                        Regex("""@\s*(?:[\w.]+\.)?JmixGeneratedValue\b""")
+                            .containsMatchIn(field.declaration)
+                }
+            ) {
+                add(TraitType.UUID_TRAIT)
+            }
+            if (annotation("DeletedDate") || annotation("DeletedBy")) {
+                add(TraitType.SOFT_DELETE)
+            }
+            if (annotation("TenantId")) {
+                add(TraitType.HAS_TENANT_ID)
+            }
+        }.distinct()
+    }
+
+    private fun lifecycleCallbacks(source: String): List<LifecycleCallback> =
+        LifecycleCallback.entries.filter { callback ->
+            Regex(
+                """@\s*(?:[\w.]+\.)?${Regex.escape(callback.annotation.removePrefix("@"))}\b""",
+            ).containsMatchIn(source)
+        }
+
+    private fun entityListeners(source: String): List<String> =
+        ENTITY_LISTENERS.findAll(source)
+            .flatMap { match -> CLASS_LITERAL.findAll(match.groupValues[1]) }
+            .map { match -> qualifyDeclaredType(source, match.groupValues[1]) }
+            .distinct()
+            .toList()
+
+    private fun entityHierarchy(source: String, className: String): ParsedEntityHierarchy {
+        val escapedName = Regex.escape(className)
+        val javaHeader = Regex(
+            """(?s)\b(?:class|record)\s+$escapedName\b\s*(?:<[^>{}]*>)?\s*""" +
+                """(?:extends\s+([^{}]*?))?(?:\s+implements\s+([^{}]*?))?\s*\{""",
+        ).find(source)
+        if (javaHeader != null) {
+            val parent = javaHeader.groupValues[1]
+                .trim()
+                .takeIf(String::isNotBlank)
+                ?.let { qualifyDeclaredType(source, it) }
+            val interfaces = splitTopLevel(javaHeader.groupValues[2])
+                .map { qualifyDeclaredType(source, it) }
+            return ParsedEntityHierarchy(parent, interfaces)
+        }
+
+        val declaration = Regex(
+            """\b(?:(?:data|open|abstract|sealed|value|annotation)\s+)*class\s+$escapedName\b""",
+        ).find(source) ?: return ParsedEntityHierarchy()
+        val openingBrace = source.indexOf('{', declaration.range.last + 1)
+        if (openingBrace < 0) return ParsedEntityHierarchy()
+        val header = source.substring(declaration.range.last + 1, openingBrace)
+        val colon = topLevelColon(header)
+        if (colon < 0) return ParsedEntityHierarchy()
+        val supertypes = splitTopLevel(header.substring(colon + 1))
+        val parentIndex = supertypes.indexOfFirst { it.contains('(') }
+        val parent = parentIndex.takeIf { it >= 0 }
+            ?.let(supertypes::get)
+            ?.let { qualifyDeclaredType(source, it.substringBefore('(')) }
+        val interfaces = supertypes
+            .filterIndexed { index, _ -> index != parentIndex }
+            .map { qualifyDeclaredType(source, it.substringBefore('(')) }
+        return ParsedEntityHierarchy(parent, interfaces)
+    }
+
+    private fun inheritedEntityEvidence(
+        owner: SchemaEntitySnapshot,
+        entities: List<SchemaEntitySnapshot>,
+    ): InheritedEntityEvidence {
+        val attributes = mutableListOf<SchemaInheritedAttributeSnapshot>()
+        val traits = mutableListOf<SchemaInheritedTraitSnapshot>()
+        val seenEntities = mutableSetOf(owner.qualifiedName)
+        val seenAttributes = owner.attributes.mapTo(linkedSetOf(), SchemaEntityAttributeSnapshot::name)
+        val seenTraits = owner.traits.toMutableSet()
+        var parentReference = owner.extendsClass
+        var depth = 1
+        while (!parentReference.isNullOrBlank() && depth <= MAX_INHERITANCE_DEPTH) {
+            val parent = resolveEntityReference(owner, parentReference, entities) ?: break
+            if (!seenEntities.add(parent.qualifiedName)) break
+            parent.attributes.forEach { attribute ->
+                if (seenAttributes.add(attribute.name)) {
+                    attributes += SchemaInheritedAttributeSnapshot(
+                        declaredBy = parent.qualifiedName,
+                        depth = depth,
+                        attribute = attribute,
+                    )
+                }
+            }
+            parent.traits.forEach { trait ->
+                if (seenTraits.add(trait)) {
+                    traits += SchemaInheritedTraitSnapshot(
+                        trait = trait,
+                        declaredBy = parent.qualifiedName,
+                        depth = depth,
+                    )
+                }
+            }
+            parentReference = parent.extendsClass
+            depth += 1
+        }
+        return InheritedEntityEvidence(attributes, traits)
+    }
+
+    private fun resolveEntityReference(
+        owner: SchemaEntitySnapshot,
+        rawReference: String,
+        entities: List<SchemaEntitySnapshot>,
+    ): SchemaEntitySnapshot? {
+        val reference = rawReference.substringBefore('<').trim().removeSuffix("?")
+        val ownerPackage = owner.qualifiedName.substringBeforeLast('.', "")
+        val qualified = if ('.' in reference) reference else "$ownerPackage.$reference"
+        return entities.firstOrNull { it.qualifiedName == qualified }
+            ?: entities.filter {
+                it.className == reference.substringAfterLast('.') &&
+                    it.moduleId == owner.moduleId
+            }.singleOrNull()
+            ?: entities.filter { it.className == reference.substringAfterLast('.') }.singleOrNull()
+    }
+
+    private fun qualifyDeclaredType(source: String, rawType: String): String {
+        val simple = rawType.trim()
+            .substringBefore('<')
+            .removeSuffix("?")
+            .trim()
+        if (simple.isBlank() || '.' in simple) return simple
+        val imported = IMPORT_DECLARATION.findAll(source)
+            .map { it.groupValues[1] }
+            .firstOrNull { it.substringAfterLast('.') == simple }
+        if (imported != null) return imported
+        val packageName = PACKAGE_DECLARATION.find(source)?.groupValues?.get(1)
+        return packageName?.let { "$it.$simple" } ?: simple
+    }
+
+    private fun splitTopLevel(value: String): List<String> {
+        val result = mutableListOf<String>()
+        var start = 0
+        var parentheses = 0
+        var angles = 0
+        value.forEachIndexed { index, character ->
+            when (character) {
+                '(' -> parentheses += 1
+                ')' -> parentheses = (parentheses - 1).coerceAtLeast(0)
+                '<' -> angles += 1
+                '>' -> angles = (angles - 1).coerceAtLeast(0)
+                ',' -> if (parentheses == 0 && angles == 0) {
+                    value.substring(start, index).trim().takeIf(String::isNotBlank)?.let(result::add)
+                    start = index + 1
+                }
+            }
+        }
+        value.substring(start).trim().takeIf(String::isNotBlank)?.let(result::add)
+        return result
+    }
+
+    private fun topLevelColon(value: String): Int {
+        var parentheses = 0
+        var angles = 0
+        value.forEachIndexed { index, character ->
+            when (character) {
+                '(' -> parentheses += 1
+                ')' -> parentheses = (parentheses - 1).coerceAtLeast(0)
+                '<' -> angles += 1
+                '>' -> angles = (angles - 1).coerceAtLeast(0)
+                ':' -> if (parentheses == 0 && angles == 0) return index
+            }
+        }
+        return -1
+    }
+
     private fun read(relativePath: String): String? {
         val file = ProjectFileResolver.getInstance(project).resolveFile(relativePath)?.file ?: return null
         if (file.isDirectory) return null
@@ -1754,7 +1966,12 @@ class SchemaWorkspaceService(
 
     companion object {
         private const val ORACLE_IDENTIFIER_LIMIT = 30
+        private const val MAX_INHERITANCE_DEPTH = 32
         private val SAFE_FILE_NAME = Regex("""[A-Za-z0-9][A-Za-z0-9._-]*""")
+        private val PACKAGE_DECLARATION = Regex("""(?m)^\s*package\s+([\w.]+)\s*;?""")
+        private val ENTITY_LISTENERS = Regex(
+            """(?s)@\s*(?:[\w.]+\.)?EntityListeners\s*\((.*?)\)""",
+        )
         private val TABLE_ANNOTATION = Regex(
             """(?s)@(?:[\w.]+\.)?Table\s*\([^)]*?\bname\s*=\s*"([^"]+)"""",
         )
@@ -1891,6 +2108,16 @@ private data class ParsedSourceField(
     val declaration: String,
 )
 
+private data class ParsedEntityHierarchy(
+    val extendsClass: String? = null,
+    val interfaces: List<String> = emptyList(),
+)
+
+private data class InheritedEntityEvidence(
+    val attributes: List<SchemaInheritedAttributeSnapshot>,
+    val traits: List<SchemaInheritedTraitSnapshot>,
+)
+
 private data class ParsedAttributeMetadata(
     val comment: String?,
     val systemLevel: Boolean,
@@ -2003,6 +2230,25 @@ data class SchemaEntitySnapshot(
     val migrationArtifactIds: List<String>,
     val tableSchema: String? = null,
     val tableCatalog: String? = null,
+    val traits: List<TraitType> = emptyList(),
+    val extendsClass: String? = null,
+    val implementsInterfaces: List<String> = emptyList(),
+    val lifecycleCallbacks: List<LifecycleCallback> = emptyList(),
+    val entityListeners: List<String> = emptyList(),
+    val inheritedAttributes: List<SchemaInheritedAttributeSnapshot> = emptyList(),
+    val inheritedTraits: List<SchemaInheritedTraitSnapshot> = emptyList(),
+)
+
+data class SchemaInheritedAttributeSnapshot(
+    val declaredBy: String,
+    val depth: Int,
+    val attribute: SchemaEntityAttributeSnapshot,
+)
+
+data class SchemaInheritedTraitSnapshot(
+    val trait: TraitType,
+    val declaredBy: String,
+    val depth: Int,
 )
 
 data class SchemaEntityAttributeSnapshot(

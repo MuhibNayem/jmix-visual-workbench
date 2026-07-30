@@ -61,11 +61,13 @@ The safety engine is not the current limiting factor. The shortest path from
 the present substantial implementation to a superior daily developer product
 is:
 
-1. high-frequency attribute and entity actions: copy/reorder,
-   inherited/trait visibility, callbacks/listeners, view creation/navigation,
-   complete discriminator and embedded-override editing, repository methods and
-   enum-usage migration;
-2. decomposition of the 5,870-line React designer plus component, interaction,
+1. remaining high-frequency entity actions: listener class creation/navigation,
+   view creation/navigation, complete discriminator and embedded-override
+   editing, mature repository methods, localized-caption workflows and safe
+   enum-usage migration. Copy/reorder, inherited/trait visibility, callback
+   authoring and listener discovery are implemented with handwritten-source
+   protection;
+2. decomposition of the 6,077-line central React designer plus component, interaction,
    responsive and accessibility regression tests;
 3. representative arbitrary-source, database-first, installed-IDE dual-host,
    scale, latency, memory and leak certification.

@@ -440,8 +440,27 @@ export interface SchemaEntitySnapshot {
   protectedUnmappedColumns?: string[]
   sourceLocator: GraphSourceLocator
   attributes: SchemaEntityAttributeSnapshot[]
+  traits: TraitType[]
+  extendsClass?: string
+  implementsInterfaces: string[]
+  lifecycleCallbacks: LifecycleCallback[]
+  entityListeners: string[]
+  inheritedAttributes: SchemaInheritedAttributeSnapshot[]
+  inheritedTraits: SchemaInheritedTraitSnapshot[]
   migrationCoverage: 'COVERED' | 'MISSING' | 'DISABLED'
   migrationArtifactIds: string[]
+}
+
+export interface SchemaInheritedAttributeSnapshot {
+  declaredBy: string
+  depth: number
+  attribute: SchemaEntityAttributeSnapshot
+}
+
+export interface SchemaInheritedTraitSnapshot {
+  trait: TraitType
+  declaredBy: string
+  depth: number
 }
 
 export interface SchemaEntityAttributeSnapshot {

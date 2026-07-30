@@ -25,10 +25,27 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 263 tests and three packaged-host
+  descriptors were inspected after assembly, 264 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
+- Existing Java/Kotlin source contracts now reopen with declared traits,
+  superclass, interfaces, lifecycle callbacks and `@EntityListeners` intact
+  instead of being reconstructed as empty designer state. A bounded,
+  cycle-safe inheritance walk exposes inherited attributes and trait origins
+  with the exact declaring entity and depth. The evidence is read-only for
+  handwritten sources, trait-managed fields can be hidden from the everyday
+  attribute list, and the native/web designer share the same model.
+- Attribute copy is available for new and handwritten entities. Copies receive
+  collision-free logical names, regenerated scalar/join mappings, deep-copied
+  validation/annotation collections, cleared uniqueness expansion and no
+  inherited ownership choreography. Handwritten declarations remain
+  order-locked; newly staged drafts can be reordered without claiming that
+  source declarations moved. New-entity lifecycle callbacks and listener
+  classes are visually authored, while existing callbacks/listeners remain
+  source-derived and protected. Browser interaction verified copy, safe column
+  regeneration, draft reorder, inherited evidence expansion and zero shell
+  overflow at a 360-pixel embedded width.
 - JPA entity, mapped-superclass, embeddable, DTO and typed Jmix enumeration
   generation.
 - UUID, Long, Integer, String and configured embedded identifier classes, with
