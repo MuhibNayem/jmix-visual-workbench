@@ -2170,6 +2170,91 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                     }
                 """.trimIndent(),
             )
+            write(
+                root,
+                "src/main/java/com/acme/entity/ExclusiveEmployee.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity @Entity @Table(name = "EXCLUSIVE_EMPLOYEE")
+                    public class ExclusiveEmployee {
+                        @Id @Column(name = "ID")
+                        private java.util.UUID id;
+                        @OneToOne
+                        @JoinColumn(name = "DEPARTMENT_ID", unique = true)
+                        private Department department;
+                        public String manualLabel() { return "exclusive"; }
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/KotlinExclusiveEmployee.kt",
+                """
+                    package com.acme.entity
+                    import io.jmix.core.metamodel.annotation.JmixEntity
+                    import jakarta.persistence.*
+                    import java.util.UUID
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "KOTLIN_EXCLUSIVE_EMPLOYEE")
+                    class KotlinExclusiveEmployee {
+                        @Id
+                        @Column(name = "ID")
+                        var id: UUID? = null
+                        @OneToOne
+                        @JoinColumn(name = "DEPARTMENT_ID", unique = true)
+                        var department: Department? = null
+                        fun manualLabel(): String = "kotlin-exclusive"
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/UnprovenExclusiveEmployee.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity @Entity @Table(name = "UNPROVEN_EXCLUSIVE_EMPLOYEE")
+                    public class UnprovenExclusiveEmployee {
+                        @Id @Column(name = "ID")
+                        private java.util.UUID id;
+                        @OneToOne
+                        @JoinColumn(name = "DEPARTMENT_ID", unique = true)
+                        private Department department;
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/resources/com/acme/liquibase/changelog/025-exclusive-employees.xml",
+                """
+                    <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                        <changeSet id="exclusive-employees" author="legacy">
+                            <createTable tableName="EXCLUSIVE_EMPLOYEE">
+                                <column name="ID" type="UUID"/>
+                                <column name="DEPARTMENT_ID" type="UUID"/>
+                            </createTable>
+                            <addUniqueConstraint
+                                tableName="EXCLUSIVE_EMPLOYEE"
+                                constraintName="UQ_EXCLUSIVE_EMPLOYEE_DEPARTMENT"
+                                columnNames="DEPARTMENT_ID"/>
+                            <createTable tableName="KOTLIN_EXCLUSIVE_EMPLOYEE">
+                                <column name="ID" type="UUID"/>
+                                <column name="DEPARTMENT_ID" type="UUID"/>
+                            </createTable>
+                            <createIndex
+                                tableName="KOTLIN_EXCLUSIVE_EMPLOYEE"
+                                indexName="UX_KOTLIN_EXCLUSIVE_EMPLOYEE_DEPARTMENT"
+                                unique="true">
+                                <column name="DEPARTMENT_ID"/>
+                            </createIndex>
+                        </changeSet>
+                    </databaseChangeLog>
+                """.trimIndent(),
+            )
         }
         val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
         val store = workspace.stores.single()
@@ -2293,6 +2378,108 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             assertTrue(migration.contains("""constraintName="$constraint""""))
             assertTrue(migration.contains("""<dropUniqueConstraint tableName="${snapshot.tableName}""""))
         }
+
+        listOf(
+            "ExclusiveEmployee" to "UQ_EXCLUSIVE_EMPLOYEE_DEPARTMENT",
+            "KotlinExclusiveEmployee" to "UX_KOTLIN_EXCLUSIVE_EMPLOYEE_DEPARTMENT",
+        ).forEach { (className, backingName) ->
+            val snapshot = workspace.entities.single { it.className == className }
+            val preview = service.previewAttributeAdditions(
+                ExistingEntityAttributeAdditionRequest(
+                    snapshot.sourceLocator,
+                    model(
+                        snapshot,
+                        "DEPARTMENT_ID",
+                        AssociationType.MANY_TO_ONE,
+                        targetUnique = false,
+                    ),
+                ),
+            )
+            assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+            assertEquals(2, preview.files.size)
+            val source = preview.files.single {
+                it.relativePath.endsWith(if (className == "ExclusiveEmployee") ".java" else ".kt")
+            }.resultContent
+            assertTrue(source.contains("@ManyToOne"))
+            assertFalse(source.contains("@OneToOne"))
+            assertFalse(source.contains("unique = true"))
+            assertTrue(source.contains("manualLabel"))
+            val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+            if (className == "ExclusiveEmployee") {
+                assertTrue(migration.contains("""<dropUniqueConstraint tableName="${snapshot.tableName}""""))
+                assertTrue(migration.contains("""constraintName="$backingName""""))
+                assertTrue(migration.contains("""<addUniqueConstraint tableName="${snapshot.tableName}""""))
+            } else {
+                assertTrue(migration.contains("""<dropIndex tableName="${snapshot.tableName}""""))
+                assertTrue(migration.contains("""indexName="$backingName""""))
+                assertTrue(migration.contains("""<createIndex tableName="${snapshot.tableName}""""))
+                assertTrue(migration.contains("""unique="true""""))
+            }
+            assertTrue(migration.contains("<rollback>"))
+        }
+
+        val qualifiedWidening = workspace.entities.single { it.className == "ExclusiveEmployee" }
+        val qualifiedRejected = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                qualifiedWidening.sourceLocator,
+                model(
+                    qualifiedWidening,
+                    "DEPARTMENT_ID",
+                    AssociationType.MANY_TO_ONE,
+                    targetUnique = false,
+                ).copy(tableSchema = "tenant"),
+            ),
+        )
+        assertFalse(qualifiedRejected.accepted)
+        assertTrue(
+            qualifiedRejected.issues.any {
+                it.code == "JVW-ENTITY-RELATIONSHIP-WIDENING-QUALIFIED-TABLE-UNPROVEN"
+            },
+            qualifiedRejected.issues.toString(),
+        )
+        val externalDdlRejected = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                qualifiedWidening.sourceLocator,
+                model(
+                    qualifiedWidening,
+                    "DEPARTMENT_ID",
+                    AssociationType.MANY_TO_ONE,
+                    targetUnique = false,
+                ).copy(
+                    ddlGeneration = DdlGenerationConfig(
+                        enabled = false,
+                        mode = DdlGenerationMode.DISABLED,
+                    ),
+                ),
+            ),
+        )
+        assertFalse(externalDdlRejected.accepted)
+        assertTrue(
+            externalDdlRejected.issues.any {
+                it.code == "JVW-ENTITY-RELATIONSHIP-WIDENING-DDL-REQUIRED"
+            },
+            externalDdlRejected.issues.toString(),
+        )
+
+        val unprovenWidening = workspace.entities.single { it.className == "UnprovenExclusiveEmployee" }
+        val unprovenRejected = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                unprovenWidening.sourceLocator,
+                model(
+                    unprovenWidening,
+                    "DEPARTMENT_ID",
+                    AssociationType.MANY_TO_ONE,
+                    targetUnique = false,
+                ),
+            ),
+        )
+        assertFalse(unprovenRejected.accepted)
+        assertTrue(
+            unprovenRejected.issues.any {
+                it.code == "JVW-ENTITY-RELATIONSHIP-WIDENING-TABLE-UNRESOLVED"
+            },
+            unprovenRejected.issues.toString(),
+        )
 
         val unsafe = workspace.entities.single { it.className == "UnsafeEmployee" }
         val rejected = service.previewAttributeAdditions(

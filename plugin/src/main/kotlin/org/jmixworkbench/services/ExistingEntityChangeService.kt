@@ -39,6 +39,7 @@ import org.jmixworkbench.model.EntityType
 import org.jmixworkbench.model.EnumIdType
 import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.IdType
+import org.jmixworkbench.model.IndexColumnDef
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.PreCondition
 import org.jmixworkbench.model.PreConditionType
@@ -749,7 +750,9 @@ class ExistingEntityChangeService(
             )
         }
         metadataChanges.firstOrNull {
-            it.current.unique && !it.desired.unique
+            it.current.unique &&
+                !it.desired.unique &&
+                !isOwningToOneWidening(it.current, it.desired)
         }?.let { change ->
             return rejected(
                 "JVW-ENTITY-UNIQUE-DROP-REQUIRES-CONSTRAINT",
@@ -1082,7 +1085,11 @@ class ExistingEntityChangeService(
                     "${desiredColumnCollision.key}.",
             )
         }
-        metadataChanges.firstOrNull { it.current.unique && !it.desired.unique }?.let {
+        metadataChanges.firstOrNull {
+            it.current.unique &&
+                !it.desired.unique &&
+                !isOwningToOneWidening(it.current, it.desired)
+        }?.let {
             return rejected(
                 "JVW-ENTITY-UNIQUE-DROP-REQUIRES-CONSTRAINT",
                 "${it.current.name} is unique, but the physical constraint name is not provable from the property. " +
@@ -1531,6 +1538,42 @@ class ExistingEntityChangeService(
                     ),
                 )
             }
+            if (current.unique && !desired.unique && current.association) {
+                val evidence = relationshipUniquenessEvidence(entity, current)
+                val backing = evidence.backing
+                    ?: return SchemaMigrationProposal(null, listOf(requireNotNull(evidence.issue)))
+                when (backing) {
+                    is RelationshipUniqueBacking.Constraint -> {
+                        changes += DbChange.DropUniqueConstraint(
+                            tableName = entity.resolvedTableName,
+                            constraintName = backing.name,
+                        )
+                        rollback.add(
+                            0,
+                            DbChange.AddUniqueConstraint(
+                                tableName = entity.resolvedTableName,
+                                constraintName = backing.name,
+                                columnNames = listOf(columnName),
+                            ),
+                        )
+                    }
+                    is RelationshipUniqueBacking.Index -> {
+                        changes += DbChange.DropIndex(
+                            tableName = entity.resolvedTableName,
+                            indexName = backing.name,
+                        )
+                        rollback.add(
+                            0,
+                            DbChange.CreateIndex(
+                                tableName = entity.resolvedTableName,
+                                indexName = backing.name,
+                                columns = listOf(IndexColumnDef(columnName)),
+                                unique = true,
+                            ),
+                        )
+                    }
+                }
+            }
             if (oldType != newType) {
                 changes += DbChange.ModifyColumn(
                     tableName = entity.resolvedTableName,
@@ -1593,6 +1636,122 @@ class ExistingEntityChangeService(
         )
     }
 
+    private fun isOwningToOneWidening(
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): Boolean {
+        val source = current.associationDetails ?: return false
+        val target = desired.association ?: return false
+        return source.associationType == AssociationType.ONE_TO_ONE &&
+            target.associationType == AssociationType.MANY_TO_ONE &&
+            !source.crossDataStore &&
+            source.mappedBy.isNullOrBlank() &&
+            target.mappedBy.isNullOrBlank() &&
+            source.joinColumnName != null &&
+            source.joinColumnName == current.columnName &&
+            desiredPhysicalColumnName(desired) == current.columnName &&
+            current.unique &&
+            !desired.unique &&
+            desired.mandatory == !current.nullable
+    }
+
+    private fun relationshipUniquenessEvidence(
+        entity: EntityModel,
+        current: SchemaEntityAttributeSnapshot,
+    ): RelationshipUniquenessEvidence {
+        if (!entity.tableSchema.isNullOrBlank() || !entity.tableCatalog.isNullOrBlank()) {
+            return RelationshipUniquenessEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-RELATIONSHIP-WIDENING-QUALIFIED-TABLE-UNPROVEN",
+                    "The current physical constraint inventory does not preserve schema/catalog qualification. " +
+                        "Widening ${entity.className}.${current.name} would risk selecting a same-named table.",
+                ),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load()
+        val moduleId = entity.generationTarget?.moduleId
+            ?: workspace.entities.singleOrNull {
+                it.qualifiedName == entity.fullName && it.storeName == entity.dataStore
+            }?.moduleId
+        val storeId = entity.generationTarget?.storeId
+            ?: workspace.stores.singleOrNull {
+                it.moduleId == moduleId && it.name == entity.dataStore
+            }?.id
+            ?: return RelationshipUniquenessEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-RELATIONSHIP-WIDENING-STORE-UNRESOLVED",
+                    "The managed data store for ${entity.className}.${current.name} is not uniquely resolved.",
+                ),
+            )
+        val physicalStore = workspace.physicalSchemas.singleOrNull { it.storeId == storeId }
+            ?: return RelationshipUniquenessEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-RELATIONSHIP-WIDENING-SCHEMA-MISSING",
+                    "No physical Liquibase inventory is available for ${entity.className}.${current.name}.",
+                ),
+            )
+        if (!physicalStore.complete) {
+            return RelationshipUniquenessEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-RELATIONSHIP-WIDENING-SCHEMA-PARTIAL",
+                    "The Liquibase inventory contains raw or unsupported operations. " +
+                        "The unique backing cannot be removed safely.",
+                ),
+            )
+        }
+        val table = physicalStore.tables.singleOrNull {
+            it.name.equals(entity.resolvedTableName.substringAfterLast('.'), ignoreCase = true)
+        } ?: return RelationshipUniquenessEvidence(
+            issue = WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-WIDENING-TABLE-UNRESOLVED",
+                "Table ${entity.resolvedTableName} is absent or ambiguous in the physical schema inventory.",
+            ),
+        )
+        val column = table.columns.singleOrNull {
+            it.name.equals(current.columnName, ignoreCase = true)
+        }
+        if (column == null || column.primaryKey || !column.unique) {
+            return RelationshipUniquenessEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-RELATIONSHIP-WIDENING-UNIQUENESS-UNPROVEN",
+                    "${entity.resolvedTableName}.${current.columnName} is not proven to be a non-key unique column.",
+                ),
+            )
+        }
+        val constraintCandidates = table.uniqueConstraints.filter { constraint ->
+            constraint.columns.size == 1 &&
+                constraint.columns.single().equals(current.columnName, ignoreCase = true)
+        }
+        val indexCandidates = table.indexes.filter { index ->
+            index.unique &&
+                index.columns.size == 1 &&
+                index.columns.single().equals(current.columnName, ignoreCase = true)
+        }
+        val candidates = constraintCandidates.map {
+            RelationshipUniqueBacking.Constraint(it.name)
+        } + indexCandidates.map {
+            RelationshipUniqueBacking.Index(it.name)
+        }
+        if (candidates.size != 1) {
+            return RelationshipUniquenessEvidence(
+                issue = WorkspaceChangeIssue(
+                    if (candidates.isEmpty()) {
+                        "JVW-ENTITY-RELATIONSHIP-WIDENING-BACKING-UNNAMED"
+                    } else {
+                        "JVW-ENTITY-RELATIONSHIP-WIDENING-BACKING-AMBIGUOUS"
+                    },
+                    if (candidates.isEmpty()) {
+                        "The unique mapping has no single named Liquibase constraint or index to remove safely."
+                    } else {
+                        "Multiple unique constraints or indexes back ${entity.resolvedTableName}.${current.columnName}; " +
+                            "selective widening is ambiguous."
+                    },
+                ),
+            )
+        }
+        return RelationshipUniquenessEvidence(backing = candidates.single())
+    }
+
     private fun relationshipEvolutionIssue(
         current: SchemaEntityAttributeSnapshot,
         desired: AttributeModel,
@@ -1618,8 +1777,13 @@ class ExistingEntityChangeService(
                 source.joinColumnName == current.columnName &&
                 desiredPhysicalColumnName(desired) == current.columnName &&
                 desired.unique
+        val owningToOneWidening = isOwningToOneWidening(current, desired)
         val immutableShapeChanged =
-            (source.associationType != target.associationType && !owningToOneNarrowing) ||
+            (
+                source.associationType != target.associationType &&
+                    !owningToOneNarrowing &&
+                    !owningToOneWidening
+                ) ||
                 source.relatedEntity != target.relatedEntity ||
                 source.relatedTableName != target.relatedTableName ||
                 source.relatedIdColumnName != target.relatedIdColumnName ||
@@ -1636,9 +1800,14 @@ class ExistingEntityChangeService(
                 desired.mandatory == !current.nullable &&
                 (!current.unique && desired.unique)
         val shapeOrConstraintChangeAllowed =
-            owningToOneNarrowing &&
-                desired.mandatory == !current.nullable &&
-                (current.unique || onlySafeUniquenessUpgrade)
+            desired.mandatory == !current.nullable &&
+                (
+                    (
+                        owningToOneNarrowing &&
+                            (current.unique || onlySafeUniquenessUpgrade)
+                        ) ||
+                        owningToOneWidening
+                    )
         if (immutableShapeChanged && !shapeOrConstraintChangeAllowed) {
             return WorkspaceChangeIssue(
                 "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT",
@@ -1646,7 +1815,11 @@ class ExistingEntityChangeService(
                     "or cross-store semantics. Use the structural relationship choreography workflow.",
             )
         }
-        if (source.associationType != target.associationType && !owningToOneNarrowing) {
+        if (
+            source.associationType != target.associationType &&
+            !owningToOneNarrowing &&
+            !owningToOneWidening
+        ) {
             return WorkspaceChangeIssue(
                 "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT",
                 "${current.name} changes relationship cardinality outside the checked owning many-to-one " +
@@ -1666,6 +1839,18 @@ class ExistingEntityChangeService(
                 "${current.name} needs a guarded unique constraint before it can become one-to-one. " +
                     "DDL generation is disabled or the entity maps a database view.",
             )
+        }
+        if (owningToOneWidening) {
+            if (
+                entity.databaseView ||
+                entity.ddlGeneration.effectiveMode == DdlGenerationMode.DISABLED
+            ) {
+                return WorkspaceChangeIssue(
+                    "JVW-ENTITY-RELATIONSHIP-WIDENING-DDL-REQUIRED",
+                    "${current.name} needs a managed Liquibase store before its unique backing can be removed.",
+                )
+            }
+            relationshipUniquenessEvidence(entity, current).issue?.let { return it }
         }
         if (source.crossDataStore && relationshipSourceMetadataChanged(current, desired)) {
             return WorkspaceChangeIssue(
@@ -2722,6 +2907,19 @@ private data class GeneratedEntityFragments(
 private data class BidirectionalRequestPlan(
     val requests: List<ExistingEntityAttributeAdditionRequest>,
     val issues: List<WorkspaceChangeIssue>,
+)
+
+private sealed interface RelationshipUniqueBacking {
+    val name: String
+
+    data class Constraint(override val name: String) : RelationshipUniqueBacking
+
+    data class Index(override val name: String) : RelationshipUniqueBacking
+}
+
+private data class RelationshipUniquenessEvidence(
+    val backing: RelationshipUniqueBacking? = null,
+    val issue: WorkspaceChangeIssue? = null,
 )
 
 private data class ExistingAttributeMetadataChange(

@@ -3687,6 +3687,48 @@ function ExistingRelationshipSemanticsEditor({
     !sourceAssociation.crossDataStore &&
     !sourceAssociation.mappedBy &&
     Boolean(sourceAssociation.joinColumnName)
+  const sourceStore = schemaWorkspace?.stores.find(
+    candidate => candidate.moduleId === sourceEntity.moduleId && candidate.name === sourceEntity.storeName,
+  )
+  const physicalStore = schemaWorkspace?.physicalSchemas.find(
+    candidate => candidate.storeId === sourceStore?.id,
+  )
+  const physicalTable = physicalStore?.tables.find(
+    candidate => candidate.name.toLowerCase() === sourceEntity.tableName.split('.').pop()?.toLowerCase(),
+  )
+  const uniqueBackingCount = sourceAssociation.joinColumnName
+    ? (
+      (physicalTable?.uniqueConstraints ?? []).filter(
+        constraint => constraint.columns.length === 1 &&
+          constraint.columns[0].toLowerCase() === sourceAssociation.joinColumnName?.toLowerCase(),
+      ).length +
+      (physicalTable?.indexes ?? []).filter(
+        index => index.unique &&
+          index.columns.length === 1 &&
+          index.columns[0].toLowerCase() === sourceAssociation.joinColumnName?.toLowerCase(),
+      ).length
+    )
+    : 0
+  const owningToOneWideningCandidate =
+    sourceAssociation.associationType === 'oneToOne' &&
+    !sourceAssociation.crossDataStore &&
+    !sourceAssociation.mappedBy &&
+    Boolean(sourceAssociation.joinColumnName) &&
+    sourceUnique
+  const owningToOneWideningEligible =
+    owningToOneWideningCandidate &&
+    !sourceEntity.databaseView &&
+    sourceEntity.ddlMode !== 'DISABLED' &&
+    !sourceEntity.tableSchema &&
+    !sourceEntity.tableCatalog &&
+    physicalStore?.complete === true &&
+    physicalTable?.columns.some(
+      column => column.name.toLowerCase() === sourceAssociation.joinColumnName?.toLowerCase() &&
+        column.unique &&
+        !column.primaryKey,
+    ) === true &&
+    uniqueBackingCount === 1
+  const checkedCardinalityEligible = owningToOneUpgradeEligible || owningToOneWideningEligible
   const relatedEntitySnapshot = schemaWorkspace?.entities.find(
     candidate => candidate.qualifiedName === sourceAssociation.relatedEntity,
   )
@@ -3732,14 +3774,14 @@ function ExistingRelationshipSemanticsEditor({
       ) : (
         <>
           <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {owningToOneUpgradeEligible && (
+            {checkedCardinalityEligible && (
               <Field label="Checked cardinality">
                 <select
                   value={association.associationType}
                   onChange={event => {
                     const associationType = event.target.value as AssociationType
                     onChange({
-                      unique: associationType === 'oneToOne' ? true : sourceUnique,
+                      unique: associationType === 'oneToOne',
                       association: {
                         ...association,
                         associationType,
@@ -3793,6 +3835,13 @@ function ExistingRelationshipSemanticsEditor({
               </select>
             </Field>
           </div>
+          {owningToOneWideningCandidate && !owningToOneWideningEligible && (
+            <div className="mt-3 rounded border border-amber-500/25 bg-amber-500/[0.05] p-2 text-[9px] leading-relaxed text-amber-200/80">
+              One-to-many reuse is locked because the physical schema does not prove exactly one named, single-column
+              unique constraint or index for <code>{sourceAssociation.joinColumnName}</code>. Refresh complete
+              Liquibase coverage or resolve competing constraints before widening this relationship.
+            </div>
+          )}
           {inverseRepairSupported && (
             <div className="mt-3 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.05] p-3">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -3888,6 +3937,12 @@ function ExistingRelationshipSemanticsEditor({
             <div className="mt-3 rounded border border-emerald-500/20 bg-emerald-500/5 p-2 text-[9px] leading-relaxed text-emerald-200/80">
               Checked narrowing adds a duplicate-data precondition and a deterministic unique constraint with reverse
               rollback. It keeps the target, owning join column, Java/Kotlin property type, and call sites unchanged.
+            </div>
+          )}
+          {owningToOneWideningEligible && association.associationType === 'manyToOne' && (
+            <div className="mt-3 rounded border border-sky-500/20 bg-sky-500/5 p-2 text-[9px] leading-relaxed text-sky-200/80">
+              Checked widening changes only the owning annotation and removes the exact named unique backing. Rollback
+              restores that same constraint or index and will stop if new duplicate references make uniqueness invalid.
             </div>
           )}
         </>

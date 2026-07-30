@@ -837,6 +837,7 @@ export interface SchemaPhysicalTableSnapshot {
   name: string
   columns: SchemaPhysicalColumnSnapshot[]
   foreignKeys: SchemaPhysicalForeignKeySnapshot[]
+  uniqueConstraints?: SchemaPhysicalUniqueConstraintSnapshot[]
   indexes?: SchemaPhysicalIndexSnapshot[]
   sourcePaths: string[]
 }
@@ -860,6 +861,11 @@ export interface SchemaPhysicalForeignKeySnapshot {
 export interface SchemaPhysicalIndexSnapshot {
   name: string
   unique: boolean
+  columns: string[]
+}
+
+export interface SchemaPhysicalUniqueConstraintSnapshot {
+  name: string
   columns: string[]
 }
 

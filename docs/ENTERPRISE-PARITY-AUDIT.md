@@ -168,6 +168,16 @@ still tracked as a separate gate.
   indexed target, ownership, join and constraint shape; the Java source and
   Kotlin target are revision-checked as one change, manual methods survive, and
   no Liquibase file is produced when the database mapping is unchanged.
+- Owning one-to-one relationships can now widen safely to many-to-one when the
+  complete Liquibase inventory proves exactly one named, single-column unique
+  constraint or unique index. Java and Kotlin mappings remove only the managed
+  `unique` argument and change the relationship annotation while retaining
+  custom join-column arguments and manual methods. The same atomic preview drops
+  the exact constraint/index and rollback recreates it; unnamed, missing,
+  partial, ambiguous, externally managed or schema/catalog-unqualified evidence
+  fails closed. The responsive designer explains the conditional rollback and
+  remained complete at 480 pixels with no browser diagnostics. Dual-host
+  contracts cover both constraint-backed Java and index-backed Kotlin mappings.
 - The Integration Designer was exercised in a real browser. Catalog selection,
   indexed Kafka handler binding, non-blocking retry and dead-letter property
   authoring, and the immutable two-file Java/policy preview completed

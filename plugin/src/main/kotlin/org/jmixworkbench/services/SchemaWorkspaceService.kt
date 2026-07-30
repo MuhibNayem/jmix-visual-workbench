@@ -1899,6 +1899,11 @@ private data class MutablePhysicalTable(
         name = name,
         columns = columns.values.sortedBy(SchemaPhysicalColumnSnapshot::name),
         foreignKeys = foreignKeys.values.sortedBy(SchemaPhysicalForeignKeySnapshot::constraintName),
+        uniqueConstraints = uniqueConstraints.entries
+            .sortedBy(Map.Entry<String, List<String>>::key)
+            .map { (constraintName, columns) ->
+                SchemaPhysicalUniqueConstraintSnapshot(constraintName, columns)
+            },
         indexes = indexes.values.sortedBy(SchemaPhysicalIndexSnapshot::name),
         sourcePaths = sourcePaths.toList(),
     )
@@ -2055,6 +2060,7 @@ data class SchemaPhysicalTableSnapshot(
     val name: String,
     val columns: List<SchemaPhysicalColumnSnapshot>,
     val foreignKeys: List<SchemaPhysicalForeignKeySnapshot>,
+    val uniqueConstraints: List<SchemaPhysicalUniqueConstraintSnapshot> = emptyList(),
     val indexes: List<SchemaPhysicalIndexSnapshot> = emptyList(),
     val sourcePaths: List<String>,
 )
@@ -2078,6 +2084,11 @@ data class SchemaPhysicalForeignKeySnapshot(
 data class SchemaPhysicalIndexSnapshot(
     val name: String,
     val unique: Boolean,
+    val columns: List<String>,
+)
+
+data class SchemaPhysicalUniqueConstraintSnapshot(
+    val name: String,
     val columns: List<String>,
 )
 
