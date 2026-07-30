@@ -281,9 +281,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 308 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 310 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 308 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 310 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -452,6 +452,15 @@ inspection control rather than relying on a hard-to-hit table-row target.
   warns natively when inherited `@ApplyConstraints` is disabled or cannot be
   proven. `@NoRepositoryBean` fragments are excluded, dumb mode is disabled,
   and shared plus both host descriptors register the action.
+- Existing indexed Java and Kotlin repository methods now expose source
+  navigation, Rename, Change Signature and Safe Delete directly in Entity
+  Designer. Every launch is bound to the exact project-contained source
+  revision, repository qualified name, indexed method/signature and live PSI
+  range; malformed, stale, ambiguous and read-only mutation requests are
+  denied before an IntelliJ action can run. IntelliJ retains preview, usage
+  search, conflict handling and undo ownership, so handwritten declarations
+  are never regenerated. The real UI handoff passed at 900, 600 and 480 pixels
+  without horizontal escape or browser errors.
 - The conventional `./gradlew test` lifecycle now builds and fingerprints the
   current self-managed-Node web bundle before starting isolated IntelliJ
   2025.3 and 2026.2 lanes, avoiding stale-bundle races and retaining the outer
@@ -482,14 +491,14 @@ inspection control rather than relying on a hard-to-hit table-row target.
 
 ## Recommended next execution order
 
-1. Finish the remaining repository workflow edges: native callable
-   change-signature/delete preview, transactional aggregate update-service
-   generation, complete JPQL grammar/language injection, and semantic
+1. Finish the remaining repository workflow edges: transactional aggregate
+   update-service generation, complete JPQL grammar/language injection, and semantic
    compilation of generated Java/Kotlin repositories and controllers against
    the supported Jmix/Java matrix. Lossless existing metadata edits,
    repository-backed view delegates, controller injection and native
-   `@Param`/JPQL parameter refactoring are now implemented; source-owned
-   diagnostics remain advisory for independent additions.
+   callable Open/Rename/Change-Signature/Safe-Delete plus `@Param`/JPQL
+   parameter refactoring are now implemented; source-owned diagnostics remain
+   advisory for independent additions.
 2. Complete evidence-backed editing of existing inheritance and embedded
    mappings, followed by localized-caption workflows and safe enum-usage
    migration. Root/subtype authoring, explicit nested scalar/association

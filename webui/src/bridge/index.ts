@@ -28,6 +28,8 @@ import type {
   EntityAttributeSafeDeleteLaunchResponse,
   EntityEventListenerRequest,
   DataRepositoryChangeRequest,
+  RepositoryMethodRefactorLaunchResponse,
+  RepositoryMethodRefactorRequest,
   RepositorySemanticValidationResponse,
   EntityAttributeTypeMigrationRequest,
   EntityAttributeTypeMigrationLaunchResponse,
@@ -1185,6 +1187,16 @@ ${javaMethods}
                     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
                     .toUpperCase(),
                 }
+              case 'launchRepositoryMethodRefactor':
+                return {
+                  success: true,
+                  message: payload.operation === 'OPEN_SOURCE'
+                    ? `Opened ${payload.repositoryQualifiedName}.${payload.sourceSignature} in source.`
+                    : `IntelliJ ${String(payload.operation)
+                      .toLowerCase()
+                      .replace(/_/g, ' ')} opened for ${payload.sourceSignature}. ` +
+                      `No source changes until you confirm IntelliJ's preview.`,
+                } satisfies RepositoryMethodRefactorLaunchResponse
               case 'launchEntityAttributeTypeMigration':
                 return {
                   success: payload.targetType === 'uri' || Boolean(payload.verificationToken),
@@ -2375,6 +2387,13 @@ ${javaMethods}
   launchEntityAttributeSafeDelete(change: EntityAttributeSafeDeleteRequest) {
     return this.request<EntityAttributeSafeDeleteLaunchResponse>(
       'launchEntityAttributeSafeDelete',
+      change,
+    )
+  }
+
+  launchRepositoryMethodRefactor(change: RepositoryMethodRefactorRequest) {
+    return this.request<RepositoryMethodRefactorLaunchResponse>(
+      'launchRepositoryMethodRefactor',
       change,
     )
   }

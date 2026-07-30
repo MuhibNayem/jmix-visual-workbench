@@ -411,6 +411,8 @@ class SchemaWorkspaceService(
                             editable = method.editable,
                             issue = method.issue,
                             methodIndex = methodIndex,
+                            sourceStartOffset = method.sourceStartOffset,
+                            sourceEndOffset = method.sourceEndOffset,
                         )
                     },
                 )
@@ -2545,6 +2547,8 @@ data class SchemaRepositoryMethodEvidence(
     val editable: Boolean,
     val issue: String? = null,
     val methodIndex: Int? = null,
+    val sourceStartOffset: Int? = null,
+    val sourceEndOffset: Int? = null,
 )
 
 data class SchemaModuleSnapshot(

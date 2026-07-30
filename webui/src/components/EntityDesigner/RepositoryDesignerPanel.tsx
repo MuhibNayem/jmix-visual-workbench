@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react'
 import {
   AlertTriangle,
+  Braces,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  FileCode2,
   LoaderCircle,
+  Pencil,
   Plus,
   ShieldAlert,
   Trash2,
@@ -18,6 +21,7 @@ import type {
   RepositoryMethodParameter,
   RepositoryParameterRole,
   RepositorySemanticValidationResponse,
+  RepositoryMethodRefactorOperation,
   SchemaRepositoryMethodEvidence,
 } from '../../types'
 
@@ -29,6 +33,11 @@ interface RepositoryDesignerPanelProps {
   methodEvidence?: SchemaRepositoryMethodEvidence[]
   semantics?: RepositorySemanticValidationResponse | null
   semanticsBusy?: boolean
+  nativeMethodActionBusy?: number | null
+  onNativeMethodAction?: (
+    methodIndex: number,
+    operation: RepositoryMethodRefactorOperation,
+  ) => void
   footer?: React.ReactNode
 }
 
@@ -177,6 +186,8 @@ export default function RepositoryDesignerPanel({
   methodEvidence = [],
   semantics,
   semanticsBusy = false,
+  nativeMethodActionBusy = null,
+  onNativeMethodAction,
   footer,
 }: RepositoryDesignerPanelProps) {
   const config = repositoryConfig(entity)
@@ -462,21 +473,69 @@ export default function RepositoryDesignerPanel({
                         {safelyEditable ? 'Existing · metadata editable' : 'Source-owned'}
                       </span>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => removeMethod(index)}
-                      aria-label={`Remove ${method.name || 'repository method'}`}
-                      disabled={existingMethod}
-                      className="rounded p-1 text-red-400 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-25"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    {!existingMethod && (
+                      <button
+                        type="button"
+                        onClick={() => removeMethod(index)}
+                        aria-label={`Remove ${method.name || 'repository method'}`}
+                        className="rounded p-1 text-red-400 hover:bg-red-500/10"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </div>
+
+                  {expanded && existingMethod && (
+                    <div
+                      className="flex min-w-0 flex-wrap gap-1.5 border-t border-surface-border bg-surface-light/20 px-3 py-2"
+                      aria-label={`Native IntelliJ actions for ${method.name}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => onNativeMethodAction?.(index, 'OPEN_SOURCE')}
+                        disabled={!onNativeMethodAction || nativeMethodActionBusy !== null}
+                        className="flex items-center gap-1 rounded border border-surface-border px-2 py-1 text-[9px] text-gray-300 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <FileCode2 className="h-3 w-3" /> Open source
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onNativeMethodAction?.(index, 'RENAME')}
+                        disabled={!onNativeMethodAction || nativeMethodActionBusy !== null}
+                        className="flex items-center gap-1 rounded border border-surface-border px-2 py-1 text-[9px] text-gray-300 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Pencil className="h-3 w-3" /> Rename
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onNativeMethodAction?.(index, 'CHANGE_SIGNATURE')}
+                        disabled={!onNativeMethodAction || nativeMethodActionBusy !== null}
+                        className="flex items-center gap-1 rounded border border-jmix-500/30 bg-jmix-500/10 px-2 py-1 text-[9px] text-jmix-100 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Braces className="h-3 w-3" /> Change signature
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onNativeMethodAction?.(index, 'SAFE_DELETE')}
+                        disabled={!onNativeMethodAction || nativeMethodActionBusy !== null}
+                        className="flex items-center gap-1 rounded border border-red-500/25 bg-red-500/5 px-2 py-1 text-[9px] text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Trash2 className="h-3 w-3" /> Safe delete
+                      </button>
+                      {nativeMethodActionBusy === index && (
+                        <span className="flex items-center gap-1 px-1 text-[9px] text-gray-500">
+                          <LoaderCircle className="h-3 w-3 animate-spin" /> Opening IntelliJ…
+                        </span>
+                      )}
+                    </div>
+                  )}
 
                   {expanded && (
                     <fieldset
                       disabled={sourceOwned}
-                      className="min-w-0 space-y-3 border-t border-surface-border p-3 disabled:opacity-65"
+                      className={`min-w-0 space-y-3 p-3 disabled:opacity-65 ${
+                        existingMethod ? '' : 'border-t border-surface-border'
+                      }`}
                     >
                       {sourceOwned && (
                         <div className="rounded border border-surface-border bg-surface-light/50 p-2 text-[9px] leading-relaxed text-gray-500">

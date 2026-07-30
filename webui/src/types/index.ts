@@ -487,6 +487,8 @@ export interface SchemaRepositoryMethodEvidence {
   editable: boolean
   issue?: string
   methodIndex?: number
+  sourceStartOffset?: number
+  sourceEndOffset?: number
 }
 
 export interface SchemaModuleSnapshot {
@@ -643,6 +645,26 @@ export interface DataRepositoryChangeRequest {
   entitySource: GraphSourceLocator
   repositorySource?: GraphSourceLocator
   config: DataRepositoryConfig
+}
+
+export type RepositoryMethodRefactorOperation =
+  | 'OPEN_SOURCE'
+  | 'RENAME'
+  | 'CHANGE_SIGNATURE'
+  | 'SAFE_DELETE'
+
+export interface RepositoryMethodRefactorRequest {
+  repositorySource: GraphSourceLocator
+  repositoryQualifiedName: string
+  methodIndex: number
+  sourceSignature: string
+  operation: RepositoryMethodRefactorOperation
+}
+
+export interface RepositoryMethodRefactorLaunchResponse {
+  success: boolean
+  code?: string
+  message: string
 }
 
 export type RepositorySemanticSeverity = 'error' | 'warning' | 'info'

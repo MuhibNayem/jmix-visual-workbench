@@ -39,6 +39,7 @@
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.EntityEventListenerService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.DataRepositoryChangeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.RepositoryMethodRefactorService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixDomainSymbolService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixUiSecuritySymbolService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixSpringBeanSymbolService"/>

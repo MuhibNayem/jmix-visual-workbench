@@ -24,8 +24,10 @@ contract and
   developer documentation. Handwritten/custom/default/native-query members
   remain visible source-owned evidence instead of being silently rewritten.
   New repositories, additive methods and the supported metadata of existing
-  methods share one responsive visual editor. Existing callable contracts,
-  documentation and binding declarations remain native-refactoring owned.
+  methods share one responsive visual editor. Existing callable contracts now
+  expose exact-source **Open**, IntelliJ **Rename**, **Change Signature**, and
+  **Safe Delete** actions; documentation and binding declarations remain
+  native-refactoring owned.
 - Repository authoring now uses one entity-aware semantic model in the backend,
   the responsive designer and native IntelliJ references. Derived queries
   resolve inherited and nested properties, operators, arity, value types,
@@ -75,6 +77,17 @@ contract and
   changes, stale revisions and signature collisions route to native
   refactoring or fail closed. Creation also emits module/language-correct
   repository activation when the indexed project has none.
+- Existing Java and Kotlin repository methods now launch IntelliJ's native
+  source navigation, Rename, Change Signature and Safe Delete workflows from
+  the visual method card. The backend accepts only project-contained
+  Java/Kotlin source whose SHA-256 revision, qualified repository, method
+  index, indexed signature, owner, arity and exact PSI source range all agree.
+  Missing, oversized, stale, ambiguous or malformed bridge evidence fails
+  closed, and visual drafts must be applied or discarded before a mutation.
+  IntelliJ owns usage discovery, preview, collision analysis, undo and the
+  eventual write; the plugin never reconstructs or replaces the handwritten
+  callable declaration. Real browser checks exercised the handoff and kept all
+  four actions contained at 900, 600 and 480 pixels with zero console errors.
 - FlowUI collection loading can now be wired to the official
   `findAll(Pageable, JmixDataRepositoryContext)` delegate contract, preserving
   filter, paging, sorting, fetch-plan and hint context. Detail saving emits a
@@ -118,7 +131,7 @@ contract and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 308 tests and three packaged-host
+  descriptors were inspected after assembly, 310 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
@@ -420,10 +433,10 @@ blocked until all of the following pass:
 
 Repository creation, additive Java/Kotlin method authoring, lossless supported
 metadata edits, native Java/Kotlin injection and repository-backed view
-delegates are implemented. Remaining repository work is native structural
-change-signature/delete refactoring, transactional aggregate update-service
-generation, complete JPQL semantics and runtime integration certification
-against representative Jmix applications.
+delegates plus native Open/Rename/Change-Signature/Safe-Delete workflows are
+implemented. Remaining repository work is transactional aggregate
+update-service generation, complete JPQL semantics and runtime integration
+certification against representative Jmix applications.
 
 No release or marketing claim may describe complete Studio Entity Designer
 parity until those gates are closed.

@@ -6,7 +6,9 @@ import com.intellij.openapi.module.ModuleType
 import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiMethod
 import com.intellij.testFramework.HeavyPlatformTestCase
+import org.jetbrains.kotlin.psi.KtNamedFunction
 import org.jmixworkbench.generator.CrudOrchestrator
 import org.jmixworkbench.generator.MigrationGenerator
 import org.jmixworkbench.model.ChangeSetModel
@@ -48,6 +50,115 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
+    fun testJavaRepositoryMethodsResolveOnlyFromExactRevisionBoundEvidenceForNativeRefactoring() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/LoanAppRepository.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.repository.JmixDataRepository;
+                import java.util.List;
+                import java.util.UUID;
+
+                public interface LoanAppRepository extends JmixDataRepository<LoanApp, UUID> {
+                    /** Referenced by payroll integration callers. */
+                    List<LoanApp> findByApplicationNo(String applicationNo);
+                }
+                """.trimIndent(),
+            )
+        }
+
+        val repository = SchemaWorkspaceService.getInstance(project)
+            .load(forceRefresh = true)
+            .repositories
+            .single()
+        val evidence = repository.methodEvidence.single()
+        assertNotNull(evidence.sourceStartOffset)
+        assertNotNull(evidence.sourceEndOffset)
+        val baseRequest = RepositoryMethodRefactorRequest(
+            repositorySource = repository.sourceLocator,
+            repositoryQualifiedName = repository.qualifiedName,
+            methodIndex = 0,
+            sourceSignature = evidence.sourceSignature,
+            operation = RepositoryMethodRefactorOperation.OPEN_SOURCE,
+        )
+        RepositoryMethodRefactorOperation.entries.forEach { operation ->
+            val prepared = RepositoryMethodRefactorService.getInstance(project)
+                .prepare(baseRequest.copy(operation = operation))
+            assertTrue(prepared.accepted, "${operation.name}: ${prepared.code} ${prepared.message}")
+            assertTrue(prepared.pointer?.element is PsiMethod)
+        }
+
+        val forgedSignature = RepositoryMethodRefactorService.getInstance(project).prepare(
+            baseRequest.copy(sourceSignature = "${evidence.sourceSignature}-forged"),
+        )
+        assertFalse(forgedSignature.accepted)
+        assertEquals("JVW-REPOSITORY-REFACTOR-EVIDENCE-MISMATCH", forgedSignature.code)
+
+        val staleRevision = RepositoryMethodRefactorService.getInstance(project).prepare(
+            baseRequest.copy(
+                repositorySource = repository.sourceLocator.copy(
+                    revisionFingerprint = "0".repeat(64),
+                ),
+            ),
+        )
+        assertFalse(staleRevision.accepted)
+        assertEquals("JVW-REPOSITORY-REFACTOR-SOURCE-STALE", staleRevision.code)
+
+        val malformedRequest = RepositoryMethodRefactorService.getInstance(project).prepare(
+            baseRequest.copy(operation = null),
+        )
+        assertFalse(malformedRequest.accepted)
+        assertEquals("JVW-REPOSITORY-REFACTOR-REQUEST-INVALID", malformedRequest.code)
+    }
+
+    fun testKotlinSourceOwnedRepositoryMethodStillRoutesToNativeRefactoring() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/LoanAppRepository.kt",
+                """
+                package com.acme.entity
+
+                import io.jmix.core.repository.JmixDataRepository
+                import java.util.UUID
+
+                interface LoanAppRepository : JmixDataRepository<LoanApp, UUID> {
+                    /** Custom contract retained by IntelliJ refactoring. */
+                    @Deprecated("migration compatibility")
+                    fun findByApplicationNo(applicationNo: String): List<LoanApp>
+                }
+                """.trimIndent(),
+            )
+        }
+
+        val repository = SchemaWorkspaceService.getInstance(project)
+            .load(forceRefresh = true)
+            .repositories
+            .single()
+        val evidence = repository.methodEvidence.single()
+        assertFalse(evidence.editable)
+        assertEquals(0, evidence.methodIndex)
+        val prepared = RepositoryMethodRefactorService.getInstance(project).prepare(
+            RepositoryMethodRefactorRequest(
+                repositorySource = repository.sourceLocator,
+                repositoryQualifiedName = repository.qualifiedName,
+                methodIndex = 0,
+                sourceSignature = evidence.sourceSignature,
+                operation = RepositoryMethodRefactorOperation.CHANGE_SIGNATURE,
+            ),
+        )
+
+        assertTrue(prepared.accepted, "${prepared.code}: ${prepared.message}")
+        assertTrue(prepared.pointer?.element is KtNamedFunction)
+    }
+
     fun testExistingRepositoryIsIndexedAndReceivesOnlyAdditiveTypedMethods() {
         createFixture(includeAll = true)
         val root = getOrCreateProjectBaseDir()

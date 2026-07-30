@@ -38,6 +38,7 @@ import type {
   EntityAttributeTypeMappingCutoverRequest,
   GraphSourceLocator,
   GraphArtifact,
+  RepositoryMethodRefactorOperation,
   RepositorySemanticValidationResponse,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
@@ -158,6 +159,8 @@ export default function EntityDesigner({
   const [repositoryPreview, setRepositoryPreview] =
     useState<WorkspaceChangePreviewResponse | null>(null)
   const [repositoryBusy, setRepositoryBusy] = useState(false)
+  const [repositoryNativeActionBusy, setRepositoryNativeActionBusy] =
+    useState<number | null>(null)
   const [repositorySemantics, setRepositorySemantics] =
     useState<RepositorySemanticValidationResponse | null>(null)
   const [repositorySemanticsBusy, setRepositorySemanticsBusy] = useState(false)
@@ -1566,6 +1569,43 @@ export default function EntityDesigner({
     setEntity({ dataRepository: repository.config })
   }
 
+  const launchRepositoryMethodRefactor = async (
+    methodIndex: number,
+    operation: RepositoryMethodRefactorOperation,
+  ) => {
+    if (!existingRepository) return
+    const evidence = existingRepository.methodEvidence.find(candidate =>
+      candidate.methodIndex === methodIndex)
+    if (!evidence) {
+      addToast('The selected method has no exact indexed source evidence. Refresh Entity Designer.', 'error')
+      return
+    }
+    const hasVisualDraft = JSON.stringify(entity.dataRepository) !==
+      JSON.stringify(existingRepository.config)
+    if (operation !== 'OPEN_SOURCE' && (hasVisualDraft || repositoryPreview)) {
+      addToast(
+        'Apply or discard pending visual repository edits before opening a native refactoring.',
+        'error',
+      )
+      return
+    }
+    setRepositoryNativeActionBusy(methodIndex)
+    try {
+      const response = await bridge.launchRepositoryMethodRefactor({
+        repositorySource: existingRepository.sourceLocator,
+        repositoryQualifiedName: existingRepository.qualifiedName,
+        methodIndex,
+        sourceSignature: evidence.sourceSignature,
+        operation,
+      })
+      addToast(response.message, response.success ? 'info' : 'error')
+    } catch (error: any) {
+      addToast(`Native repository refactoring failed: ${error.message}`, 'error')
+    } finally {
+      setRepositoryNativeActionBusy(null)
+    }
+  }
+
   const previewRepositoryChange = async () => {
     if (!existingEntity || !entity.dataRepository) return
     setRepositoryBusy(true)
@@ -2439,6 +2479,10 @@ export default function EntityDesigner({
                 methodEvidence={existingRepository?.methodEvidence ?? []}
                 semantics={repositorySemantics}
                 semanticsBusy={repositorySemanticsBusy}
+                nativeMethodActionBusy={repositoryNativeActionBusy}
+                onNativeMethodAction={(methodIndex, operation) => {
+                  void launchRepositoryMethodRefactor(methodIndex, operation)
+                }}
                 onChange={dataRepository => {
                   setRepositoryPreview(null)
                   setEntity({ dataRepository })

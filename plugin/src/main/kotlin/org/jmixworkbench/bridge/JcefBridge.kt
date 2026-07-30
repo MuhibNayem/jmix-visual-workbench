@@ -3,11 +3,14 @@ package org.jmixworkbench.bridge
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.refactoring.rename.RenameProcessor
@@ -58,6 +61,11 @@ import org.jmixworkbench.services.EntityEventListenerService
 import org.jmixworkbench.services.DataRepositoryApplyRequest
 import org.jmixworkbench.services.DataRepositoryChangeRequest
 import org.jmixworkbench.services.DataRepositoryChangeService
+import org.jmixworkbench.services.PreparedRepositoryMethodRefactor
+import org.jmixworkbench.services.RepositoryMethodRefactorLaunchResponse
+import org.jmixworkbench.services.RepositoryMethodRefactorOperation
+import org.jmixworkbench.services.RepositoryMethodRefactorRequest
+import org.jmixworkbench.services.RepositoryMethodRefactorService
 import org.jmixworkbench.services.DatabaseEntityTableInspectionRequest
 import org.jmixworkbench.services.DatabaseEntityTableBrowseRequest
 import org.jmixworkbench.services.DatabaseEntityImportRequest
@@ -370,6 +378,10 @@ class JcefBridge(
             }
             if (action == "launchEntityAttributeSafeDelete") {
                 handleLaunchEntityAttributeSafeDelete(action, requestId, payload)
+                return
+            }
+            if (action == "launchRepositoryMethodRefactor") {
+                handleLaunchRepositoryMethodRefactor(action, requestId, payload)
                 return
             }
             if (action == "launchEntityAttributeTypeMigration") {
@@ -1518,6 +1530,144 @@ class JcefBridge(
                         true,
                         true,
                     ).run()
+                }, ModalityState.nonModal())
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleLaunchRepositoryMethodRefactor(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, RepositoryMethodRefactorRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedRepositoryMethodRefactor> {
+            RepositoryMethodRefactorService.getInstance(project).prepare(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val element = prepared.pointer?.element
+                val operation = prepared.operation
+                val virtualFile = element?.containingFile?.virtualFile
+                if (
+                    !prepared.accepted ||
+                    element == null ||
+                    operation == null ||
+                    virtualFile == null ||
+                    !virtualFile.isValid
+                ) {
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(
+                            RepositoryMethodRefactorLaunchResponse(
+                                success = false,
+                                code = prepared.code,
+                                message = prepared.message,
+                            ),
+                        ),
+                    )
+                    return@finishOnUiThread
+                }
+                val descriptor = OpenFileDescriptor(project, virtualFile, element.textOffset)
+                if (operation == RepositoryMethodRefactorOperation.OPEN_SOURCE) {
+                    descriptor.navigate(true)
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(
+                            RepositoryMethodRefactorLaunchResponse(
+                                success = true,
+                                message = "Opened ${prepared.repositoryName}.${prepared.methodName} in source.",
+                            ),
+                        ),
+                    )
+                    return@finishOnUiThread
+                }
+                val actionId = operation.actionId
+                val nativeAction = actionId?.let {
+                    ActionManager.getInstance().getAction(it)
+                }
+                if (nativeAction == null) {
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(
+                            RepositoryMethodRefactorLaunchResponse(
+                                success = false,
+                                code = "JVW-REPOSITORY-REFACTOR-ACTION-MISSING",
+                                message = "IntelliJ action ${actionId ?: operation.name} is unavailable.",
+                            ),
+                        ),
+                    )
+                    return@finishOnUiThread
+                }
+                val editor = FileEditorManager.getInstance(project)
+                    .openTextEditor(descriptor, true)
+                if (editor == null) {
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(
+                            RepositoryMethodRefactorLaunchResponse(
+                                success = false,
+                                code = "JVW-REPOSITORY-REFACTOR-EDITOR-MISSING",
+                                message = "IntelliJ could not open the repository source editor.",
+                            ),
+                        ),
+                    )
+                    return@finishOnUiThread
+                }
+                editor.caretModel.moveToOffset(element.textOffset)
+                editor.scrollingModel.scrollToCaret(
+                    com.intellij.openapi.editor.ScrollType.CENTER,
+                )
+                ApplicationManager.getApplication().invokeLater({
+                    val callback = ActionManager.getInstance().tryToExecute(
+                        nativeAction,
+                        null,
+                        editor.contentComponent,
+                        ActionPlaces.UNKNOWN,
+                        true,
+                    )
+                    callback.doWhenDone {
+                        sendResponse(
+                            action,
+                            requestId,
+                            gson.toJson(
+                                RepositoryMethodRefactorLaunchResponse(
+                                    success = true,
+                                    message = buildString {
+                                        append(operation.label)
+                                        append(" opened for ")
+                                        append(prepared.repositoryName)
+                                        append('.')
+                                        append(prepared.methodName)
+                                        append(". No source changes until you confirm IntelliJ's preview.")
+                                    },
+                                ),
+                            ),
+                        )
+                    }
+                    callback.doWhenRejected(Runnable {
+                        sendResponse(
+                            action,
+                            requestId,
+                            gson.toJson(
+                                RepositoryMethodRefactorLaunchResponse(
+                                    success = false,
+                                    code = "JVW-REPOSITORY-REFACTOR-ACTION-REJECTED",
+                                    message = "${operation.label} was not available for the exact repository method.",
+                                ),
+                            ),
+                        )
+                    })
                 }, ModalityState.nonModal())
             }
             .submit(AppExecutorUtil.getAppExecutorService())
