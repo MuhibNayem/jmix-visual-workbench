@@ -348,6 +348,10 @@ class JcefBridge(
                 handleApplyExistingEntityAttributeAdditions(action, requestId, payload)
                 return
             }
+            if (action == "inspectEntityAttributeRename") {
+                handleInspectEntityAttributeRename(action, requestId, payload)
+                return
+            }
             if (action == "launchEntityAttributeRename") {
                 handleLaunchEntityAttributeRename(action, requestId, payload)
                 return
@@ -1378,6 +1382,43 @@ class JcefBridge(
                         setPreviewUsages(true)
                     }.run()
                 }, ModalityState.nonModal())
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleInspectEntityAttributeRename(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeRenameRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedEntityAttributeRename> {
+            EntityAttributeRefactorService.getInstance(project).prepareRename(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                sendResponse(
+                    action,
+                    requestId,
+                    gson.toJson(
+                        EntityAttributeRenameLaunchResponse(
+                            success = prepared.accepted,
+                            code = prepared.code,
+                            message = if (prepared.accepted) {
+                                "Native usage rename is ready for " +
+                                    "${request.attributeName} → ${request.newName}; no files were changed."
+                            } else {
+                                prepared.message
+                            },
+                        ),
+                    ),
+                )
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

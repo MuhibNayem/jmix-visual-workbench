@@ -85,6 +85,7 @@ export interface AssociationConfig {
   inverseAttributeName?: string
   ownershipTransfer?: 'request' | 'receiver' | 'release'
   ownershipJoinColumnName?: string
+  cardinalityChoreography?: 'owner' | 'inverse'
 }
 
 export interface AssociationJoinColumn {

@@ -55,6 +55,26 @@ The clean-room baseline is derived only from public documentation:
 Public behavior is a compatibility target, not a license to copy proprietary
 source code, assets, protocols, or internal implementation.
 
+## Entity Designer product-gap priority
+
+The safety engine is not the current limiting factor. The shortest path from
+the present substantial implementation to a superior daily developer product
+is:
+
+1. native Java/Kotlin entity `FileEditor` integration with immediate
+   source/designer refresh and correct New Entity/View/CRUD action routing;
+2. high-frequency attribute and entity actions: copy/reorder,
+   inherited/trait visibility, callbacks/listeners, view creation/navigation,
+   complete discriminator and embedded-override editing, repository methods and
+   enum-usage migration;
+3. decomposition of the 5,807-line React designer plus component, interaction,
+   responsive and accessibility regression tests;
+4. representative arbitrary-source, database-first, installed-IDE dual-host,
+   scale, latency, memory and leak certification.
+
+Until those items pass, advanced migration and relationship capabilities do not
+justify an overall Entity Designer superiority claim.
+
 ## A. Studio core development parity
 
 | ID | Mandatory capability | Current status | Completion evidence required |

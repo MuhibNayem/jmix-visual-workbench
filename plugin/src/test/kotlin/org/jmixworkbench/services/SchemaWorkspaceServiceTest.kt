@@ -2654,6 +2654,34 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             ),
         )
         assertTrue(migration.contains("<dropColumn tableName=\"KOTLIN_LOAN_ACCOUNT\" columnName=\"APPROVED_AMOUNT\""))
+
+        val prepared = ExistingEntityChangeService.getInstance(project).prepareAttributeAdditions(
+            ExistingEntityAttributeAdditionApplyRequest(
+                change = ExistingEntityAttributeAdditionRequest(snapshot.sourceLocator, entity),
+                expectedPlanDigest = requireNotNull(preview.planDigest),
+            ),
+        )
+        val applied = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+        assertTrue(applied.success, applied.issues.joinToString { "${it.code}: ${it.message}" })
+        val refreshed = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+            .entities.single { it.className == "KotlinLoanAccount" }
+        assertEquals(
+            "EXTERNAL_ACCOUNT_NO",
+            refreshed.attributes.single { it.name == "accountNo" }.columnName,
+        )
+        val coordinatedRename = EntityAttributeRefactorService.getInstance(project).prepareRename(
+            EntityAttributeRenameRequest(
+                sourceLocator = refreshed.sourceLocator,
+                entityClassName = refreshed.className,
+                attributeName = "accountNo",
+                newName = "externalAccountNo",
+            ),
+        )
+        assertTrue(
+            coordinatedRename.accepted,
+            "${coordinatedRename.code}: ${coordinatedRename.message}",
+        )
+        assertEquals("KtProperty", coordinatedRename.element?.javaClass?.simpleName)
     }
 
     fun testExistingEntityCrossStoreRelationshipIsAddedWithoutRewritingManualCodeOrAddingForeignKey() {
@@ -3187,6 +3215,339 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertEquals(
             "JVW-ENTITY-TYPE-EXPANSION-CONVERSION-REQUIRES-EXPRESSION",
             unsafeExpansion.code,
+        )
+    }
+
+    fun testEstablishedBidirectionalCardinalityChangesUpdateBothSourcesAndSchemaAtomically() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/CardinalityDepartment.kt",
+                """
+                    package com.acme.entity
+                    import io.jmix.core.metamodel.annotation.JmixEntity
+                    import jakarta.persistence.*
+                    import java.util.UUID
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "CARDINALITY_DEPARTMENT")
+                    open class CardinalityDepartment {
+                        @Id
+                        @Column(name = "ID", nullable = false)
+                        var id: UUID? = null
+
+                        @ManualInverseCollection("preserve")
+                        @OneToMany(mappedBy = "department", fetch = FetchType.LAZY)
+                        var employees: MutableList<CardinalityEmployee> = mutableListOf()
+
+                        fun manualDepartmentCode(): String = "department"
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/CardinalityEmployee.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    import java.util.UUID;
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "CARDINALITY_EMPLOYEE")
+                    public class CardinalityEmployee {
+                        @Id
+                        @Column(name = "ID", nullable = false)
+                        private UUID id;
+
+                        @ManyToOne(fetch = FetchType.LAZY)
+                        @JoinColumn(
+                            name = "DEPARTMENT_ID",
+                            referencedColumnName = "ID",
+                            foreignKey = @ForeignKey(name = "FK_CARDINALITY_EMPLOYEE_DEPARTMENT")
+                        )
+                        private CardinalityDepartment department;
+
+                        public String manualEmployeeCode() { return "employee"; }
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/CardinalityAccount.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    import java.util.UUID;
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "CARDINALITY_ACCOUNT")
+                    public class CardinalityAccount {
+                        @Id
+                        @Column(name = "ID", nullable = false)
+                        private UUID id;
+
+                        @ManualInverseScalar
+                        @OneToOne(mappedBy = "account", fetch = FetchType.LAZY)
+                        private CardinalityContract contracts = null;
+
+                        public String manualAccountCode() { return "account"; }
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/CardinalityContract.kt",
+                """
+                    package com.acme.entity
+                    import io.jmix.core.metamodel.annotation.JmixEntity
+                    import jakarta.persistence.*
+                    import java.util.UUID
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "CARDINALITY_CONTRACT")
+                    open class CardinalityContract {
+                        @Id
+                        @Column(name = "ID", nullable = false)
+                        var id: UUID? = null
+
+                        @OneToOne(fetch = FetchType.LAZY)
+                        @JoinColumn(
+                            name = "ACCOUNT_ID",
+                            referencedColumnName = "ID",
+                            unique = true,
+                            foreignKey = ForeignKey(name = "FK_CARDINALITY_CONTRACT_ACCOUNT"),
+                        )
+                        var account: CardinalityAccount? = null
+
+                        fun manualContractCode(): String = "contract"
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/resources/com/acme/liquibase/changelog/024-bidirectional-cardinality.xml",
+                """
+                    <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                        <changeSet id="bidirectional-cardinality" author="team">
+                            <createTable tableName="CARDINALITY_DEPARTMENT">
+                                <column name="ID" type="UUID">
+                                    <constraints nullable="false" primaryKey="true"/>
+                                </column>
+                            </createTable>
+                            <createTable tableName="CARDINALITY_EMPLOYEE">
+                                <column name="ID" type="UUID">
+                                    <constraints nullable="false" primaryKey="true"/>
+                                </column>
+                                <column name="DEPARTMENT_ID" type="UUID"/>
+                            </createTable>
+                            <addForeignKeyConstraint
+                                constraintName="FK_CARDINALITY_EMPLOYEE_DEPARTMENT"
+                                baseTableName="CARDINALITY_EMPLOYEE"
+                                baseColumnNames="DEPARTMENT_ID"
+                                referencedTableName="CARDINALITY_DEPARTMENT"
+                                referencedColumnNames="ID"/>
+                            <createTable tableName="CARDINALITY_ACCOUNT">
+                                <column name="ID" type="UUID">
+                                    <constraints nullable="false" primaryKey="true"/>
+                                </column>
+                            </createTable>
+                            <createTable tableName="CARDINALITY_CONTRACT">
+                                <column name="ID" type="UUID">
+                                    <constraints nullable="false" primaryKey="true"/>
+                                </column>
+                                <column name="ACCOUNT_ID" type="UUID"/>
+                            </createTable>
+                            <addUniqueConstraint
+                                tableName="CARDINALITY_CONTRACT"
+                                constraintName="UQ_CARDINALITY_CONTRACT_ACCOUNT"
+                                columnNames="ACCOUNT_ID"/>
+                            <addForeignKeyConstraint
+                                constraintName="FK_CARDINALITY_CONTRACT_ACCOUNT"
+                                baseTableName="CARDINALITY_CONTRACT"
+                                baseColumnNames="ACCOUNT_ID"
+                                referencedTableName="CARDINALITY_ACCOUNT"
+                                referencedColumnNames="ID"/>
+                        </changeSet>
+                    </databaseChangeLog>
+                """.trimIndent(),
+            )
+        }
+
+        val schemaService = SchemaWorkspaceService.getInstance(project)
+        val workspace = schemaService.load(forceRefresh = true)
+        val store = workspace.stores.single()
+        val service = ExistingEntityChangeService.getInstance(project)
+
+        fun model(
+            snapshot: SchemaEntitySnapshot,
+            attributeName: String,
+            targetType: AssociationType,
+            targetUnique: Boolean,
+        ): EntityModel {
+            val current = snapshot.attributes.single { it.name == attributeName }
+            val relation = requireNotNull(current.associationDetails)
+            return EntityModel(
+                className = snapshot.className,
+                packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+                sourceLanguage = if (snapshot.sourceLocator.relativePath.endsWith(".kt")) {
+                    EntitySourceLanguage.KOTLIN
+                } else {
+                    EntitySourceLanguage.JAVA
+                },
+                tableName = snapshot.tableName,
+                dataStore = snapshot.storeName,
+                generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+                attributes = mutableListOf(
+                    AttributeModel(
+                        name = current.name,
+                        type = AttributeType.ASSOCIATION,
+                        columnName = current.columnName,
+                        mandatory = !current.nullable,
+                        unique = targetUnique,
+                        association = AssociationConfig(
+                            associationType = targetType,
+                            relatedEntity = relation.relatedEntity,
+                            relatedTableName = relation.relatedTableName,
+                            relatedIdColumnName = relation.relatedIdColumnName,
+                            relatedIdType = relation.relatedIdType,
+                            localIdAttributeName = relation.localIdAttributeName,
+                            mappedBy = relation.mappedBy,
+                            joinColumnName = relation.joinColumnName,
+                            joinTable = relation.joinTable,
+                            cascade = relation.cascade.toMutableList(),
+                            fetch = relation.fetch,
+                            collectionType = relation.collectionType,
+                            crossDataStore = relation.crossDataStore,
+                            orphanRemoval = relation.orphanRemoval,
+                            onDelete = relation.onDelete,
+                        ),
+                    ),
+                ),
+            )
+        }
+
+        val employee = workspace.entities.single { it.className == "CardinalityEmployee" }
+        val narrowingRequest = ExistingEntityAttributeAdditionRequest(
+            employee.sourceLocator,
+            model(
+                employee,
+                "department",
+                AssociationType.ONE_TO_ONE,
+                targetUnique = true,
+            ),
+        )
+        val narrowing = service.previewAttributeAdditions(narrowingRequest)
+        assertTrue(narrowing.accepted, narrowing.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(3, narrowing.files.size)
+        val employeeSource = narrowing.files.single {
+            it.relativePath.endsWith("/CardinalityEmployee.java")
+        }.resultContent
+        val departmentSource = narrowing.files.single {
+            it.relativePath.endsWith("/CardinalityDepartment.kt")
+        }.resultContent
+        val narrowingMigration = narrowing.files.single {
+            it.relativePath.endsWith(".xml")
+        }.resultContent
+        assertTrue(employeeSource.contains("@OneToOne(fetch = FetchType.LAZY)"))
+        assertFalse(employeeSource.contains("@ManyToOne"))
+        assertTrue(employeeSource.contains("unique = true"))
+        assertTrue(employeeSource.contains("manualEmployeeCode"))
+        assertTrue(departmentSource.contains("@ManualInverseCollection(\"preserve\")"))
+        assertTrue(departmentSource.contains("@OneToOne(mappedBy = \"department\", fetch = FetchType.LAZY)"))
+        assertTrue(departmentSource.contains("var employees: CardinalityEmployee? = null"))
+        assertFalse(departmentSource.contains("MutableList<CardinalityEmployee>"))
+        assertTrue(departmentSource.contains("manualDepartmentCode"))
+        assertTrue(narrowingMigration.contains("HAVING COUNT(*) &gt; 1"))
+        assertTrue(narrowingMigration.contains("""<addUniqueConstraint tableName="CARDINALITY_EMPLOYEE""""))
+        assertFalse(narrowingMigration.contains("""tableName="CARDINALITY_DEPARTMENT""""))
+
+        val contract = workspace.entities.single { it.className == "CardinalityContract" }
+        val account = workspace.entities.single { it.className == "CardinalityAccount" }
+        val accountInverse = requireNotNull(
+            account.attributes.single { it.name == "contracts" }.associationDetails,
+        )
+        assertEquals(AssociationType.ONE_TO_ONE, accountInverse.associationType)
+        assertEquals(contract.qualifiedName, accountInverse.relatedEntity)
+        assertEquals("account", accountInverse.mappedBy)
+        val wideningRequest = ExistingEntityAttributeAdditionRequest(
+            contract.sourceLocator,
+            model(
+                contract,
+                "account",
+                AssociationType.MANY_TO_ONE,
+                targetUnique = false,
+            ),
+        )
+        val widening = service.previewAttributeAdditions(wideningRequest)
+        assertTrue(widening.accepted, widening.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(
+            widening.files.joinToString { it.relativePath },
+            3,
+            widening.files.size,
+        )
+        val contractSource = widening.files.single {
+            it.relativePath.endsWith("/CardinalityContract.kt")
+        }.resultContent
+        val accountSource = widening.files.single {
+            it.relativePath.endsWith("/CardinalityAccount.java")
+        }.resultContent
+        val wideningMigration = widening.files.single {
+            it.relativePath.endsWith(".xml")
+        }.resultContent
+        assertTrue(contractSource.contains("@ManyToOne(fetch = FetchType.LAZY)"))
+        assertFalse(contractSource.contains("@OneToOne"))
+        assertFalse(contractSource.contains("unique = true"))
+        assertTrue(contractSource.contains("manualContractCode"))
+        assertTrue(accountSource.contains("@ManualInverseScalar"))
+        assertTrue(accountSource.contains("@OneToMany(mappedBy = \"account\", fetch = FetchType.LAZY)"))
+        assertTrue(accountSource.contains("List<CardinalityContract> contracts = new java.util.ArrayList<>()"))
+        assertTrue(accountSource.contains("import java.util.List;"))
+        assertTrue(accountSource.contains("manualAccountCode"))
+        assertTrue(
+            wideningMigration.contains(
+                """<dropUniqueConstraint tableName="CARDINALITY_CONTRACT" """ +
+                    """constraintName="UQ_CARDINALITY_CONTRACT_ACCOUNT"""",
+            ),
+        )
+        assertTrue(wideningMigration.contains("<rollback>"))
+        assertTrue(
+            wideningMigration.contains(
+                """<addUniqueConstraint tableName="CARDINALITY_CONTRACT" """ +
+                    """constraintName="UQ_CARDINALITY_CONTRACT_ACCOUNT"""",
+            ),
+        )
+
+        val prepared = service.prepareAttributeAdditions(
+            ExistingEntityAttributeAdditionApplyRequest(
+                change = narrowingRequest,
+                expectedPlanDigest = requireNotNull(narrowing.planDigest),
+            ),
+        )
+        val applied = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+        assertTrue(applied.success, applied.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(3, applied.filesChanged.size)
+        val refreshed = schemaService.load(forceRefresh = true)
+        assertEquals(
+            AssociationType.ONE_TO_ONE,
+            refreshed.entities.single { it.className == "CardinalityEmployee" }
+                .attributes.single { it.name == "department" }
+                .associationDetails?.associationType,
+        )
+        assertEquals(
+            AssociationType.ONE_TO_ONE,
+            refreshed.entities.single { it.className == "CardinalityDepartment" }
+                .attributes.single { it.name == "employees" }
+                .associationDetails?.associationType,
+        )
+        assertTrue(
+            refreshed.physicalSchemas.single { it.storeId == store.id }
+                .tables.single { it.name == "CARDINALITY_EMPLOYEE" }
+                .columns.single { it.name == "DEPARTMENT_ID" }
+                .unique,
         )
     }
 

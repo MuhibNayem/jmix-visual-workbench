@@ -1807,7 +1807,8 @@ class SchemaWorkspaceService(
         private val ENTITY_ANNOTATION = Regex("""(?s)@Entity\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
         private val COLUMN_ANNOTATION = Regex("""@Column\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
         private val JAVA_FIELD_DECLARATION = Regex(
-            """(?m)^[\t ]*(?:private|protected|public)[\t ]+([\w.$<>,?\[\]\t ]+?)[\t ]+([A-Za-z_$][A-Za-z0-9_$]*)\s*;""",
+            """(?m)^[\t ]*(?:private|protected|public)[\t ]+([\w.$<>,?\[\]\t ]+?)[\t ]+""" +
+                """([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=\s*[^;\r\n]+)?\s*;""",
         )
         private val KOTLIN_PROPERTY_DECLARATION = Regex(
             """(?m)^[\t ]*(?:(?:private|protected|public|internal)[\t ]+)?""" +

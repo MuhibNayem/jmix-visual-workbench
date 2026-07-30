@@ -23,6 +23,7 @@ import org.jmixworkbench.generator.EntityGenerator
 import org.jmixworkbench.generator.KotlinEntityGenerator
 import org.jmixworkbench.model.AttributeModel
 import org.jmixworkbench.model.AttributeType
+import org.jmixworkbench.model.AssociationCardinalityChoreography
 import org.jmixworkbench.model.AssociationCollectionType
 import org.jmixworkbench.model.AssociationConfig
 import org.jmixworkbench.model.AssociationOwnershipTransfer
@@ -143,7 +144,31 @@ class ExistingEntityChangeService(
         val requestedOwnershipTransfers = request.entity.attributes.filter {
             it.association?.ownershipTransfer != null
         }
-        if (requestedInverseRelationships.isEmpty() && requestedOwnershipTransfers.isEmpty()) {
+        val submittedCardinalityRoles = request.entity.attributes.filter {
+            it.association?.cardinalityChoreography != null
+        }
+        if (submittedCardinalityRoles.isNotEmpty()) {
+            return BidirectionalRequestPlan(
+                emptyList(),
+                listOf(
+                    WorkspaceChangeIssue(
+                        "JVW-ENTITY-CARDINALITY-INTERNAL-ROLE",
+                        "Bidirectional cardinality roles are planner-owned and cannot be submitted directly.",
+                    ),
+                ),
+            )
+        }
+        val mayChangeOwningCardinality = request.entity.attributes.any {
+            it.association?.associationType in setOf(
+                AssociationType.MANY_TO_ONE,
+                AssociationType.ONE_TO_ONE,
+            )
+        }
+        if (
+            requestedInverseRelationships.isEmpty() &&
+            requestedOwnershipTransfers.isEmpty() &&
+            !mayChangeOwningCardinality
+        ) {
             return BidirectionalRequestPlan(listOf(request), emptyList())
         }
         val workspace = SchemaWorkspaceService.getInstance(project).load()
@@ -159,6 +184,42 @@ class ExistingEntityChangeService(
                 ),
             ),
         )
+        val requestedCardinalityChanges = request.entity.attributes.filter { desired ->
+            val current = sourceSnapshot.attributes.singleOrNull { it.name == desired.name }
+                ?: return@filter false
+            isOwningCardinalityChange(current, desired)
+        }
+        if (
+            requestedInverseRelationships.isEmpty() &&
+            requestedOwnershipTransfers.isEmpty() &&
+            requestedCardinalityChanges.isEmpty()
+        ) {
+            return BidirectionalRequestPlan(listOf(request), emptyList())
+        }
+        if (requestedCardinalityChanges.isNotEmpty()) {
+            if (
+                requestedCardinalityChanges.size != 1 ||
+                requestedInverseRelationships.isNotEmpty() ||
+                requestedOwnershipTransfers.isNotEmpty()
+            ) {
+                return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-CARDINALITY-ISOLATION",
+                            "Transform exactly one established relationship at a time and do not combine it " +
+                                "with inverse generation or ownership transfer.",
+                        ),
+                    ),
+                )
+            }
+            return planBidirectionalCardinalityChange(
+                request = request,
+                workspace = workspace,
+                sourceSnapshot = sourceSnapshot,
+                requestedAttribute = requestedCardinalityChanges.single(),
+            )
+        }
         if (
             requestedOwnershipTransfers.any {
                 it.association?.ownershipTransfer != AssociationOwnershipTransfer.REQUEST
@@ -383,6 +444,192 @@ class ExistingEntityChangeService(
         }
         return BidirectionalRequestPlan(requests, emptyList())
     }
+
+    private fun isOwningCardinalityChange(
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): Boolean {
+        val source = current.associationDetails ?: return false
+        val target = desired.association ?: return false
+        return current.association &&
+            source.mappedBy.isNullOrBlank() &&
+            target.mappedBy.isNullOrBlank() &&
+            !source.crossDataStore &&
+            !target.crossDataStore &&
+            source.joinTable == null &&
+            target.joinTable == null &&
+            (
+                source.associationType == AssociationType.MANY_TO_ONE &&
+                    target.associationType == AssociationType.ONE_TO_ONE ||
+                    source.associationType == AssociationType.ONE_TO_ONE &&
+                    target.associationType == AssociationType.MANY_TO_ONE
+                )
+    }
+
+    private fun planBidirectionalCardinalityChange(
+        request: ExistingEntityAttributeAdditionRequest,
+        workspace: SchemaWorkspaceResponse,
+        sourceSnapshot: SchemaEntitySnapshot,
+        requestedAttribute: AttributeModel,
+    ): BidirectionalRequestPlan {
+        val currentOwner = sourceSnapshot.attributes.singleOrNull {
+            it.name == requestedAttribute.name
+        } ?: return cardinalityRejected(
+            "JVW-ENTITY-CARDINALITY-OWNER-MISSING",
+            "${sourceSnapshot.qualifiedName}.${requestedAttribute.name} is not an indexed existing property.",
+        )
+        val currentOwnerAssociation = currentOwner.associationDetails
+            ?: return cardinalityRejected(
+                "JVW-ENTITY-CARDINALITY-OWNER-UNRESOLVED",
+                "The owning relationship metadata is incomplete. Refresh the project index before transforming it.",
+            )
+        val requestedOwnerAssociation = requestedAttribute.association
+            ?: return cardinalityRejected(
+                "JVW-ENTITY-CARDINALITY-OWNER-MAPPING-MISSING",
+                "${requestedAttribute.name} has no requested relationship mapping.",
+            )
+        val targetMatches = workspace.entities.filter {
+            it.qualifiedName == currentOwnerAssociation.relatedEntity &&
+                it.storeName == sourceSnapshot.storeName
+        }
+        if (targetMatches.size != 1) {
+            return cardinalityRejected(
+                "JVW-ENTITY-CARDINALITY-TARGET-${if (targetMatches.isEmpty()) "MISSING" else "AMBIGUOUS"}",
+                "The relationship target ${currentOwnerAssociation.relatedEntity} must resolve exactly once " +
+                    "in the same data store.",
+            )
+        }
+        val targetSnapshot = targetMatches.single()
+        if (targetSnapshot.entityType != EntityType.ENTITY || targetSnapshot.databaseView) {
+            return cardinalityRejected(
+                "JVW-ENTITY-CARDINALITY-TARGET-INCOMPATIBLE",
+                "${targetSnapshot.qualifiedName} must be a writable JPA entity.",
+            )
+        }
+        val inverseCandidates = targetSnapshot.attributes.filter { candidate ->
+            val inverse = candidate.associationDetails
+            candidate.association &&
+                inverse != null &&
+                inverse.relatedEntity == sourceSnapshot.qualifiedName &&
+                inverse.mappedBy == currentOwner.name
+        }
+        if (inverseCandidates.isEmpty()) {
+            // The relationship is intentionally unidirectional. The checked owning-side
+            // narrowing/widening path remains authoritative and no second source is invented.
+            return BidirectionalRequestPlan(listOf(request), emptyList())
+        }
+        if (inverseCandidates.size != 1) {
+            return cardinalityRejected(
+                "JVW-ENTITY-CARDINALITY-INVERSE-AMBIGUOUS",
+                "${targetSnapshot.qualifiedName} has multiple inverse properties mapped by " +
+                    "'${currentOwner.name}'. Resolve the handwritten mapping before transforming cardinality.",
+            )
+        }
+        val inverseSnapshot = inverseCandidates.single()
+        val inverseAssociation = requireNotNull(inverseSnapshot.associationDetails)
+        val expectedCurrentInverse = when (currentOwnerAssociation.associationType) {
+            AssociationType.MANY_TO_ONE -> AssociationType.ONE_TO_MANY
+            AssociationType.ONE_TO_ONE -> AssociationType.ONE_TO_ONE
+            else -> return cardinalityRejected(
+                "JVW-ENTITY-CARDINALITY-OWNER-UNSUPPORTED",
+                "Only owning many-to-one and one-to-one relationships support this choreography.",
+            )
+        }
+        val desiredInverseType = when (requestedOwnerAssociation.associationType) {
+            AssociationType.ONE_TO_ONE -> AssociationType.ONE_TO_ONE
+            AssociationType.MANY_TO_ONE -> AssociationType.ONE_TO_MANY
+            else -> return cardinalityRejected(
+                "JVW-ENTITY-CARDINALITY-TARGET-UNSUPPORTED",
+                "Only many-to-one and one-to-one owning targets support this choreography.",
+            )
+        }
+        if (
+            inverseAssociation.associationType != expectedCurrentInverse ||
+            inverseAssociation.crossDataStore ||
+            inverseAssociation.joinTable != null ||
+            inverseAssociation.joinColumnName != null
+        ) {
+            return cardinalityRejected(
+                "JVW-ENTITY-CARDINALITY-INVERSE-SHAPE",
+                "${targetSnapshot.qualifiedName}.${inverseSnapshot.name} is not the exact " +
+                    "${expectedCurrentInverse.name.lowercase().replace('_', '-')} inverse of " +
+                    "${sourceSnapshot.qualifiedName}.${currentOwner.name}.",
+            )
+        }
+        val ownerEntity = request.entity.copy(
+            attributes = request.entity.attributes.map { attribute ->
+                if (attribute.name != requestedAttribute.name) {
+                    attribute
+                } else {
+                    attribute.copy(
+                        association = requireNotNull(attribute.association).copy(
+                            cardinalityChoreography = AssociationCardinalityChoreography.OWNER,
+                        ),
+                    )
+                }
+            }.toMutableList(),
+        )
+        if (targetSnapshot.sourceLocator.relativePath == sourceSnapshot.sourceLocator.relativePath) {
+            val selfAttributes = ownerEntity.attributes.toMutableList()
+            val inverseIndex = selfAttributes.indexOfFirst { it.name == inverseSnapshot.name }
+            val inverseAttribute = (
+                selfAttributes.getOrNull(inverseIndex)
+                    ?: entityModel(sourceSnapshot, workspace).attributes.single {
+                        it.name == inverseSnapshot.name
+                    }
+                ).let { attribute ->
+                attribute.copy(
+                    association = requireNotNull(attribute.association).copy(
+                        associationType = desiredInverseType,
+                        cardinalityChoreography = AssociationCardinalityChoreography.INVERSE,
+                    ),
+                )
+            }
+            if (inverseIndex >= 0) {
+                selfAttributes[inverseIndex] = inverseAttribute
+            } else {
+                selfAttributes += inverseAttribute
+            }
+            val selfEntity = ownerEntity.copy(attributes = selfAttributes)
+            return BidirectionalRequestPlan(
+                listOf(request.copy(entity = selfEntity)),
+                emptyList(),
+            )
+        }
+        val targetBase = entityModel(targetSnapshot, workspace)
+        val inverseEntity = targetBase.copy(
+            attributes = targetBase.attributes.map { attribute ->
+                if (attribute.name != inverseSnapshot.name) {
+                    attribute
+                } else {
+                    attribute.copy(
+                        association = requireNotNull(attribute.association).copy(
+                            associationType = desiredInverseType,
+                            cardinalityChoreography = AssociationCardinalityChoreography.INVERSE,
+                        ),
+                    )
+                }
+            }.toMutableList(),
+        )
+        return BidirectionalRequestPlan(
+            requests = listOf(
+                request.copy(entity = ownerEntity),
+                ExistingEntityAttributeAdditionRequest(
+                    sourceLocator = targetSnapshot.sourceLocator,
+                    entity = inverseEntity,
+                ),
+            ),
+            issues = emptyList(),
+        )
+    }
+
+    private fun cardinalityRejected(
+        code: String,
+        message: String,
+    ): BidirectionalRequestPlan = BidirectionalRequestPlan(
+        emptyList(),
+        listOf(WorkspaceChangeIssue(code, message)),
+    )
 
     private fun planOneToOneOwnershipTransfer(
         request: ExistingEntityAttributeAdditionRequest,
@@ -2728,11 +2975,14 @@ class ExistingEntityChangeService(
         val owningToOneWidening = isOwningToOneWidening(current, desired)
         val owningToOneNullabilityChange =
             isOwningToOneNullabilityChange(current, desired)
+        val plannedInverseCardinalityChange =
+            isPlannedInverseCardinalityChange(current, desired)
         val immutableShapeChanged =
             (
                 source.associationType != target.associationType &&
                     !owningToOneNarrowing &&
-                    !owningToOneWidening
+                    !owningToOneWidening &&
+                    !plannedInverseCardinalityChange
                 ) ||
                 source.relatedEntity != target.relatedEntity ||
                 source.relatedTableName != target.relatedTableName ||
@@ -2763,7 +3013,8 @@ class ExistingEntityChangeService(
                             (current.unique || onlySafeUniquenessUpgrade)
                         ) ||
                         owningToOneWidening ||
-                        owningToOneNullabilityChange
+                        owningToOneNullabilityChange ||
+                        plannedInverseCardinalityChange
                     )
         if (immutableShapeChanged && !shapeOrConstraintChangeAllowed) {
             return WorkspaceChangeIssue(
@@ -2775,7 +3026,8 @@ class ExistingEntityChangeService(
         if (
             source.associationType != target.associationType &&
             !owningToOneNarrowing &&
-            !owningToOneWidening
+            !owningToOneWidening &&
+            !plannedInverseCardinalityChange
         ) {
             return WorkspaceChangeIssue(
                 "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT",
@@ -2892,6 +3144,42 @@ class ExistingEntityChangeService(
             )
         }
         return null
+    }
+
+    private fun isPlannedInverseCardinalityChange(
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): Boolean {
+        val source = current.associationDetails ?: return false
+        val target = desired.association ?: return false
+        return target.cardinalityChoreography == AssociationCardinalityChoreography.INVERSE &&
+            (
+                source.associationType == AssociationType.ONE_TO_MANY &&
+                    target.associationType == AssociationType.ONE_TO_ONE ||
+                    source.associationType == AssociationType.ONE_TO_ONE &&
+                    target.associationType == AssociationType.ONE_TO_MANY
+                ) &&
+            source.relatedEntity == target.relatedEntity &&
+            source.relatedTableName == target.relatedTableName &&
+            source.relatedIdColumnName == target.relatedIdColumnName &&
+            source.relatedIdType == target.relatedIdType &&
+            source.localIdAttributeName == target.localIdAttributeName &&
+            source.mappedBy != null &&
+            source.mappedBy == target.mappedBy &&
+            source.joinColumnName == null &&
+            target.joinColumnName == null &&
+            source.joinTable == null &&
+            target.joinTable == null &&
+            !source.crossDataStore &&
+            !target.crossDataStore &&
+            source.collectionType == target.collectionType &&
+            source.composition == (desired.type == AttributeType.COMPOSITION) &&
+            source.cascade == target.cascade &&
+            source.fetch == target.fetch &&
+            source.orphanRemoval == target.orphanRemoval &&
+            source.onDelete == target.onDelete?.takeIf(String::isNotBlank) &&
+            desired.mandatory == !current.nullable &&
+            desired.unique == current.unique
     }
 
     private fun inferredTableName(qualifiedName: String): String =
@@ -3420,6 +3708,13 @@ class ExistingEntityChangeService(
             ) ?: return null
             edits += relationshipMetadata.edits
             imports += relationshipMetadata.imports
+            val relationshipType = inverseCardinalityJavaTypeEdits(
+                field = field,
+                current = change.current,
+                desired = change.desired,
+            ) ?: return null
+            edits += relationshipType.edits
+            imports += relationshipType.imports
             if (!change.physicalMappingChanged) return@forEach
             val transferRole = change.desired.association?.ownershipTransfer
             if (transferRole == AssociationOwnershipTransfer.RELEASE) {
@@ -3560,6 +3855,13 @@ class ExistingEntityChangeService(
             ) ?: return null
             edits += relationshipMetadata.edits
             imports += relationshipMetadata.imports
+            val relationshipType = inverseCardinalityKotlinTypeEdits(
+                property = property,
+                current = change.current,
+                desired = change.desired,
+            ) ?: return null
+            edits += relationshipType.edits
+            imports += relationshipType.imports
             if (!change.physicalMappingChanged) return@forEach
             val transferRole = change.desired.association?.ownershipTransfer
             if (transferRole == AssociationOwnershipTransfer.RELEASE) {
@@ -3674,6 +3976,139 @@ class ExistingEntityChangeService(
             }
         }
         return GeneratedMetadataEdits(edits, imports)
+    }
+
+    private fun inverseCardinalityJavaTypeEdits(
+        field: com.intellij.psi.PsiField,
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): GeneratedMetadataEdits? {
+        val target = desired.association ?: return GeneratedMetadataEdits(emptyList(), emptySet())
+        if (target.cardinalityChoreography != AssociationCardinalityChoreography.INVERSE) {
+            return GeneratedMetadataEdits(emptyList(), emptySet())
+        }
+        val source = current.associationDetails ?: return null
+        val typeElement = field.typeElement ?: return null
+        val replacement = inverseCardinalityType(
+            currentType = typeElement.text,
+            sourceType = source.associationType,
+            targetType = target.associationType,
+            collectionType = target.collectionType,
+            kotlin = false,
+        ) ?: return null
+        val edits = mutableListOf(
+            WorkspaceTextEdit(
+                startOffset = typeElement.textRange.startOffset,
+                endOffset = typeElement.textRange.endOffset,
+                expectedText = typeElement.text,
+                replacement = replacement,
+            ),
+        )
+        val imports = mutableSetOf<String>()
+        val targetCollection = target.associationType in COLLECTION_ASSOCIATIONS
+        if (targetCollection) {
+            imports += target.collectionType.importPath
+        }
+        field.initializer?.let { initializer ->
+            val replacementInitializer = when {
+                targetCollection && target.collectionType == AssociationCollectionType.SET ->
+                    "new java.util.LinkedHashSet<>()"
+                targetCollection -> "new java.util.ArrayList<>()"
+                else -> "null"
+            }
+            if (initializer.text != replacementInitializer) {
+                edits += WorkspaceTextEdit(
+                    startOffset = initializer.textRange.startOffset,
+                    endOffset = initializer.textRange.endOffset,
+                    expectedText = initializer.text,
+                    replacement = replacementInitializer,
+                )
+            }
+        }
+        return GeneratedMetadataEdits(edits, imports)
+    }
+
+    private fun inverseCardinalityKotlinTypeEdits(
+        property: PsiNamedElement,
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): GeneratedMetadataEdits? {
+        val target = desired.association ?: return GeneratedMetadataEdits(emptyList(), emptySet())
+        if (target.cardinalityChoreography != AssociationCardinalityChoreography.INVERSE) {
+            return GeneratedMetadataEdits(emptyList(), emptySet())
+        }
+        val source = current.associationDetails ?: return null
+        val typeReference = property.children.singleOrNull {
+            it.javaClass.simpleName == "KtTypeReference"
+        } ?: return null
+        val replacement = inverseCardinalityType(
+            currentType = typeReference.text,
+            sourceType = source.associationType,
+            targetType = target.associationType,
+            collectionType = target.collectionType,
+            kotlin = true,
+        ) ?: return null
+        val edits = mutableListOf(
+            WorkspaceTextEdit(
+                startOffset = typeReference.textRange.startOffset,
+                endOffset = typeReference.textRange.endOffset,
+                expectedText = typeReference.text,
+                replacement = replacement,
+            ),
+        )
+        val initializer = runCatching {
+            property.javaClass.methods
+                .singleOrNull { it.name == "getInitializer" && it.parameterCount == 0 }
+                ?.invoke(property) as? com.intellij.psi.PsiElement
+        }.getOrNull()
+        initializer?.let {
+            val targetCollection = target.associationType in COLLECTION_ASSOCIATIONS
+            val replacementInitializer = when {
+                targetCollection && target.collectionType == AssociationCollectionType.SET ->
+                    "linkedSetOf()"
+                targetCollection -> "mutableListOf()"
+                else -> "null"
+            }
+            if (it.text != replacementInitializer) {
+                edits += WorkspaceTextEdit(
+                    startOffset = it.textRange.startOffset,
+                    endOffset = it.textRange.endOffset,
+                    expectedText = it.text,
+                    replacement = replacementInitializer,
+                )
+            }
+        }
+        return GeneratedMetadataEdits(edits, emptySet())
+    }
+
+    private fun inverseCardinalityType(
+        currentType: String,
+        sourceType: AssociationType,
+        targetType: AssociationType,
+        collectionType: AssociationCollectionType,
+        kotlin: Boolean,
+    ): String? {
+        val sourceCollection = sourceType in COLLECTION_ASSOCIATIONS
+        val targetCollection = targetType in COLLECTION_ASSOCIATIONS
+        if (sourceCollection == targetCollection) return null
+        if (sourceCollection) {
+            val elementType = currentType
+                .substringAfter('<', "")
+                .substringBeforeLast('>', "")
+                .trim()
+                .takeIf(String::isNotBlank)
+                ?: return null
+            return if (kotlin) "${elementType.removeSuffix("?")}?" else elementType
+        }
+        val elementType = currentType.removeSuffix("?").trim()
+            .takeIf { it.isNotBlank() && '<' !in it && '>' !in it }
+            ?: return null
+        return when {
+            kotlin && collectionType == AssociationCollectionType.SET -> "MutableSet<$elementType>"
+            kotlin -> "MutableList<$elementType>"
+            collectionType == AssociationCollectionType.SET -> "Set<$elementType>"
+            else -> "List<$elementType>"
+        }
     }
 
     private fun splitTopLevelArguments(arguments: String): List<String> {
@@ -3883,6 +4318,8 @@ class ExistingEntityChangeService(
             setOf("name", "nullable", "unique")
         private val RELATIONSHIP_ATTRIBUTE_TYPES =
             setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION)
+        private val COLLECTION_ASSOCIATIONS =
+            setOf(AssociationType.ONE_TO_MANY, AssociationType.MANY_TO_MANY)
         private val RELATION_ANNOTATIONS =
             setOf("ManyToOne", "OneToMany", "ManyToMany", "OneToOne")
         private val MANAGED_RELATION_ARGUMENTS =

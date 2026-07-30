@@ -72,6 +72,15 @@ interface DatabaseColumnDraft {
   attributeType: AttributeType
 }
 
+interface CoordinatedRenameSession {
+  attributeName: string
+  newName: string
+  sourcePhysicalColumn: string
+  requestedPhysicalColumn: string
+  previewPlanDigest?: string
+  stage: 'MAPPING_PREVIEW' | 'MAPPING_APPLIED' | 'NATIVE_PREVIEW'
+}
+
 export default function EntityDesigner() {
   const {
     entity,
@@ -96,6 +105,8 @@ export default function EntityDesigner() {
   const [renameDraft, setRenameDraft] = useState('')
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameLaunched, setRenameLaunched] = useState(false)
+  const [coordinatedRename, setCoordinatedRename] =
+    useState<CoordinatedRenameSession | null>(null)
   const [safeDeleteBusy, setSafeDeleteBusy] = useState(false)
   const [typeMigrationTarget, setTypeMigrationTarget] = useState<AttributeType>('long')
   const [typeMigrationBusy, setTypeMigrationBusy] = useState(false)
@@ -223,6 +234,23 @@ export default function EntityDesigner() {
     }
   }, [selectedAttr, typeCutoverSession?.attributeName])
 
+  const selectAttribute = (index: number, attributeName: string) => {
+    const next = selectedAttr === index ? null : index
+    setSelectedAttr(next)
+    setRenameDraft(
+      next === null
+        ? ''
+        : coordinatedRename?.attributeName === attributeName
+          ? coordinatedRename.newName
+          : attributeName,
+    )
+    setRenameLaunched(
+      next !== null &&
+      coordinatedRename?.attributeName === attributeName &&
+      coordinatedRename.stage === 'NATIVE_PREVIEW',
+    )
+  }
+
   const selectedModuleId = entity.generationTarget?.moduleId
     ?? schemaWorkspace?.stores.find((store) => store.id === entity.generationTarget?.storeId)?.moduleId
     ?? schemaWorkspace?.modules[0]?.moduleId
@@ -310,9 +338,82 @@ export default function EntityDesigner() {
         newName,
       })
       addToast(response.message, response.success ? 'info' : 'error')
-      if (response.success) setRenameLaunched(true)
+      if (response.success) {
+        setRenameLaunched(true)
+        setCoordinatedRename(current =>
+          current && current.attributeName === attributeName
+            ? { ...current, stage: 'NATIVE_PREVIEW' }
+            : current,
+        )
+      }
     } catch (error: any) {
       addToast(`Native rename failed: ${error.message}`, 'error')
+    } finally {
+      setRenameBusy(false)
+    }
+  }
+
+  const previewCoordinatedAttributeRename = async (
+    attribute: AttributeModel,
+    source: SchemaEntityAttributeSnapshot,
+  ) => {
+    if (!existingEntity) return
+    const newName = renameDraft.trim()
+    if (!newName || newName === attribute.name) {
+      addToast('Enter a different property name', 'error')
+      return
+    }
+    const requestedPhysicalColumn = (
+      attribute.association?.joinColumnName ||
+      attribute.columnName ||
+      source.columnName
+    ).trim()
+    const sourcePhysicalColumn = source.columnName
+    if (requestedPhysicalColumn === sourcePhysicalColumn) {
+      await handleNativeAttributeRename(attribute.name)
+      return
+    }
+    setRenameBusy(true)
+    setGenerationPreview(null)
+    try {
+      const renameRequest = {
+        sourceLocator: existingEntity.sourceLocator,
+        entityClassName: existingEntity.className,
+        attributeName: attribute.name,
+        newName,
+      }
+      const nativePreflight = await bridge.inspectEntityAttributeRename(renameRequest)
+      if (!nativePreflight.success) {
+        addToast(nativePreflight.message, 'error')
+        return
+      }
+      const preview = await bridge.previewExistingEntityAttributeAdditions({
+        sourceLocator: existingEntity.sourceLocator,
+        entity,
+      })
+      if (!preview.accepted || !preview.planDigest) {
+        addToast(
+          `Coordinated rename rejected: ${preview.issues.map(issue => issue.message).join(', ')}`,
+          'error',
+        )
+        return
+      }
+      setGenerationPreview(preview)
+      setCoordinatedRename({
+        attributeName: attribute.name,
+        newName,
+        sourcePhysicalColumn,
+        requestedPhysicalColumn,
+        previewPlanDigest: preview.planDigest,
+        stage: 'MAPPING_PREVIEW',
+      })
+      addToast(
+        `Rename preflight passed. Review the physical ${sourcePhysicalColumn} → ` +
+          `${requestedPhysicalColumn} change, then apply it before opening IntelliJ usage preview.`,
+        'info',
+      )
+    } catch (error: any) {
+      addToast(`Coordinated rename failed: ${error.message}`, 'error')
     } finally {
       setRenameBusy(false)
     }
@@ -872,13 +973,28 @@ export default function EntityDesigner() {
           ? updated.attributes.findIndex(attribute =>
               attribute.name === typeCutoverSession.attributeName)
           : -1
-        setSelectedAttr(cutoverAttributeIndex >= 0 ? cutoverAttributeIndex : null)
+        const coordinatedAttributeIndex = coordinatedRename?.stage === 'NATIVE_PREVIEW'
+          ? updated.attributes.findIndex(attribute =>
+              attribute.name === coordinatedRename.newName)
+          : -1
+        setSelectedAttr(
+          cutoverAttributeIndex >= 0
+            ? cutoverAttributeIndex
+            : coordinatedAttributeIndex >= 0
+              ? coordinatedAttributeIndex
+              : null,
+        )
         setRenameDraft('')
         setRenameLaunched(false)
+        if (coordinatedAttributeIndex >= 0) {
+          setCoordinatedRename(null)
+        }
         addToast(
           cutoverAttributeIndex >= 0
             ? 'Source migration indexed. Review the verified mapping cutover.'
-            : 'Entity workspace refreshed after native refactor',
+            : coordinatedAttributeIndex >= 0
+              ? 'Coordinated logical and physical rename completed and re-indexed.'
+              : 'Entity workspace refreshed after native refactor',
           'success',
         )
       }
@@ -891,6 +1007,11 @@ export default function EntityDesigner() {
 
   const handleApplyGeneration = async () => {
     if (!generationPreview?.planDigest) return
+    const coordinatedMappingApply =
+      coordinatedRename?.stage === 'MAPPING_PREVIEW' &&
+      coordinatedRename.previewPlanDigest === generationPreview.planDigest
+        ? coordinatedRename
+        : null
     const addedAttributeNames = existingEntity
       ? entity.attributes
           .filter(attribute => !existingAttributeNames.has(attribute.name))
@@ -927,6 +1048,22 @@ export default function EntityDesigner() {
             )
             setExistingEntity(updated)
             setEntity(existingEntityModel(updated, store?.id))
+            if (coordinatedMappingApply) {
+              const renamedAttributeIndex = updated.attributes.findIndex(
+                attribute => attribute.name === coordinatedMappingApply.attributeName,
+              )
+              setSelectedAttr(renamedAttributeIndex >= 0 ? renamedAttributeIndex : null)
+              setRenameDraft(coordinatedMappingApply.newName)
+              setCoordinatedRename({
+                ...coordinatedMappingApply,
+                previewPlanDigest: undefined,
+                stage: 'MAPPING_APPLIED',
+              })
+              addToast(
+                'Physical mapping is applied and re-indexed. Open IntelliJ usage preview to finish the logical rename.',
+                'info',
+              )
+            }
             if (addedAttributeNames.length) {
               await inspectAttributePropagation(updated, addedAttributeNames)
             }
@@ -1147,6 +1284,9 @@ export default function EntityDesigner() {
     setExistingEntity(null)
     setGenerationPreview(null)
     setSelectedAttr(null)
+    setRenameDraft('')
+    setRenameLaunched(false)
+    setCoordinatedRename(null)
     setDatabaseInspection(null)
     setDatabaseColumnDrafts({})
     setDatabaseSchemaName('')
@@ -1180,6 +1320,9 @@ export default function EntityDesigner() {
     setExistingEntity(snapshot)
     setGenerationPreview(null)
     setSelectedAttr(null)
+    setRenameDraft('')
+    setRenameLaunched(false)
+    setCoordinatedRename(null)
     setDatabaseInspection(null)
     setDatabaseColumnDrafts({})
     setDatabaseSchemaName('')
@@ -1252,7 +1395,15 @@ export default function EntityDesigner() {
           </div>
           <button
             type="button"
-            onClick={() => setGenerationPreview(null)}
+            onClick={() => {
+              if (
+                coordinatedRename?.stage === 'MAPPING_PREVIEW' &&
+                coordinatedRename.previewPlanDigest === generationPreview.planDigest
+              ) {
+                setCoordinatedRename(null)
+              }
+              setGenerationPreview(null)
+            }}
             className="rounded border border-surface-border px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200"
           >
             Discard
@@ -2279,24 +2430,34 @@ export default function EntityDesigner() {
                     return (
                       <tr
                         key={`${attr.name}-${i}`}
-                        onClick={() => {
-                          const next = selectedAttr === i ? null : i
-                          setSelectedAttr(next)
-                          setRenameDraft(next === null ? '' : attr.name)
-                          setRenameLaunched(false)
-                        }}
+                        onClick={() => selectAttribute(i, attr.name)}
                         className={`border-t border-surface-border cursor-pointer transition-colors ${
                           selectedAttr === i ? 'bg-jmix-500/10' : 'hover:bg-surface-lighter'
                         } ${locked ? 'text-gray-500' : ''}`}
                       >
                         <td className="px-3 py-2">
-                          <input
-                            value={attr.name}
-                            disabled={locked}
-                            onChange={e => updateAttribute(i, { name: e.target.value })}
-                            onClick={e => e.stopPropagation()}
-                            className="w-28 bg-transparent border-none p-0 text-gray-200 disabled:text-gray-500"
-                          />
+                          {locked ? (
+                            <button
+                              type="button"
+                              aria-pressed={selectedAttr === i}
+                              aria-label={`Inspect ${attr.name}`}
+                              onClick={event => {
+                                event.stopPropagation()
+                                selectAttribute(i, attr.name)
+                              }}
+                              className="w-28 truncate rounded px-1 py-0.5 text-left font-mono text-gray-400 hover:bg-jmix-500/10 hover:text-jmix-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-jmix-400"
+                              title={`Inspect ${attr.name}`}
+                            >
+                              {attr.name}
+                            </button>
+                          ) : (
+                            <input
+                              value={attr.name}
+                              onChange={e => updateAttribute(i, { name: e.target.value })}
+                              onClick={e => e.stopPropagation()}
+                              className="w-28 bg-transparent border-none p-0 text-gray-200"
+                            />
+                          )}
                         </td>
                         <td className="px-3 py-2">
                           <select
@@ -2383,6 +2544,28 @@ export default function EntityDesigner() {
                 const source = existingEntity?.attributes.find((candidate) => candidate.name === selected.name)
                 const mappingLocked = Boolean(source && (source.association || !source.persistent))
                 const sourceAssociation = source?.associationDetails
+                const requestedPhysicalColumn = (
+                  selected.association?.joinColumnName ||
+                  selected.columnName ||
+                  source?.columnName ||
+                  ''
+                ).trim()
+                const physicalRenameRequested = Boolean(
+                  source?.persistent &&
+                  requestedPhysicalColumn &&
+                  requestedPhysicalColumn !== source.columnName,
+                )
+                const activeCoordinatedRename =
+                  coordinatedRename?.attributeName === selected.name
+                    ? coordinatedRename
+                    : null
+                const scalarColumnRenameSafe = Boolean(
+                  source?.persistent &&
+                  !source.association &&
+                  source.columnName &&
+                  existingEntity?.ddlMode !== 'DISABLED' &&
+                  !existingEntity?.databaseView,
+                )
                 const joinColumnRenameSafe = Boolean(
                   source?.persistent &&
                   sourceAssociation?.joinColumnName &&
@@ -2403,17 +2586,47 @@ export default function EntityDesigner() {
                           : 'relationship/transient mapping is source-protected'
                         : 'safe persistence metadata editor'}
                     </div>
+                    {scalarColumnRenameSafe && (
+                      <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
+                        <Field label="Physical column">
+                          <input
+                            value={selected.columnName ?? source?.columnName ?? ''}
+                            onChange={(event) => {
+                              if (activeCoordinatedRename?.stage === 'MAPPING_PREVIEW') {
+                                setGenerationPreview(null)
+                                setCoordinatedRename(null)
+                              }
+                              updateAttribute(selectedAttr, {
+                                columnName: event.target.value || undefined,
+                              })
+                            }}
+                            className="w-full min-w-0 font-mono"
+                            aria-label={`Physical column for ${selected.name}`}
+                          />
+                        </Field>
+                        <div className="min-w-0 rounded border border-emerald-500/20 bg-emerald-500/5 p-2 text-[10px] leading-relaxed text-emerald-200/80">
+                          The explicit <code>@Column(name)</code> mapping and reversible Liquibase rename can be
+                          staged before IntelliJ renames the logical property and every connected usage.
+                        </div>
+                      </div>
+                    )}
                     {joinColumnRenameSafe && selected.association && (
                       <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
                         <Field label="Physical join column">
                           <input
                             value={selected.association.joinColumnName ?? ''}
-                            onChange={(event) => updateAttribute(selectedAttr, {
-                              association: {
-                                ...selected.association!,
-                                joinColumnName: event.target.value || undefined,
-                              },
-                            })}
+                            onChange={(event) => {
+                              if (activeCoordinatedRename?.stage === 'MAPPING_PREVIEW') {
+                                setGenerationPreview(null)
+                                setCoordinatedRename(null)
+                              }
+                              updateAttribute(selectedAttr, {
+                                association: {
+                                  ...selected.association!,
+                                  joinColumnName: event.target.value || undefined,
+                                },
+                              })
+                            }}
                             className="w-full min-w-0 font-mono"
                             aria-label={`Physical join column for ${selected.name}`}
                           />
@@ -2513,29 +2726,82 @@ export default function EntityDesigner() {
                     {source && (
                       <div className="mt-4 rounded-lg border border-jmix-500/20 bg-jmix-500/5 p-3">
                         <div className="text-[10px] font-semibold uppercase tracking-wider text-jmix-300">
-                          Native safe rename
+                          Coordinated safe rename
                         </div>
                         <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
                           Opens IntelliJ&apos;s usage preview so Java, Kotlin, FlowUI, fetch plans, JPQL, and security
-                          references and JPA mappedBy strings participate in the IDE refactor. Persistent scalar and
-                          owning relationship properties require explicit stable column or join-table mappings.
+                          references and JPA mappedBy strings participate in the IDE refactor. When the explicit
+                          physical mapping also changes, the designer first preflights the native rename, applies a
+                          reversible mapping migration, refreshes the source revision, and then opens usage preview.
                         </p>
+                        {physicalRenameRequested && (
+                          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 text-[9px] text-emerald-200/80">
+                            <span className="max-w-full break-all rounded border border-surface-border bg-black/15 px-2 py-1 font-mono">
+                              {source.columnName}
+                            </span>
+                            <span aria-hidden="true">→</span>
+                            <span className="max-w-full break-all rounded border border-emerald-500/25 bg-emerald-500/5 px-2 py-1 font-mono">
+                              {requestedPhysicalColumn}
+                            </span>
+                          </div>
+                        )}
+                        {activeCoordinatedRename && (
+                          <div className={`mt-2 rounded border px-2.5 py-2 text-[9px] leading-relaxed ${
+                            activeCoordinatedRename.stage === 'MAPPING_APPLIED'
+                              ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-100/80'
+                              : activeCoordinatedRename.stage === 'NATIVE_PREVIEW'
+                                ? 'border-sky-500/30 bg-sky-500/5 text-sky-100/80'
+                                : 'border-amber-500/30 bg-amber-500/5 text-amber-100/80'
+                          }`}>
+                            {activeCoordinatedRename.stage === 'MAPPING_PREVIEW'
+                              ? 'Native rename preflight passed. Review and apply the immutable physical mapping preview above.'
+                              : activeCoordinatedRename.stage === 'MAPPING_APPLIED'
+                                ? 'Physical mapping applied and re-indexed. The project remains runnable; open IntelliJ usage preview to finish the logical rename.'
+                                : 'IntelliJ usage preview is open. Apply or cancel it in the IDE, then refresh this entity.'}
+                          </div>
+                        )}
                         <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                           <input
                             value={renameDraft}
-                            onChange={event => setRenameDraft(event.target.value)}
+                            onChange={event => {
+                              const newName = event.target.value
+                              setRenameDraft(newName)
+                              if (activeCoordinatedRename?.stage === 'MAPPING_PREVIEW') {
+                                setGenerationPreview(null)
+                                setCoordinatedRename(null)
+                              } else if (activeCoordinatedRename) {
+                                setCoordinatedRename({
+                                  ...activeCoordinatedRename,
+                                  newName,
+                                })
+                              }
+                            }}
                             className="min-w-0 flex-1"
                             aria-label={`New name for ${selected.name}`}
                           />
                           <button
                             type="button"
-                            disabled={renameBusy || !renameDraft.trim() || renameDraft.trim() === selected.name}
-                            onClick={() => handleNativeAttributeRename(selected.name)}
+                            disabled={
+                              renameBusy ||
+                              !renameDraft.trim() ||
+                              renameDraft.trim() === selected.name ||
+                              activeCoordinatedRename?.stage === 'MAPPING_PREVIEW' ||
+                              activeCoordinatedRename?.stage === 'NATIVE_PREVIEW'
+                            }
+                            onClick={() => previewCoordinatedAttributeRename(selected, source)}
                             className="rounded bg-jmix-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-jmix-600 disabled:opacity-50"
                           >
-                            {renameBusy ? 'Resolving…' : 'Open usage preview'}
+                            {renameBusy
+                              ? 'Resolving…'
+                              : activeCoordinatedRename?.stage === 'MAPPING_PREVIEW'
+                                ? 'Review mapping preview'
+                                : activeCoordinatedRename?.stage === 'NATIVE_PREVIEW'
+                                  ? 'Usage preview open'
+                                  : physicalRenameRequested
+                                    ? 'Preview coordinated rename'
+                                    : 'Open usage preview'}
                           </button>
-                          {renameLaunched && (
+                          {(renameLaunched || activeCoordinatedRename?.stage === 'NATIVE_PREVIEW') && (
                             <button
                               type="button"
                               disabled={schemaLoading}
@@ -3728,14 +3994,24 @@ function ExistingRelationshipSemanticsEditor({
     physicalStore?.complete === true &&
     physicalTable?.columns.some(
       column => column.name.toLowerCase() === sourceAssociation.joinColumnName?.toLowerCase() &&
-        column.unique &&
-        !column.primaryKey,
+      column.unique &&
+      !column.primaryKey,
     ) === true &&
     uniqueBackingCount === 1
-  const checkedCardinalityEligible = owningToOneUpgradeEligible || owningToOneWideningEligible
   const relatedEntitySnapshot = schemaWorkspace?.entities.find(
     candidate => candidate.qualifiedName === sourceAssociation.relatedEntity,
   )
+  const inverseCardinalityCandidates = relatedEntitySnapshot?.attributes.filter(candidate =>
+    candidate.association &&
+    candidate.associationDetails?.relatedEntity === sourceEntity.qualifiedName &&
+    candidate.associationDetails?.mappedBy === attribute.name,
+  ) ?? []
+  const exactInverseCardinality = inverseCardinalityCandidates.length === 1
+    ? inverseCardinalityCandidates[0]
+    : undefined
+  const checkedCardinalityEligible =
+    (owningToOneUpgradeEligible || owningToOneWideningEligible) &&
+    inverseCardinalityCandidates.length <= 1
   const relatedPhysicalTable = physicalStore?.tables.find(
     candidate => candidate.name.toLowerCase() ===
       relatedEntitySnapshot?.tableName.split('.').pop()?.toLowerCase(),
@@ -4205,19 +4481,36 @@ function ExistingRelationshipSemanticsEditor({
             </div>
           </div>
           <p className="mt-3 text-[9px] leading-relaxed text-gray-600">
-            Fetch, cascade, composition, orphan removal, and delete policy are source-only. Other structural changes
-            remain blocked until target, inverse side, usages, data migration, and rollback can be reviewed together.
+            Fetch, cascade, composition, orphan removal, and delete policy are source-only. Checked to-one
+            cardinality also coordinates an exact existing inverse below; other structural changes remain blocked
+            until target, usages, data migration, and rollback can be reviewed together.
           </p>
+          {exactInverseCardinality && (
+            <div className="mt-3 rounded border border-violet-500/20 bg-violet-500/[0.05] p-2 text-[9px] leading-relaxed text-violet-200/80">
+              Bidirectional choreography will update{' '}
+              <code>{relatedEntitySnapshot?.className}.{exactInverseCardinality.name}</code> in the same
+              revision-bound plan, including its collection-or-scalar declaration. No independent inverse edit is
+              required.
+            </div>
+          )}
+          {inverseCardinalityCandidates.length > 1 && (
+            <div className="mt-3 rounded border border-amber-500/25 bg-amber-500/[0.05] p-2 text-[9px] leading-relaxed text-amber-200/80">
+              Cardinality is locked because multiple inverse properties declare{' '}
+              <code>mappedBy=&quot;{attribute.name}&quot;</code>. Resolve the handwritten ambiguity first.
+            </div>
+          )}
           {owningToOneUpgradeEligible && association.associationType === 'oneToOne' && (
             <div className="mt-3 rounded border border-emerald-500/20 bg-emerald-500/5 p-2 text-[9px] leading-relaxed text-emerald-200/80">
               Checked narrowing adds a duplicate-data precondition and a deterministic unique constraint with reverse
-              rollback. It keeps the target, owning join column, Java/Kotlin property type, and call sites unchanged.
+              rollback. The owning property remains a to-one; an exact inverse collection becomes a to-one property
+              in the same Java/Kotlin source transaction.
             </div>
           )}
           {owningToOneWideningEligible && association.associationType === 'manyToOne' && (
             <div className="mt-3 rounded border border-sky-500/20 bg-sky-500/5 p-2 text-[9px] leading-relaxed text-sky-200/80">
               Checked widening changes only the owning annotation and removes the exact named unique backing. Rollback
-              restores that same constraint or index and will stop if new duplicate references make uniqueness invalid.
+              restores that same constraint or index and will stop if new duplicate references make uniqueness
+              invalid. An exact inverse to-one becomes its matching collection atomically.
             </div>
           )}
         </>

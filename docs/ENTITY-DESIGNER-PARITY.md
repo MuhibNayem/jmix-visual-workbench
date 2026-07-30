@@ -82,6 +82,29 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   usage preview also includes plugin-contributed FlowUI, fetch-plan, JPQL and
   security references. A missing existing property in the normal update request
   is rejected rather than being misread as an addition.
+- Logical-property and explicit physical-column rename can now be coordinated
+  safely instead of forcing a developer to choose one refactor surface. The
+  bridge first performs a read-only native rename preflight, then the designer
+  previews and applies only the scalar `@Column(name)` or owning to-one
+  `@JoinColumn(name)` change plus reversible Liquibase, refreshes the indexed
+  source revision, and finally revalidates and opens IntelliJ's real usage
+  preview for the logical Java/Kotlin/Jmix rename. Canceling the final IDE
+  refactor leaves a valid explicit physical mapping rather than a half-renamed
+  source tree.
+- Established bidirectional owning many-to-one/one-to-many and
+  one-to-one/one-to-one pairs now transform together when the owning side
+  narrows or widens. The planner derives the inverse role internally, updates
+  both Java/Kotlin annotations and scalar/collection property types in one
+  revision-bound preview, preserves initializers, manual methods and unmanaged
+  annotations, and generates DDL only for the proven owning join column.
+  Ambiguous inverses, stale sources, cross-store targets, unsupported shapes
+  and directly submitted internal choreography roles fail closed. Java fields
+  with ordinary single-line initializers are included in handwritten entity
+  discovery. The browser completed the coordinated physical/native-rename
+  handoff at desktop width and the bidirectional selection flow at 1440, 768,
+  480 and 360 pixels with no horizontal overflow or diagnostics; protected
+  existing attributes expose a dedicated keyboard-focusable inspector at
+  compact widths.
 - Existing Java/Kotlin attributes can launch IntelliJ Safe Delete directly from
   Entity Designer after exact-revision, writable-declaration and stable physical
   mapping checks. IntelliJ and plugin-contributed Jmix references participate in
@@ -186,9 +209,12 @@ blocked until all of the following pass:
    entities. Stable-mapping scalar and relationship property rename delegates
    to IntelliJ usage preview, including native `mappedBy` references, and
    explicit scalar and owning to-one join-column physical rename is atomic
-   with checked Liquibase rollback. Combined logical-property rename and
-   physical mapping changes, broader relationship shape changes, scalar
-   contraction and final post-retention physical deletion remain.
+   with checked Liquibase rollback. Combined logical-property and explicit
+   physical mapping rename is implemented as a safe staged choreography, and
+   established bidirectional owning many-to-one/one-to-many and
+   one-to-one/one-to-one cardinality changes update both sources atomically.
+   Other relationship shapes, scalar contraction and final post-retention
+   physical deletion remain.
    Deployed-data/type/value verification and exact
    Java/Kotlin mapping cutover are implemented with an expiring backend
    capability. The non-destructive expansion stage, Native

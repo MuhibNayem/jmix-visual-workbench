@@ -305,12 +305,18 @@ data class AssociationConfig(
     val inverseAttributeName: String? = null,
     val ownershipTransfer: AssociationOwnershipTransfer? = null,
     val ownershipJoinColumnName: String? = null,
+    val cardinalityChoreography: AssociationCardinalityChoreography? = null,
 )
 
 enum class AssociationOwnershipTransfer {
     @SerializedName("request") REQUEST,
     @SerializedName("receiver") RECEIVER,
     @SerializedName("release") RELEASE,
+}
+
+enum class AssociationCardinalityChoreography {
+    @SerializedName("owner") OWNER,
+    @SerializedName("inverse") INVERSE,
 }
 
 data class AssociationJoinColumn(

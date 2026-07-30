@@ -718,11 +718,53 @@ class ${scenario.className} {
                   if (!current || current.association || !current.persistent) return false
                   return attribute.mandatory !== !current.nullable ||
                     attribute.unique !== current.unique ||
+                    (attribute.columnName ?? current.columnName) !== current.columnName ||
                     (attribute.length ?? 255) !== (current.length ?? 255) ||
                     attribute.precision !== current.precision ||
                     attribute.scale !== current.scale
                 })
-                if (additions.length === 0 && mappingChanges.length === 0) {
+                const relationshipMappingChanges = (entity.attributes ?? []).filter((attribute: any) => {
+                  const current = currentEntity?.attributes.find(existing => existing.name === attribute.name)
+                  if (!current?.association || !attribute.association) return false
+                  return attribute.mandatory !== !current.nullable ||
+                    attribute.unique !== current.unique ||
+                    attribute.association.associationType !== current.associationDetails?.associationType ||
+                    attribute.association.joinColumnName !== current.associationDetails?.joinColumnName
+                })
+                const coordinatedInverseEntities = relationshipMappingChanges.flatMap((
+                  attribute: any,
+                ): SchemaWorkspaceResponse['entities'] => {
+                  const current = currentEntity?.attributes.find(existing => existing.name === attribute.name)
+                  if (
+                    !current?.associationDetails ||
+                    !attribute.association ||
+                    current.associationDetails.associationType === attribute.association.associationType
+                  ) {
+                    return []
+                  }
+                  const target = developmentSchemaWorkspace.entities.find(candidate =>
+                    candidate.qualifiedName === current.associationDetails?.relatedEntity,
+                  )
+                  const inverseMatches = target?.attributes.filter(candidate =>
+                    candidate.associationDetails?.relatedEntity === currentEntity?.qualifiedName &&
+                    candidate.associationDetails?.mappedBy === current.name,
+                  ) ?? []
+                  return inverseMatches.length === 1 && target ? [target] : []
+                }).filter((
+                  candidate: SchemaWorkspaceResponse['entities'][number],
+                  index: number,
+                  candidates: SchemaWorkspaceResponse['entities'],
+                ) =>
+                  candidate.sourceLocator.relativePath !== sourcePath &&
+                  candidates.findIndex((
+                    other: SchemaWorkspaceResponse['entities'][number],
+                  ) => other.artifactId === candidate.artifactId) === index,
+                )
+                if (
+                  additions.length === 0 &&
+                  mappingChanges.length === 0 &&
+                  relationshipMappingChanges.length === 0
+                ) {
                   return {
                     accepted: false,
                     changeSetId: 'existing-entity-update:rejected',
@@ -744,7 +786,10 @@ class ${scenario.className} {
                       ? `add ${additions.length} attribute${additions.length === 1 ? '' : 's'}`
                       : '',
                     mappingChanges.length
-                      ? `change ${mappingChanges.length} mapping${mappingChanges.length === 1 ? '' : 's'}`
+                      ? `change ${mappingChanges.length} scalar mapping${mappingChanges.length === 1 ? '' : 's'}`
+                      : '',
+                    relationshipMappingChanges.length
+                      ? `change ${relationshipMappingChanges.length} relationship mapping${relationshipMappingChanges.length === 1 ? '' : 's'}`
                       : '',
                   ].filter(Boolean).join(', ')}`,
                   planDigest: 'development-existing-entity-update',
@@ -762,9 +807,22 @@ class ${scenario.className} {
                         mappingChanges.length
                           ? `// Mapping updates: ${mappingChanges.map((attribute: any) => attribute.name).join(', ')}`
                           : '',
+                        relationshipMappingChanges.length
+                          ? `// Relationship mapping updates: ${relationshipMappingChanges.map((attribute: any) => attribute.name).join(', ')}`
+                          : '',
                       ].filter(Boolean).join('\n'),
                       appliedEditCount: 2,
                     },
+                    ...coordinatedInverseEntities.map((
+                      target: SchemaWorkspaceResponse['entities'][number],
+                    ) => ({
+                      relativePath: target.sourceLocator.relativePath,
+                      mode: 'MODIFY' as const,
+                      beforeFingerprint: target.sourceLocator.revisionFingerprint,
+                      afterFingerprint: 'development-existing-inverse-after',
+                      resultContent: '// Exact inverse collection/scalar declaration updated atomically',
+                      appliedEditCount: 2,
+                    })),
                     {
                       relativePath: migrationPath,
                       mode: 'CREATE',
@@ -776,7 +834,96 @@ class ${scenario.className} {
                   issues: [],
                 }
               }
-              case 'applyExistingEntityAttributeAdditions':
+              case 'applyExistingEntityAttributeAdditions': {
+                const changedEntity = payload.change?.entity as any
+                const currentEntity = developmentSchemaWorkspace.entities.find(
+                  candidate => candidate.qualifiedName ===
+                    `${changedEntity?.packageName}.${changedEntity?.className}`,
+                )
+                const physicalStore = developmentSchemaWorkspace.physicalSchemas.find(
+                  candidate => candidate.storeId === changedEntity?.generationTarget?.storeId,
+                )
+                const physicalTable = physicalStore?.tables.find(
+                  candidate => candidate.name.toLowerCase() ===
+                    String(currentEntity?.tableName ?? '').split('.').pop()?.toLowerCase(),
+                )
+                ;(changedEntity?.attributes ?? []).forEach((desired: any) => {
+                  const current = currentEntity?.attributes.find(candidate => candidate.name === desired.name)
+                  if (!current) return
+                  const formerAssociationType = current.associationDetails?.associationType
+                  const oldColumn = current.columnName
+                  const nextColumn =
+                    desired.association?.joinColumnName ||
+                    desired.columnName ||
+                    oldColumn
+                  const physicalColumn = physicalTable?.columns.find(
+                    candidate => candidate.name.toLowerCase() === oldColumn.toLowerCase(),
+                  )
+                  if (nextColumn !== oldColumn) {
+                    current.columnName = nextColumn
+                    if (current.associationDetails) {
+                      current.associationDetails.joinColumnName = nextColumn
+                    }
+                    if (physicalColumn) physicalColumn.name = nextColumn
+                    physicalTable?.foreignKeys.forEach(foreignKey => {
+                      if (foreignKey.baseColumnNames.toLowerCase() === oldColumn.toLowerCase()) {
+                        foreignKey.baseColumnNames = nextColumn
+                      }
+                    })
+                  }
+                  current.nullable = !desired.mandatory
+                  current.unique = Boolean(desired.unique)
+                  if (current.associationDetails && desired.association) {
+                    current.associationDetails.associationType = desired.association.associationType
+                    if (formerAssociationType !== desired.association.associationType) {
+                      const target = developmentSchemaWorkspace.entities.find(candidate =>
+                        candidate.qualifiedName === current.associationDetails?.relatedEntity,
+                      )
+                      const inverseMatches = target?.attributes.filter(candidate =>
+                        candidate.associationDetails?.relatedEntity === currentEntity?.qualifiedName &&
+                        candidate.associationDetails?.mappedBy === current.name,
+                      ) ?? []
+                      if (inverseMatches.length === 1) {
+                        const inverse = inverseMatches[0]
+                        const inverseType = desired.association.associationType === 'oneToOne'
+                          ? 'oneToOne'
+                          : 'oneToMany'
+                        if (inverse.associationDetails) {
+                          inverse.associationDetails.associationType = inverseType
+                        }
+                        inverse.javaType = inverseType === 'oneToOne'
+                          ? currentEntity?.qualifiedName ?? inverse.javaType
+                          : `java.util.List<${currentEntity?.qualifiedName ?? 'java.lang.Object'}>`
+                        if (target) {
+                          target.sourceLocator.revisionFingerprint =
+                            `development-existing-inverse-${Date.now()}`
+                        }
+                      }
+                    }
+                  }
+                  if (physicalColumn && physicalTable) {
+                    physicalColumn.nullable = !desired.mandatory
+                    physicalColumn.unique = Boolean(desired.unique)
+                    const uniqueConstraints =
+                      physicalTable.uniqueConstraints ?? (physicalTable.uniqueConstraints = [])
+                    const matchingUnique = uniqueConstraints.findIndex(constraint =>
+                      constraint.columns.length === 1 &&
+                      constraint.columns[0].toLowerCase() === physicalColumn.name.toLowerCase(),
+                    )
+                    if (desired.unique && matchingUnique < 0) {
+                      uniqueConstraints.push({
+                        name: `UQ_${physicalTable.name}_${physicalColumn.name}`,
+                        columns: [physicalColumn.name],
+                      })
+                    } else if (!desired.unique && matchingUnique >= 0) {
+                      uniqueConstraints.splice(matchingUnique, 1)
+                    }
+                  }
+                })
+                if (currentEntity) {
+                  currentEntity.sourceLocator.revisionFingerprint =
+                    `development-existing-entity-${Date.now()}`
+                }
                 developmentHistory = {
                   canUndo: true,
                   undoLabel: `Update ${payload.change?.entity?.className ?? 'entity'}`,
@@ -794,6 +941,12 @@ class ${scenario.className} {
                     'loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/29-update-loan_app.xml',
                   ],
                   issues: [],
+                }
+              }
+              case 'inspectEntityAttributeRename':
+                return {
+                  success: true,
+                  message: `Native usage rename is ready for ${payload.attributeName} → ${payload.newName}; no files were changed.`,
                 }
               case 'launchEntityAttributeRename':
                 return {
@@ -1924,6 +2077,13 @@ class ${scenario.className} {
   launchEntityAttributeRename(change: EntityAttributeRenameRequest) {
     return this.request<EntityAttributeRenameLaunchResponse>(
       'launchEntityAttributeRename',
+      change,
+    )
+  }
+
+  inspectEntityAttributeRename(change: EntityAttributeRenameRequest) {
+    return this.request<EntityAttributeRenameLaunchResponse>(
+      'inspectEntityAttributeRename',
       change,
     )
   }
