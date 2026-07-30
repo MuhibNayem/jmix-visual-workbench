@@ -124,6 +124,55 @@ class DatabaseReverseEngineeringServiceTest {
         assertTrue(message.contains("jdbc:<redacted>"))
     }
 
+    @Test
+    fun `live cutover type evidence accepts capacity preserving shapes only`() {
+        assertTrue(
+            DatabaseSqlTypeCompatibility.accepts(
+                "BIGINT",
+                column("SHADOW_LONG", Types.BIGINT, "int8"),
+            ),
+        )
+        assertTrue(
+            DatabaseSqlTypeCompatibility.accepts(
+                "DECIMAL(19, 2)",
+                column("SHADOW_AMOUNT", Types.NUMERIC, "numeric", size = 24, scale = 2),
+            ),
+        )
+        assertFalse(
+            DatabaseSqlTypeCompatibility.accepts(
+                "DECIMAL(19, 2)",
+                column("SHADOW_AMOUNT", Types.NUMERIC, "numeric", size = 18, scale = 2),
+            ),
+        )
+        assertFalse(
+            DatabaseSqlTypeCompatibility.accepts(
+                "DECIMAL(19, 2)",
+                column("SHADOW_AMOUNT", Types.NUMERIC, "numeric", size = 24, scale = 4),
+            ),
+        )
+        assertTrue(
+            DatabaseSqlTypeCompatibility.accepts(
+                "VARCHAR(255)",
+                column("SHADOW_TEXT", Types.VARCHAR, "varchar", size = 512),
+            ),
+        )
+        assertFalse(
+            DatabaseSqlTypeCompatibility.accepts(
+                "VARCHAR(255)",
+                column("SHADOW_TEXT", Types.VARCHAR, "varchar", size = 120),
+            ),
+        )
+        assertEquals(
+            "SELECT COUNT(*) FROM \"PUBLIC\".\"LOAN_APP\" WHERE \"RISK_SCORE\" IS NOT NULL " +
+                "AND (\"JVE_SHADOW\" IS NULL OR \"JVE_SHADOW\" <> \"RISK_SCORE\")",
+            DatabaseBackfillVerificationSql.query(
+                "\"PUBLIC\".\"LOAN_APP\"",
+                "\"RISK_SCORE\"",
+                "\"JVE_SHADOW\"",
+            ),
+        )
+    }
+
     private fun column(
         name: String,
         jdbcType: Int,

@@ -23,6 +23,8 @@ import type {
   EntityAttributeTypeMigrationRequest,
   EntityAttributeTypeMigrationLaunchResponse,
   EntityAttributeTypeExpansionPreviewResponse,
+  EntityAttributeTypeExpansionVerificationResponse,
+  EntityAttributeTypeMappingCutoverRequest,
   GenerationResult,
   GraphSourceLocator,
   IntegrationConnectorModel,
@@ -760,12 +762,12 @@ class ${scenario.className} {
                 }
               case 'launchEntityAttributeTypeMigration':
                 return {
-                  success: payload.targetType === 'uri',
-                  code: payload.targetType === 'uri'
+                  success: payload.targetType === 'uri' || Boolean(payload.verificationToken),
+                  code: payload.targetType === 'uri' || payload.verificationToken
                     ? undefined
                     : 'JVW-ENTITY-TYPE-MIGRATION-SCHEMA-STAGE-REQUIRED',
-                  message: payload.targetType === 'uri'
-                    ? `IntelliJ project-wide Type Migration preview opened for ${payload.attributeName} → URI.`
+                  message: payload.targetType === 'uri' || payload.verificationToken
+                    ? `IntelliJ project-wide Type Migration preview opened for ${payload.attributeName} → ${payload.targetType}.`
                     : `Schema expansion is required before ${payload.attributeName} can migrate to ${payload.targetType}.`,
                   sourceLanguage: 'java',
                   schemaImpact: {
@@ -816,6 +818,50 @@ class ${scenario.className} {
                   filesChanged: [
                     'loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/30-entity-type-expand.xml',
                   ],
+                  issues: [],
+                }
+              case 'verifyEntityAttributeTypeExpansion':
+                return {
+                  accepted: true,
+                  message: 'Live database verified: the shadow type and every deployed backfill row are complete.',
+                  verificationToken: 'development-expansion-verification',
+                  expiresAtEpochMillis: Date.now() + 20 * 60 * 1000,
+                  evidenceDigest: 'development-live-expansion-evidence',
+                  shadowColumnName: 'JVE_91A8B2C_LOAN_AMOUNT',
+                  targetSqlType: payload.targetType === 'long' ? 'BIGINT' : 'DOUBLE',
+                  inconsistentBackfillRows: 0,
+                  database: {
+                    name: 'PostgreSQL',
+                    version: '17',
+                    driverName: 'PostgreSQL JDBC Driver',
+                    driverVersion: '42.7',
+                    urlFingerprint: 'development-db',
+                  },
+                }
+              case 'previewEntityAttributeTypeMappingCutover':
+                return {
+                  accepted: true,
+                  changeSetId: 'entity-type-mapping-cutover:development',
+                  label: `Switch ${payload.entityClassName}.${payload.attributeName} to verified shadow`,
+                  planDigest: 'development-mapping-cutover',
+                  files: [{
+                    relativePath: payload.sourceLocator?.relativePath ??
+                      'loan/src/main/java/com/company/loan/entity/LoanApp.java',
+                    mode: 'MODIFY',
+                    beforeFingerprint: payload.sourceLocator?.revisionFingerprint,
+                    afterFingerprint: 'development-mapping-cutover-after',
+                    originalContent: '@Column(name = "LOAN_AMOUNT")',
+                    resultContent: '@Column(name = "JVE_91A8B2C_LOAN_AMOUNT")',
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              case 'applyEntityAttributeTypeMappingCutover':
+                return {
+                  success: true,
+                  changeSetId: 'entity-type-mapping-cutover:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [payload.change?.sourceLocator?.relativePath],
                   issues: [],
                 }
               case 'inspectDatabaseEntityTable':
@@ -1658,6 +1704,30 @@ class ${scenario.className} {
   ) {
     return this.request<WorkspaceChangeApplyResponse>(
       'applyEntityAttributeTypeExpansion',
+      { change, expectedPlanDigest },
+    )
+  }
+
+  verifyEntityAttributeTypeExpansion(change: EntityAttributeTypeMigrationRequest) {
+    return this.request<EntityAttributeTypeExpansionVerificationResponse>(
+      'verifyEntityAttributeTypeExpansion',
+      change,
+    )
+  }
+
+  previewEntityAttributeTypeMappingCutover(change: EntityAttributeTypeMappingCutoverRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewEntityAttributeTypeMappingCutover',
+      change,
+    )
+  }
+
+  applyEntityAttributeTypeMappingCutover(
+    change: EntityAttributeTypeMappingCutoverRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyEntityAttributeTypeMappingCutover',
       { change, expectedPlanDigest },
     )
   }

@@ -808,6 +808,7 @@ data class EntityAttributeTypeMigrationRequest(
     val entityClassName: String,
     val attributeName: String,
     val targetType: AttributeType,
+    val verificationToken: String? = null,
 )
 
 data class PreparedEntityAttributeTypeMigration(

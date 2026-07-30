@@ -23,6 +23,8 @@ import type {
   EntityAttributeTypeSchemaImpact,
   EntityAttributeTypeMigrationRequest,
   EntityAttributeTypeExpansionPreviewResponse,
+  EntityAttributeTypeExpansionVerificationResponse,
+  EntityAttributeTypeMappingCutoverRequest,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
@@ -97,6 +99,14 @@ export default function EntityDesigner() {
   } | null>(null)
   const [typeExpansionBusy, setTypeExpansionBusy] = useState(false)
   const [typeExpansionApplied, setTypeExpansionApplied] = useState<string | null>(null)
+  const [typeCutoverSession, setTypeCutoverSession] = useState<{
+    attributeName: string
+    targetType: AttributeType
+    verification: EntityAttributeTypeExpansionVerificationResponse
+    sourceMigrationOpened: boolean
+  } | null>(null)
+  const [typeMappingCutoverPreview, setTypeMappingCutoverPreview] =
+    useState<WorkspaceChangePreviewResponse | null>(null)
   const [databaseInspection, setDatabaseInspection] =
     useState<DatabaseEntityTableInspectionResponse | null>(null)
   const [databaseColumnDrafts, setDatabaseColumnDrafts] =
@@ -148,8 +158,10 @@ export default function EntityDesigner() {
 
   useEffect(() => {
     const selected = selectedAttr === null ? undefined : entity.attributes[selectedAttr]
+    const activeCutover = selected && typeCutoverSession?.attributeName === selected.name
     if (
       selected &&
+      !activeCutover &&
       TYPE_MIGRATION_TYPES.includes(selected.type) &&
       selected.type === typeMigrationTarget
     ) {
@@ -157,10 +169,13 @@ export default function EntityDesigner() {
         TYPE_MIGRATION_TYPES.find(candidate => candidate !== selected.type) ?? selected.type,
       )
     }
-    setTypeMigrationImpact(null)
-    setTypeExpansionPending(null)
-    setTypeExpansionApplied(null)
-  }, [selectedAttr])
+    if (!typeCutoverSession) {
+      setTypeMigrationImpact(null)
+      setTypeExpansionPending(null)
+      setTypeExpansionApplied(null)
+      setTypeMappingCutoverPreview(null)
+    }
+  }, [selectedAttr, typeCutoverSession?.attributeName])
 
   const selectedModuleId = entity.generationTarget?.moduleId
     ?? schemaWorkspace?.stores.find((store) => store.id === entity.generationTarget?.storeId)?.moduleId
@@ -278,22 +293,28 @@ export default function EntityDesigner() {
   const handleNativeAttributeTypeMigration = async (
     attributeName: string,
     currentType: AttributeType,
+    verificationToken?: string,
   ) => {
     if (!existingEntity) return
-    if (typeMigrationTarget === currentType) {
+    if (typeMigrationTarget === currentType && !verificationToken) {
       addToast('Choose a different target type', 'error')
       return
     }
     setTypeMigrationBusy(true)
     setTypeMigrationImpact(null)
-    setTypeExpansionPending(null)
-    setTypeExpansionApplied(null)
+    if (!verificationToken) {
+      setTypeExpansionPending(null)
+      setTypeExpansionApplied(null)
+      setTypeCutoverSession(null)
+      setTypeMappingCutoverPreview(null)
+    }
     try {
       const response = await bridge.launchEntityAttributeTypeMigration({
         sourceLocator: existingEntity.sourceLocator,
         entityClassName: existingEntity.className,
         attributeName,
         targetType: typeMigrationTarget,
+        verificationToken,
       })
       setTypeMigrationImpact(response.schemaImpact ?? null)
       addToast(
@@ -302,7 +323,14 @@ export default function EntityDesigner() {
           ? 'info'
           : 'error',
       )
-      if (response.success) setRenameLaunched(true)
+      if (response.success) {
+        setRenameLaunched(true)
+        if (verificationToken) {
+          setTypeCutoverSession(current => current
+            ? { ...current, sourceMigrationOpened: true }
+            : current)
+        }
+      }
     } catch (error: any) {
       addToast(`Native type migration failed: ${error.message}`, 'error')
     } finally {
@@ -356,6 +384,108 @@ export default function EntityDesigner() {
       setSchemaWorkspace(refreshed)
     } catch (error: any) {
       addToast(`Expansion apply failed: ${error.message}`, 'error')
+    } finally {
+      setTypeExpansionBusy(false)
+    }
+  }
+
+  const verifyTypeExpansion = async (attributeName: string) => {
+    if (!existingEntity) return
+    setTypeExpansionBusy(true)
+    setTypeMappingCutoverPreview(null)
+    try {
+      const response = await bridge.verifyEntityAttributeTypeExpansion({
+        sourceLocator: existingEntity.sourceLocator,
+        entityClassName: existingEntity.className,
+        attributeName,
+        targetType: typeMigrationTarget,
+        verificationToken: typeCutoverSession?.verification.verificationToken,
+      })
+      if (!response.accepted || !response.verificationToken) {
+        addToast(response.message, 'error')
+        return
+      }
+      setTypeCutoverSession({
+        attributeName,
+        targetType: typeMigrationTarget,
+        verification: response,
+        sourceMigrationOpened: typeCutoverSession?.sourceMigrationOpened ?? false,
+      })
+      addToast(response.message, 'success')
+    } catch (error: any) {
+      addToast(`Live expansion verification failed: ${error.message}`, 'error')
+    } finally {
+      setTypeExpansionBusy(false)
+    }
+  }
+
+  const mappingCutoverRequest = (
+    attributeName: string,
+  ): EntityAttributeTypeMappingCutoverRequest | null => {
+    if (
+      !existingEntity ||
+      !typeCutoverSession?.verification.verificationToken ||
+      typeCutoverSession.attributeName !== attributeName
+    ) return null
+    return {
+      sourceLocator: existingEntity.sourceLocator,
+      entityClassName: existingEntity.className,
+      attributeName,
+      targetType: typeCutoverSession.targetType,
+      verificationToken: typeCutoverSession.verification.verificationToken,
+    }
+  }
+
+  const previewTypeMappingCutover = async (attributeName: string) => {
+    const request = mappingCutoverRequest(attributeName)
+    if (!request) return
+    setTypeExpansionBusy(true)
+    setTypeMappingCutoverPreview(null)
+    try {
+      const response = await bridge.previewEntityAttributeTypeMappingCutover(request)
+      if (!response.accepted || !response.planDigest) {
+        addToast(response.issues[0]?.message ?? 'Mapping cutover was rejected', 'error')
+        return
+      }
+      setTypeMappingCutoverPreview(response)
+      addToast('Exact annotation-only mapping cutover is ready for review', 'info')
+    } catch (error: any) {
+      addToast(`Mapping cutover preview failed: ${error.message}`, 'error')
+    } finally {
+      setTypeExpansionBusy(false)
+    }
+  }
+
+  const applyTypeMappingCutover = async (attributeName: string) => {
+    const request = mappingCutoverRequest(attributeName)
+    const digest = typeMappingCutoverPreview?.planDigest
+    if (!request || !digest) return
+    setTypeExpansionBusy(true)
+    try {
+      const response = await bridge.applyEntityAttributeTypeMappingCutover(request, digest)
+      if (!response.success) {
+        addToast(response.issues[0]?.message ?? 'Mapping cutover apply was rejected', 'error')
+        return
+      }
+      setTypeMappingCutoverPreview(null)
+      setTypeCutoverSession(null)
+      setTypeMigrationImpact(null)
+      addToast('Entity mapping switched atomically to the verified shadow column', 'success')
+      const refreshed = await bridge.getSchemaWorkspace(true)
+      setSchemaWorkspace(refreshed)
+      const updated = refreshed.entities.find(
+        candidate => candidate.qualifiedName === existingEntity?.qualifiedName,
+      )
+      if (updated) {
+        const store = refreshed.stores.find(
+          candidate => candidate.moduleId === updated.moduleId && candidate.name === updated.storeName,
+        )
+        setExistingEntity(updated)
+        setEntity(existingEntityModel(updated, store?.id))
+        setSelectedAttr(updated.attributes.findIndex(attribute => attribute.name === attributeName))
+      }
+    } catch (error: any) {
+      addToast(`Mapping cutover apply failed: ${error.message}`, 'error')
     } finally {
       setTypeExpansionBusy(false)
     }
@@ -487,10 +617,19 @@ export default function EntityDesigner() {
         )
         setExistingEntity(updated)
         setEntity(existingEntityModel(updated, store?.id))
-        setSelectedAttr(null)
+        const cutoverAttributeIndex = typeCutoverSession
+          ? updated.attributes.findIndex(attribute =>
+              attribute.name === typeCutoverSession.attributeName)
+          : -1
+        setSelectedAttr(cutoverAttributeIndex >= 0 ? cutoverAttributeIndex : null)
         setRenameDraft('')
         setRenameLaunched(false)
-        addToast('Entity workspace refreshed after native refactor', 'success')
+        addToast(
+          cutoverAttributeIndex >= 0
+            ? 'Source migration indexed. Review the verified mapping cutover.'
+            : 'Entity workspace refreshed after native refactor',
+          'success',
+        )
       }
     } catch (error: any) {
       addToast(`Cannot refresh entity workspace: ${error.message}`, 'error')
@@ -1963,7 +2102,8 @@ export default function EntityDesigner() {
                                 {typeMigrationBusy ? 'Analyzing project…' : 'Open type preview'}
                               </button>
                             </div>
-                            {typeMigrationImpact && (
+                            {typeMigrationImpact &&
+                              (!typeCutoverSession || typeCutoverSession.attributeName === selected.name) && (
                               <div className={`mt-3 min-w-0 rounded border p-2.5 text-[10px] leading-relaxed ${
                                 typeMigrationImpact.strategy === 'SOURCE_ONLY'
                                   ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100/80'
@@ -2046,6 +2186,135 @@ export default function EntityDesigner() {
                                         mapping cutover. The plugin will not open the source refactor early.
                                       </div>
                                     )}
+                                    <div className="mt-3 rounded-lg border border-sky-500/25 bg-sky-500/5 p-2.5">
+                                      <div className="flex flex-wrap items-center gap-1.5 text-[9px]">
+                                        {[
+                                          ['1', 'Deploy expansion', Boolean(typeExpansionApplied)],
+                                          ['2', 'Verify live data', Boolean(typeCutoverSession)],
+                                          ['3', 'Migrate source', Boolean(typeCutoverSession?.sourceMigrationOpened)],
+                                          ['4', 'Switch mapping', false],
+                                        ].map(([step, label, complete]) => (
+                                          <span
+                                            key={String(step)}
+                                            className={`rounded-full border px-2 py-1 ${
+                                              complete
+                                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
+                                                : 'border-surface-border bg-black/15 text-gray-400'
+                                            }`}
+                                          >
+                                            {step}. {label}
+                                          </span>
+                                        ))}
+                                      </div>
+                                      {!typeCutoverSession && (
+                                        <div className="mt-2">
+                                          <p className="text-[9px] leading-relaxed text-sky-100/70">
+                                            This opens a read-only connection from the active Jmix data-store profile.
+                                            It checks the deployed SQL type and compares shadow values with the
+                                            authoritative original; no credentials or row values enter the designer.
+                                          </p>
+                                          <button
+                                            type="button"
+                                            disabled={typeExpansionBusy}
+                                            onClick={() => verifyTypeExpansion(selected.name)}
+                                            className="mt-2 rounded border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-[10px] font-medium text-sky-100 hover:bg-sky-500/20 disabled:opacity-50"
+                                          >
+                                            {typeExpansionBusy ? 'Verifying deployed data…' : 'Verify deployed expansion'}
+                                          </button>
+                                        </div>
+                                      )}
+                                      {typeCutoverSession?.attributeName === selected.name && (
+                                        <div className="mt-2 space-y-2">
+                                          <div className="rounded border border-emerald-500/25 bg-emerald-500/5 p-2 text-[9px] leading-relaxed text-emerald-100/80">
+                                            <div className="font-semibold">
+                                              Live evidence {typeCutoverSession.verification.evidenceDigest?.slice(0, 12)}
+                                            </div>
+                                            <div className="mt-0.5 break-words">
+                                              {typeCutoverSession.verification.database?.name}{' '}
+                                              {typeCutoverSession.verification.database?.version} ·{' '}
+                                              {typeCutoverSession.verification.shadowColumnName}{' '}
+                                              {typeCutoverSession.verification.targetSqlType} · exact value parity
+                                            </div>
+                                          </div>
+                                          <button
+                                            type="button"
+                                            disabled={typeExpansionBusy}
+                                            onClick={() => verifyTypeExpansion(selected.name)}
+                                            className="rounded border border-emerald-500/30 px-2.5 py-1 text-[9px] text-emerald-100 hover:bg-emerald-500/10 disabled:opacity-50"
+                                          >
+                                            {typeExpansionBusy ? 'Re-verifying…' : 'Re-verify live evidence'}
+                                          </button>
+                                          {!typeCutoverSession.sourceMigrationOpened ? (
+                                            <button
+                                              type="button"
+                                              disabled={typeMigrationBusy}
+                                              onClick={() => handleNativeAttributeTypeMigration(
+                                                selected.name,
+                                                selected.type,
+                                                typeCutoverSession.verification.verificationToken,
+                                              )}
+                                              className="rounded bg-sky-500 px-3 py-1.5 text-[10px] font-semibold text-white hover:bg-sky-400 disabled:opacity-50"
+                                            >
+                                              {typeMigrationBusy
+                                                ? 'Opening IntelliJ preview…'
+                                                : 'Open verified source migration'}
+                                            </button>
+                                          ) : (
+                                            <div>
+                                              <p className="text-[9px] leading-relaxed text-gray-400">
+                                                Apply IntelliJ&apos;s usage preview, then use “Refresh after apply”.
+                                                The next preview changes only the exact @Column name literal and
+                                                rechecks the live database first.
+                                              </p>
+                                              {!typeMappingCutoverPreview ? (
+                                                <button
+                                                  type="button"
+                                                  disabled={typeExpansionBusy}
+                                                  onClick={() => previewTypeMappingCutover(selected.name)}
+                                                  className="mt-2 rounded border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-[10px] font-medium text-violet-100 hover:bg-violet-500/20 disabled:opacity-50"
+                                                >
+                                                  {typeExpansionBusy
+                                                    ? 'Rechecking live database…'
+                                                    : 'Preview exact mapping cutover'}
+                                                </button>
+                                              ) : (
+                                                <div className="mt-2 rounded border border-violet-500/25 bg-black/15 p-2">
+                                                  <div className="font-semibold text-violet-100">
+                                                    {typeMappingCutoverPreview.label}
+                                                  </div>
+                                                  {typeMappingCutoverPreview.files.map(file => (
+                                                    <div
+                                                      key={file.relativePath}
+                                                      className="mt-1 break-all font-mono text-[8px] text-gray-400"
+                                                    >
+                                                      {file.mode} · {file.relativePath} · {file.appliedEditCount} exact edit
+                                                    </div>
+                                                  ))}
+                                                  <div className="mt-2 flex flex-wrap gap-2">
+                                                    <button
+                                                      type="button"
+                                                      disabled={typeExpansionBusy}
+                                                      onClick={() => setTypeMappingCutoverPreview(null)}
+                                                      className="rounded border border-surface-border px-2.5 py-1 text-[9px] text-gray-400"
+                                                    >
+                                                      Discard
+                                                    </button>
+                                                    <button
+                                                      type="button"
+                                                      disabled={typeExpansionBusy}
+                                                      onClick={() => applyTypeMappingCutover(selected.name)}
+                                                      className="rounded bg-violet-500 px-2.5 py-1 text-[9px] font-semibold text-white hover:bg-violet-400 disabled:opacity-50"
+                                                    >
+                                                      {typeExpansionBusy ? 'Applying…' : 'Switch verified mapping'}
+                                                    </button>
+                                                  </div>
+                                                </div>
+                                              )}
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 )}
                               </div>

@@ -472,6 +472,7 @@ export interface EntityAttributeTypeMigrationRequest {
   entityClassName: string
   attributeName: string
   targetType: AttributeType
+  verificationToken?: string
 }
 
 export type EntityAttributeTypeSchemaStrategy =
@@ -506,6 +507,27 @@ export interface EntityAttributeTypeExpansionPreviewResponse {
   shadowColumnName?: string
   targetSqlType?: string
   preview: WorkspaceChangePreviewResponse
+}
+
+export interface EntityAttributeTypeExpansionVerificationResponse {
+  accepted: boolean
+  code?: string
+  message: string
+  verificationToken?: string
+  expiresAtEpochMillis?: number
+  evidenceDigest?: string
+  database?: DatabaseProductSnapshot
+  shadowColumnName?: string
+  targetSqlType?: string
+  inconsistentBackfillRows?: number
+}
+
+export interface EntityAttributeTypeMappingCutoverRequest {
+  sourceLocator: GraphSourceLocator
+  entityClassName: string
+  attributeName: string
+  targetType: AttributeType
+  verificationToken: string
 }
 
 export interface DatabaseEntityTableInspectionRequest {

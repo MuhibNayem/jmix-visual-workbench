@@ -5,6 +5,7 @@ import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.module.ModuleType
 import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.vfs.VfsUtil
+import com.intellij.psi.PsiManager
 import com.intellij.testFramework.HeavyPlatformTestCase
 import org.jmixworkbench.generator.CrudOrchestrator
 import org.jmixworkbench.generator.MigrationGenerator
@@ -879,6 +880,30 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
         assertTrue(kotlinTypeMigration.element is com.intellij.psi.PsiField)
         assertNotNull(kotlinTypeMigration.targetPsiType)
+        val kotlinSourceFile = requireNotNull(
+            ProjectFileResolver.getInstance(project)
+                .resolveFile(kotlinEmployee.sourceLocator.relativePath)?.file,
+        )
+        val kotlinSource = ProjectSourceText.read(kotlinSourceFile)
+        val kotlinMappingEdit = requireNotNull(
+            EntityAttributeTypeCutoverService.getInstance(project).columnEditFromPsi(
+                psiFile = requireNotNull(PsiManager.getInstance(project).findFile(kotlinSourceFile)),
+                fileExtension = "kt",
+                className = kotlinEmployee.className,
+                attributeName = "age",
+                expectedColumnName = "AGE",
+                replacementColumnName = "JVE_TEST_AGE",
+            ),
+        )
+        assertEquals("AGE", kotlinMappingEdit.expectedText)
+        assertEquals("JVE_TEST_AGE", kotlinMappingEdit.replacement)
+        assertTrue(
+            kotlinSource.replaceRange(
+                kotlinMappingEdit.startOffset,
+                kotlinMappingEdit.endOffset,
+                kotlinMappingEdit.replacement,
+            ).contains("""@Column(name = "JVE_TEST_AGE")"""),
+        )
 
         val unsafe = workspace.entities.single { it.className == "UnsafeEmployee" }
         val rejected = refactors.prepareRename(
@@ -1031,6 +1056,41 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertFalse(expansionXml.contains("""columnName="RISK_SCORE"</dropColumn"""))
         assertTrue(expansionXml.contains("<sqlCheck expectedResult=\"0\">"))
         assertTrue(expansionXml.contains("SET ${expansion.shadowColumnName} = NULL"))
+        val description = EntityAttributeTypeExpansionService.getInstance(project)
+            .describe(expansionRequest)
+        val descriptor = assertNotNull(
+            description.descriptor,
+            "${description.code}: ${description.message}",
+        )
+        assertEquals(expansion.shadowColumnName, descriptor.shadowColumnName)
+        assertEquals("RISK_SCORE", descriptor.originalColumnName)
+        assertEquals("BIGINT", descriptor.targetSqlType)
+        val loanSourceFile = requireNotNull(
+            ProjectFileResolver.getInstance(project)
+                .resolveFile(loanApp.sourceLocator.relativePath)?.file,
+        )
+        val loanSource = ProjectSourceText.read(loanSourceFile)
+        val javaMappingEdit = requireNotNull(
+            EntityAttributeTypeCutoverService.getInstance(project).columnEditFromPsi(
+                psiFile = requireNotNull(PsiManager.getInstance(project).findFile(loanSourceFile)),
+                fileExtension = "java",
+                className = loanApp.className,
+                attributeName = "riskScore",
+                expectedColumnName = "RISK_SCORE",
+                replacementColumnName = descriptor.shadowColumnName,
+            ),
+        )
+        val cutoverSource = loanSource.replaceRange(
+            javaMappingEdit.startOffset,
+            javaMappingEdit.endOffset,
+            javaMappingEdit.replacement,
+        )
+        assertTrue(cutoverSource.contains("""@Column(name = "${descriptor.shadowColumnName}", nullable = false)"""))
+        assertTrue(cutoverSource.contains("private Integer riskScore;"))
+        assertEquals(
+            "RISK_SCORE".length,
+            javaMappingEdit.endOffset - javaMappingEdit.startOffset,
+        )
 
         val expansionPreview = EntityAttributeTypeExpansionService.getInstance(project)
             .preview(expansionRequest)

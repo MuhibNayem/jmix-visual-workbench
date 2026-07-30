@@ -81,70 +81,21 @@ class EntityAttributeTypeExpansionService(
     internal fun build(
         request: EntityAttributeTypeMigrationRequest,
     ): PreparedEntityAttributeTypeExpansion {
-        val typeMigration = EntityAttributeRefactorService.getInstance(project)
-            .prepareTypeMigration(request)
-        if (!typeMigration.accepted) {
+        val described = describe(request)
+        val descriptor = described.descriptor
+        if (descriptor == null) {
             return PreparedEntityAttributeTypeExpansion.failure(
-                typeMigration.code ?: "JVW-ENTITY-TYPE-EXPANSION-ANALYSIS-REJECTED",
-                typeMigration.message,
+                described.code ?: "JVW-ENTITY-TYPE-EXPANSION-ANALYSIS-REJECTED",
+                described.message,
             )
         }
-        val impact = typeMigration.schemaImpact
-            ?: return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-IMPACT-MISSING",
-                "Physical schema impact is unavailable.",
-            )
-        if (impact.strategy != EntityAttributeTypeSchemaStrategy.EXPAND_CONTRACT_REQUIRED) {
-            return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-NOT-REQUIRED",
-                "This change is ${impact.strategy.name.lowercase().replace('_', ' ')} and does not require a managed shadow-column expansion.",
-            )
-        }
-        val currentType = typeMigration.currentType
-            ?: return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-CURRENT-TYPE-MISSING",
-                "The current scalar type is unavailable.",
-            )
-        val targetType = typeMigration.targetType
-            ?: return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-TARGET-TYPE-MISSING",
-                "The target scalar type is unavailable.",
-            )
-        val targetSqlType = impact.targetSqlType
-            ?: return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-SQL-TYPE-MISSING",
-                "The target SQL type is unavailable.",
-            )
-        if (!losslessAssignment(currentType, targetType, targetSqlType)) {
-            return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-CONVERSION-REQUIRES-EXPRESSION",
-                "$currentType → $targetType is not proven lossless by the portable conversion matrix. " +
-                    "Use a reviewed, database-specific conversion expression and validation rehearsal.",
-            )
-        }
-        val storeId = impact.storeId
-            ?: return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-STORE-MISSING",
-                "The managed data store is unavailable.",
-            )
-        val qualifiedTable = impact.tableName.orEmpty()
-        val tableParts = qualifiedTable.split('.').map(String::trim).filter(String::isNotBlank)
-        if (tableParts.isEmpty() || tableParts.size > 2 || tableParts.any { !IDENTIFIER.matches(it) }) {
-            return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-TABLE-UNSUPPORTED",
-                "Expansion requires a portable TABLE or SCHEMA.TABLE mapping.",
-            )
-        }
-        val tableName = tableParts.last().uppercase(Locale.ROOT)
-        val schemaName = tableParts.takeIf { it.size == 2 }?.first()?.uppercase(Locale.ROOT)
-        val originalColumn = impact.columnName.orEmpty().uppercase(Locale.ROOT)
-        if (!IDENTIFIER.matches(originalColumn)) {
-            return PreparedEntityAttributeTypeExpansion.failure(
-                "JVW-ENTITY-TYPE-EXPANSION-COLUMN-UNSUPPORTED",
-                "Expansion requires a portable unquoted source column.",
-            )
-        }
-        val shadowColumn = shadowColumnName(tableName, originalColumn, targetSqlType)
+        val storeId = descriptor.storeId
+        val qualifiedTable = descriptor.qualifiedTableName
+        val tableName = descriptor.tableName
+        val schemaName = descriptor.schemaName
+        val originalColumn = descriptor.originalColumnName
+        val shadowColumn = descriptor.shadowColumnName
+        val targetSqlType = descriptor.targetSqlType
         val workspace = SchemaWorkspaceService.getInstance(project).load()
         val physicalStore = workspace.physicalSchemas.firstOrNull { it.storeId == storeId }
             ?: return PreparedEntityAttributeTypeExpansion.failure(
@@ -305,6 +256,96 @@ class EntityAttributeTypeExpansionService(
         )
     }
 
+    /**
+     * Reconstructs the immutable expansion identity without requiring the
+     * shadow column to be absent. This remains valid after a generated
+     * changelog has been indexed and is therefore the source of truth for live
+     * deployment verification and mapping cutover.
+     */
+    internal fun describe(
+        request: EntityAttributeTypeMigrationRequest,
+    ): EntityAttributeTypeExpansionDescription {
+        val typeMigration = EntityAttributeRefactorService.getInstance(project)
+            .prepareTypeMigration(request)
+        if (!typeMigration.accepted) {
+            return EntityAttributeTypeExpansionDescription.failure(
+                typeMigration.code ?: "JVW-ENTITY-TYPE-EXPANSION-ANALYSIS-REJECTED",
+                typeMigration.message,
+            )
+        }
+        val impact = typeMigration.schemaImpact
+            ?: return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-IMPACT-MISSING",
+                "Physical schema impact is unavailable.",
+            )
+        if (impact.strategy != EntityAttributeTypeSchemaStrategy.EXPAND_CONTRACT_REQUIRED) {
+            return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-NOT-REQUIRED",
+                "This change is ${impact.strategy.name.lowercase().replace('_', ' ')} and does not require a managed shadow-column expansion.",
+            )
+        }
+        val currentType = typeMigration.currentType
+            ?: return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-CURRENT-TYPE-MISSING",
+                "The current scalar type is unavailable.",
+            )
+        val targetType = typeMigration.targetType
+            ?: return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-TARGET-TYPE-MISSING",
+                "The target scalar type is unavailable.",
+            )
+        val targetSqlType = impact.targetSqlType
+            ?: return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-SQL-TYPE-MISSING",
+                "The target SQL type is unavailable.",
+            )
+        if (!losslessAssignment(currentType, targetType, targetSqlType)) {
+            return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-CONVERSION-REQUIRES-EXPRESSION",
+                "$currentType → $targetType is not proven lossless by the portable conversion matrix. " +
+                    "Use a reviewed, database-specific conversion expression and validation rehearsal.",
+            )
+        }
+        val storeId = impact.storeId
+            ?: return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-STORE-MISSING",
+                "The managed data store is unavailable.",
+            )
+        val qualifiedTable = impact.tableName.orEmpty()
+        val tableParts = qualifiedTable.split('.').map(String::trim).filter(String::isNotBlank)
+        if (tableParts.isEmpty() || tableParts.size > 2 || tableParts.any { !IDENTIFIER.matches(it) }) {
+            return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-TABLE-UNSUPPORTED",
+                "Expansion requires a portable TABLE or SCHEMA.TABLE mapping.",
+            )
+        }
+        val tableName = tableParts.last().uppercase(Locale.ROOT)
+        val schemaName = tableParts.takeIf { it.size == 2 }?.first()?.uppercase(Locale.ROOT)
+        val originalColumn = impact.columnName.orEmpty().uppercase(Locale.ROOT)
+        if (!IDENTIFIER.matches(originalColumn)) {
+            return EntityAttributeTypeExpansionDescription.failure(
+                "JVW-ENTITY-TYPE-EXPANSION-COLUMN-UNSUPPORTED",
+                "Expansion requires a portable unquoted source column.",
+            )
+        }
+        return EntityAttributeTypeExpansionDescription(
+            descriptor = EntityAttributeTypeExpansionDescriptor(
+                storeId = storeId,
+                schemaName = schemaName,
+                tableName = tableName,
+                originalColumnName = originalColumn,
+                shadowColumnName = shadowColumnName(tableName, originalColumn, targetSqlType),
+                targetSqlType = targetSqlType,
+                sourceRevisionFingerprint = request.sourceLocator.revisionFingerprint,
+                entityClassName = request.entityClassName,
+                attributeName = request.attributeName,
+                targetType = request.targetType,
+            ),
+            code = null,
+            message = "Lossless expansion identity is ready.",
+        )
+    }
+
     companion object {
         private val IDENTIFIER = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
 
@@ -401,3 +442,30 @@ data class EntityAttributeTypeExpansionApplyRequest(
     val change: EntityAttributeTypeMigrationRequest,
     val expectedPlanDigest: String,
 )
+
+data class EntityAttributeTypeExpansionDescriptor(
+    val storeId: String,
+    val schemaName: String?,
+    val tableName: String,
+    val originalColumnName: String,
+    val shadowColumnName: String,
+    val targetSqlType: String,
+    val sourceRevisionFingerprint: String,
+    val entityClassName: String,
+    val attributeName: String,
+    val targetType: AttributeType,
+) {
+    val qualifiedTableName: String
+        get() = listOfNotNull(schemaName, tableName).joinToString(".")
+}
+
+data class EntityAttributeTypeExpansionDescription(
+    val descriptor: EntityAttributeTypeExpansionDescriptor?,
+    val code: String?,
+    val message: String,
+) {
+    companion object {
+        fun failure(code: String, message: String) =
+            EntityAttributeTypeExpansionDescription(null, code, message)
+    }
+}

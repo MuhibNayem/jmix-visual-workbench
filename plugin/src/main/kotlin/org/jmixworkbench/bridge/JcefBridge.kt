@@ -40,10 +40,12 @@ import org.jmixworkbench.services.PreparedEntityAttributeSafeDelete
 import org.jmixworkbench.services.EntityAttributeTypeMigrationLaunchResponse
 import org.jmixworkbench.services.EntityAttributeTypeMigrationRequest
 import org.jmixworkbench.services.PreparedEntityAttributeTypeMigration
-import org.jmixworkbench.services.EntityAttributeTypeSchemaStrategy
 import org.jmixworkbench.services.EntityAttributeTypeExpansionApplyRequest
 import org.jmixworkbench.services.EntityAttributeTypeExpansionPreviewResponse
 import org.jmixworkbench.services.EntityAttributeTypeExpansionService
+import org.jmixworkbench.services.EntityAttributeTypeCutoverService
+import org.jmixworkbench.services.EntityAttributeTypeMappingCutoverRequest
+import org.jmixworkbench.services.EntityAttributeTypeMappingCutoverApplyRequest
 import org.jmixworkbench.services.EntityAttributePropagationApplyRequest
 import org.jmixworkbench.services.EntityAttributePropagationChangeRequest
 import org.jmixworkbench.services.EntityAttributePropagationInspectionRequest
@@ -356,6 +358,18 @@ class JcefBridge(
             }
             if (action == "applyEntityAttributeTypeExpansion") {
                 handleApplyEntityAttributeTypeExpansion(action, requestId, payload)
+                return
+            }
+            if (action == "verifyEntityAttributeTypeExpansion") {
+                handleVerifyEntityAttributeTypeExpansion(action, requestId, payload)
+                return
+            }
+            if (action == "previewEntityAttributeTypeMappingCutover") {
+                handlePreviewEntityAttributeTypeMappingCutover(action, requestId, payload)
+                return
+            }
+            if (action == "applyEntityAttributeTypeMappingCutover") {
+                handleApplyEntityAttributeTypeMappingCutover(action, requestId, payload)
                 return
             }
             if (action == "inspectDatabaseEntityTable") {
@@ -1431,16 +1445,17 @@ class JcefBridge(
                     )
                     return@finishOnUiThread
                 }
-                if (prepared.schemaImpact?.strategy != EntityAttributeTypeSchemaStrategy.SOURCE_ONLY) {
+                val authorizationIssue = EntityAttributeTypeCutoverService.getInstance(project)
+                    .authorizeSourceMigration(request, prepared)
+                if (authorizationIssue != null) {
                     sendResponse(
                         action,
                         requestId,
                         gson.toJson(
                             EntityAttributeTypeMigrationLaunchResponse(
                                 success = false,
-                                code = "JVW-ENTITY-TYPE-MIGRATION-SCHEMA-STAGE-REQUIRED",
-                                message = prepared.message +
-                                    " The source refactor was not opened because its schema stage must be completed first.",
+                                code = authorizationIssue.code,
+                                message = authorizationIssue.message,
                                 sourceLanguage = prepared.sourceLanguage,
                                 schemaImpact = prepared.schemaImpact,
                             ),
@@ -1521,6 +1536,72 @@ class JcefBridge(
                 sendResponse(action, requestId, gson.toJson(response))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleVerifyEntityAttributeTypeExpansion(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeTypeMigrationRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().submit {
+            val response = EntityAttributeTypeCutoverService.getInstance(project).verify(request)
+            ApplicationManager.getApplication().invokeLater({
+                if (!project.isDisposed) {
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+            }, ModalityState.any())
+        }
+    }
+
+    private fun handlePreviewEntityAttributeTypeMappingCutover(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeTypeMappingCutoverRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().submit {
+            val response = EntityAttributeTypeCutoverService.getInstance(project)
+                .previewMappingCutover(request)
+            ApplicationManager.getApplication().invokeLater({
+                if (!project.isDisposed) {
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+            }, ModalityState.any())
+        }
+    }
+
+    private fun handleApplyEntityAttributeTypeMappingCutover(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeTypeMappingCutoverApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().submit {
+            val prepared = EntityAttributeTypeCutoverService.getInstance(project)
+                .prepareMappingCutoverApply(request)
+            ApplicationManager.getApplication().invokeLater({
+                if (!project.isDisposed) {
+                    val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+            }, ModalityState.any())
+        }
     }
 
     private fun handleInspectDatabaseEntityTable(

@@ -101,10 +101,23 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   existence preconditions that HALT on failure or evaluation error, and custom
   rollback that drops only the shadow. Qualified `SCHEMA.TABLE` mappings are
   preserved. The original column remains authoritative and untouched.
-  Unproven or database-specific conversions fail closed. Mapping cutover,
-  deployed-data verification and later contraction remain separate gates
-  because Liquibase `modifyDataType` has no automatic rollback and reversing
-  the declaration cannot restore truncated data.
+  Unproven or database-specific conversions fail closed. The cutover gate now
+  resolves the active Jmix data-store profile without exposing credentials,
+  loads the project's own JDBC driver, verifies the deployed original and
+  deterministic shadow columns, checks target SQL type/capacity, and rejects
+  any row whose shadow is null or differs from the authoritative original.
+  Successful evidence creates a random, memory-only, exact-revision/property/
+  type/schema-bound capability that expires after twenty minutes. Only that
+  capability can open IntelliJ Type Migration for an expand/contract outcome.
+  A bounded memory-only recovery identity permits live re-verification after a
+  long IntelliJ review without persisting credentials or weakening expiry.
+  After the developer applies the native Java/Kotlin usage preview and refreshes
+  the index, the final cutover preview rechecks live value parity and proposes
+  one exact edit to the existing `@Column(name)` literal; every other handwritten
+  annotation argument and source byte is retained, the preview is revision
+  bound, and apply is atomic. Later contraction and final deletion remain
+  separate retention gates because reversing the declaration cannot restore
+  intentionally retired data.
 - Existing entities can inspect their live mapped table through the
   project-owned JDBC driver and the active profile configuration. The backend
   supports datasource-only stores with Liquibase intentionally disabled,
@@ -152,9 +165,10 @@ blocked until all of the following pass:
    to IntelliJ usage preview, including native `mappedBy` references, and
    explicit scalar and owning to-one join-column physical rename is atomic
    with checked Liquibase rollback. Combined property-and-physical mapping
-   changes, relationship shape changes, mapping cutover, deployed-data
-   verification, contraction and final post-retention physical deletion remain.
-   The non-destructive expansion stage, Native
+   changes, relationship shape changes, contraction and final post-retention
+   physical deletion remain. Deployed-data/type/value verification and exact
+   Java/Kotlin mapping cutover are implemented with an expiring backend
+   capability. The non-destructive expansion stage, Native
    project-wide Java/Kotlin type-migration preview with physical dependency
    classification, Native Safe Delete and reversible quarantine are implemented.
    Additive and managed-mapping Java/Kotlin round trip is implemented.

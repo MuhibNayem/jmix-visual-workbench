@@ -36,12 +36,6 @@ class DatabaseReverseEngineeringService(
     fun inspectEntityTable(
         request: DatabaseEntityTableInspectionRequest,
     ): DatabaseEntityTableInspectionResponse {
-        val workspace = SchemaWorkspaceService.getInstance(project).load()
-        val store = workspace.stores.firstOrNull { it.id == request.storeId }
-            ?: return DatabaseEntityTableInspectionResponse.failure(
-                "JVW-DB-STORE-MISSING",
-                "The selected Jmix data store no longer exists.",
-            )
         val tableName = request.tableName.trim()
         if (tableName.isBlank() || tableName.length > MAX_IDENTIFIER_LENGTH) {
             return DatabaseEntityTableInspectionResponse.failure(
@@ -49,56 +43,41 @@ class DatabaseReverseEngineeringService(
                 "Enter a valid database table or view name.",
             )
         }
-        val configuration = resolveConnectionConfiguration(store)
-            ?: return DatabaseEntityTableInspectionResponse.failure(
-                "JVW-DB-CONNECTION-CONFIG-MISSING",
-                "No complete ${store.name}.datasource URL and JDBC driver settings were found in the active project profile.",
+        val result = withReadOnlyConnection(
+            storeId = request.storeId,
+            connectTimeoutSeconds = request.connectTimeoutSeconds,
+            networkTimeoutSeconds = request.networkTimeoutSeconds,
+        ) { connection, context ->
+            inspectConnected(
+                connection,
+                context.store,
+                request,
+                context.workspace,
+                context.configuration,
             )
-        val password = configuration.password
-        val properties = connectionProperties(configuration.url, request).apply {
-            configuration.username?.let { setProperty("user", it) }
-            password?.let { setProperty("password", String(it)) }
         }
-        val driverUrls = projectLibraryUrls()
-        val loader = URLClassLoader(driverUrls.toTypedArray(), javaClass.classLoader)
-        return try {
-            val driver = loadDriver(configuration, loader)
-                ?: return DatabaseEntityTableInspectionResponse.failure(
-                    "JVW-DB-DRIVER-MISSING",
-                    "JDBC driver ${configuration.driverClassName} is not available in the synced project libraries.",
-                )
-            val connection = driver.connect(configuration.url, properties)
-                ?: return DatabaseEntityTableInspectionResponse.failure(
-                    "JVW-DB-DRIVER-URL-REJECTED",
-                    "The configured JDBC driver does not accept the data store URL.",
-                )
-            connection.use { live ->
-                runCatching { live.isReadOnly = true }
-                runCatching { live.autoCommit = false }
-                runCatching {
-                    live.setNetworkTimeout(
-                        AppExecutorUtil.getAppExecutorService(),
-                        request.networkTimeoutSeconds.coerceIn(1, 120) * 1_000,
-                    )
-                }
-                inspectConnected(
-                    live,
-                    store,
-                    request,
-                    workspace,
-                    configuration,
-                )
-            }
-        } catch (error: Throwable) {
-            DatabaseEntityTableInspectionResponse.failure(
-                "JVW-DB-INSPECTION-FAILED",
-                redactDatabaseError(error),
-            )
-        } finally {
-            runCatching { loader.close() }
-            properties.clear()
-            password?.fill('\u0000')
+        return result.value ?: DatabaseEntityTableInspectionResponse.failure(
+            result.issue?.code ?: "JVW-DB-INSPECTION-FAILED",
+            result.issue?.message ?: "Database inspection failed.",
+        )
+    }
+
+    fun verifyEntityTypeExpansion(
+        descriptor: EntityAttributeTypeExpansionDescriptor,
+        connectTimeoutSeconds: Int = 10,
+        networkTimeoutSeconds: Int = 30,
+    ): DatabaseEntityTypeExpansionVerification {
+        val result = withReadOnlyConnection(
+            storeId = descriptor.storeId,
+            connectTimeoutSeconds = connectTimeoutSeconds,
+            networkTimeoutSeconds = networkTimeoutSeconds,
+        ) { connection, context ->
+            verifyConnectedExpansion(connection, context.configuration, descriptor)
         }
+        return result.value ?: DatabaseEntityTypeExpansionVerification.failure(
+            result.issue?.code ?: "JVW-ENTITY-TYPE-CUTOVER-DB-FAILED",
+            result.issue?.message ?: "Live expansion verification failed.",
+        )
     }
 
     private fun inspectConnected(
@@ -234,6 +213,170 @@ class DatabaseReverseEngineeringService(
         )
     }
 
+    private fun verifyConnectedExpansion(
+        connection: Connection,
+        configuration: DatabaseConnectionConfiguration,
+        descriptor: EntityAttributeTypeExpansionDescriptor,
+    ): DatabaseEntityTypeExpansionVerification {
+        val metadata = connection.metaData
+        val matchedTables = findTables(
+            metadata,
+            connection.catalog,
+            descriptor.schemaName,
+            descriptor.tableName,
+        )
+        if (matchedTables.isEmpty()) {
+            return DatabaseEntityTypeExpansionVerification.failure(
+                "JVW-ENTITY-TYPE-CUTOVER-TABLE-MISSING",
+                "Deployed table ${descriptor.qualifiedTableName} was not found.",
+            )
+        }
+        if (matchedTables.size > 1) {
+            return DatabaseEntityTypeExpansionVerification.failure(
+                "JVW-ENTITY-TYPE-CUTOVER-TABLE-AMBIGUOUS",
+                "${descriptor.tableName} exists in multiple schemas. Use an explicit schema-qualified entity mapping.",
+            )
+        }
+        val table = matchedTables.single()
+        val columns = readColumns(metadata, table)
+        val original = columns.singleOrNull {
+            it.name.equals(descriptor.originalColumnName, ignoreCase = true)
+        } ?: return DatabaseEntityTypeExpansionVerification.failure(
+            "JVW-ENTITY-TYPE-CUTOVER-ORIGINAL-MISSING",
+            "Original column ${descriptor.originalColumnName} is absent. Cutover cannot prove rollback safety.",
+        )
+        val shadow = columns.singleOrNull {
+            it.name.equals(descriptor.shadowColumnName, ignoreCase = true)
+        } ?: return DatabaseEntityTypeExpansionVerification.failure(
+            "JVW-ENTITY-TYPE-CUTOVER-SHADOW-MISSING",
+            "Shadow column ${descriptor.shadowColumnName} is not deployed yet.",
+        )
+        if (!DatabaseSqlTypeCompatibility.accepts(descriptor.targetSqlType, shadow)) {
+            return DatabaseEntityTypeExpansionVerification.failure(
+                "JVW-ENTITY-TYPE-CUTOVER-SHADOW-TYPE-MISMATCH",
+                "Shadow column ${shadow.name} is ${shadow.typeName}" +
+                    shadow.size?.let { "($it${shadow.scale?.let { scale -> ",$scale" }.orEmpty()})" }.orEmpty() +
+                    ", not the required ${descriptor.targetSqlType}.",
+            )
+        }
+        val tableSql = qualifiedSqlIdentifier(metadata, table.schema, table.name)
+        val originalSql = quotedSqlIdentifier(metadata, original.name)
+        val shadowSql = quotedSqlIdentifier(metadata, shadow.name)
+        val inconsistentBackfill = connection.prepareStatement(
+            DatabaseBackfillVerificationSql.query(tableSql, originalSql, shadowSql),
+        ).use { statement ->
+            statement.queryTimeout = 30
+            statement.maxRows = 1
+            statement.executeQuery().use { rows ->
+                check(rows.next()) { "Backfill verification returned no result." }
+                rows.getLong(1)
+            }
+        }
+        if (inconsistentBackfill != 0L) {
+            return DatabaseEntityTypeExpansionVerification.failure(
+                "JVW-ENTITY-TYPE-CUTOVER-BACKFILL-INCONSISTENT",
+                "$inconsistentBackfill deployed row(s) have a missing or different ${shadow.name} value compared with ${original.name}.",
+                inconsistentBackfill,
+            )
+        }
+        val database = databaseProduct(metadata, configuration)
+        val evidenceDigest = CanonicalDiscoveryJson.sha256(
+            listOf(
+                descriptor.storeId,
+                table.catalog.orEmpty(),
+                table.schema.orEmpty(),
+                table.name,
+                original.name,
+                original.jdbcType.toString(),
+                shadow.name,
+                shadow.jdbcType.toString(),
+                shadow.typeName,
+                shadow.size?.toString().orEmpty(),
+                shadow.scale?.toString().orEmpty(),
+                inconsistentBackfill.toString(),
+                database.urlFingerprint,
+            ).joinToString("\u0000"),
+        )
+        return DatabaseEntityTypeExpansionVerification(
+            accepted = true,
+            code = null,
+            message = "Live database verified: ${shadow.name} has the required type and exactly matches every non-null ${original.name} value.",
+            evidenceDigest = evidenceDigest,
+            database = database,
+            deployedSchemaName = table.schema,
+            deployedTableName = table.name,
+            originalColumn = original,
+            shadowColumn = shadow,
+            inconsistentBackfillRows = 0,
+        )
+    }
+
+    private fun <T> withReadOnlyConnection(
+        storeId: String,
+        connectTimeoutSeconds: Int,
+        networkTimeoutSeconds: Int,
+        operation: (Connection, DatabaseReadOnlyContext) -> T,
+    ): DatabaseReadOnlyResult<T> {
+        val workspace = SchemaWorkspaceService.getInstance(project).load()
+        val store = workspace.stores.firstOrNull { it.id == storeId }
+            ?: return DatabaseReadOnlyResult.failure(
+                "JVW-DB-STORE-MISSING",
+                "The selected Jmix data store no longer exists.",
+            )
+        val configuration = resolveConnectionConfiguration(store)
+            ?: return DatabaseReadOnlyResult.failure(
+                "JVW-DB-CONNECTION-CONFIG-MISSING",
+                "No complete ${store.name}.datasource URL and JDBC driver settings were found in the active project profile.",
+            )
+        val password = configuration.password
+        val properties = connectionProperties(
+            configuration.url,
+            connectTimeoutSeconds,
+            networkTimeoutSeconds,
+        ).apply {
+            configuration.username?.let { setProperty("user", it) }
+            password?.let { setProperty("password", String(it)) }
+        }
+        val loader = URLClassLoader(projectLibraryUrls().toTypedArray(), javaClass.classLoader)
+        return try {
+            val driver = loadDriver(configuration, loader)
+                ?: return DatabaseReadOnlyResult.failure(
+                    "JVW-DB-DRIVER-MISSING",
+                    "JDBC driver ${configuration.driverClassName} is not available in the synced project libraries.",
+                )
+            val connection = driver.connect(configuration.url, properties)
+                ?: return DatabaseReadOnlyResult.failure(
+                    "JVW-DB-DRIVER-URL-REJECTED",
+                    "The configured JDBC driver does not accept the data store URL.",
+                )
+            connection.use { live ->
+                runCatching { live.isReadOnly = true }
+                runCatching { live.autoCommit = false }
+                runCatching {
+                    live.setNetworkTimeout(
+                        AppExecutorUtil.getAppExecutorService(),
+                        networkTimeoutSeconds.coerceIn(1, 120) * 1_000,
+                    )
+                }
+                val value = operation(
+                    live,
+                    DatabaseReadOnlyContext(store, workspace, configuration),
+                )
+                runCatching { live.rollback() }
+                DatabaseReadOnlyResult(value = value, issue = null)
+            }
+        } catch (error: Throwable) {
+            DatabaseReadOnlyResult.failure(
+                "JVW-DB-INSPECTION-FAILED",
+                redactDatabaseError(error),
+            )
+        } finally {
+            runCatching { loader.close() }
+            properties.clear()
+            password?.fill('\u0000')
+        }
+    }
+
     private fun resolveConnectionConfiguration(
         store: SchemaDataStoreSnapshot,
     ): DatabaseConnectionConfiguration? {
@@ -312,10 +455,11 @@ class DatabaseReverseEngineeringService(
 
     private fun connectionProperties(
         url: String,
-        request: DatabaseEntityTableInspectionRequest,
+        connectTimeoutSeconds: Int,
+        networkTimeoutSeconds: Int,
     ): Properties {
-        val connectSeconds = request.connectTimeoutSeconds.coerceIn(1, 60)
-        val networkSeconds = request.networkTimeoutSeconds.coerceIn(1, 120)
+        val connectSeconds = connectTimeoutSeconds.coerceIn(1, 60)
+        val networkSeconds = networkTimeoutSeconds.coerceIn(1, 120)
         val connectMillis = connectSeconds * 1_000
         val networkMillis = networkSeconds * 1_000
         return Properties().apply {
@@ -407,24 +551,39 @@ class DatabaseReverseEngineeringService(
     ): List<DatabaseTableSnapshot> {
         val matches = linkedMapOf<String, DatabaseTableSnapshot>()
         val patterns = linkedSetOf(requested, requested.uppercase(Locale.ROOT), requested.lowercase(Locale.ROOT))
-        patterns.forEach { pattern ->
-            metadata.getTables(catalog, schema, pattern, arrayOf("TABLE", "VIEW")).use { rows ->
-                while (rows.next()) {
-                    if (rows.string("TABLE_NAME").equals(requested, ignoreCase = true)) {
-                        val table = DatabaseTableSnapshot(
-                            catalog = rows.stringOrNull("TABLE_CAT"),
-                            schema = rows.stringOrNull("TABLE_SCHEM"),
-                            name = rows.string("TABLE_NAME"),
-                            type = rows.string("TABLE_TYPE"),
-                            remarks = rows.stringOrNull("REMARKS"),
-                        )
-                        val key = listOf(
-                            table.catalog.orEmpty(),
-                            table.schema.orEmpty(),
-                            table.name,
-                            table.type,
-                        ).joinToString("\u0000").uppercase(Locale.ROOT)
-                        matches.putIfAbsent(key, table)
+        val schemaPatterns = if (schema == null) {
+            listOf<String?>(null)
+        } else {
+            linkedSetOf(
+                schema,
+                schema.uppercase(Locale.ROOT),
+                schema.lowercase(Locale.ROOT),
+            ).toList()
+        }
+        schemaPatterns.forEach { schemaPattern ->
+            patterns.forEach { pattern ->
+                metadata.getTables(catalog, schemaPattern, pattern, arrayOf("TABLE", "VIEW")).use { rows ->
+                    while (rows.next()) {
+                        val returnedSchema = rows.stringOrNull("TABLE_SCHEM")
+                        if (
+                            rows.string("TABLE_NAME").equals(requested, ignoreCase = true) &&
+                            (schema == null || returnedSchema?.equals(schema, ignoreCase = true) == true)
+                        ) {
+                            val table = DatabaseTableSnapshot(
+                                catalog = rows.stringOrNull("TABLE_CAT"),
+                                schema = returnedSchema,
+                                name = rows.string("TABLE_NAME"),
+                                type = rows.string("TABLE_TYPE"),
+                                remarks = rows.stringOrNull("REMARKS"),
+                            )
+                            val key = listOf(
+                                table.catalog.orEmpty(),
+                                table.schema.orEmpty(),
+                                table.name,
+                                table.type,
+                            ).joinToString("\u0000").uppercase(Locale.ROOT)
+                            matches.putIfAbsent(key, table)
+                        }
                     }
                 }
             }
@@ -522,6 +681,34 @@ class DatabaseReverseEngineeringService(
         }.sortedBy(DatabaseIndexSnapshot::name)
     }
 
+    private fun databaseProduct(
+        metadata: DatabaseMetaData,
+        configuration: DatabaseConnectionConfiguration,
+    ) = DatabaseProductSnapshot(
+        name = metadata.databaseProductName.orEmpty(),
+        version = metadata.databaseProductVersion.orEmpty(),
+        driverName = metadata.driverName.orEmpty(),
+        driverVersion = metadata.driverVersion.orEmpty(),
+        urlFingerprint = CanonicalDiscoveryJson.sha256(configuration.url).take(16),
+    )
+
+    private fun qualifiedSqlIdentifier(
+        metadata: DatabaseMetaData,
+        schema: String?,
+        table: String,
+    ): String = listOfNotNull(schema?.takeIf(String::isNotBlank), table)
+        .joinToString(".") { quotedSqlIdentifier(metadata, it) }
+
+    private fun quotedSqlIdentifier(
+        metadata: DatabaseMetaData,
+        identifier: String,
+    ): String {
+        check(PORTABLE_IDENTIFIER.matches(identifier)) { "Unsafe database identifier." }
+        val quote = metadata.identifierQuoteString.orEmpty().trim()
+        if (quote.isBlank()) return identifier
+        return quote + identifier.replace(quote, quote + quote) + quote
+    }
+
     private fun driverClassFor(url: String): String? = when {
         url.startsWith("jdbc:postgresql:", ignoreCase = true) -> "org.postgresql.Driver"
         url.startsWith("jdbc:mysql:", ignoreCase = true) -> "com.mysql.cj.jdbc.Driver"
@@ -537,6 +724,7 @@ class DatabaseReverseEngineeringService(
     companion object {
         private const val MAX_IDENTIFIER_LENGTH = 256
         private const val MAX_PLACEHOLDER_DEPTH = 12
+        private val PORTABLE_IDENTIFIER = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
         private val PROFILE_FILE =
             Regex("""^application-([A-Za-z0-9_.-]+)\.(?:properties|ya?ml)$""")
         private val PLACEHOLDER = Regex("""\$\{([^{}]+)}""")
@@ -733,12 +921,112 @@ data class DatabaseIndexSnapshot(
     val columns: List<String>,
 )
 
+data class DatabaseEntityTypeExpansionVerification(
+    val accepted: Boolean,
+    val code: String?,
+    val message: String,
+    val evidenceDigest: String?,
+    val database: DatabaseProductSnapshot?,
+    val deployedSchemaName: String?,
+    val deployedTableName: String?,
+    val originalColumn: DatabaseColumnSnapshot?,
+    val shadowColumn: DatabaseColumnSnapshot?,
+    val inconsistentBackfillRows: Long?,
+) {
+    companion object {
+        fun failure(
+            code: String,
+            message: String,
+            inconsistentBackfillRows: Long? = null,
+        ) = DatabaseEntityTypeExpansionVerification(
+            accepted = false,
+            code = code,
+            message = message,
+            evidenceDigest = null,
+            database = null,
+            deployedSchemaName = null,
+            deployedTableName = null,
+            originalColumn = null,
+            shadowColumn = null,
+            inconsistentBackfillRows = inconsistentBackfillRows,
+        )
+    }
+}
+
 private data class DatabaseConnectionConfiguration(
     val url: String,
     val username: String?,
     val password: CharArray?,
     val driverClassName: String,
 )
+
+private data class DatabaseReadOnlyContext(
+    val store: SchemaDataStoreSnapshot,
+    val workspace: SchemaWorkspaceResponse,
+    val configuration: DatabaseConnectionConfiguration,
+)
+
+private data class DatabaseReadOnlyResult<T>(
+    val value: T?,
+    val issue: WorkspaceChangeIssue?,
+) {
+    companion object {
+        fun <T> failure(code: String, message: String) =
+            DatabaseReadOnlyResult<T>(
+                value = null,
+                issue = WorkspaceChangeIssue(code, message),
+            )
+    }
+}
+
+internal object DatabaseSqlTypeCompatibility {
+    fun accepts(expectedSqlType: String, live: DatabaseColumnSnapshot): Boolean {
+        val expected = expectedSqlType.uppercase(Locale.ROOT)
+            .replace(Regex("""\s+"""), "")
+        val typeName = live.typeName.uppercase(Locale.ROOT)
+            .replace(Regex("""\s+"""), "")
+        val dimensions = Regex(
+            """^[A-Z0-9_ ]+\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)$""",
+        )
+            .matchEntire(expectedSqlType.trim().uppercase(Locale.ROOT))
+        val expectedSize = dimensions?.groupValues?.get(1)?.toIntOrNull()
+        val expectedScale = dimensions?.groupValues?.getOrNull(2)?.toIntOrNull()
+        return when {
+            expected == "BIGINT" ->
+                live.jdbcType == Types.BIGINT || typeName in setOf("BIGINT", "INT8")
+            expected in setOf("DOUBLE", "DOUBLEPRECISION") ->
+                live.jdbcType in setOf(Types.DOUBLE, Types.FLOAT, Types.REAL) ||
+                    typeName in setOf("DOUBLE", "DOUBLEPRECISION", "FLOAT8")
+            expected.startsWith("DECIMAL(") || expected.startsWith("NUMERIC(") ->
+                live.jdbcType in setOf(Types.DECIMAL, Types.NUMERIC) &&
+                    expectedSize != null &&
+                    live.size != null &&
+                    live.size >= expectedSize &&
+                    (expectedScale == null || live.scale == expectedScale)
+            expected.startsWith("VARCHAR(") || expected.startsWith("CHARACTERVARYING(") ->
+                live.jdbcType in setOf(
+                    Types.VARCHAR,
+                    Types.NVARCHAR,
+                    Types.LONGVARCHAR,
+                    Types.LONGNVARCHAR,
+                ) &&
+                    expectedSize != null &&
+                    live.size != null &&
+                    live.size >= expectedSize
+            else -> false
+        }
+    }
+}
+
+internal object DatabaseBackfillVerificationSql {
+    fun query(
+        qualifiedTable: String,
+        originalColumn: String,
+        shadowColumn: String,
+    ): String =
+        "SELECT COUNT(*) FROM $qualifiedTable WHERE $originalColumn IS NOT NULL " +
+            "AND ($shadowColumn IS NULL OR $shadowColumn <> $originalColumn)"
+}
 
 internal fun redactDatabaseError(error: Throwable): String {
     val root = generateSequence(error) { it.cause }.last()
