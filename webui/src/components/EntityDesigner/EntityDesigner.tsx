@@ -45,6 +45,8 @@ import {
 } from './EntitySourceEvidence'
 import { existingEntityModel } from './entityModelAdapter'
 import EntityEventListenerPanel from './EntityEventListenerPanel'
+import EntityInheritancePanel from './EntityInheritancePanel'
+import EmbeddedOverrideEditor from './EmbeddedOverrideEditor'
 
 const ATTRIBUTE_TYPES: AttributeType[] = [
   'string', 'character', 'integer', 'long', 'double', 'bigDecimal', 'boolean',
@@ -2063,37 +2065,13 @@ export default function EntityDesigner({
           )}
 
           {/* Inheritance */}
-          {['entity', 'mappedSuperclass'].includes(entity.entityType) && (
-          <Section title="Inheritance">
-            <Field label="Extends Class">
-              <input
-                value={entity.extendsClass || ''}
-                onChange={e => setEntity({ extendsClass: e.target.value || undefined })}
-                placeholder="com.example.BaseEntity"
-                className="w-full"
-              />
-            </Field>
-            {entity.extendsClass && (
-              <Field label="Strategy">
-                <select
-                  value={entity.inheritance?.strategy || 'singleTable'}
-                  onChange={e => setEntity({
-                    inheritance: {
-                      strategy: e.target.value as any,
-                      discriminatorType: entity.inheritance?.discriminatorType || 'STRING',
-                      discriminatorColumn: entity.inheritance?.discriminatorColumn,
-                      discriminatorValue: entity.inheritance?.discriminatorValue,
-                    }
-                  })}
-                  className="w-full"
-                >
-                  <option value="singleTable">Single Table</option>
-                  <option value="joined">Joined</option>
-                  <option value="tablePerClass">Table Per Class</option>
-                </select>
-              </Field>
-            )}
-          </Section>
+          {entity.entityType === 'entity' && (
+            <EntityInheritancePanel
+              entity={entity}
+              entities={schemaWorkspace?.entities ?? []}
+              existingSource={Boolean(existingEntity)}
+              onChange={(inheritance, extendsClass) => setEntity({ inheritance, extendsClass })}
+            />
           )}
 
           {entity.entityType !== 'enum' && (
@@ -2948,6 +2926,16 @@ export default function EntityDesigner({
                           : 'relationship/transient mapping is source-protected'
                         : 'safe persistence metadata editor'}
                     </div>
+                    {selected.type === 'embedded' && (
+                      <div className="mt-3">
+                        <EmbeddedOverrideEditor
+                          attribute={selected}
+                          entities={schemaWorkspace?.entities ?? []}
+                          existingSource
+                          onChange={(patch) => updateAttribute(selectedAttr, patch)}
+                        />
+                      </div>
+                    )}
                     {scalarColumnRenameSafe && (
                       <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
                         <Field label="Physical column">
@@ -4054,13 +4042,12 @@ function AttributeDetail({
         )}
 
         {attr.type === 'embedded' && (
-          <Field label="Embedded Class">
-            <input
-              value={attr.embeddedClass || ''}
-              onChange={e => onChange({ embeddedClass: e.target.value || undefined })}
-              className="w-full"
-            />
-          </Field>
+          <EmbeddedOverrideEditor
+            attribute={attr}
+            entities={schemaWorkspace?.entities ?? []}
+            existingSource={false}
+            onChange={onChange}
+          />
         )}
 
         {attr.type === 'custom' && (
@@ -5831,6 +5818,8 @@ function databaseColumnToAttribute(
     jmixProperty: false,
     dependsOnProperties: [],
     lob: /(?:BLOB|CLOB|LONGVARBINARY|LONGVARCHAR)/i.test(column.typeName),
+    embeddedAttributeOverrides: [],
+    embeddedAssociationOverrides: [],
     enumIdType: 'string',
     validations: [],
     annotations: [],

@@ -24,6 +24,7 @@ import org.jmixworkbench.model.EntityGenerationTarget
 import org.jmixworkbench.model.EntityModel
 import org.jmixworkbench.model.EntitySourceLanguage
 import org.jmixworkbench.model.EntityType
+import org.jmixworkbench.model.EmbeddedAttributeOverride
 import org.jmixworkbench.model.DdlGenerationConfig
 import org.jmixworkbench.model.DdlGenerationMode
 import org.jmixworkbench.model.MigrationModel
@@ -32,6 +33,8 @@ import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.IdConfig
 import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.LifecycleCallback
+import org.jmixworkbench.model.InheritanceRole
+import org.jmixworkbench.model.InheritanceStrategy
 import org.jmixworkbench.model.TraitType
 import org.jmixworkbench.model.ValidationModel
 import org.jmixworkbench.model.ValidationType
@@ -41,6 +44,173 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
+    fun testInheritanceAndEmbeddedOverridesRoundTripForJavaAndKotlin() {
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            val module = ModuleManager.getInstance(project).modules.first()
+            if (ModuleRootManager.getInstance(module).contentRoots.none { it == root }) {
+                val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+                rootModel.addContentEntry(root)
+                rootModel.commit()
+            }
+            write(
+                root,
+                "build.gradle.kts",
+                """plugins { id("io.jmix") version "2.8.3" }""",
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/Payment.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+
+                @JmixEntity
+                @Entity(name = "acme_Payment")
+                @Table(name = "PAYMENT")
+                @Inheritance(strategy = InheritanceType.JOINED)
+                @DiscriminatorColumn(
+                    name = "PAYMENT_KIND",
+                    discriminatorType = DiscriminatorType.STRING,
+                    length = 24
+                )
+                @DiscriminatorValue("BASE")
+                public class Payment {
+                    @Id
+                    @Column(name = "ID")
+                    protected UUID id;
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/WirePayment.kt",
+                """
+                package com.acme.entity
+
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+
+                @JmixEntity
+                @Entity(name = "acme_WirePayment")
+                @Table(name = "WIRE_PAYMENT")
+                @DiscriminatorValue("WIRE")
+                @PrimaryKeyJoinColumn(name = "PAYMENT_ID", referencedColumnName = "ID")
+                open class WirePayment : Payment() {
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/PostalAddress.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+
+                @JmixEntity
+                @Embeddable
+                public class PostalAddress {
+                    @Column(name = "CITY")
+                    protected String city;
+
+                    @ManyToOne
+                    protected Country country;
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/Customer.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+
+                @JmixEntity
+                @Entity(name = "acme_Customer")
+                @Table(name = "CUSTOMER")
+                public class Customer {
+                    @Id
+                    @Column(name = "ID")
+                    protected UUID id;
+
+                    @Embedded
+                    @AttributeOverrides({
+                        @AttributeOverride(
+                            name = "city",
+                            column = @Column(name = "POSTAL_CITY", nullable = false, length = 120)
+                        ),
+                        @AttributeOverride(
+                            name = "location.code",
+                            column = @Column(name = "LOCATION_CODE", columnDefinition = "varchar(16)")
+                        )
+                    })
+                    @AssociationOverrides({
+                        @AssociationOverride(
+                            name = "country",
+                            joinColumns = {
+                                @JoinColumn(
+                                    name = "COUNTRY_ID",
+                                    referencedColumnName = "ID",
+                                    nullable = false
+                                )
+                            }
+                        )
+                    })
+                    protected PostalAddress address;
+                }
+                """.trimIndent(),
+            )
+        }
+
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val payment = workspace.entities.single { it.className == "Payment" }
+        val wire = workspace.entities.single { it.className == "WirePayment" }
+        val address = workspace.entities.single { it.className == "Customer" }
+            .attributes.single { it.name == "address" }
+
+        val rootInheritance = requireNotNull(payment.inheritance)
+        assertEquals(InheritanceRole.ROOT, rootInheritance.role)
+        assertEquals(InheritanceStrategy.JOINED, rootInheritance.strategy)
+        assertEquals("PAYMENT_KIND", rootInheritance.discriminatorColumn)
+        assertEquals(24, rootInheritance.discriminatorLength)
+        assertEquals("BASE", rootInheritance.discriminatorValue)
+
+        val subtypeInheritance = requireNotNull(wire.inheritance)
+        assertEquals(InheritanceRole.SUBTYPE, subtypeInheritance.role)
+        assertEquals(InheritanceStrategy.JOINED, subtypeInheritance.strategy)
+        assertEquals("PAYMENT_ID", subtypeInheritance.primaryKeyJoinColumnName)
+        assertEquals("ID", subtypeInheritance.primaryKeyJoinReferencedColumnName)
+        assertEquals("PAYMENT", subtypeInheritance.parentTableName)
+
+        assertTrue(address.embedded)
+        assertFalse(address.association)
+        assertEquals("com.acme.entity.PostalAddress", address.embeddedClass)
+        assertEquals(
+            listOf("city", "location.code"),
+            address.embeddedAttributeOverrides.map { it.path },
+        )
+        assertEquals("POSTAL_CITY", address.embeddedAttributeOverrides.first().columnName)
+        assertEquals(false, address.embeddedAttributeOverrides.first().nullable)
+        assertEquals(120, address.embeddedAttributeOverrides.first().length)
+        assertEquals(
+            "varchar(16)",
+            address.embeddedAttributeOverrides.last().columnDefinition,
+        )
+        val association = address.embeddedAssociationOverrides.single()
+        assertEquals("country", association.path)
+        assertEquals("COUNTRY_ID", association.joinColumns.single().name)
+        assertEquals("ID", association.joinColumns.single().referencedColumnName)
+        assertEquals(false, association.joinColumns.single().nullable)
+    }
+
     fun testEntitySourceContractAndInheritedEvidenceRoundTripForJavaAndKotlin() {
         val root = getOrCreateProjectBaseDir()
         WriteAction.run<RuntimeException> {
@@ -2428,6 +2598,74 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(
             columnCollision.issues.any { it.code == "JVW-ENTITY-COLUMN-RENAME-COLLISION" },
         )
+    }
+
+    fun testExistingEntityEmbeddedAdditionPreservesSourceAndAddsExplicitRollbackColumns() {
+        createFixture(includeAll = true)
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val snapshot = workspace.entities.single { it.className == "LoanApp" }
+        val store = workspace.stores.single()
+        val desired = EntityModel(
+            className = snapshot.className,
+            packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+            tableName = snapshot.tableName,
+            dataStore = snapshot.storeName,
+            generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "applicationNo",
+                    type = AttributeType.STRING,
+                    columnName = "APPLICATION_NO",
+                    mandatory = true,
+                ),
+                AttributeModel(
+                    name = "loanAmount",
+                    type = AttributeType.BIG_DECIMAL,
+                    columnName = "LOAN_AMOUNT",
+                    mandatory = true,
+                    precision = 19,
+                    scale = 2,
+                ),
+                AttributeModel(
+                    name = "mailingAddress",
+                    type = AttributeType.EMBEDDED,
+                    embeddedClass = "com.acme.entity.PostalAddress",
+                    embeddedAttributeOverrides = mutableListOf(
+                        EmbeddedAttributeOverride(
+                            path = "city",
+                            columnName = "MAILING_CITY",
+                            attributeType = AttributeType.STRING,
+                            nullable = false,
+                            length = 120,
+                        ),
+                        EmbeddedAttributeOverride(
+                            path = "location.code",
+                            columnName = "MAILING_LOCATION_CODE",
+                            columnDefinition = "varchar(16)",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val preview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(snapshot.sourceLocator, desired),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(2, preview.files.size)
+        val source = preview.files.single { it.relativePath.endsWith("LoanApp.java") }.resultContent
+        assertTrue(source.contains("public int calculateRisk()"))
+        assertTrue(source.contains("@Embedded"))
+        assertTrue(source.contains("@AttributeOverrides"))
+        assertTrue(source.contains("name = \"city\""))
+        assertTrue(source.contains("name = \"MAILING_CITY\""))
+        assertTrue(source.contains("name = \"location.code\""))
+        val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+        assertTrue(migration.contains("name=\"MAILING_CITY\" type=\"VARCHAR(120)\""))
+        assertTrue(migration.contains("name=\"MAILING_LOCATION_CODE\" type=\"varchar(16)\""))
+        assertTrue(migration.contains("columnName=\"MAILING_LOCATION_CODE\""))
+        assertTrue(migration.contains("columnName=\"MAILING_CITY\""))
     }
 
     fun testNonPersistentAndReusableHandwrittenJmixTypesRoundTripWithoutTableDdl() {

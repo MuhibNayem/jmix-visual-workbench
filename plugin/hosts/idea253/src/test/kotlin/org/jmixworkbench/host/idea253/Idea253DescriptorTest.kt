@@ -21,6 +21,11 @@ class Idea253DescriptorTest {
                 """<fileEditorProvider\s+implementation="org\.jmixworkbench\.editor\.JmixFlowUiFileEditorProvider"\s*/>""",
             ).containsMatchIn(descriptor),
         )
+        assertTrue(
+            Regex(
+                """<fileEditorProvider\s+implementation="org\.jmixworkbench\.editor\.JmixEntityFileEditorProvider"\s*/>""",
+            ).containsMatchIn(descriptor),
+        )
         assertTrue(descriptor.contains("org.jmixworkbench.ide.JmixJavaUiComponentPolicyInspection"))
         assertTrue(descriptor.contains("org.jmixworkbench.ide.JmixKotlinUiComponentPolicyInspection"))
         assertFalse(descriptor.contains("<depends>com.intellij.modules.jcef</depends>"))

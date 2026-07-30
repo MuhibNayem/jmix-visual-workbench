@@ -14,14 +14,21 @@ import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
 import org.jmixworkbench.discovery.model.SourceLocator
 import org.jmixworkbench.generator.MigrationGenerator
 import org.jmixworkbench.model.AssociationCollectionType
+import org.jmixworkbench.model.AssociationJoinColumn
 import org.jmixworkbench.model.AssociationType
+import org.jmixworkbench.model.AttributeType
 import org.jmixworkbench.model.CascadeType
 import org.jmixworkbench.model.DbChange
 import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.IdType
+import org.jmixworkbench.model.InheritanceConfig
+import org.jmixworkbench.model.InheritanceRole
+import org.jmixworkbench.model.InheritanceStrategy
 import org.jmixworkbench.model.JoinTableConfig
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.EntityType
+import org.jmixworkbench.model.EmbeddedAssociationOverride
+import org.jmixworkbench.model.EmbeddedAttributeOverride
 import org.jmixworkbench.model.LifecycleCallback
 import org.jmixworkbench.model.TraitType
 import org.jmixworkbench.model.ValidationModel
@@ -161,6 +168,7 @@ class SchemaWorkspaceService(
                     val type = attribute.summary.orEmpty().substringBefore(" attribute of").trim()
                     val declaration = fieldDeclaration(source, name)
                     val metadata = attributeMetadata(source, name, declaration)
+                    val embedded = isEmbedded(declaration)
                     val association = associationSnapshot(
                         source = source,
                         fieldName = name,
@@ -198,15 +206,31 @@ class SchemaWorkspaceService(
                         sqlType = metadata.sqlType,
                         persistent = entityType != EntityType.DTO &&
                             !TRANSIENT_ANNOTATION.containsMatchIn(declaration),
-                        association = association != null || run {
+                        association = !embedded && (association != null || run {
                             val normalizedType = type.trim().removeSuffix("?").trim()
                             val simpleType = normalizedType.substringAfterLast('.').substringBefore('<')
                             normalizedType.contains('<') || (
                                 simpleType.firstOrNull()?.isUpperCase() == true &&
                                     simpleType !in SCALAR_TYPES
                                 )
-                        },
+                        }),
                         associationDetails = association,
+                        embedded = embedded,
+                        embeddedClass = if (embedded) {
+                            resolveJavaType(source, entity.semanticKey, type)
+                        } else {
+                            null
+                        },
+                        embeddedAttributeOverrides = if (embedded) {
+                            embeddedAttributeOverrides(declaration)
+                        } else {
+                            emptyList()
+                        },
+                        embeddedAssociationOverrides = if (embedded) {
+                            embeddedAssociationOverrides(declaration)
+                        } else {
+                            emptyList()
+                        },
                         moneyCandidate = MONEY_NAME.containsMatchIn(name),
                         comment = metadata.comment,
                         systemLevel = metadata.systemLevel,
@@ -255,6 +279,7 @@ class SchemaWorkspaceService(
                     implementsInterfaces = hierarchy.interfaces,
                     lifecycleCallbacks = lifecycleCallbacks(source),
                     entityListeners = entityListeners(source),
+                    inheritance = inheritanceSnapshot(source),
                 )
             }
             .sortedWith(compareBy(SchemaEntitySnapshot::moduleId, SchemaEntitySnapshot::qualifiedName))
@@ -263,22 +288,57 @@ class SchemaWorkspaceService(
         val associationEnrichedEntities = rawEntities.map { owner ->
             owner.copy(
                 attributes = owner.attributes.map { attribute ->
-                    val association = attribute.associationDetails ?: return@map attribute
-                    val target = entitiesByType[association.relatedEntity]
-                        ?: entitiesBySimpleName[association.relatedEntity.substringAfterLast('.')]
-                            ?.singleOrNull()
-                    attribute.copy(
-                        associationDetails = association.copy(
-                            relatedTableName = target?.tableName,
-                            relatedIdColumnName = target?.idColumnName ?: association.relatedIdColumnName,
-                            relatedIdType = target?.idType ?: association.relatedIdType,
-                        ),
-                    )
+                    val association = attribute.associationDetails
+                    if (association != null) {
+                        val target = entitiesByType[association.relatedEntity]
+                            ?: entitiesBySimpleName[association.relatedEntity.substringAfterLast('.')]
+                                ?.singleOrNull()
+                        return@map attribute.copy(
+                            associationDetails = association.copy(
+                                relatedTableName = target?.tableName,
+                                relatedIdColumnName = target?.idColumnName ?: association.relatedIdColumnName,
+                                relatedIdType = target?.idType ?: association.relatedIdType,
+                            ),
+                        )
+                    }
+                    if (attribute.embedded) {
+                        val embeddable = attribute.embeddedClass?.let { embeddedClass ->
+                            entitiesByType[embeddedClass]
+                                ?: entitiesBySimpleName[embeddedClass.substringAfterLast('.')]
+                                    ?.singleOrNull()
+                        }
+                        return@map attribute.copy(
+                            embeddedAttributeOverrides = attribute.embeddedAttributeOverrides.map { override ->
+                                val member = embeddable?.attributes?.singleOrNull {
+                                    it.name == override.path.substringBefore('.')
+                                }
+                                override.copy(
+                                    attributeType = member?.let { schemaAttributeType(it.javaType) },
+                                    sqlType = override.sqlType ?: member?.sqlType,
+                                )
+                            },
+                            embeddedAssociationOverrides = attribute.embeddedAssociationOverrides.map { override ->
+                                val member = embeddable?.attributes?.singleOrNull {
+                                    it.name == override.path.substringBefore('.')
+                                }
+                                override.copy(
+                                    relatedEntity = member?.associationDetails?.relatedEntity,
+                                    relatedIdType = member?.associationDetails?.relatedIdType,
+                                )
+                            },
+                        )
+                    }
+                    attribute
                 },
             )
         }
-        val entities = associationEnrichedEntities.map { owner ->
-            val inheritance = inheritedEntityEvidence(owner, associationEnrichedEntities)
+        val hierarchyEnrichedEntities = associationEnrichedEntities.map { owner ->
+            owner.copy(
+                inheritance = resolvedInheritance(owner, associationEnrichedEntities),
+            )
+        }
+        val entities = hierarchyEnrichedEntities.map { owner ->
+            val inheritance = inheritedEntityEvidence(owner, hierarchyEnrichedEntities)
             owner.copy(
                 inheritedAttributes = inheritance.attributes,
                 inheritedTraits = inheritance.traits,
@@ -1596,6 +1656,33 @@ class SchemaWorkspaceService(
             .ifBlank { trimmed }
     }
 
+    private fun schemaAttributeType(javaType: String): AttributeType? {
+        val simple = javaType.trim()
+            .removeSuffix("?")
+            .substringAfterLast('.')
+            .substringBefore('<')
+        return when (simple) {
+            "String" -> AttributeType.STRING
+            "Character", "Char", "char" -> AttributeType.CHARACTER
+            "Integer", "Int", "int" -> AttributeType.INTEGER
+            "Long", "long" -> AttributeType.LONG
+            "Double", "double" -> AttributeType.DOUBLE
+            "BigDecimal" -> AttributeType.BIG_DECIMAL
+            "Boolean", "boolean" -> AttributeType.BOOLEAN
+            "Date" -> AttributeType.DATE
+            "LocalDate" -> AttributeType.LOCAL_DATE
+            "LocalDateTime" -> AttributeType.LOCAL_DATE_TIME
+            "LocalTime" -> AttributeType.LOCAL_TIME
+            "OffsetTime" -> AttributeType.OFFSET_TIME
+            "OffsetDateTime" -> AttributeType.OFFSET_DATE_TIME
+            "UUID" -> AttributeType.UUID
+            "URI" -> AttributeType.URI
+            "FileRef" -> AttributeType.FILE_REF
+            "ByteArray", "byte[]" -> AttributeType.BYTE_ARRAY
+            else -> null
+        }
+    }
+
     private fun resolveJavaType(
         source: String,
         ownerQualifiedName: String,
@@ -1613,9 +1700,46 @@ class SchemaWorkspaceService(
     }
 
     private fun annotationArguments(declaration: String, annotationName: String): String? =
-        Regex(
-            """(?s)@\s*(?:[\w.]+\.)?${Regex.escape(annotationName)}\s*\((.*?)\)""",
-        ).find(declaration)?.groupValues?.get(1)
+        annotationArgumentBodies(declaration, annotationName).firstOrNull()
+
+    /**
+     * Returns balanced annotation argument bodies. Regex-only parsing truncates
+     * Jakarta container annotations at the first nested `)`, which made
+     * @AttributeOverrides and @AssociationOverrides impossible to round-trip.
+     */
+    private fun annotationArgumentBodies(
+        declaration: String,
+        annotationName: String,
+    ): List<String> = buildList {
+        val start = Regex(
+            """@\s*(?:[\w.]+\.)?${Regex.escape(annotationName)}\b\s*\(""",
+        )
+        start.findAll(declaration).forEach { match ->
+            val bodyStart = match.range.last + 1
+            var depth = 1
+            var inString = false
+            var escaped = false
+            var cursor = bodyStart
+            while (cursor < declaration.length && depth > 0) {
+                val character = declaration[cursor]
+                if (inString) {
+                    when {
+                        escaped -> escaped = false
+                        character == '\\' -> escaped = true
+                        character == '"' -> inString = false
+                    }
+                } else {
+                    when (character) {
+                        '"' -> inString = true
+                        '(' -> depth += 1
+                        ')' -> depth -= 1
+                    }
+                }
+                cursor += 1
+            }
+            if (depth == 0) add(declaration.substring(bodyStart, cursor - 1))
+        }
+    }
 
     private fun stringArgument(arguments: String, name: String): String? =
         Regex("""\b${Regex.escape(name)}\s*=\s*"([^"]*)"""")
@@ -1623,6 +1747,158 @@ class SchemaWorkspaceService(
             ?.groupValues
             ?.get(1)
             ?.takeIf(String::isNotBlank)
+
+    private fun booleanArgument(arguments: String, name: String): Boolean? =
+        Regex("""\b${Regex.escape(name)}\s*=\s*(true|false)\b""", RegexOption.IGNORE_CASE)
+            .find(arguments)
+            ?.groupValues
+            ?.get(1)
+            ?.toBooleanStrictOrNull()
+
+    private fun integerArgument(arguments: String, name: String): Int? =
+        Regex("""\b${Regex.escape(name)}\s*=\s*(\d+)\b""")
+            .find(arguments)
+            ?.groupValues
+            ?.get(1)
+            ?.toIntOrNull()
+
+    private fun firstStringArgument(arguments: String): String? =
+        STRING_LITERAL.find(arguments)
+            ?.groupValues
+            ?.get(1)
+            ?.let(::unescapeAnnotationString)
+
+    private fun isEmbedded(declaration: String): Boolean =
+        Regex("""@\s*(?:[\w.]+\.)?Embedded(?:Id)?\b""").containsMatchIn(declaration)
+
+    private fun embeddedAttributeOverrides(
+        declaration: String,
+    ): List<EmbeddedAttributeOverride> =
+        annotationArgumentBodies(declaration, "AttributeOverride")
+            .mapNotNull { arguments ->
+                val path = stringArgument(arguments, "name") ?: return@mapNotNull null
+                val column = annotationArguments(arguments, "Column") ?: return@mapNotNull null
+                val columnName = stringArgument(column, "name") ?: return@mapNotNull null
+                EmbeddedAttributeOverride(
+                    path = path,
+                    columnName = columnName,
+                    sqlType = stringArgument(column, "columnDefinition"),
+                    nullable = booleanArgument(column, "nullable"),
+                    unique = booleanArgument(column, "unique"),
+                    length = integerArgument(column, "length"),
+                    precision = integerArgument(column, "precision"),
+                    scale = integerArgument(column, "scale"),
+                    insertable = booleanArgument(column, "insertable"),
+                    updatable = booleanArgument(column, "updatable"),
+                    columnDefinition = stringArgument(column, "columnDefinition"),
+                )
+            }
+            .distinctBy(EmbeddedAttributeOverride::path)
+
+    private fun embeddedAssociationOverrides(
+        declaration: String,
+    ): List<EmbeddedAssociationOverride> =
+        annotationArgumentBodies(declaration, "AssociationOverride")
+            .mapNotNull { arguments ->
+                val path = stringArgument(arguments, "name") ?: return@mapNotNull null
+                val joinColumns = annotationArgumentBodies(arguments, "JoinColumn")
+                    .mapNotNull { column ->
+                        val name = stringArgument(column, "name") ?: return@mapNotNull null
+                        AssociationJoinColumn(
+                            name = name,
+                            referencedColumnName = stringArgument(column, "referencedColumnName").orEmpty(),
+                            nullable = booleanArgument(column, "nullable"),
+                            insertable = booleanArgument(column, "insertable") ?: true,
+                            updatable = booleanArgument(column, "updatable") ?: true,
+                        )
+                    }
+                    .toMutableList()
+                if (joinColumns.isEmpty()) return@mapNotNull null
+                EmbeddedAssociationOverride(path, joinColumns)
+            }
+            .distinctBy(EmbeddedAssociationOverride::path)
+
+    private fun inheritanceSnapshot(source: String): InheritanceConfig? {
+        fun has(name: String): Boolean = Regex(
+            """@\s*(?:[\w.]+\.)?${Regex.escape(name)}\b""",
+        ).containsMatchIn(source)
+
+        val hasInheritance = has("Inheritance")
+        val hasDiscriminatorColumn = has("DiscriminatorColumn")
+        val hasDiscriminatorValue = has("DiscriminatorValue")
+        val hasPrimaryKeyJoin = has("PrimaryKeyJoinColumn")
+        if (
+            !hasInheritance &&
+            !hasDiscriminatorColumn &&
+            !hasDiscriminatorValue &&
+            !hasPrimaryKeyJoin
+        ) {
+            return null
+        }
+        val inheritanceArguments = annotationArguments(source, "Inheritance").orEmpty()
+        val strategyName = Regex("""InheritanceType\s*\.\s*(SINGLE_TABLE|JOINED|TABLE_PER_CLASS)""")
+            .find(inheritanceArguments)
+            ?.groupValues
+            ?.get(1)
+            ?: "SINGLE_TABLE"
+        val discriminatorArguments = annotationArguments(source, "DiscriminatorColumn").orEmpty()
+        val discriminatorType = Regex("""DiscriminatorType\s*\.\s*(STRING|CHAR|INTEGER)""")
+            .find(discriminatorArguments)
+            ?.groupValues
+            ?.get(1)
+            ?: "STRING"
+        val discriminatorValueArguments = annotationArguments(source, "DiscriminatorValue").orEmpty()
+        val primaryKeyJoinArguments = annotationArguments(source, "PrimaryKeyJoinColumn").orEmpty()
+        return InheritanceConfig(
+            role = if (hasInheritance) InheritanceRole.ROOT else InheritanceRole.SUBTYPE,
+            strategy = InheritanceStrategy.valueOf(strategyName),
+            discriminatorColumn = stringArgument(discriminatorArguments, "name"),
+            discriminatorType = discriminatorType,
+            discriminatorLength = integerArgument(discriminatorArguments, "length"),
+            discriminatorValue = firstStringArgument(discriminatorValueArguments),
+            primaryKeyJoinColumnName = stringArgument(primaryKeyJoinArguments, "name"),
+            primaryKeyJoinReferencedColumnName = stringArgument(
+                primaryKeyJoinArguments,
+                "referencedColumnName",
+            ),
+        )
+    }
+
+    private fun resolvedInheritance(
+        owner: SchemaEntitySnapshot,
+        entities: List<SchemaEntitySnapshot>,
+    ): InheritanceConfig? {
+        if (owner.inheritance?.role == InheritanceRole.ROOT) return owner.inheritance
+        val directParent = owner.extendsClass
+            ?.let { resolveEntityReference(owner, it, entities) }
+            ?: return owner.inheritance
+        var root = directParent
+        val seen = mutableSetOf(owner.qualifiedName)
+        var depth = 0
+        while (
+            root.inheritance?.role != InheritanceRole.ROOT &&
+            !root.extendsClass.isNullOrBlank() &&
+            seen.add(root.qualifiedName) &&
+            depth < MAX_INHERITANCE_DEPTH
+        ) {
+            root = resolveEntityReference(root, root.extendsClass.orEmpty(), entities) ?: break
+            depth += 1
+        }
+        val rootConfig = root.inheritance?.takeIf { it.role == InheritanceRole.ROOT }
+            ?: return owner.inheritance
+        val local = owner.inheritance ?: InheritanceConfig(role = InheritanceRole.SUBTYPE)
+        return local.copy(
+            role = InheritanceRole.SUBTYPE,
+            strategy = rootConfig.strategy,
+            discriminatorType = rootConfig.discriminatorType,
+            parentTableName = if (rootConfig.strategy == InheritanceStrategy.SINGLE_TABLE) {
+                root.tableName
+            } else {
+                directParent.tableName
+            },
+            parentIdColumnName = directParent.idColumnName,
+        )
+    }
 
     private fun joinTable(declaration: String): JoinTableConfig? {
         val name = JOIN_TABLE_NAME.find(declaration)?.groupValues?.get(1) ?: return null
@@ -2235,6 +2511,7 @@ data class SchemaEntitySnapshot(
     val implementsInterfaces: List<String> = emptyList(),
     val lifecycleCallbacks: List<LifecycleCallback> = emptyList(),
     val entityListeners: List<String> = emptyList(),
+    val inheritance: InheritanceConfig? = null,
     val inheritedAttributes: List<SchemaInheritedAttributeSnapshot> = emptyList(),
     val inheritedTraits: List<SchemaInheritedTraitSnapshot> = emptyList(),
 )
@@ -2265,6 +2542,10 @@ data class SchemaEntityAttributeSnapshot(
     val persistent: Boolean = true,
     val association: Boolean,
     val associationDetails: SchemaAssociationSnapshot? = null,
+    val embedded: Boolean = false,
+    val embeddedClass: String? = null,
+    val embeddedAttributeOverrides: List<EmbeddedAttributeOverride> = emptyList(),
+    val embeddedAssociationOverrides: List<EmbeddedAssociationOverride> = emptyList(),
     val moneyCandidate: Boolean,
     val comment: String? = null,
     val systemLevel: Boolean = false,

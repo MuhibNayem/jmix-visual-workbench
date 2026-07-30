@@ -25,10 +25,36 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 272 tests and three packaged-host
+  descriptors were inspected after assembly, 275 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
+- New Java and Kotlin entities now author JPA inheritance as an explicit root
+  or subtype contract. The designer covers `SINGLE_TABLE`, `JOINED`, and
+  `TABLE_PER_CLASS`, discriminator column/type/length/value metadata, subtype
+  parent evidence, and JOINED primary-key join columns. Generators avoid
+  duplicating inherited ID, version, and trait members; the schema workspace
+  reconstructs the same hierarchy from handwritten Java/Kotlin source with a
+  bounded parent walk. Liquibase emits proven root discriminator and JOINED
+  subtype PK/FK changes, while subtype DDL that lacks complete inherited-column
+  evidence fails closed instead of inventing a destructive schema.
+- Embedded mappings now support visually authored, nested
+  `@AttributeOverride` and `@AssociationOverride` paths, multi-column join
+  overrides, explicit SQL/column metadata, and indexed embeddable-member
+  assistance. Java/Kotlin generation and schema parsing share the same model.
+  A new embedded attribute can be added to an exact-revision handwritten
+  entity without replacing manual code; its explicit scalar/join columns and
+  foreign keys enter the same checked forward/rollback Liquibase preview.
+  Existing hierarchy declarations and already-declared embedded mappings are
+  intentionally source-derived/read-only until complete parent/child and
+  physical-column inventory makes shape-changing edits provably safe.
+- The inheritance and embedded-override controls are independent responsive
+  components rather than another expansion of the central designer. Real
+  browser interaction covered root/subtype switching, embedded override
+  creation, and a 1,280-pixel no-overflow shell. Both real host descriptors now
+  contain the native entity editor registration, and host-level packaged
+  descriptor tests assert it directly in addition to the source-parity and
+  nested-ZIP gates.
 - Existing Java/Kotlin source contracts now reopen with declared traits,
   superclass, interfaces, lifecycle callbacks and `@EntityListeners` intact
   instead of being reconstructed as empty designer state. A bounded,

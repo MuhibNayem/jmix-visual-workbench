@@ -34,6 +34,8 @@ function defaultAttribute(name: string = ''): AttributeModel {
     jmixProperty: false,
     dependsOnProperties: [],
     lob: false,
+    embeddedAttributeOverrides: [],
+    embeddedAssociationOverrides: [],
     enumIdType: 'string',
     validations: [],
     annotations: [],

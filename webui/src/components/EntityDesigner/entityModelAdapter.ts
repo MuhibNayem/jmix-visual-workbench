@@ -34,10 +34,18 @@ export function existingEntityModel(
       generation: 'jmixGenerated',
       columnName: snapshot.idColumnName,
     },
+    inheritance: snapshot.inheritance
+      ? {
+          ...snapshot.inheritance,
+          role: snapshot.inheritance.role ?? 'root',
+        }
+      : undefined,
     traits: [...snapshot.traits],
     attributes: snapshot.attributes.map((attribute) => {
       const discovered = attribute.associationDetails
-      const attributeType = discovered?.composition
+      const attributeType = attribute.embedded
+        ? 'embedded' as const
+        : discovered?.composition
         ? 'composition' as const
         : schemaAttributeType(attribute.javaType, attribute.association)
       return {
@@ -57,6 +65,9 @@ export function existingEntityModel(
         dependsOnProperties: attribute.dependsOnProperties ?? [],
         propertyDatatype: attribute.propertyDatatype,
         lob: attribute.lob ?? false,
+        embeddedClass: attribute.embeddedClass,
+        embeddedAttributeOverrides: attribute.embeddedAttributeOverrides ?? [],
+        embeddedAssociationOverrides: attribute.embeddedAssociationOverrides ?? [],
         sqlType: attribute.sqlType,
         ...(attributeType === 'enum' ? {
           enumClass: attribute.javaType.replace(/\?$/, ''),

@@ -57,8 +57,15 @@ object EntityGenerator {
                     "JVW-ENTITY-ENUM-CLASS-MISSING: ${attribute.name} needs a Jmix EnumClass."
                 }
             }
+            if (attribute.type == AttributeType.EMBEDDED) {
+                require(!attribute.embeddedClass.isNullOrBlank()) {
+                    "JVW-ENTITY-EMBEDDED-CLASS-MISSING: ${attribute.name} needs an embeddable class."
+                }
+                validateEmbeddedOverrides(attribute)
+            }
             validateRelationship(attribute)
         }
+        validateInheritance(entity)
         if (
             entity.id.type == IdType.EMBEDDED &&
             entity.entityType in setOf(EntityType.ENTITY, EntityType.MAPPED_SUPERCLASS)
@@ -132,6 +139,67 @@ object EntityGenerator {
             require(constraint.columns.isNotEmpty()) {
                 "JVW-ENTITY-UNIQUE-COLUMNS-MISSING: Constraint ${constraint.name} needs at least one column."
             }
+        }
+    }
+
+    private fun validateInheritance(entity: EntityModel) {
+        val inheritance = entity.inheritance ?: return
+        require(entity.entityType == EntityType.ENTITY) {
+            "JVW-ENTITY-INHERITANCE-TYPE-INVALID: JPA inheritance is available only to persistent entities."
+        }
+        require(inheritance.discriminatorType in setOf("STRING", "CHAR", "INTEGER")) {
+            "JVW-ENTITY-DISCRIMINATOR-TYPE-INVALID: use STRING, CHAR, or INTEGER."
+        }
+        require(inheritance.discriminatorLength == null || inheritance.discriminatorLength > 0) {
+            "JVW-ENTITY-DISCRIMINATOR-LENGTH-INVALID: discriminator length must be positive."
+        }
+        if (inheritance.role == InheritanceRole.SUBTYPE) {
+            require(!entity.extendsClass.isNullOrBlank()) {
+                "JVW-ENTITY-INHERITANCE-PARENT-MISSING: an inheritance subtype needs a parent entity."
+            }
+            require(inheritance.discriminatorColumn.isNullOrBlank()) {
+                "JVW-ENTITY-SUBTYPE-DISCRIMINATOR-COLUMN: only the hierarchy root declares the discriminator column."
+            }
+        } else {
+            require(inheritance.primaryKeyJoinColumnName.isNullOrBlank()) {
+                "JVW-ENTITY-ROOT-PRIMARY-KEY-JOIN: only a JOINED subtype declares @PrimaryKeyJoinColumn."
+            }
+        }
+        if (inheritance.strategy == InheritanceStrategy.TABLE_PER_CLASS) {
+            require(
+                inheritance.discriminatorColumn.isNullOrBlank() &&
+                    inheritance.discriminatorValue.isNullOrBlank() &&
+                    inheritance.discriminatorLength == null,
+            ) {
+                "JVW-ENTITY-TABLE-PER-CLASS-DISCRIMINATOR: TABLE_PER_CLASS does not use a discriminator."
+            }
+        }
+        if (!inheritance.primaryKeyJoinColumnName.isNullOrBlank()) {
+            require(
+                inheritance.role == InheritanceRole.SUBTYPE &&
+                    inheritance.strategy == InheritanceStrategy.JOINED,
+            ) {
+                "JVW-ENTITY-PRIMARY-KEY-JOIN-INVALID: @PrimaryKeyJoinColumn is valid only for a JOINED subtype."
+            }
+        }
+    }
+
+    private fun validateEmbeddedOverrides(attribute: AttributeModel) {
+        val scalarPaths = attribute.embeddedAttributeOverrides.map { it.path.trim() }
+        val associationPaths = attribute.embeddedAssociationOverrides.map { it.path.trim() }
+        require((scalarPaths + associationPaths).none(String::isBlank)) {
+            "JVW-ENTITY-EMBEDDED-OVERRIDE-PATH-MISSING: every embedded override needs a member path."
+        }
+        require((scalarPaths + associationPaths).distinct().size == scalarPaths.size + associationPaths.size) {
+            "JVW-ENTITY-EMBEDDED-OVERRIDE-DUPLICATE: override paths must be unique across scalar and association mappings."
+        }
+        require(attribute.embeddedAttributeOverrides.all { it.columnName.isNotBlank() }) {
+            "JVW-ENTITY-EMBEDDED-OVERRIDE-COLUMN-MISSING: every scalar override needs a column."
+        }
+        require(attribute.embeddedAssociationOverrides.all {
+            it.joinColumns.isNotEmpty() && it.joinColumns.all { column -> column.name.isNotBlank() }
+        }) {
+            "JVW-ENTITY-EMBEDDED-ASSOCIATION-JOIN-MISSING: every association override needs a join column."
         }
     }
 
@@ -209,24 +277,47 @@ object EntityGenerator {
 
         // Inheritance
         entity.inheritance?.let { inh ->
-            b.annotation {
-                name = "Inheritance"
-                importPath = "jakarta.persistence.Inheritance"
-                param("strategy", "InheritanceType.${inh.strategy.name}")
-            }
-            if (inh.discriminatorColumn != null) {
+            if (inh.role == InheritanceRole.ROOT) {
                 b.annotation {
-                    name = "DiscriminatorColumn"
-                    importPath = "jakarta.persistence.DiscriminatorColumn"
-                    param("name", "\"${inh.discriminatorColumn}\"")
-                    param("discriminatorType", "DiscriminatorType.${inh.discriminatorType}")
+                    name = "Inheritance"
+                    importPath = "jakarta.persistence.Inheritance"
+                    param("strategy", "InheritanceType.${inh.strategy.name}")
+                }
+                if (
+                    inh.strategy != InheritanceStrategy.TABLE_PER_CLASS &&
+                    !inh.discriminatorColumn.isNullOrBlank()
+                ) {
+                    b.annotation {
+                        name = "DiscriminatorColumn"
+                        importPath = "jakarta.persistence.DiscriminatorColumn"
+                        param("name", "\"${escapeJavaString(inh.discriminatorColumn)}\"")
+                        param("discriminatorType", "DiscriminatorType.${inh.discriminatorType}")
+                        inh.discriminatorLength?.let { param("length", it.toString()) }
+                    }
                 }
             }
-            if (inh.discriminatorValue != null) {
+            if (
+                inh.strategy != InheritanceStrategy.TABLE_PER_CLASS &&
+                !inh.discriminatorValue.isNullOrBlank()
+            ) {
                 b.annotation {
                     name = "DiscriminatorValue"
                     importPath = "jakarta.persistence.DiscriminatorValue"
-                    value("\"${inh.discriminatorValue}\"")
+                    value("\"${escapeJavaString(inh.discriminatorValue)}\"")
+                }
+            }
+            if (
+                inh.role == InheritanceRole.SUBTYPE &&
+                inh.strategy == InheritanceStrategy.JOINED &&
+                !inh.primaryKeyJoinColumnName.isNullOrBlank()
+            ) {
+                b.annotation {
+                    name = "PrimaryKeyJoinColumn"
+                    importPath = "jakarta.persistence.PrimaryKeyJoinColumn"
+                    param("name", "\"${escapeJavaString(inh.primaryKeyJoinColumnName)}\"")
+                    inh.primaryKeyJoinReferencedColumnName?.takeIf(String::isNotBlank)?.let {
+                        param("referencedColumnName", "\"${escapeJavaString(it)}\"")
+                    }
                 }
             }
         }
@@ -393,13 +484,18 @@ object EntityGenerator {
             }
         }
 
+        val inheritanceSubtype = entity.inheritance?.role == InheritanceRole.SUBTYPE
+
         // ── ID field ──
-        if (entity.entityType != EntityType.EMBEDDABLE) {
+        if (entity.entityType != EntityType.EMBEDDABLE && !inheritanceSubtype) {
             generateIdField(b, entity)
         }
 
         // ── Version field (if trait) ──
-        if (entity.traits.any { it == TraitType.HAS_VERSION || it == TraitType.STANDARD_ENTITY }) {
+        if (
+            !inheritanceSubtype &&
+            entity.traits.any { it == TraitType.HAS_VERSION || it == TraitType.STANDARD_ENTITY }
+        ) {
             b.field {
                 name = "version"
                 type = "Integer"
@@ -418,7 +514,7 @@ object EntityGenerator {
         }
 
         // ── Trait fields ──
-        generateTraitFields(b, entity)
+        if (!inheritanceSubtype) generateTraitFields(b, entity)
 
         // ── Attribute fields ──
         entity.attributes.forEach { attr ->
@@ -426,13 +522,16 @@ object EntityGenerator {
         }
 
         // ── Getters and setters ──
-        if (entity.entityType != EntityType.EMBEDDABLE) {
+        if (entity.entityType != EntityType.EMBEDDABLE && !inheritanceSubtype) {
             generateIdAccessors(b, entity)
         }
-        if (entity.traits.any { it == TraitType.HAS_VERSION || it == TraitType.STANDARD_ENTITY }) {
+        if (
+            !inheritanceSubtype &&
+            entity.traits.any { it == TraitType.HAS_VERSION || it == TraitType.STANDARD_ENTITY }
+        ) {
             generateGetterSetter(b, "version", "Integer")
         }
-        generateTraitAccessors(b, entity)
+        if (!inheritanceSubtype) generateTraitAccessors(b, entity)
         entity.attributes.forEach { attr ->
             if (
                 attr.type in setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION) &&
@@ -558,6 +657,47 @@ object EntityGenerator {
         if (!column.insertable) append(", insertable = false")
         if (!column.updatable) append(", updatable = false")
         append(')')
+    }
+
+    private fun javaEmbeddedAttributeOverride(
+        override: EmbeddedAttributeOverride,
+    ): String = buildString {
+        append("@AttributeOverride(name = \"")
+            .append(escapeJavaString(override.path))
+            .append("\", column = @Column(name = \"")
+            .append(escapeJavaString(override.columnName))
+            .append('"')
+        override.nullable?.let { append(", nullable = ").append(it) }
+        override.unique?.let { append(", unique = ").append(it) }
+        override.length?.let { append(", length = ").append(it) }
+        override.precision?.let { append(", precision = ").append(it) }
+        override.scale?.let { append(", scale = ").append(it) }
+        override.insertable?.let { append(", insertable = ").append(it) }
+        override.updatable?.let { append(", updatable = ").append(it) }
+        (override.columnDefinition ?: override.sqlType)
+            ?.takeIf(String::isNotBlank)
+            ?.let {
+                append(", columnDefinition = \"")
+                    .append(escapeJavaString(it))
+                    .append('"')
+            }
+        append("))")
+    }
+
+    private fun javaEmbeddedAssociationOverride(
+        override: EmbeddedAssociationOverride,
+    ): String = buildString {
+        append("@AssociationOverride(name = \"")
+            .append(escapeJavaString(override.path))
+            .append("\", joinColumns = ")
+            .append(
+                override.joinColumns.joinToString(
+                    prefix = "{",
+                    postfix = "}",
+                    transform = ::javaJoinColumn,
+                ),
+            )
+            .append(')')
     }
 
     private val JAVA_IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")
@@ -900,6 +1040,32 @@ object EntityGenerator {
                 annotation {
                     name = "Embedded"
                     importPath = "jakarta.persistence.Embedded"
+                }
+                if (attr.embeddedAttributeOverrides.isNotEmpty()) {
+                    annotation {
+                        name = "AttributeOverrides"
+                        importPath = "jakarta.persistence.AttributeOverrides"
+                        value(
+                            attr.embeddedAttributeOverrides.joinToString(
+                                prefix = "{",
+                                postfix = "}",
+                                transform = ::javaEmbeddedAttributeOverride,
+                            ),
+                        )
+                    }
+                }
+                if (attr.embeddedAssociationOverrides.isNotEmpty()) {
+                    annotation {
+                        name = "AssociationOverrides"
+                        importPath = "jakarta.persistence.AssociationOverrides"
+                        value(
+                            attr.embeddedAssociationOverrides.joinToString(
+                                prefix = "{",
+                                postfix = "}",
+                                transform = ::javaEmbeddedAssociationOverride,
+                            ),
+                        )
+                    }
                 }
                 attr.embeddedClass?.let { b.import_(it) }
                 return@field

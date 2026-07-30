@@ -32,10 +32,11 @@ object KotlinEntityGenerator {
     private fun jpaSource(entity: EntityModel): String {
         val imports = commonImports(entity)
         val body = mutableListOf<String>()
-        if (entity.entityType != EntityType.EMBEDDABLE) {
+        val inheritanceSubtype = entity.inheritance?.role == InheritanceRole.SUBTYPE
+        if (entity.entityType != EntityType.EMBEDDABLE && !inheritanceSubtype) {
             body += idSource(entity, imports)
         }
-        body += traitSources(entity, imports)
+        if (!inheritanceSubtype) body += traitSources(entity, imports)
         body += entity.attributes.flatMap { attribute ->
             attributeSource(entity, attribute, imports).split(FRAGMENT_SEPARATOR)
         }
@@ -200,21 +201,47 @@ object KotlinEntityGenerator {
         imports: MutableSet<String>,
     ): List<String> = buildList {
         entity.inheritance?.let { inheritance ->
-            add(annotation("Inheritance", mapOf("strategy" to "InheritanceType.${inheritance.strategy.name}")))
-            inheritance.discriminatorColumn?.let {
-                add(
-                    annotation(
-                        "DiscriminatorColumn",
-                        linkedMapOf(
-                            "name" to quote(it),
-                            "discriminatorType" to "DiscriminatorType.${inheritance.discriminatorType}",
+            if (inheritance.role == InheritanceRole.ROOT) {
+                add(annotation("Inheritance", mapOf("strategy" to "InheritanceType.${inheritance.strategy.name}")))
+                inheritance.discriminatorColumn
+                    ?.takeIf { inheritance.strategy != InheritanceStrategy.TABLE_PER_CLASS && it.isNotBlank() }
+                    ?.let {
+                        add(
+                            annotation(
+                                "DiscriminatorColumn",
+                                linkedMapOf(
+                                    "name" to quote(it),
+                                    "discriminatorType" to "DiscriminatorType.${inheritance.discriminatorType}",
+                                ).apply {
+                                    inheritance.discriminatorLength?.let { length ->
+                                        put("length", length.toString())
+                                    }
+                                },
+                            ),
+                        )
+                    }
+            }
+            inheritance.discriminatorValue
+                ?.takeIf { inheritance.strategy != InheritanceStrategy.TABLE_PER_CLASS && it.isNotBlank() }
+                ?.let { add(annotation("DiscriminatorValue", value = quote(it))) }
+            inheritance.primaryKeyJoinColumnName
+                ?.takeIf {
+                    inheritance.role == InheritanceRole.SUBTYPE &&
+                        inheritance.strategy == InheritanceStrategy.JOINED &&
+                        it.isNotBlank()
+                }
+                ?.let {
+                    add(
+                        annotation(
+                            "PrimaryKeyJoinColumn",
+                            linkedMapOf("name" to quote(it)).apply {
+                                inheritance.primaryKeyJoinReferencedColumnName
+                                    ?.takeIf(String::isNotBlank)
+                                    ?.let { referenced -> put("referencedColumnName", quote(referenced)) }
+                            },
                         ),
-                    ),
-                )
-            }
-            inheritance.discriminatorValue?.let {
-                add(annotation("DiscriminatorValue", value = quote(it)))
-            }
+                    )
+                }
         }
         when (entity.entityType) {
             EntityType.ENTITY ->
@@ -644,7 +671,29 @@ object KotlinEntityGenerator {
                     add(annotation("OnDelete", mapOf("value" to "DeletePolicy.CASCADE")))
                 }
             }
-            attribute.type == AttributeType.EMBEDDED -> add("@Embedded")
+            attribute.type == AttributeType.EMBEDDED -> {
+                add("@Embedded")
+                if (attribute.embeddedAttributeOverrides.isNotEmpty()) {
+                    add(
+                        annotation(
+                            "AttributeOverrides",
+                            value = attribute.embeddedAttributeOverrides.joinToString {
+                                kotlinEmbeddedAttributeOverride(it)
+                            },
+                        ),
+                    )
+                }
+                if (attribute.embeddedAssociationOverrides.isNotEmpty()) {
+                    add(
+                        annotation(
+                            "AssociationOverrides",
+                            value = attribute.embeddedAssociationOverrides.joinToString {
+                                kotlinEmbeddedAssociationOverride(it)
+                            },
+                        ),
+                    )
+                }
+            }
             attribute.transientFlag -> add("@Transient")
             else -> {
                 val parameters = linkedMapOf("name" to quote(attribute.resolvedColumnName))
@@ -709,6 +758,44 @@ object KotlinEntityGenerator {
                 if (!column.updatable) put("updatable", "false")
             },
         ).removePrefix("@")
+
+    private fun kotlinEmbeddedAttributeOverride(
+        override: EmbeddedAttributeOverride,
+    ): String {
+        val column = linkedMapOf("name" to quote(override.columnName)).apply {
+            override.nullable?.let { put("nullable", it.toString()) }
+            override.unique?.let { put("unique", it.toString()) }
+            override.length?.let { put("length", it.toString()) }
+            override.precision?.let { put("precision", it.toString()) }
+            override.scale?.let { put("scale", it.toString()) }
+            override.insertable?.let { put("insertable", it.toString()) }
+            override.updatable?.let { put("updatable", it.toString()) }
+            (override.columnDefinition ?: override.sqlType)
+                ?.takeIf(String::isNotBlank)
+                ?.let { put("columnDefinition", quote(it)) }
+        }
+        return annotation(
+            "AttributeOverride",
+            linkedMapOf(
+                "name" to quote(override.path),
+                "column" to annotation("Column", column).removePrefix("@"),
+            ),
+        ).removePrefix("@")
+    }
+
+    private fun kotlinEmbeddedAssociationOverride(
+        override: EmbeddedAssociationOverride,
+    ): String = annotation(
+        "AssociationOverride",
+        linkedMapOf(
+            "name" to quote(override.path),
+            "joinColumns" to override.joinColumns.joinToString(
+                prefix = "[",
+                postfix = "]",
+                transform = ::kotlinJoinColumn,
+            ),
+        ),
+    ).removePrefix("@")
 
     private fun kotlinAttributeType(attribute: AttributeModel, imports: MutableSet<String>): String = when (attribute.type) {
         AttributeType.CHARACTER -> "Char"
@@ -790,6 +877,64 @@ object KotlinEntityGenerator {
         entity.attributes.forEach {
             require(IDENTIFIER.matches(it.name)) {
                 "JVW-ENTITY-ATTRIBUTE-NAME-INVALID: '${it.name}' is not a valid Kotlin property name."
+            }
+            if (it.type == AttributeType.EMBEDDED) {
+                require(!it.embeddedClass.isNullOrBlank()) {
+                    "JVW-ENTITY-EMBEDDED-CLASS-MISSING: ${it.name} needs an embeddable class."
+                }
+                val paths = (
+                    it.embeddedAttributeOverrides.map(EmbeddedAttributeOverride::path) +
+                        it.embeddedAssociationOverrides.map(EmbeddedAssociationOverride::path)
+                    ).map(String::trim)
+                require(paths.none(String::isBlank) && paths.distinct().size == paths.size) {
+                    "JVW-ENTITY-EMBEDDED-OVERRIDE-INVALID: override paths must be non-empty and unique."
+                }
+                require(it.embeddedAttributeOverrides.all { mapping -> mapping.columnName.isNotBlank() }) {
+                    "JVW-ENTITY-EMBEDDED-OVERRIDE-COLUMN-MISSING: every scalar override needs a column."
+                }
+                require(it.embeddedAssociationOverrides.all { mapping ->
+                    mapping.joinColumns.isNotEmpty() &&
+                        mapping.joinColumns.all { column -> column.name.isNotBlank() }
+                }) {
+                    "JVW-ENTITY-EMBEDDED-ASSOCIATION-JOIN-MISSING: every association override needs a join column."
+                }
+            }
+        }
+        entity.inheritance?.let { inheritance ->
+            require(entity.entityType == EntityType.ENTITY) {
+                "JVW-ENTITY-INHERITANCE-TYPE-INVALID: JPA inheritance is available only to persistent entities."
+            }
+            require(inheritance.discriminatorType in setOf("STRING", "CHAR", "INTEGER")) {
+                "JVW-ENTITY-DISCRIMINATOR-TYPE-INVALID: use STRING, CHAR, or INTEGER."
+            }
+            require(inheritance.discriminatorLength == null || inheritance.discriminatorLength > 0) {
+                "JVW-ENTITY-DISCRIMINATOR-LENGTH-INVALID: discriminator length must be positive."
+            }
+            if (inheritance.role == InheritanceRole.SUBTYPE) {
+                require(!entity.extendsClass.isNullOrBlank() && inheritance.discriminatorColumn.isNullOrBlank()) {
+                    "JVW-ENTITY-INHERITANCE-SUBTYPE-INVALID: a subtype needs a parent and cannot declare the discriminator column."
+                }
+            } else {
+                require(inheritance.primaryKeyJoinColumnName.isNullOrBlank()) {
+                    "JVW-ENTITY-ROOT-PRIMARY-KEY-JOIN: only a JOINED subtype declares @PrimaryKeyJoinColumn."
+                }
+            }
+            if (inheritance.strategy == InheritanceStrategy.TABLE_PER_CLASS) {
+                require(
+                    inheritance.discriminatorColumn.isNullOrBlank() &&
+                        inheritance.discriminatorValue.isNullOrBlank() &&
+                        inheritance.discriminatorLength == null,
+                ) {
+                    "JVW-ENTITY-TABLE-PER-CLASS-DISCRIMINATOR: TABLE_PER_CLASS does not use a discriminator."
+                }
+            }
+            if (!inheritance.primaryKeyJoinColumnName.isNullOrBlank()) {
+                require(
+                    inheritance.role == InheritanceRole.SUBTYPE &&
+                        inheritance.strategy == InheritanceStrategy.JOINED,
+                ) {
+                    "JVW-ENTITY-PRIMARY-KEY-JOIN-INVALID: @PrimaryKeyJoinColumn is valid only for a JOINED subtype."
+                }
             }
         }
         if (entity.embeddableIdentity) {

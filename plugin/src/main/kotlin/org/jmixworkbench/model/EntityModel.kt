@@ -112,11 +112,22 @@ enum class IdGeneration {
 // ─── Inheritance ─────────────────────────────────────────────────────────────
 
 data class InheritanceConfig(
+    val role: InheritanceRole = InheritanceRole.ROOT,
     val strategy: InheritanceStrategy = InheritanceStrategy.SINGLE_TABLE,
     val discriminatorColumn: String? = null,
     val discriminatorType: String = "STRING",
-    val discriminatorValue: String? = null
+    val discriminatorLength: Int? = null,
+    val discriminatorValue: String? = null,
+    val primaryKeyJoinColumnName: String? = null,
+    val primaryKeyJoinReferencedColumnName: String? = null,
+    val parentTableName: String? = null,
+    val parentIdColumnName: String? = null,
 )
+
+enum class InheritanceRole {
+    @SerializedName("root") ROOT,
+    @SerializedName("subtype") SUBTYPE,
+}
 
 enum class InheritanceStrategy {
     @SerializedName("singleTable") SINGLE_TABLE,
@@ -172,6 +183,8 @@ data class AttributeModel(
     val association: AssociationConfig? = null,
     // Embedded
     val embeddedClass: String? = null,
+    val embeddedAttributeOverrides: MutableList<EmbeddedAttributeOverride> = mutableListOf(),
+    val embeddedAssociationOverrides: MutableList<EmbeddedAssociationOverride> = mutableListOf(),
     // Enum
     val enumClass: String? = null,
     val enumIdType: EnumIdType = EnumIdType.STRING,
@@ -256,6 +269,40 @@ data class AttributeModel(
     val relationshipIdAttributeName: String
         get() = association?.localIdAttributeName?.takeIf(String::isNotBlank) ?: "${name}Id"
 }
+
+/**
+ * Explicit mapping for a scalar member of an embeddable. [path] supports the
+ * Jakarta Persistence dotted syntax for nested embeddables.
+ *
+ * The optional logical type is designer evidence used for new-table Liquibase
+ * generation. It is deliberately not emitted into the JPA annotation.
+ */
+data class EmbeddedAttributeOverride(
+    val path: String,
+    val columnName: String,
+    val attributeType: AttributeType? = null,
+    val javaTypeName: String? = null,
+    val sqlType: String? = null,
+    val nullable: Boolean? = null,
+    val unique: Boolean? = null,
+    val length: Int? = null,
+    val precision: Int? = null,
+    val scale: Int? = null,
+    val insertable: Boolean? = null,
+    val updatable: Boolean? = null,
+    val columnDefinition: String? = null,
+)
+
+/**
+ * Explicit mapping for an association member of an embeddable. Multiple join
+ * columns are retained in declaration order for composite foreign keys.
+ */
+data class EmbeddedAssociationOverride(
+    val path: String,
+    val joinColumns: MutableList<AssociationJoinColumn> = mutableListOf(),
+    val relatedEntity: String? = null,
+    val relatedIdType: IdType? = null,
+)
 
 enum class AttributeType {
     @SerializedName("string") STRING,

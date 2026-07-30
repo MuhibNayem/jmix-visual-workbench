@@ -339,6 +339,17 @@ object MigrationGenerator {
     // ─── Entity → Migration auto-generation ──────────────────────────────────
 
     fun generateFromEntity(entity: EntityModel, dbType: DatabaseType): MigrationModel {
+        val inheritance = entity.inheritance
+        if (
+            inheritance?.role == InheritanceRole.SUBTYPE &&
+            inheritance.strategy != InheritanceStrategy.JOINED
+        ) {
+            error(
+                "JVW-INHERITANCE-SUBTYPE-DDL-EVIDENCE-REQUIRED: " +
+                    "${inheritance.strategy} subtype tables require indexed inherited-column evidence. " +
+                    "Generate the hierarchy from an indexed parent or disable automatic DDL.",
+            )
+        }
         val migration = MigrationModel(
             changelogId = "001-${entity.resolvedTableName.lowercase()}"
         )
@@ -356,13 +367,42 @@ object MigrationGenerator {
         // ID column
         val idColType = idColumnType(entity.id.type, dbType, entity.id.length)
 
+        val physicalIdColumn = if (
+            inheritance?.role == InheritanceRole.SUBTYPE &&
+            inheritance.strategy == InheritanceStrategy.JOINED
+        ) {
+            inheritance.primaryKeyJoinColumnName?.takeIf(String::isNotBlank)
+                ?: entity.id.columnName
+        } else {
+            entity.id.columnName
+        }
         createTable.columns.add(ColumnDef(
-            name = entity.id.columnName,
+            name = physicalIdColumn,
             type = idColType,
             nullable = false,
             primaryKey = true,
             autoIncrement = entity.id.generation == IdGeneration.IDENTITY
         ))
+
+        if (inheritance?.role == InheritanceRole.ROOT &&
+            inheritance.strategy != InheritanceStrategy.TABLE_PER_CLASS
+        ) {
+            val discriminatorName = inheritance.discriminatorColumn
+                ?.takeIf(String::isNotBlank)
+                ?: "DTYPE"
+            val discriminatorType = when (inheritance.discriminatorType) {
+                "INTEGER" -> "INT"
+                "CHAR" -> "CHAR(1)"
+                else -> "VARCHAR(${inheritance.discriminatorLength ?: 31})"
+            }
+            createTable.columns.add(
+                ColumnDef(
+                    name = discriminatorName,
+                    type = discriminatorType,
+                    nullable = false,
+                ),
+            )
+        }
 
         // Version column
         if (entity.traits.any { it == TraitType.HAS_VERSION || it == TraitType.STANDARD_ENTITY }) {
@@ -434,7 +474,34 @@ object MigrationGenerator {
                 }
                 return@forEach
             }
-            if (attr.type == AttributeType.EMBEDDED) return@forEach
+            if (attr.type == AttributeType.EMBEDDED) {
+                attr.embeddedAttributeOverrides.forEach { mapping ->
+                    createTable.columns.add(
+                        ColumnDef(
+                            name = mapping.columnName,
+                            type = embeddedColumnType(mapping, dbType),
+                            nullable = mapping.nullable ?: !attr.mandatory,
+                            unique = mapping.unique ?: false,
+                        ),
+                    )
+                }
+                attr.embeddedAssociationOverrides.forEach { mapping ->
+                    val relatedIdType = requireNotNull(mapping.relatedIdType) {
+                        "JVW-EMBEDDED-ASSOCIATION-ID-EVIDENCE-MISSING: " +
+                            "${attr.name}.${mapping.path} needs an indexed target identifier type."
+                    }
+                    mapping.joinColumns.forEach { column ->
+                        createTable.columns.add(
+                            ColumnDef(
+                                name = column.name,
+                                type = idColumnType(relatedIdType, dbType),
+                                nullable = column.nullable ?: !attr.mandatory,
+                            ),
+                        )
+                    }
+                }
+                return@forEach
+            }
 
             val colType = resolveColumnType(attr, dbType)
             createTable.columns.add(ColumnDef(
@@ -447,6 +514,31 @@ object MigrationGenerator {
         }
 
         changeSet.changes.add(createTable)
+
+        if (inheritance?.role == InheritanceRole.SUBTYPE &&
+            inheritance.strategy == InheritanceStrategy.JOINED
+        ) {
+            val parentTable = requireNotNull(inheritance.parentTableName?.takeIf(String::isNotBlank)) {
+                "JVW-INHERITANCE-PARENT-TABLE-MISSING: a JOINED subtype migration needs the indexed parent table."
+            }
+            val joinColumn = inheritance.primaryKeyJoinColumnName
+                ?.takeIf(String::isNotBlank)
+                ?: entity.id.columnName
+            val parentId = inheritance.primaryKeyJoinReferencedColumnName
+                ?.takeIf(String::isNotBlank)
+                ?: inheritance.parentIdColumnName
+                ?.takeIf(String::isNotBlank)
+                ?: "ID"
+            changeSet.changes.add(
+                DbChange.AddForeignKeyConstraint(
+                    constraintName = "FK_${entity.resolvedTableName}_$joinColumn",
+                    baseTableName = entity.resolvedTableName,
+                    baseColumnNames = joinColumn,
+                    referencedTableName = parentTable,
+                    referencedColumnNames = parentId,
+                ),
+            )
+        }
 
         // Indexes
         entity.indexes.forEach { idx ->
@@ -540,6 +632,27 @@ object MigrationGenerator {
                     }
                 }
             }
+            if (attr.type == AttributeType.EMBEDDED) {
+                attr.embeddedAssociationOverrides.forEach { mapping ->
+                    val relatedEntity = mapping.relatedEntity?.takeIf(String::isNotBlank)
+                    if (relatedEntity != null) {
+                        mapping.joinColumns.forEach { column ->
+                            val referenced = column.referencedColumnName.takeIf(String::isNotBlank) ?: "ID"
+                            changeSet.changes.add(
+                                DbChange.AddForeignKeyConstraint(
+                                    constraintName = "FK_${entity.resolvedTableName}_${column.name}",
+                                    baseTableName = entity.resolvedTableName,
+                                    baseColumnNames = column.name,
+                                    referencedTableName = relatedEntity.substringAfterLast('.')
+                                        .replace(Regex("([a-z0-9])([A-Z])"), "$1_$2")
+                                        .uppercase(),
+                                    referencedColumnNames = referenced,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
         }
         generatedJoinTables.asReversed().forEach { tableName ->
             changeSet.rollback.add(DbChange.DropTable(tableName, cascadeConstraints = true))
@@ -604,5 +717,30 @@ object MigrationGenerator {
             AttributeType.CUSTOM -> requireNotNull(attr.sqlType)
             else -> "VARCHAR(255)"
         }
+    }
+
+    private fun embeddedColumnType(
+        mapping: EmbeddedAttributeOverride,
+        dbType: DatabaseType,
+    ): String {
+        (mapping.columnDefinition ?: mapping.sqlType)
+            ?.takeIf(String::isNotBlank)
+            ?.let { return it }
+        val type = requireNotNull(mapping.attributeType) {
+            "JVW-EMBEDDED-COLUMN-TYPE-EVIDENCE-MISSING: " +
+                "${mapping.path} needs an indexed logical type or explicit SQL definition."
+        }
+        return resolveColumnType(
+            AttributeModel(
+                name = mapping.path.substringAfterLast('.'),
+                type = type,
+                length = mapping.length,
+                precision = mapping.precision,
+                scale = mapping.scale,
+                javaTypeName = mapping.javaTypeName,
+                sqlType = mapping.sqlType,
+            ),
+            dbType,
+        )
     }
 }

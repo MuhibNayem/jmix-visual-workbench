@@ -13,6 +13,7 @@ import org.jmixworkbench.model.IndexModel
 import org.jmixworkbench.model.ProjectConfig
 import org.jmixworkbench.model.TraitType
 import org.jmixworkbench.model.AttributeModel
+import org.jmixworkbench.model.AttributeType
 import org.jmixworkbench.model.AssociationCollectionType
 import org.jmixworkbench.model.AssociationConfig
 import org.jmixworkbench.model.AssociationJoinColumn
@@ -23,6 +24,11 @@ import org.jmixworkbench.model.EntityType
 import org.jmixworkbench.model.EnumConfig
 import org.jmixworkbench.model.EnumIdType
 import org.jmixworkbench.model.EnumValueModel
+import org.jmixworkbench.model.EmbeddedAssociationOverride
+import org.jmixworkbench.model.EmbeddedAttributeOverride
+import org.jmixworkbench.model.InheritanceConfig
+import org.jmixworkbench.model.InheritanceRole
+import org.jmixworkbench.model.InheritanceStrategy
 import org.jmixworkbench.model.JoinTableConfig
 import org.jmixworkbench.model.UniqueConstraintModel
 import org.jmixworkbench.model.ValidationModel
@@ -33,6 +39,167 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class EntityAndCrudGeneratorTest {
+    @Test
+    fun `Java and Kotlin generate root subtype and embedded override contracts`() {
+        val root = EntityModel(
+            className = "Payment",
+            packageName = "com.company.payments.entity",
+            inheritance = InheritanceConfig(
+                role = InheritanceRole.ROOT,
+                strategy = InheritanceStrategy.JOINED,
+                discriminatorColumn = "PAYMENT_KIND",
+                discriminatorType = "STRING",
+                discriminatorLength = 24,
+                discriminatorValue = "BASE",
+            ),
+        )
+        val subtype = EntityModel(
+            className = "WirePayment",
+            packageName = "com.company.payments.entity",
+            sourceLanguage = EntitySourceLanguage.KOTLIN,
+            extendsClass = "com.company.payments.entity.Payment",
+            inheritance = InheritanceConfig(
+                role = InheritanceRole.SUBTYPE,
+                strategy = InheritanceStrategy.JOINED,
+                discriminatorValue = "WIRE",
+                primaryKeyJoinColumnName = "PAYMENT_ID",
+                primaryKeyJoinReferencedColumnName = "ID",
+                parentTableName = "PAYMENT",
+                parentIdColumnName = "ID",
+            ),
+        )
+        val customer = EntityModel(
+            className = "Customer",
+            packageName = "com.company.payments.entity",
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "address",
+                    type = AttributeType.EMBEDDED,
+                    embeddedClass = "com.company.payments.entity.PostalAddress",
+                    embeddedAttributeOverrides = mutableListOf(
+                        EmbeddedAttributeOverride(
+                            path = "city",
+                            columnName = "POSTAL_CITY",
+                            attributeType = AttributeType.STRING,
+                            nullable = false,
+                            length = 120,
+                        ),
+                        EmbeddedAttributeOverride(
+                            path = "location.code",
+                            columnName = "LOCATION_CODE",
+                            columnDefinition = "varchar(16)",
+                        ),
+                    ),
+                    embeddedAssociationOverrides = mutableListOf(
+                        EmbeddedAssociationOverride(
+                            path = "country",
+                            relatedEntity = "com.company.payments.entity.Country",
+                            relatedIdType = IdType.UUID,
+                            joinColumns = mutableListOf(
+                                AssociationJoinColumn(
+                                    name = "COUNTRY_ID",
+                                    referencedColumnName = "ID",
+                                    nullable = false,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val javaRoot = EntityGenerator.generate(root)
+        val kotlinSubtype = KotlinEntityGenerator.generate(subtype)
+        val javaEmbedded = EntityGenerator.generate(customer)
+        val kotlinEmbedded = KotlinEntityGenerator.generate(
+            customer.copy(sourceLanguage = EntitySourceLanguage.KOTLIN),
+        )
+        val rootMigration = MigrationGenerator.generateFromEntity(root, DatabaseType.POSTGRES)
+        val subtypeMigration = MigrationGenerator.generateFromEntity(subtype, DatabaseType.POSTGRES)
+        val embeddedMigration = MigrationGenerator.generateFromEntity(customer, DatabaseType.POSTGRES)
+
+        assertTrue(javaRoot.contains("@Inheritance(strategy = InheritanceType.JOINED)"))
+        assertTrue(
+            javaRoot.contains(
+                "@DiscriminatorColumn(name = \"PAYMENT_KIND\", " +
+                    "discriminatorType = DiscriminatorType.STRING, length = 24)",
+            ),
+        )
+        assertTrue(javaRoot.contains("@DiscriminatorValue(\"BASE\")"))
+
+        assertFalse(kotlinSubtype.contains("@Inheritance"))
+        assertFalse(kotlinSubtype.contains("@DiscriminatorColumn"))
+        assertTrue(kotlinSubtype.contains("@DiscriminatorValue(\"WIRE\")"))
+        assertTrue(
+            kotlinSubtype.contains(
+                "@PrimaryKeyJoinColumn(name = \"PAYMENT_ID\", referencedColumnName = \"ID\")",
+            ),
+        )
+        assertTrue(kotlinSubtype.contains("open class WirePayment : Payment()"))
+        assertFalse(kotlinSubtype.contains("var id:"))
+
+        assertTrue(javaEmbedded.contains("@Embedded"))
+        assertTrue(
+            javaEmbedded.contains(
+                "@AttributeOverride(name = \"city\", " +
+                    "column = @Column(name = \"POSTAL_CITY\", nullable = false, length = 120))",
+            ),
+        )
+        assertTrue(javaEmbedded.contains("name = \"location.code\""))
+        assertTrue(javaEmbedded.contains("columnDefinition = \"varchar(16)\""))
+        assertTrue(
+            javaEmbedded.contains(
+                "@AssociationOverride(name = \"country\", " +
+                    "joinColumns = {@JoinColumn(name = \"COUNTRY_ID\", " +
+                    "referencedColumnName = \"ID\", nullable = false)})",
+            ),
+        )
+        assertTrue(kotlinEmbedded.contains("@AttributeOverrides("))
+        assertTrue(
+            kotlinEmbedded.contains(
+                "AttributeOverride(name = \"city\", " +
+                    "column = Column(name = \"POSTAL_CITY\", nullable = false, length = 120))",
+            ),
+        )
+        assertTrue(
+            kotlinEmbedded.contains(
+                "AssociationOverride(name = \"country\", " +
+                    "joinColumns = [JoinColumn(name = \"COUNTRY_ID\", " +
+                    "referencedColumnName = \"ID\", nullable = false)])",
+            ),
+        )
+        val rootTable = rootMigration.changes.single().changes
+            .filterIsInstance<org.jmixworkbench.model.DbChange.CreateTable>()
+            .single()
+        assertTrue(rootTable.columns.any {
+            it.name == "PAYMENT_KIND" && it.type == "VARCHAR(24)" && !it.nullable
+        })
+        val subtypeChanges = subtypeMigration.changes.single().changes
+        val subtypeTable = subtypeChanges
+            .filterIsInstance<org.jmixworkbench.model.DbChange.CreateTable>()
+            .single()
+        assertTrue(subtypeTable.columns.any { it.name == "PAYMENT_ID" && it.primaryKey })
+        assertTrue(subtypeChanges.filterIsInstance<org.jmixworkbench.model.DbChange.AddForeignKeyConstraint>()
+            .any {
+                it.baseColumnNames == "PAYMENT_ID" &&
+                    it.referencedTableName == "PAYMENT" &&
+                    it.referencedColumnNames == "ID"
+            })
+        val embeddedChanges = embeddedMigration.changes.single().changes
+        val embeddedTable = embeddedChanges
+            .filterIsInstance<org.jmixworkbench.model.DbChange.CreateTable>()
+            .single()
+        assertTrue(embeddedTable.columns.any {
+            it.name == "POSTAL_CITY" && it.type == "VARCHAR(120)" && !it.nullable
+        })
+        assertTrue(embeddedTable.columns.any { it.name == "COUNTRY_ID" && it.type == "UUID" })
+        assertTrue(embeddedChanges.filterIsInstance<org.jmixworkbench.model.DbChange.AddForeignKeyConstraint>()
+            .any {
+                it.baseColumnNames == "COUNTRY_ID" &&
+                    it.referencedTableName == "COUNTRY"
+            })
+    }
+
     @Test
     fun `Kotlin entity generation preserves Jmix enum ids relationships and repository contracts`() {
         val entity = EntityModel(

@@ -5,6 +5,7 @@ export type EntitySourceLanguage = 'java' | 'kotlin'
 export type IdType = 'uuid' | 'long' | 'integer' | 'string' | 'embedded'
 export type IdGeneration = 'jmixGenerated' | 'identity' | 'sequence' | 'assigned'
 export type InheritanceStrategy = 'singleTable' | 'joined' | 'tablePerClass'
+export type InheritanceRole = 'root' | 'subtype'
 export type AttributeType =
   | 'string' | 'character' | 'integer' | 'long' | 'double' | 'bigDecimal' | 'boolean'
   | 'date' | 'localDate' | 'localDateTime' | 'localTime' | 'offsetTime' | 'offsetDateTime'
@@ -49,11 +50,36 @@ export interface AttributeModel {
   sqlType?: string
   association?: AssociationConfig
   embeddedClass?: string
+  embeddedAttributeOverrides: EmbeddedAttributeOverride[]
+  embeddedAssociationOverrides: EmbeddedAssociationOverride[]
   enumClass?: string
   enumIdType: 'string' | 'integer'
   validations: ValidationModel[]
   annotations: CustomAnnotation[]
   inBaseFetchPlan: boolean
+}
+
+export interface EmbeddedAttributeOverride {
+  path: string
+  columnName: string
+  attributeType?: AttributeType
+  javaTypeName?: string
+  sqlType?: string
+  nullable?: boolean
+  unique?: boolean
+  length?: number
+  precision?: number
+  scale?: number
+  insertable?: boolean
+  updatable?: boolean
+  columnDefinition?: string
+}
+
+export interface EmbeddedAssociationOverride {
+  path: string
+  joinColumns: AssociationJoinColumn[]
+  relatedEntity?: string
+  relatedIdType?: IdType
 }
 
 export interface AssociationConfig {
@@ -140,10 +166,16 @@ export interface EntityModel {
     embeddedIdClass?: string
   }
   inheritance?: {
+    role: InheritanceRole
     strategy: InheritanceStrategy
     discriminatorColumn?: string
     discriminatorType: string
+    discriminatorLength?: number
     discriminatorValue?: string
+    primaryKeyJoinColumnName?: string
+    primaryKeyJoinReferencedColumnName?: string
+    parentTableName?: string
+    parentIdColumnName?: string
   }
   traits: TraitType[]
   attributes: AttributeModel[]
@@ -445,6 +477,7 @@ export interface SchemaEntitySnapshot {
   implementsInterfaces: string[]
   lifecycleCallbacks: LifecycleCallback[]
   entityListeners: string[]
+  inheritance?: EntityModel['inheritance']
   inheritedAttributes: SchemaInheritedAttributeSnapshot[]
   inheritedTraits: SchemaInheritedTraitSnapshot[]
   migrationCoverage: 'COVERED' | 'MISSING' | 'DISABLED'
@@ -477,6 +510,10 @@ export interface SchemaEntityAttributeSnapshot {
   persistent: boolean
   association: boolean
   associationDetails?: SchemaAssociationSnapshot
+  embedded?: boolean
+  embeddedClass?: string
+  embeddedAttributeOverrides?: EmbeddedAttributeOverride[]
+  embeddedAssociationOverrides?: EmbeddedAssociationOverride[]
   moneyCandidate: boolean
   comment?: string
   systemLevel?: boolean

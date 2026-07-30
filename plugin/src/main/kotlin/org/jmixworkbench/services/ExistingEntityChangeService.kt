@@ -38,6 +38,7 @@ import org.jmixworkbench.model.EntityGenerationTarget
 import org.jmixworkbench.model.EntityModel
 import org.jmixworkbench.model.EntitySourceLanguage
 import org.jmixworkbench.model.EntityType
+import org.jmixworkbench.model.EmbeddedAttributeOverride
 import org.jmixworkbench.model.EnumIdType
 import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.IdType
@@ -1086,13 +1087,6 @@ class ExistingEntityChangeService(
                 "'${attribute.name}' is not a valid Java field name.",
             )
         }
-        additions.firstOrNull { it.type == AttributeType.EMBEDDED }?.let { attribute ->
-            return rejected(
-                "JVW-ENTITY-EMBEDDED-REQUIRES-DESIGNER",
-                "${attribute.name} is embedded. Use the embedded-type designer so attribute overrides can be reviewed.",
-            )
-        }
-
         val currentEntity = SchemaWorkspaceService.getInstance(project).load().entities.firstOrNull {
             it.qualifiedName == request.entity.fullName &&
                 it.sourceLocator.relativePath == request.sourceLocator.relativePath
@@ -1109,11 +1103,15 @@ class ExistingEntityChangeService(
                     "${current.name} is missing from the requested entity model. " +
                         "Removal or rename requires the explicit native impact workflow; it will not be interpreted as an addition.",
                 )
-            val currentType = attributeType(
-                current.javaType,
-                current.association,
-                current.associationDetails?.composition == true,
-            )
+            val currentType = if (current.embedded) {
+                AttributeType.EMBEDDED
+            } else {
+                attributeType(
+                    current.javaType,
+                    current.association,
+                    current.associationDetails?.composition == true,
+                )
+            }
             val relationshipSemanticKindChange =
                 current.association &&
                     currentType in RELATIONSHIP_ATTRIBUTE_TYPES &&
@@ -1424,12 +1422,6 @@ class ExistingEntityChangeService(
                 "'${it.name}' is not a valid Kotlin property name.",
             )
         }
-        additions.firstOrNull { it.type == AttributeType.EMBEDDED }?.let {
-            return rejected(
-                "JVW-ENTITY-EMBEDDED-REQUIRES-DESIGNER",
-                "${it.name} is embedded. Use the embedded-type designer so attribute overrides can be reviewed.",
-            )
-        }
         val snapshot = SchemaWorkspaceService.getInstance(project).load().entities.firstOrNull {
             it.qualifiedName == request.entity.fullName &&
                 it.sourceLocator.relativePath == request.sourceLocator.relativePath
@@ -1446,11 +1438,15 @@ class ExistingEntityChangeService(
                     "${current.name} is missing from the requested Kotlin entity model. " +
                         "Removal or rename requires the explicit native impact workflow; it will not be interpreted as an addition.",
                 )
-            val currentType = attributeType(
-                current.javaType,
-                current.association,
-                current.associationDetails?.composition == true,
-            )
+            val currentType = if (current.embedded) {
+                AttributeType.EMBEDDED
+            } else {
+                attributeType(
+                    current.javaType,
+                    current.association,
+                    current.associationDetails?.composition == true,
+                )
+            }
             val relationshipSemanticKindChange =
                 current.association &&
                     currentType in RELATIONSHIP_ATTRIBUTE_TYPES &&
@@ -1821,8 +1817,23 @@ class ExistingEntityChangeService(
         }
         val dbType = JmixProjectService.getInstance(project).getConfig()?.databaseType
             ?: DatabaseType.POSTGRES
+        val embeddedAdditions = additions.filter { it.type == AttributeType.EMBEDDED }
+        embeddedAdditions.firstOrNull {
+            it.embeddedAttributeOverrides.isEmpty() && it.embeddedAssociationOverrides.isEmpty()
+        }?.let {
+            return SchemaMigrationProposal.failure(
+                "JVW-ENTITY-EMBEDDED-MAPPING-EVIDENCE-MISSING",
+                "${it.name} needs explicit scalar or association overrides before a safe table migration can be generated.",
+            )
+        }
         val scalarColumns = additions
-            .filterNot { it.type in setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION) }
+            .filterNot {
+                it.type in setOf(
+                    AttributeType.ASSOCIATION,
+                    AttributeType.COMPOSITION,
+                    AttributeType.EMBEDDED,
+                )
+            }
             .map { attribute ->
                 ColumnDef(
                     name = attribute.resolvedColumnName,
@@ -1832,6 +1843,45 @@ class ExistingEntityChangeService(
                     remarks = attribute.comment,
                 )
             }.toMutableList()
+        embeddedAdditions.forEach { attribute ->
+            attribute.embeddedAttributeOverrides.forEach { mapping ->
+                val type = runCatching { embeddedColumnType(mapping, dbType) }.getOrElse {
+                    return SchemaMigrationProposal.failure(
+                        "JVW-ENTITY-EMBEDDED-COLUMN-TYPE-MISSING",
+                        it.message ?: "${attribute.name}.${mapping.path} has no safe SQL type evidence.",
+                    )
+                }
+                scalarColumns += ColumnDef(
+                    name = mapping.columnName,
+                    type = type,
+                    nullable = mapping.nullable ?: !attribute.mandatory,
+                    unique = mapping.unique ?: false,
+                )
+            }
+            attribute.embeddedAssociationOverrides.forEach { mapping ->
+                val relatedIdType = mapping.relatedIdType
+                    ?: return SchemaMigrationProposal.failure(
+                        "JVW-ENTITY-EMBEDDED-ASSOCIATION-ID-MISSING",
+                        "${attribute.name}.${mapping.path} has no indexed target identifier type.",
+                    )
+                mapping.joinColumns.forEach { column ->
+                    scalarColumns += ColumnDef(
+                        name = column.name,
+                        type = idColumnType(relatedIdType, dbType),
+                        nullable = column.nullable ?: !attribute.mandatory,
+                    )
+                }
+            }
+        }
+        val duplicateEmbeddedColumn = scalarColumns.groupBy { it.name.uppercase(Locale.ROOT) }
+            .entries
+            .firstOrNull { it.value.size > 1 }
+        if (duplicateEmbeddedColumn != null) {
+            return SchemaMigrationProposal.failure(
+                "JVW-ENTITY-EMBEDDED-COLUMN-COLLISION",
+                "Multiple new mappings target ${duplicateEmbeddedColumn.key}. Choose unique physical columns.",
+            )
+        }
         val stableSuffix = CanonicalDiscoveryJson.sha256(
             listOf(
                 entity.resolvedTableName,
@@ -1848,10 +1898,9 @@ class ExistingEntityChangeService(
         val preConditions = mutableListOf<PreCondition>()
         if (scalarColumns.isNotEmpty()) {
             changes += DbChange.AddColumn(entity.resolvedTableName, scalarColumns)
-            additions
-                .filterNot { it.type in setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION) }
-                .asReversed()
-                .forEach { rollback += DbChange.DropColumn(entity.resolvedTableName, it.resolvedColumnName) }
+            scalarColumns.asReversed().forEach {
+                rollback += DbChange.DropColumn(entity.resolvedTableName, it.name)
+            }
         }
         additions
             .filter { it.type in setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION) }
@@ -1950,6 +1999,42 @@ class ExistingEntityChangeService(
                     }
                 }
             }
+        embeddedAdditions.forEach { attribute ->
+            attribute.embeddedAssociationOverrides.forEach { mapping ->
+                val relatedEntity = mapping.relatedEntity
+                    ?.takeIf(String::isNotBlank)
+                    ?: return SchemaMigrationProposal.failure(
+                        "JVW-ENTITY-EMBEDDED-ASSOCIATION-TARGET-MISSING",
+                        "${attribute.name}.${mapping.path} has no indexed target entity.",
+                    )
+                val target = workspace.entities.singleOrNull {
+                    it.qualifiedName == relatedEntity ||
+                        it.className == relatedEntity.substringAfterLast('.')
+                } ?: return SchemaMigrationProposal.failure(
+                    "JVW-ENTITY-EMBEDDED-ASSOCIATION-TARGET-AMBIGUOUS",
+                    "Target $relatedEntity is absent or ambiguous in the current project index.",
+                )
+                if (target.storeName != store.name) {
+                    return SchemaMigrationProposal.failure(
+                        "JVW-ENTITY-EMBEDDED-ASSOCIATION-STORE-MISMATCH",
+                        "${attribute.name}.${mapping.path} targets ${target.qualifiedName} in store ${target.storeName}.",
+                    )
+                }
+                mapping.joinColumns.forEach { column ->
+                    val fkName = "FK_${entity.resolvedTableName}_${column.name}"
+                    changes += DbChange.AddForeignKeyConstraint(
+                        constraintName = fkName,
+                        baseTableName = entity.resolvedTableName,
+                        baseColumnNames = column.name,
+                        referencedTableName = target.tableName,
+                        referencedColumnNames = column.referencedColumnName
+                            .takeIf(String::isNotBlank)
+                            ?: target.idColumnName,
+                    )
+                    rollback.add(0, DbChange.DropForeignKeyConstraint(fkName, entity.resolvedTableName))
+                }
+            }
+        }
         metadataChanges.forEach { change ->
             val current = change.current
             val desired = change.desired
@@ -3224,6 +3309,30 @@ class ExistingEntityChangeService(
             }
         AttributeType.CUSTOM -> requireNotNull(attribute.sqlType)
         else -> error("Unsupported additive migration type: ${attribute.type}")
+    }
+
+    private fun embeddedColumnType(
+        mapping: EmbeddedAttributeOverride,
+        dbType: DatabaseType,
+    ): String {
+        (mapping.columnDefinition ?: mapping.sqlType)
+            ?.takeIf(String::isNotBlank)
+            ?.let { return it }
+        val attributeType = requireNotNull(mapping.attributeType) {
+            "${mapping.path} needs an indexed logical type or explicit SQL definition."
+        }
+        return columnType(
+            AttributeModel(
+                name = mapping.path.substringAfterLast('.'),
+                type = attributeType,
+                length = mapping.length,
+                precision = mapping.precision,
+                scale = mapping.scale,
+                javaTypeName = mapping.javaTypeName,
+                sqlType = mapping.sqlType,
+            ),
+            dbType,
+        )
     }
 
     private fun columnType(attribute: SchemaEntityAttributeSnapshot, dbType: DatabaseType): String =
