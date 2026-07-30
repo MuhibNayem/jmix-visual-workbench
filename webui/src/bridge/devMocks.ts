@@ -828,7 +828,7 @@ const flowElement = (
 
 const developmentFlowElements: FlowUiElementSnapshot[] = [
   flowElement('view', 'view', 'payroll_LoanApp.list', undefined, ['data', 'layout']),
-  flowElement('data', 'data', undefined, 'view', ['loanAppsDc']),
+  flowElement('data', 'data', undefined, 'view', ['loanAppsDc', 'selectedLoanDc']),
   flowElement('loanAppsDc', 'collection', 'loanAppsDc', 'data', ['loanAppsDl'], {
     class: 'com.company.loan.entity.LoanApp',
     fetchPlan: '_base',
@@ -839,6 +839,10 @@ const developmentFlowElements: FlowUiElementSnapshot[] = [
     selfClosing: false,
     directText: 'select e from LoanApp e order by e.applicationDate desc',
   },
+  flowElement('selectedLoanDc', 'instance', 'selectedLoanDc', 'data', [], {
+    class: 'com.company.loan.entity.LoanApp',
+    fetchPlan: '_base',
+  }),
   flowElement('layout', 'layout', undefined, 'view', ['toolbar', 'loanAppsGrid']),
   flowElement('toolbar', 'hbox', 'toolbar', 'layout', ['loanFilter', 'createButton'], {
     width: '100%',
@@ -879,16 +883,22 @@ export const developmentFlowUiWorkspace: FlowUiWorkspaceResponse = {
   issues: [],
   dataModel: {
     containers: [{
-      elementKey: 'loanAppsDc',
-      id: 'loanAppsDc',
-      kind: 'collection',
-      entityClass: 'com.company.loan.entity.LoanApp',
-      fetchPlan: '_base',
-      loaderElementKey: 'loanAppsDl',
-      loaderId: 'loanAppsDl',
-      queryElementKey: 'loanQuery',
-      query: 'select e from LoanApp e order by e.applicationDate desc',
-    }],
+        elementKey: 'loanAppsDc',
+        id: 'loanAppsDc',
+        kind: 'collection',
+        entityClass: 'com.company.loan.entity.LoanApp',
+        fetchPlan: '_base',
+        loaderElementKey: 'loanAppsDl',
+        loaderId: 'loanAppsDl',
+        queryElementKey: 'loanQuery',
+        query: 'select e from LoanApp e order by e.applicationDate desc',
+      }, {
+        elementKey: 'selectedLoanDc',
+        id: 'selectedLoanDc',
+        kind: 'instance',
+        entityClass: 'com.company.loan.entity.LoanApp',
+        fetchPlan: '_base',
+      }],
     bindings: [
       {
         elementKey: 'loanAppsGrid',

@@ -131,7 +131,7 @@ contract and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 310 tests and three packaged-host
+  descriptors were inspected after assembly, 318 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
@@ -434,9 +434,18 @@ blocked until all of the following pass:
 Repository creation, additive Java/Kotlin method authoring, lossless supported
 metadata edits, native Java/Kotlin injection and repository-backed view
 delegates plus native Open/Rename/Change-Signature/Safe-Delete workflows are
-implemented. Remaining repository work is transactional aggregate
-update-service generation, complete JPQL semantics and runtime integration
-certification against representative Jmix applications.
+implemented. Transactional aggregate update-service generation now derives the
+service location from the exact controller module, preserves the complete
+`SaveContext`, uses constrained `DataManager`, selects the entity-store
+transaction manager, registers `SaveDelegate`/`RemoveDelegate` when the opened
+Jmix API provides them, and wires Java or Kotlin DataContext delegates in the
+same revision-bound atomic preview. Cross-store compositions, target
+collisions, stale/forged evidence and existing conflicting business logic fail
+closed. The two-file operation is undoable as one change, and packaged host
+descriptors are required to contain the service. Remaining repository work is
+complete JPQL semantics and runtime compilation/integration certification
+against representative Jmix applications and the supported Jmix/Java/database
+matrix.
 
 No release or marketing claim may describe complete Studio Entity Designer
 parity until those gates are closed.

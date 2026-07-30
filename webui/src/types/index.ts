@@ -2803,6 +2803,14 @@ export interface FlowUiControllerHandlerRequest {
   repositoryQualifiedName?: string
 }
 
+export interface AggregateUpdateServiceRequest {
+  descriptorSource: GraphSourceLocator
+  controllerSource: GraphSourceLocator
+  entitySource: GraphSourceLocator
+  containerId: string
+  entityQualifiedName: string
+}
+
 export interface JmixRuntimeInspectionResponse {
   accepted: boolean
   viewId?: string

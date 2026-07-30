@@ -281,9 +281,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 310 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 318 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 310 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 318 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -461,6 +461,22 @@ inspection control rather than relying on a hard-to-hit table-row target.
   search, conflict handling and undo ownership, so handwritten declarations
   are never regenerated. The real UI handoff passed at 900, 600 and 480 pixels
   without horizontal escape or browser errors.
+- FlowUI instance containers now offer a transactional aggregate update-service
+  path beside the deliberately bounded repository single-save path. The
+  backend independently re-resolves the descriptor, controller, entity,
+  container, module, source root, data store and every SHA-256 revision; the
+  JCEF client cannot choose a write path. It creates a constrained
+  `DataManager` service, retains the incoming `SaveContext`, selects a
+  store-specific transaction manager where required, implements platform
+  `SaveDelegate`/`RemoveDelegate` contracts when present, and wires Java or
+  Kotlin controllers in one atomic, previewed, undoable change. Existing target
+  files or DataContext business handlers are preserved rather than replaced,
+  and cross-store compositions are rejected because a local transaction cannot
+  prove distributed atomicity. Dual-host fixtures cover generation,
+  Java/Kotlin PSI wiring, forged/stale evidence and exact apply/undo restoration.
+  The live three-column UI exposes both changed paths in the approval preview;
+  1280, 760 and 480 pixel checks had no horizontal escape or browser errors,
+  and the narrow continuous workspace remained vertically scrollable.
 - The conventional `./gradlew test` lifecycle now builds and fingerprints the
   current self-managed-Node web bundle before starting isolated IntelliJ
   2025.3 and 2026.2 lanes, avoiding stale-bundle races and retaining the outer
@@ -491,14 +507,15 @@ inspection control rather than relying on a hard-to-hit table-row target.
 
 ## Recommended next execution order
 
-1. Finish the remaining repository workflow edges: transactional aggregate
-   update-service generation, complete JPQL grammar/language injection, and semantic
+1. Finish the remaining repository workflow edges: complete JPQL
+   grammar/language injection, and semantic
    compilation of generated Java/Kotlin repositories and controllers against
    the supported Jmix/Java matrix. Lossless existing metadata edits,
    repository-backed view delegates, controller injection and native
    callable Open/Rename/Change-Signature/Safe-Delete plus `@Param`/JPQL
-   parameter refactoring are now implemented; source-owned diagnostics remain
-   advisory for independent additions.
+   parameter refactoring and transactional aggregate update services are now
+   implemented; source-owned diagnostics remain advisory for independent
+   additions.
 2. Complete evidence-backed editing of existing inheritance and embedded
    mappings, followed by localized-caption workflows and safe enum-usage
    migration. Root/subtype authoring, explicit nested scalar/association

@@ -179,6 +179,16 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 "org/jmixworkbench/services/RepositoryMethodRefactorService.class",
                 archive
         );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/services/AggregateUpdateServiceChangeService.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/generator/AggregateUpdateServiceGenerator.class",
+                archive
+        );
 
         String descriptor = text(contents.get("META-INF/plugin.xml"));
         requireContains(descriptor, "<id>org.jmixworkbench</id>", archive);
@@ -209,6 +219,13 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 "projectService",
                 "serviceImplementation",
                 "org.jmixworkbench.services.RepositoryMethodRefactorService",
+                archive
+        );
+        requireExtensionRegistration(
+                descriptor,
+                "projectService",
+                "serviceImplementation",
+                "org.jmixworkbench.services.AggregateUpdateServiceChangeService",
                 archive
         );
         requireActionRegistration(

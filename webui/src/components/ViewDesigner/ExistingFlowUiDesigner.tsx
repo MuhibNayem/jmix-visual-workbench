@@ -26,6 +26,7 @@ import type {
   FlowUiControllerInjectionRequest,
   FlowUiControllerHandlerKind,
   FlowUiControllerHandlerRequest,
+  AggregateUpdateServiceRequest,
   FlowUiPropertyChangeRequest,
   FlowUiStructureChangeRequest,
   FlowUiWorkspaceResponse,
@@ -111,6 +112,21 @@ function repositoriesForEntity(
     .filter((artifact) => artifact.kind === 'REPOSITORY' &&
       relatedRepositoryIds.has(artifact.id))
     .sort((left, right) => left.displayName.localeCompare(right.displayName))
+}
+
+function entityArtifactForEntity(
+  workspace: FlowUiWorkspaceResponse,
+  entityClass?: string,
+) {
+  if (!entityClass) return undefined
+  const matches = workspace.contextArtifacts.filter((artifact) => (
+    artifact.kind === 'ENTITY' &&
+    (
+      artifact.semanticKey === entityClass ||
+      artifact.semanticKey.endsWith(`.${entityClass}`)
+    )
+  ))
+  return matches.length === 1 ? matches[0] : undefined
 }
 
 function attributeValue(element: FlowUiElementSnapshot, name: string): string | undefined {
@@ -411,6 +427,10 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
   } | {
     kind: 'controllerHandler'
     change: FlowUiControllerHandlerRequest
+    preview: WorkspaceChangePreviewResponse
+  } | {
+    kind: 'aggregateUpdateService'
+    change: AggregateUpdateServiceRequest
     preview: WorkspaceChangePreviewResponse
   } | {
     kind: 'hotDeploy'
@@ -965,6 +985,43 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     setPending({ kind: 'controllerHandler', change, preview })
   }
 
+  const previewAggregateUpdateService = async () => {
+    if (
+      !workspace?.controllerModel?.psiSupported ||
+      !selectedInstanceContainer?.id ||
+      !selectedInstanceContainer.entityClass
+    ) return
+    const entityArtifact = entityArtifactForEntity(workspace, selectedInstanceContainer.entityClass)
+    if (!entityArtifact) {
+      addToast(
+        'The bound entity source is missing or ambiguous. Refresh project indexing before generating.',
+        'error',
+      )
+      return
+    }
+    const entityQualifiedName = entityArtifact.semanticKey
+    const change: AggregateUpdateServiceRequest = {
+      descriptorSource: locator,
+      controllerSource: {
+        relativePath: workspace.controllerModel.relativePath,
+        revisionFingerprint: workspace.controllerModel.revisionFingerprint,
+      },
+      entitySource: entityArtifact.sourceLocator,
+      containerId: selectedInstanceContainer.id,
+      entityQualifiedName,
+    }
+    const preview = await bridge.previewAggregateUpdateService(change)
+    if (!preview.accepted) {
+      addToast(preview.issues[0]?.message ?? 'Aggregate update-service generation was rejected.', 'error')
+      return
+    }
+    if (!preview.planDigest || preview.files.length === 0) {
+      addToast('The transactional aggregate update service is already wired.', 'info')
+      return
+    }
+    setPending({ kind: 'aggregateUpdateService', change, preview })
+  }
+
   const openRuntimePreview = async (viewport: JmixRuntimeViewport) => {
     if (!selectedRuntimeTarget || !document) return
     const response = await bridge.openJmixRuntimePreview(
@@ -1101,7 +1158,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
               ? await bridge.applyFlowUiControllerInjection(pending.change, pending.preview.planDigest)
               : pending.kind === 'controllerHandler'
                 ? await bridge.applyFlowUiControllerHandler(pending.change, pending.preview.planDigest)
-                : await bridge.applyFlowUiHotDeploy(pending.change, pending.preview.planDigest)
+                : pending.kind === 'aggregateUpdateService'
+                  ? await bridge.applyAggregateUpdateService(pending.change, pending.preview.planDigest)
+                  : await bridge.applyFlowUiHotDeploy(pending.change, pending.preview.planDigest)
       if (!result.success) {
         addToast(result.issues[0]?.message ?? 'The FlowUI source change failed.', 'error')
         return
@@ -1113,11 +1172,17 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
         await inspectRuntime(locator)
         return
       }
-      if (pending.kind === 'controllerInjection' || pending.kind === 'controllerHandler') {
+      if (
+        pending.kind === 'controllerInjection' ||
+        pending.kind === 'controllerHandler' ||
+        pending.kind === 'aggregateUpdateService'
+      ) {
         addToast(
           pending.kind === 'controllerInjection'
             ? 'Component injection added without replacing Java code.'
-            : 'Controller handler added without replacing Java code.',
+            : pending.kind === 'controllerHandler'
+              ? 'Controller handler added without replacing Java or Kotlin code.'
+              : 'Transactional aggregate update service created and wired as one atomic change.',
           'success',
         )
         await refreshHistory()
@@ -1667,10 +1732,24 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
           {pending && (
             <div className="border-t border-amber-500/30 bg-amber-500/5 p-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
+                <div className="min-w-0 flex-1">
                   <div className="text-xs font-medium text-amber-200">{pending.preview.label}</div>
                   <div className="mt-0.5 text-[10px] text-amber-100/60">
-                    {pending.preview.files[0]?.relativePath} · exact {pending.preview.files[0]?.appliedEditCount} edit
+                    {pending.preview.files.length} {pending.preview.files.length === 1 ? 'file' : 'files'} ·{' '}
+                    {pending.preview.files.reduce((total, file) => total + file.appliedEditCount, 0)} exact edits
+                  </div>
+                  <div className="mt-1 flex min-w-0 flex-col gap-0.5">
+                    {pending.preview.files.map((file) => (
+                      <div
+                        key={`${file.mode}:${file.relativePath}`}
+                        className="flex min-w-0 items-center gap-1.5 font-mono text-[9px] text-amber-100/70"
+                      >
+                        <span className="shrink-0 rounded border border-amber-500/20 px-1 py-px">
+                          {file.mode}
+                        </span>
+                        <span className="min-w-0 break-all">{file.relativePath}</span>
+                      </div>
+                    ))}
                   </div>
                   <div className="mt-1 font-mono text-[10px] text-amber-100">
                     {pending.kind === 'property'
@@ -1683,7 +1762,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                             ? <>inject {pending.change.componentId} into controller</>
                             : pending.kind === 'controllerHandler'
                               ? <>generate {pending.change.kind.replace(/_/g, ' ').toLowerCase()} handler</>
-                              : <>stage descriptor and verified Jmix cache-reset trigger</>}
+                              : pending.kind === 'aggregateUpdateService'
+                                ? <>create service and wire {pending.change.containerId} atomically</>
+                                : <>stage descriptor and verified Jmix cache-reset trigger</>}
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -2234,9 +2315,33 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                           Wire safe detail save delegate
                         </button>
                         <p className="text-[9px] leading-relaxed text-amber-300/70">
-                          Single-entity saves only. Aggregate compositions or removals require a transactional update
-                          service; the generated guard rejects them before any write.
+                          This fast path is restricted to one entity. It is blocked when compositions or removals
+                          require aggregate semantics.
                         </p>
+                        <div className="border-t border-surface-border pt-2">
+                          <div className="text-[9px] font-medium uppercase tracking-wider text-emerald-300/80">
+                            Transactional aggregate save
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void previewAggregateUpdateService()}
+                            disabled={
+                              !workspace.controllerModel?.psiSupported ||
+                              !entityArtifactForEntity(workspace, selectedInstanceContainer.entityClass)
+                            }
+                            className="mt-1.5 w-full rounded border border-emerald-500/35 bg-emerald-500/10 px-2 py-1.5 text-[10px] font-medium text-emerald-200 hover:bg-emerald-500/15 disabled:opacity-50"
+                          >
+                            Create &amp; wire aggregate update service
+                          </button>
+                          <p className="mt-1.5 text-[9px] leading-relaxed text-gray-500">
+                            Saves changed compositions and removals together through constrained DataManager, so
+                            entity and row-level policies remain active. Java and Kotlin controllers are supported.
+                          </p>
+                          <p className="mt-1 text-[9px] leading-relaxed text-gray-600">
+                            The backend derives every target from current project evidence, previews both files,
+                            rejects cross-store pseudo-transactions, and applies the approved set atomically.
+                          </p>
+                        </div>
                       </div>
                     )}
                   </div>

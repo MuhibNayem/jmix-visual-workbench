@@ -8,6 +8,7 @@ import type {
   FlowUiDirectTextChangeRequest,
   FlowUiControllerInjectionRequest,
   FlowUiControllerHandlerRequest,
+  AggregateUpdateServiceRequest,
   FlowUiWorkspaceResponse,
   ExistingEntityAttributeAdditionRequest,
   DatabaseEntityTableInspectionRequest,
@@ -2217,11 +2218,44 @@ ${javaMethods}
                   issues: [],
                 }
               }
+              case 'previewAggregateUpdateService': {
+                const change = payload as AggregateUpdateServiceRequest
+                return {
+                  accepted: true,
+                  changeSetId: 'aggregate-update-service:development',
+                  label: 'Create and wire transactional aggregate update service',
+                  planDigest: 'development-aggregate-update-service',
+                  files: [{
+                    relativePath: 'src/main/java/com/company/app/service/LoanAppUpdateService.java',
+                    mode: 'CREATE',
+                    afterFingerprint: 'development-aggregate-service',
+                    resultContent: [
+                      '@Component',
+                      'class LoanAppUpdateService {',
+                      '  @Transactional Set<Object> saveChanges(SaveContext context) {',
+                      '    return dataManager.save(context);',
+                      '  }',
+                      '}',
+                    ].join('\n'),
+                    appliedEditCount: 1,
+                  }, {
+                    relativePath: change.controllerSource.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: change.controllerSource.revisionFingerprint,
+                    afterFingerprint: 'development-aggregate-controller',
+                    originalContent: 'class LoanAppDetailView {}',
+                    resultContent: 'class LoanAppDetailView { /* transactional aggregate delegate */ }',
+                    appliedEditCount: 2,
+                  }],
+                  issues: [],
+                }
+              }
               case 'applyFlowUiPropertyChange':
               case 'applyFlowUiStructureChange':
               case 'applyFlowUiDirectTextChange':
               case 'applyFlowUiControllerInjection':
-              case 'applyFlowUiControllerHandler': {
+              case 'applyFlowUiControllerHandler':
+              case 'applyAggregateUpdateService': {
                 const label = action.replace(/^applyFlowUi/, '').replace(/([A-Z])/g, ' $1').trim()
                 developmentHistory = {
                   canUndo: true,
@@ -2855,6 +2889,17 @@ ${javaMethods}
 
   applyFlowUiControllerHandler(change: FlowUiControllerHandlerRequest, expectedPlanDigest: string) {
     return this.request<WorkspaceChangeApplyResponse>('applyFlowUiControllerHandler', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewAggregateUpdateService(change: AggregateUpdateServiceRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewAggregateUpdateService', change)
+  }
+
+  applyAggregateUpdateService(change: AggregateUpdateServiceRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyAggregateUpdateService', {
       change,
       expectedPlanDigest,
     })

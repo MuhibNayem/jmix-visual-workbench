@@ -34,6 +34,7 @@
         <projectService serviceImplementation="org.jmixworkbench.services.WorkspaceChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiWorkspaceService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiControllerChangeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.AggregateUpdateServiceChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.JmixRuntimeService"/>
         <projectService serviceImplementation="org.jmixworkbench.toolwindow.WorkbenchNavigationService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>

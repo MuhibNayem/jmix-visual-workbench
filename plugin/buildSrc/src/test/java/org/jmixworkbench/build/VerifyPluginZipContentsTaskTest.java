@@ -156,6 +156,28 @@ class VerifyPluginZipContentsTaskTest {
         assertTrue(error.getMessage().contains("RepositoryMethodRefactorService"));
     }
 
+    @Test
+    void rejectsAPluginWhosePackagedDescriptorOmitsAggregateUpdateService() throws Exception {
+        byte[] pluginJar = validPluginJar();
+        byte[] withoutAggregateService = rewriteNestedEntry(
+                pluginJar,
+                "META-INF/plugin.xml",
+                text(pluginJar, "META-INF/plugin.xml").replace(
+                        "<projectService serviceImplementation=\"org.jmixworkbench.services.AggregateUpdateServiceChangeService\" />",
+                        ""
+                )
+        );
+        Path archive = writeArchive("missing-aggregate-update-service.zip", Map.of(
+                "plugin/lib/main.jar", withoutAggregateService
+        ));
+
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> VerifyPluginZipContentsTask.inspectArchive(archive, "idea253")
+        );
+        assertTrue(error.getMessage().contains("AggregateUpdateServiceChangeService"));
+    }
+
     private Path writeArchive(String name, Map<String, byte[]> entries) throws Exception {
         Path archive = temporaryDirectory.resolve(name);
         try (ZipOutputStream output = new ZipOutputStream(java.nio.file.Files.newOutputStream(archive))) {
@@ -177,6 +199,7 @@ class VerifyPluginZipContentsTaskTest {
                         + "<projectService serviceImplementation=\"org.jmixworkbench.toolwindow.WorkbenchNavigationService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.EntityEventListenerService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.RepositoryMethodRefactorService\" />"
+                        + "<projectService serviceImplementation=\"org.jmixworkbench.services.AggregateUpdateServiceChangeService\" />"
                         + "</extensions>"
                         + "<actions><action id=\"JmixWorkbench.InjectRepository\" "
                         + "class=\"org.jmixworkbench.actions.InjectJmixRepositoryAction\">"
@@ -203,6 +226,14 @@ class VerifyPluginZipContentsTaskTest {
         );
         entries.put(
                 "org/jmixworkbench/services/RepositoryMethodRefactorService.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/AggregateUpdateServiceChangeService.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/generator/AggregateUpdateServiceGenerator.class",
                 new byte[]{0, 1, 2}
         );
         return nestedArchive(entries);

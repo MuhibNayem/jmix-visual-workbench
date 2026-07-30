@@ -58,6 +58,9 @@ import org.jmixworkbench.services.EntityAttributePropagationService
 import org.jmixworkbench.services.EntityEventListenerApplyRequest
 import org.jmixworkbench.services.EntityEventListenerRequest
 import org.jmixworkbench.services.EntityEventListenerService
+import org.jmixworkbench.services.AggregateUpdateServiceApplyRequest
+import org.jmixworkbench.services.AggregateUpdateServiceChangeService
+import org.jmixworkbench.services.AggregateUpdateServiceRequest
 import org.jmixworkbench.services.DataRepositoryApplyRequest
 import org.jmixworkbench.services.DataRepositoryChangeRequest
 import org.jmixworkbench.services.DataRepositoryChangeService
@@ -560,6 +563,14 @@ class JcefBridge(
             }
             if (action == "applyFlowUiControllerHandler") {
                 handleApplyFlowUiControllerHandler(action, requestId, payload)
+                return
+            }
+            if (action == "previewAggregateUpdateService") {
+                handlePreviewAggregateUpdateService(action, requestId, payload)
+                return
+            }
+            if (action == "applyAggregateUpdateService") {
+                handleApplyAggregateUpdateService(action, requestId, payload)
                 return
             }
             if (action == "inspectJmixRuntime") {
@@ -3047,6 +3058,51 @@ class JcefBridge(
         }
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             FlowUiControllerChangeService.getInstance(project).prepareHandler(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewAggregateUpdateService(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, AggregateUpdateServiceRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
+            AggregateUpdateServiceChangeService.getInstance(project).preview(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { preview ->
+                sendResponse(action, requestId, gson.toJson(preview))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyAggregateUpdateService(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, AggregateUpdateServiceApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationApplyError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            AggregateUpdateServiceChangeService.getInstance(project).prepareApply(request)
         }
             .inSmartMode(project)
             .expireWith(project)
