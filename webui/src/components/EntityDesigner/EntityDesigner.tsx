@@ -2484,9 +2484,17 @@ export default function EntityDesigner() {
                         )}
                       </div>
                     )}
+                    {source && (
+                      <ExistingAttributeSourceMetadataEditor
+                        attribute={selected}
+                        unmanagedAnnotations={source.unmanagedAnnotations ?? []}
+                        onChange={(change) => updateAttribute(selectedAttr, change)}
+                      />
+                    )}
                     <p className="mt-3 text-[10px] leading-relaxed text-gray-600">
-                      Mapping edits preserve property identity, Java/Kotlin type, manual annotations, accessors, and call sites.
-                      {' '}Unsafe relationship changes remain blocked by the backend even if a request bypasses this UI.
+                      Managed metadata edits preserve property identity, Java/Kotlin type, unmanaged annotations,
+                      accessors, and call sites. Unsafe relationship or mutability changes remain blocked by the backend
+                      even if a request bypasses this UI.
                     </p>
                     {source && (
                       <div className="mt-4 rounded-lg border border-jmix-500/20 bg-jmix-500/5 p-3">
@@ -3442,6 +3450,130 @@ function AttributeDetail({
           })}
         </div>
       </div>
+    </div>
+  )
+}
+
+function ExistingAttributeSourceMetadataEditor({
+  attribute,
+  unmanagedAnnotations,
+  onChange,
+}: {
+  attribute: AttributeModel
+  unmanagedAnnotations: string[]
+  onChange: (change: Partial<AttributeModel>) => void
+}) {
+  return (
+    <div className="mt-4 rounded-lg border border-violet-500/20 bg-violet-500/[0.04] p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-violet-200">
+            Source metadata
+          </div>
+          <p className="mt-1 text-[9px] leading-relaxed text-gray-500">
+            These annotations round-trip through exact Java/Kotlin source ranges. Unknown annotations remain untouched.
+          </p>
+        </div>
+        {attribute.readOnly && (
+          <span className="rounded border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-[8px] text-amber-200">
+            read-only accessor · native refactor required
+          </span>
+        )}
+      </div>
+      <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <Field label="Metadata comment">
+          <input
+            value={attribute.comment ?? ''}
+            onChange={event => onChange({ comment: event.target.value || undefined })}
+            className="w-full min-w-0"
+            aria-label={`Metadata comment for ${attribute.name}`}
+          />
+        </Field>
+        <Field label="Property datatype">
+          <input
+            value={attribute.propertyDatatype ?? ''}
+            onChange={event => onChange({ propertyDatatype: event.target.value || undefined })}
+            className="w-full min-w-0"
+            placeholder="customDatatypeId"
+            aria-label={`Property datatype for ${attribute.name}`}
+          />
+        </Field>
+        <Field label="Depends on properties">
+          <input
+            value={attribute.dependsOnProperties.join(', ')}
+            onChange={event => onChange({
+              dependsOnProperties: event.target.value
+                .split(',')
+                .map(value => value.trim())
+                .filter(Boolean),
+            })}
+            className="w-full min-w-0"
+            placeholder="firstName, lastName"
+            aria-label={`Dependencies for ${attribute.name}`}
+          />
+        </Field>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2">
+        {([
+          ['systemLevel', 'System level'],
+          ['lob', 'Large object'],
+          ['jmixProperty', 'Explicit Jmix property'],
+        ] as const).map(([property, label]) => (
+          <label key={property} className="flex cursor-pointer items-center gap-1.5 text-[10px] text-gray-400">
+            <input
+              type="checkbox"
+              checked={Boolean(attribute[property])}
+              onChange={event => onChange({ [property]: event.target.checked })}
+            />
+            {label}
+          </label>
+        ))}
+      </div>
+      <div className="mt-3 border-t border-violet-500/15 pt-3">
+        <div className="text-[9px] font-medium uppercase tracking-wider text-gray-500">
+          Jakarta validation
+        </div>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {VALIDATIONS.map(validation => {
+            const active = attribute.validations.some(candidate => candidate.type === validation)
+            return (
+              <button
+                key={validation}
+                type="button"
+                onClick={() => onChange({
+                  validations: active
+                    ? attribute.validations.filter(candidate => candidate.type !== validation)
+                    : [...attribute.validations, { type: validation }],
+                })}
+                className={`rounded border px-2 py-1 text-[9px] transition-colors ${
+                  active
+                    ? 'border-violet-500/40 bg-violet-500/20 text-violet-100'
+                    : 'border-surface-border bg-black/10 text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                {validation}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      {unmanagedAnnotations.length > 0 && (
+        <div className="mt-3 border-t border-violet-500/15 pt-3">
+          <div className="text-[9px] font-medium uppercase tracking-wider text-gray-500">
+            Preserved source-only annotations
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {unmanagedAnnotations.map(annotation => (
+              <span
+                key={annotation}
+                className="rounded border border-surface-border bg-black/15 px-2 py-1 font-mono text-[8px] text-gray-400"
+              >
+                @{annotation}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -4446,11 +4578,12 @@ function existingEntityModel(
     traits: [],
     attributes: snapshot.attributes.map((attribute) => {
       const discovered = attribute.associationDetails
+      const attributeType = discovered?.composition
+        ? 'composition' as const
+        : schemaAttributeType(attribute.javaType, attribute.association)
       return {
         name: attribute.name,
-        type: discovered?.composition
-          ? 'composition' as const
-          : schemaAttributeType(attribute.javaType, attribute.association),
+        type: attributeType,
         columnName: attribute.columnName,
         mandatory: !attribute.nullable,
         unique: attribute.unique,
@@ -4458,13 +4591,19 @@ function existingEntityModel(
         precision: attribute.precision,
         scale: attribute.scale,
         transientFlag: !attribute.persistent,
-        systemLevel: false,
-        readOnly: false,
-        jmixProperty: false,
-        dependsOnProperties: [],
-        lob: false,
+        comment: attribute.comment,
+        systemLevel: attribute.systemLevel ?? false,
+        readOnly: attribute.readOnly ?? false,
+        jmixProperty: attribute.jmixProperty ?? false,
+        dependsOnProperties: attribute.dependsOnProperties ?? [],
+        propertyDatatype: attribute.propertyDatatype,
+        lob: attribute.lob ?? false,
+        sqlType: attribute.sqlType,
+        ...(attributeType === 'enum' ? {
+          enumClass: attribute.javaType.replace(/\?$/, ''),
+        } : {}),
         enumIdType: 'string',
-        validations: [],
+        validations: attribute.validations ?? [],
         annotations: [],
         inBaseFetchPlan: true,
         ...(attribute.association ? {

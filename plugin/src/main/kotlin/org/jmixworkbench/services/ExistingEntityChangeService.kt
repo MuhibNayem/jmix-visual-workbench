@@ -35,6 +35,8 @@ import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.PreCondition
 import org.jmixworkbench.model.PreConditionType
+import org.jmixworkbench.model.ValidationModel
+import org.jmixworkbench.model.ValidationType
 import java.util.Locale
 
 /**
@@ -186,14 +188,26 @@ class ExistingEntityChangeService(
                     "Use a project-wide refactor with call-site impact analysis.",
                 )
             }
+            if (desired.readOnly != current.readOnly) {
+                return rejected(
+                    "JVW-ENTITY-ACCESSOR-REFACTOR-REQUIRES-IMPACT",
+                    "${current.name} changes mutability. Use a native accessor/property refactor so callers are reviewed.",
+                )
+            }
+            val sourceMetadataChanged = sourceMetadataChanged(current, desired)
             val desiredColumnName = desiredPhysicalColumnName(desired)
             val columnRenamed = desiredColumnName != current.columnName
             if (current.association) {
-                if (current.associationDetails == null && !columnRenamed) return@forEach
+                if (current.associationDetails == null && !columnRenamed) {
+                    if (sourceMetadataChanged) {
+                        metadataChanges += ExistingAttributeMetadataChange(current, desired)
+                    }
+                    return@forEach
+                }
                 relationshipEvolutionIssue(current, desired, request.entity)?.let {
                     return ExistingEntityChangeProposal(null, listOf(it))
                 }
-                if (columnRenamed) {
+                if (columnRenamed || sourceMetadataChanged) {
                     metadataChanges += ExistingAttributeMetadataChange(current, desired)
                 }
                 return@forEach
@@ -253,7 +267,8 @@ class ExistingEntityChangeService(
                 normalizedLength(desired) != normalizedLength(current) ||
                 desired.precision != current.precision ||
                 desired.scale != current.scale ||
-                columnRenamed
+                columnRenamed ||
+                sourceMetadataChanged
             ) {
                 metadataChanges += ExistingAttributeMetadataChange(current, desired)
             }
@@ -348,7 +363,7 @@ class ExistingEntityChangeService(
         )
         val persistedAdditions = additions.filterNot(AttributeModel::transientFlag)
         val migrationChanges = if (
-            (persistedAdditions.isNotEmpty() || metadataChanges.isNotEmpty()) &&
+            (persistedAdditions.isNotEmpty() || metadataChanges.any(ExistingAttributeMetadataChange::physicalMappingChanged)) &&
             !request.entity.databaseView &&
             request.entity.ddlGeneration.effectiveMode != DdlGenerationMode.DISABLED
         ) {
@@ -375,6 +390,13 @@ class ExistingEntityChangeService(
                     .append('\u0000').append(change.desired.length)
                     .append('\u0000').append(change.desired.precision)
                     .append('\u0000').append(change.desired.scale)
+                    .append('\u0000').append(change.desired.comment)
+                    .append('\u0000').append(change.desired.systemLevel)
+                    .append('\u0000').append(change.desired.lob)
+                    .append('\u0000').append(change.desired.jmixProperty)
+                    .append('\u0000').append(change.desired.dependsOnProperties.joinToString(","))
+                    .append('\u0000').append(change.desired.propertyDatatype)
+                    .append('\u0000').append(change.desired.validations)
             }
             allChanges.forEach { change ->
                 append('\u0000').append(change.relativePath).append('\u0000').append(change.createContent.orEmpty())
@@ -491,14 +513,29 @@ class ExistingEntityChangeService(
                         "Use a project-wide refactor with call-site impact analysis.",
                 )
             }
+            if (desired.readOnly != current.readOnly) {
+                return rejected(
+                    "JVW-ENTITY-ACCESSOR-REFACTOR-REQUIRES-IMPACT",
+                    "${current.name} changes Kotlin mutability. Use a native property refactor so callers are reviewed.",
+                )
+            }
+            val sourceMetadataChanged = sourceMetadataChanged(current, desired)
             val desiredColumnName = desiredPhysicalColumnName(desired)
             val columnRenamed = desiredColumnName != current.columnName
             if (current.association) {
-                if (current.associationDetails == null && !columnRenamed) return@forEach
+                if (current.associationDetails == null && !columnRenamed) {
+                    if (sourceMetadataChanged) {
+                        metadataChanges += ExistingAttributeMetadataChange(current, desired)
+                    }
+                    return@forEach
+                }
                 relationshipEvolutionIssue(current, desired, request.entity)?.let {
                     return ExistingEntityChangeProposal(null, listOf(it))
                 }
-                if (columnRenamed) {
+                if (columnRenamed || sourceMetadataChanged) {
+                    metadataChanges += ExistingAttributeMetadataChange(current, desired)
+                }
+                if (sourceMetadataChanged) {
                     metadataChanges += ExistingAttributeMetadataChange(current, desired)
                 }
                 return@forEach
@@ -558,7 +595,8 @@ class ExistingEntityChangeService(
                 normalizedLength(desired) != normalizedLength(current) ||
                 desired.precision != current.precision ||
                 desired.scale != current.scale ||
-                columnRenamed
+                columnRenamed ||
+                sourceMetadataChanged
             ) {
                 metadataChanges += ExistingAttributeMetadataChange(current, desired)
             }
@@ -662,7 +700,7 @@ class ExistingEntityChangeService(
         )
         val persisted = additions.filterNot(AttributeModel::transientFlag)
         val migrationChanges = if (
-            (persisted.isNotEmpty() || metadataChanges.isNotEmpty()) &&
+            (persisted.isNotEmpty() || metadataChanges.any(ExistingAttributeMetadataChange::physicalMappingChanged)) &&
             !request.entity.databaseView &&
             request.entity.ddlGeneration.effectiveMode != DdlGenerationMode.DISABLED
         ) {
@@ -688,6 +726,13 @@ class ExistingEntityChangeService(
                     .append('\u0000').append(it.desired.length)
                     .append('\u0000').append(it.desired.precision)
                     .append('\u0000').append(it.desired.scale)
+                    .append('\u0000').append(it.desired.comment)
+                    .append('\u0000').append(it.desired.systemLevel)
+                    .append('\u0000').append(it.desired.lob)
+                    .append('\u0000').append(it.desired.jmixProperty)
+                    .append('\u0000').append(it.desired.dependsOnProperties.joinToString(","))
+                    .append('\u0000').append(it.desired.propertyDatatype)
+                    .append('\u0000').append(it.desired.validations)
             }
         }
         return ExistingEntityChangeProposal(
@@ -1296,6 +1341,168 @@ class ExistingEntityChangeService(
             null
         }
 
+    private fun sourceMetadataChanged(
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): Boolean =
+        current.comment != desired.comment?.takeIf(String::isNotBlank) ||
+            current.systemLevel != desired.systemLevel ||
+            current.lob != desired.lob ||
+            current.jmixProperty != desired.jmixProperty ||
+            current.dependsOnProperties != desired.dependsOnProperties ||
+            current.propertyDatatype != desired.propertyDatatype?.takeIf(String::isNotBlank) ||
+            current.validations.map(::normalizedValidation) != desired.validations.map(::normalizedValidation)
+
+    private fun normalizedValidation(validation: ValidationModel): List<String> = listOf(
+        validation.type.name,
+        validation.value.orEmpty(),
+        validation.value2.orEmpty(),
+        validation.message.orEmpty(),
+        validation.groups.sorted().joinToString("\u0001"),
+    )
+
+    private fun managedSourceMetadataEdits(
+        source: String,
+        ownerStart: Int,
+        annotations: List<SourceAnnotation>,
+        desired: AttributeModel,
+        kotlin: Boolean,
+    ): GeneratedMetadataEdits? {
+        val desiredAnnotations = linkedMapOf<String, RenderedAnnotation>()
+        fun add(
+            name: String,
+            importPath: String,
+            arguments: String? = null,
+        ) {
+            desiredAnnotations[name] = RenderedAnnotation(name, importPath, arguments)
+        }
+        if (desired.systemLevel) {
+            add("SystemLevel", "io.jmix.core.entity.annotation.SystemLevel")
+        }
+        desired.comment?.takeIf(String::isNotBlank)?.let {
+            add(
+                "Comment",
+                "io.jmix.core.metamodel.annotation.Comment",
+                "\"${escapeJavaString(it)}\"",
+            )
+        }
+        if (desired.lob) add("Lob", "jakarta.persistence.Lob")
+        if (desired.jmixProperty) {
+            add(
+                "JmixProperty",
+                "io.jmix.core.metamodel.annotation.JmixProperty",
+                if (desired.mandatory) "mandatory = true" else null,
+            )
+        }
+        if (desired.dependsOnProperties.isNotEmpty()) {
+            val values = desired.dependsOnProperties.joinToString(", ") {
+                "\"${escapeJavaString(it)}\""
+            }
+            add(
+                "DependsOnProperties",
+                "io.jmix.core.metamodel.annotation.DependsOnProperties",
+                if (kotlin) "[$values]" else "{$values}",
+            )
+        }
+        desired.propertyDatatype?.takeIf(String::isNotBlank)?.let {
+            add(
+                "PropertyDatatype",
+                "io.jmix.core.metamodel.annotation.PropertyDatatype",
+                "\"${escapeJavaString(it)}\"",
+            )
+        }
+        desired.validations.forEach { validation ->
+            if (validation.type.annotation in desiredAnnotations) return null
+            val arguments = validationArguments(validation, kotlin)
+            add(validation.type.annotation, validation.type.importPath, arguments)
+        }
+
+        val managedNames = SOURCE_METADATA_ANNOTATIONS +
+            ValidationType.entries.map(ValidationType::annotation)
+        val existing = annotations.filter { it.name in managedNames }
+        if (existing.groupingBy(SourceAnnotation::name).eachCount().any { it.value > 1 }) {
+            return null
+        }
+        val edits = mutableListOf<WorkspaceTextEdit>()
+        val imports = mutableSetOf<String>()
+        val existingByName = existing.associateBy(SourceAnnotation::name)
+        existing.forEach { annotation ->
+            val rendered = desiredAnnotations[annotation.name]
+            if (rendered == null) {
+                edits += WorkspaceTextEdit(
+                    startOffset = annotation.startOffset,
+                    endOffset = annotation.endOffset,
+                    expectedText = annotation.text,
+                    replacement = "",
+                )
+            } else {
+                val prefix = annotation.text.substringBefore('(').trim()
+                val replacement = rendered.text(prefix)
+                if (replacement != annotation.text) {
+                    edits += WorkspaceTextEdit(
+                        startOffset = annotation.startOffset,
+                        endOffset = annotation.endOffset,
+                        expectedText = annotation.text,
+                        replacement = replacement,
+                    )
+                }
+            }
+        }
+        val missing = desiredAnnotations.values.filter { it.name !in existingByName }
+        if (missing.isNotEmpty()) {
+            val lineStart = source.lastIndexOf('\n', (ownerStart - 1).coerceAtLeast(0)) + 1
+            val indentation = source.substring(lineStart, ownerStart)
+                .takeWhile { it == ' ' || it == '\t' }
+            edits += WorkspaceTextEdit(
+                startOffset = ownerStart,
+                endOffset = ownerStart,
+                expectedText = "",
+                replacement = missing.joinToString(separator = "\n$indentation", postfix = "\n$indentation") {
+                    it.text("@${it.name}")
+                },
+            )
+            imports += missing.map(RenderedAnnotation::importPath)
+            imports += desired.validations
+                .flatMap(ValidationModel::groups)
+                .filter { '.' in it }
+        }
+        return GeneratedMetadataEdits(edits, imports)
+    }
+
+    private fun validationArguments(validation: ValidationModel, kotlin: Boolean): String? {
+        val arguments = linkedMapOf<String, String>()
+        when (validation.type) {
+            ValidationType.SIZE -> {
+                validation.value?.let { arguments["min"] = it }
+                validation.value2?.let { arguments["max"] = it }
+            }
+            ValidationType.MIN, ValidationType.MAX ->
+                validation.value?.let { arguments["value"] = it }
+            ValidationType.DECIMAL_MIN, ValidationType.DECIMAL_MAX ->
+                validation.value?.let { arguments["value"] = "\"${escapeJavaString(it)}\"" }
+            ValidationType.PATTERN ->
+                validation.value?.let { arguments["regexp"] = "\"${escapeJavaString(it)}\"" }
+            ValidationType.DIGITS -> {
+                validation.value?.let { arguments["integer"] = it }
+                validation.value2?.let { arguments["fraction"] = it }
+            }
+            else -> Unit
+        }
+        validation.message?.let {
+            arguments["message"] = "\"${escapeJavaString(it)}\""
+        }
+        if (validation.groups.isNotEmpty()) {
+            arguments["groups"] = validation.groups.joinToString(
+                prefix = if (kotlin) "[" else "{",
+                postfix = if (kotlin) "]" else "}",
+            ) {
+                if (kotlin) "${it.substringAfterLast('.')}::class" else "${it.substringAfterLast('.')}.class"
+            }
+        }
+        return arguments.entries.joinToString(", ") { (name, value) -> "$name = $value" }
+            .takeIf(String::isNotBlank)
+    }
+
     private fun metadataAnnotationEdits(
         source: String,
         entityClass: com.intellij.psi.PsiClass,
@@ -1306,6 +1513,23 @@ class ExistingEntityChangeService(
         changes.forEach { change ->
             val field = entityClass.findFieldByName(change.current.name, false) ?: return null
             val modifierList = field.modifierList ?: return null
+            val sourceMetadata = managedSourceMetadataEdits(
+                source = source,
+                ownerStart = modifierList.textRange.startOffset,
+                annotations = modifierList.annotations.map { annotation ->
+                    SourceAnnotation(
+                        name = annotation.nameReferenceElement?.text?.substringAfterLast('.').orEmpty(),
+                        text = annotation.text,
+                        startOffset = annotation.textRange.startOffset,
+                        endOffset = annotation.textRange.endOffset,
+                    )
+                },
+                desired = change.desired,
+                kotlin = false,
+            ) ?: return null
+            edits += sourceMetadata.edits
+            imports += sourceMetadata.imports
+            if (!change.physicalMappingChanged) return@forEach
             val managedAnnotationName = if (change.relationshipColumnRenamed) "JoinColumn" else "Column"
             val columnAnnotation = modifierList.annotations.firstOrNull { annotation ->
                 val name = annotation.nameReferenceElement?.text?.substringAfterLast('.')
@@ -1393,6 +1617,32 @@ class ExistingEntityChangeService(
         val imports = mutableSetOf<String>()
         changes.forEach { change ->
             val property = propertiesByName[change.current.name] ?: return null
+            val propertyAnnotations = PsiTreeUtil.findChildrenOfType(
+                property,
+                com.intellij.psi.PsiElement::class.java,
+            ).filter { element ->
+                element.javaClass.simpleName == "KtAnnotationEntry"
+            }.map { annotation ->
+                SourceAnnotation(
+                    name = annotation.text.substringBefore('(')
+                        .substringAfterLast(':')
+                        .substringAfterLast('.')
+                        .removePrefix("@"),
+                    text = annotation.text,
+                    startOffset = annotation.textRange.startOffset,
+                    endOffset = annotation.textRange.endOffset,
+                )
+            }
+            val sourceMetadata = managedSourceMetadataEdits(
+                source = source,
+                ownerStart = property.textRange.startOffset,
+                annotations = propertyAnnotations,
+                desired = change.desired,
+                kotlin = true,
+            ) ?: return null
+            edits += sourceMetadata.edits
+            imports += sourceMetadata.imports
+            if (!change.physicalMappingChanged) return@forEach
             val managedAnnotationName = if (change.relationshipColumnRenamed) "JoinColumn" else "Column"
             val columnAnnotation = PsiTreeUtil.findChildrenOfType(
                 property,
@@ -1665,6 +1915,14 @@ class ExistingEntityChangeService(
             "precision",
             "scale",
         )
+        private val SOURCE_METADATA_ANNOTATIONS = setOf(
+            "SystemLevel",
+            "Comment",
+            "Lob",
+            "JmixProperty",
+            "DependsOnProperties",
+            "PropertyDatatype",
+        )
         private val KOTLIN_PACKAGE =
             Regex("""(?m)^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$""")
         private val KOTLIN_IMPORT =
@@ -1715,12 +1973,36 @@ private data class ExistingAttributeMetadataChange(
 
     val relationshipColumnRenamed: Boolean
         get() = current.association && columnRenamed
+
+    val physicalMappingChanged: Boolean
+        get() = columnRenamed ||
+            desired.mandatory != !current.nullable ||
+            desired.unique != current.unique ||
+            desired.length != current.length ||
+            desired.precision != current.precision ||
+            desired.scale != current.scale
 }
 
 private data class GeneratedMetadataEdits(
     val edits: List<WorkspaceTextEdit>,
     val imports: Set<String>,
 )
+
+private data class SourceAnnotation(
+    val name: String,
+    val text: String,
+    val startOffset: Int,
+    val endOffset: Int,
+)
+
+private data class RenderedAnnotation(
+    val name: String,
+    val importPath: String,
+    val arguments: String?,
+) {
+    fun text(prefix: String): String =
+        if (arguments.isNullOrBlank()) prefix else "$prefix($arguments)"
+}
 
 internal data class ExistingEntityChangeProposal(
     val changeSet: WorkspaceChangeSet?,

@@ -449,10 +449,20 @@ export interface SchemaEntityAttributeSnapshot {
   length?: number
   precision?: number
   scale?: number
+  sqlType?: string
   persistent: boolean
   association: boolean
   associationDetails?: SchemaAssociationSnapshot
   moneyCandidate: boolean
+  comment?: string
+  systemLevel?: boolean
+  lob?: boolean
+  jmixProperty?: boolean
+  dependsOnProperties?: string[]
+  propertyDatatype?: string
+  validations?: ValidationModel[]
+  readOnly?: boolean
+  unmanagedAnnotations?: string[]
 }
 
 export interface SchemaAssociationSnapshot extends AssociationConfig {

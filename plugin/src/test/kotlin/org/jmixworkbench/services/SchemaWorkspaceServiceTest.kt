@@ -29,6 +29,8 @@ import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.ProjectConfig
 import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.FetchType
+import org.jmixworkbench.model.ValidationModel
+import org.jmixworkbench.model.ValidationType
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -664,6 +666,194 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(java.contains("public String manualLabel()"))
         assertTrue(java.contains("protected BigDecimal netAmount;"))
         assertFalse(java.contains("""@Column(name = "NET_AMOUNT""""))
+    }
+
+    fun testHandwrittenJavaAndKotlinAttributeMetadataIsReconstructedAndEditedWithoutTouchingCustomAnnotations() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/PayrollMetadata.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.entity.annotation.SystemLevel;
+                import io.jmix.core.metamodel.annotation.Comment;
+                import io.jmix.core.metamodel.annotation.DependsOnProperties;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import io.jmix.core.metamodel.annotation.JmixProperty;
+                import io.jmix.core.metamodel.annotation.PropertyDatatype;
+                import jakarta.persistence.Column;
+                import jakarta.persistence.Entity;
+                import jakarta.persistence.Id;
+                import jakarta.persistence.Lob;
+                import jakarta.persistence.Table;
+                import jakarta.validation.constraints.Size;
+                import java.util.UUID;
+
+                @JmixEntity
+                @Entity
+                @Table(name = "PAYROLL_METADATA")
+                public class PayrollMetadata {
+                    @Id
+                    private UUID id;
+
+                    @CustomPayrollAudit(level = "strict")
+                    @Comment("Original caption")
+                    @SystemLevel
+                    @Lob
+                    @JmixProperty
+                    @DependsOnProperties({"firstName", "lastName"})
+                    @PropertyDatatype("payrollText")
+                    @Size(min = 2, max = 64, message = "invalid payroll label", groups = {PayrollChecks.class})
+                    @Column(name = "DISPLAY_NAME", nullable = false, length = 64, columnDefinition = "CLOB")
+                    private String displayName;
+
+                    public String manualLedgerKey() {
+                        return "LEDGER-" + displayName;
+                    }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/KotlinPayrollMetadata.kt",
+                """
+                package com.acme.entity
+
+                import io.jmix.core.metamodel.annotation.Comment
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.Column
+                import jakarta.persistence.Entity
+                import jakarta.persistence.Id
+                import jakarta.persistence.Table
+                import jakarta.validation.constraints.Size
+                import java.util.UUID
+
+                @JmixEntity
+                @Entity
+                @Table(name = "KOTLIN_PAYROLL_METADATA")
+                open class KotlinPayrollMetadata {
+                    @Id
+                    var id: UUID? = null
+
+                    @CustomKotlinMetadata
+                    @Comment("Original Kotlin note")
+                    @Size(min = 1, max = 30)
+                    @Column(name = "NOTE", length = 30)
+                    var note: String? = null
+
+                    fun manualNote(): String = note ?: "none"
+                }
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val javaSnapshot = workspace.entities.single { it.className == "PayrollMetadata" }
+        val kotlinSnapshot = workspace.entities.single { it.className == "KotlinPayrollMetadata" }
+        val javaAttribute = javaSnapshot.attributes.single { it.name == "displayName" }
+        val kotlinAttribute = kotlinSnapshot.attributes.single { it.name == "note" }
+
+        assertEquals("Original caption", javaAttribute.comment)
+        assertTrue(javaAttribute.systemLevel)
+        assertTrue(javaAttribute.lob)
+        assertTrue(javaAttribute.jmixProperty)
+        assertEquals(listOf("firstName", "lastName"), javaAttribute.dependsOnProperties)
+        assertEquals("payrollText", javaAttribute.propertyDatatype)
+        assertEquals("CLOB", javaAttribute.sqlType)
+        assertEquals(listOf("CustomPayrollAudit"), javaAttribute.unmanagedAnnotations)
+        val javaSize = javaAttribute.validations.single()
+        assertEquals(ValidationType.SIZE, javaSize.type)
+        assertEquals("2", javaSize.value)
+        assertEquals("64", javaSize.value2)
+        assertEquals("invalid payroll label", javaSize.message)
+        assertEquals(listOf("PayrollChecks"), javaSize.groups)
+        assertEquals("Original Kotlin note", kotlinAttribute.comment)
+        assertEquals(listOf("CustomKotlinMetadata"), kotlinAttribute.unmanagedAnnotations)
+
+        val javaDesired = EntityModel(
+            className = javaSnapshot.className,
+            packageName = javaSnapshot.qualifiedName.substringBeforeLast('.'),
+            entityName = javaSnapshot.entityName,
+            tableName = javaSnapshot.tableName,
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "displayName",
+                    type = AttributeType.STRING,
+                    columnName = "DISPLAY_NAME",
+                    mandatory = true,
+                    length = 64,
+                    comment = "Reviewed payroll caption",
+                    lob = true,
+                    dependsOnProperties = mutableListOf("employeeNo"),
+                    propertyDatatype = "reviewedPayrollText",
+                    validations = mutableListOf(
+                        ValidationModel(
+                            ValidationType.SIZE,
+                            value = "3",
+                            value2 = "80",
+                            message = "reviewed payroll label",
+                            groups = mutableListOf("PayrollChecks"),
+                        ),
+                        ValidationModel(ValidationType.NOT_BLANK),
+                    ),
+                ),
+            ),
+            ddlGeneration = DdlGenerationConfig(false, DdlGenerationMode.DISABLED),
+        )
+        val javaPreview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(javaSnapshot.sourceLocator, javaDesired),
+        )
+        assertTrue(javaPreview.accepted, javaPreview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(1, javaPreview.files.size)
+        val java = javaPreview.files.single().resultContent
+        assertTrue(java.contains("@CustomPayrollAudit(level = \"strict\")"))
+        assertTrue(java.contains("@Comment(\"Reviewed payroll caption\")"))
+        assertFalse(java.contains("@SystemLevel"))
+        assertFalse(java.contains("@JmixProperty"))
+        assertTrue(java.contains("@Lob"))
+        assertTrue(java.contains("@DependsOnProperties({\"employeeNo\"})"))
+        assertTrue(java.contains("@PropertyDatatype(\"reviewedPayrollText\")"))
+        assertTrue(java.contains("@Size(min = 3, max = 80, message = \"reviewed payroll label\", groups = {PayrollChecks.class})"))
+        assertTrue(java.contains("@NotBlank"))
+        assertTrue(java.contains("columnDefinition = \"CLOB\""))
+        assertTrue(java.contains("public String manualLedgerKey()"))
+
+        val kotlinDesired = EntityModel(
+            className = kotlinSnapshot.className,
+            packageName = kotlinSnapshot.qualifiedName.substringBeforeLast('.'),
+            sourceLanguage = EntitySourceLanguage.KOTLIN,
+            entityName = kotlinSnapshot.entityName,
+            tableName = kotlinSnapshot.tableName,
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "note",
+                    type = AttributeType.STRING,
+                    columnName = "NOTE",
+                    length = 30,
+                    comment = "Reviewed Kotlin note",
+                    jmixProperty = true,
+                    validations = mutableListOf(
+                        ValidationModel(ValidationType.SIZE, value = "2", value2 = "40"),
+                        ValidationModel(ValidationType.NOT_BLANK),
+                    ),
+                ),
+            ),
+            ddlGeneration = DdlGenerationConfig(false, DdlGenerationMode.DISABLED),
+        )
+        val kotlinPreview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(kotlinSnapshot.sourceLocator, kotlinDesired),
+        )
+        assertTrue(kotlinPreview.accepted, kotlinPreview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(1, kotlinPreview.files.size)
+        val kotlin = kotlinPreview.files.single().resultContent
+        assertTrue(kotlin.contains("@CustomKotlinMetadata"))
+        assertTrue(kotlin.contains("@Comment(\"Reviewed Kotlin note\")"))
+        assertTrue(kotlin.contains("@JmixProperty"))
+        assertTrue(kotlin.contains("@Size(min = 2, max = 40)"))
+        assertTrue(kotlin.contains("@NotBlank"))
+        assertTrue(kotlin.contains("fun manualNote(): String"))
     }
 
     fun testExistingKotlinEntityAdditionPreservesManualSourceAndAddsRollbackMigration() {

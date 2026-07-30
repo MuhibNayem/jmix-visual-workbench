@@ -985,6 +985,17 @@ export const developmentSchemaWorkspace: SchemaWorkspaceResponse = {
         persistent: true,
         association: false,
         moneyCandidate: false,
+        comment: 'Stable external application identifier',
+        jmixProperty: true,
+        dependsOnProperties: ['employee'],
+        validations: [{
+          type: 'size',
+          value: '4',
+          value2: '40',
+          message: 'Application number must be 4–40 characters',
+          groups: ['com.company.loan.validation.ApplicationChecks'],
+        }],
+        unmanagedAnnotations: ['LoanBusinessKey'],
       },
       {
         artifactId: 'entity-loan:loanAmount',

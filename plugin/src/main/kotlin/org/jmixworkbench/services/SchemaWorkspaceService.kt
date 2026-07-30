@@ -22,6 +22,8 @@ import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.JoinTableConfig
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.EntityType
+import org.jmixworkbench.model.ValidationModel
+import org.jmixworkbench.model.ValidationType
 import java.time.LocalDate
 import java.util.Locale
 
@@ -154,6 +156,8 @@ class SchemaWorkspaceService(
                 val attributes = attributesByEntity[entity.id].orEmpty().map { attribute ->
                     val name = attribute.displayName
                     val type = attribute.summary.orEmpty().substringBefore(" attribute of").trim()
+                    val declaration = fieldDeclaration(source, name)
+                    val metadata = attributeMetadata(source, name, declaration)
                     val association = associationSnapshot(
                         source = source,
                         fieldName = name,
@@ -188,8 +192,9 @@ class SchemaWorkspaceService(
                             association?.localIdAttributeName ?: name,
                             "scale",
                         ),
+                        sqlType = metadata.sqlType,
                         persistent = entityType != EntityType.DTO &&
-                            !TRANSIENT_ANNOTATION.containsMatchIn(fieldDeclaration(source, name)),
+                            !TRANSIENT_ANNOTATION.containsMatchIn(declaration),
                         association = association != null || run {
                             val normalizedType = type.trim().removeSuffix("?").trim()
                             val simpleType = normalizedType.substringAfterLast('.').substringBefore('<')
@@ -200,6 +205,15 @@ class SchemaWorkspaceService(
                         },
                         associationDetails = association,
                         moneyCandidate = MONEY_NAME.containsMatchIn(name),
+                        comment = metadata.comment,
+                        systemLevel = metadata.systemLevel,
+                        lob = metadata.lob,
+                        jmixProperty = metadata.jmixProperty,
+                        dependsOnProperties = metadata.dependsOnProperties,
+                        propertyDatatype = metadata.propertyDatatype,
+                        validations = metadata.validations,
+                        readOnly = metadata.readOnly,
+                        unmanagedAnnotations = metadata.unmanagedAnnotations,
                     )
                 }
                 val migratedBy = schemaTables[tableName.uppercase(Locale.ROOT)].orEmpty()
@@ -1351,6 +1365,99 @@ class SchemaWorkspaceService(
         return sourceField(source, fieldName)?.declaration.orEmpty()
     }
 
+    private fun attributeMetadata(
+        source: String,
+        fieldName: String,
+        declaration: String,
+    ): ParsedAttributeMetadata {
+        fun has(name: String): Boolean = Regex(
+            """@\s*(?:[\w.]+\.)?${Regex.escape(name)}\b""",
+        ).containsMatchIn(declaration)
+        fun firstString(arguments: String?): String? = arguments
+            ?.let { STRING_LITERAL.find(it)?.groupValues?.get(1) }
+            ?.let(::unescapeAnnotationString)
+        fun argument(arguments: String?, name: String): String? = arguments
+            ?.let {
+                Regex("""(?s)\b${Regex.escape(name)}\s*=\s*("(?:\\.|[^"\\])*"|[^,\])}]+)""")
+                    .find(it)
+                    ?.groupValues
+                    ?.get(1)
+                    ?.trim()
+            }
+        fun stringArgument(arguments: String?, name: String): String? =
+            argument(arguments, name)
+                ?.takeIf { it.startsWith('"') && it.endsWith('"') }
+                ?.removeSurrounding("\"")
+                ?.let(::unescapeAnnotationString)
+
+        val validations = ValidationType.entries.mapNotNull { type ->
+            if (!has(type.annotation)) return@mapNotNull null
+            val arguments = annotationArguments(declaration, type.annotation)
+            val values = when (type) {
+                ValidationType.SIZE ->
+                    argument(arguments, "min") to argument(arguments, "max")
+                ValidationType.DIGITS ->
+                    argument(arguments, "integer") to argument(arguments, "fraction")
+                ValidationType.PATTERN ->
+                    stringArgument(arguments, "regexp") to null
+                ValidationType.DECIMAL_MIN, ValidationType.DECIMAL_MAX ->
+                    (stringArgument(arguments, "value") ?: firstString(arguments)) to null
+                ValidationType.MIN, ValidationType.MAX ->
+                    (argument(arguments, "value") ?: arguments?.trim()?.takeIf(String::isNotBlank)) to null
+                else -> null to null
+            }
+            val groups = arguments
+                ?.let { VALIDATION_GROUPS.find(it)?.groupValues?.get(1) }
+                ?.let { body ->
+                    CLASS_LITERAL.findAll(body)
+                        .map { it.groupValues[1] }
+                        .distinct()
+                        .toMutableList()
+                }
+                ?: mutableListOf()
+            ValidationModel(
+                type = type,
+                value = values.first,
+                value2 = values.second,
+                message = stringArgument(arguments, "message"),
+                groups = groups,
+            )
+        }
+        val managed = MANAGED_ATTRIBUTE_ANNOTATIONS +
+            ValidationType.entries.map(ValidationType::annotation)
+        val annotationNames = ANNOTATION_NAME.findAll(declaration)
+            .map { it.groupValues[1].substringAfterLast('.') }
+            .filterNot { it in managed }
+            .distinct()
+            .sorted()
+            .toList()
+        val dependsOn = annotationArguments(declaration, "DependsOnProperties")
+            ?.let { arguments ->
+                STRING_LITERAL.findAll(arguments)
+                    .map { unescapeAnnotationString(it.groupValues[1]) }
+                    .distinct()
+                    .toList()
+            }
+            .orEmpty()
+        val columnArguments = annotationArguments(declaration, "Column")
+        return ParsedAttributeMetadata(
+            comment = firstString(annotationArguments(declaration, "Comment")),
+            systemLevel = has("SystemLevel"),
+            lob = has("Lob"),
+            jmixProperty = has("JmixProperty"),
+            dependsOnProperties = dependsOn,
+            propertyDatatype = firstString(annotationArguments(declaration, "PropertyDatatype")),
+            validations = validations,
+            readOnly = Regex("""\bval\s+${Regex.escape(fieldName)}\b""").containsMatchIn(declaration),
+            unmanagedAnnotations = annotationNames,
+            sqlType = stringArgument(columnArguments, "columnDefinition"),
+        )
+    }
+
+    private fun unescapeAnnotationString(value: String): String =
+        value.replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+
     private fun associationSnapshot(
         source: String,
         fieldName: String,
@@ -1641,6 +1748,40 @@ class SchemaWorkspaceService(
             Regex("""@\s*(?:[\w.]+\.)?Embeddable\b""")
         private val JPA_ENTITY_ANNOTATION =
             Regex("""@\s*(?:jakarta\.persistence\.)?Entity\b""")
+        private val ANNOTATION_NAME = Regex("""@\s*([\w.]+)""")
+        private val STRING_LITERAL = Regex(""""((?:\\.|[^"\\])*)"""")
+        private val VALIDATION_GROUPS =
+            Regex("""(?s)\bgroups\s*=\s*(?:\{|\[)(.*?)(?:}|\])""")
+        private val CLASS_LITERAL = Regex("""([\w.]+)\s*(?:::class|\.class)""")
+        private val MANAGED_ATTRIBUTE_ANNOTATIONS = setOf(
+            "Column",
+            "JoinColumn",
+            "JoinColumns",
+            "JoinTable",
+            "ManyToOne",
+            "OneToMany",
+            "ManyToMany",
+            "OneToOne",
+            "Transient",
+            "JmixProperty",
+            "DependsOnProperties",
+            "PropertyDatatype",
+            "SystemLevel",
+            "Comment",
+            "Lob",
+            "Composition",
+            "OnDelete",
+            "OnDeleteInverse",
+            "InstanceName",
+            "Id",
+            "EmbeddedId",
+            "JmixId",
+            "JmixGeneratedValue",
+            "GeneratedValue",
+            "SequenceGenerator",
+            "Enumerated",
+            "JvmField",
+        )
         private val ENTITY_ANNOTATION = Regex("""(?s)@Entity\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
         private val COLUMN_ANNOTATION = Regex("""@Column\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
         private val JAVA_FIELD_DECLARATION = Regex(
@@ -1719,6 +1860,19 @@ private data class ParsedSourceField(
     val type: String,
     val name: String,
     val declaration: String,
+)
+
+private data class ParsedAttributeMetadata(
+    val comment: String?,
+    val systemLevel: Boolean,
+    val lob: Boolean,
+    val jmixProperty: Boolean,
+    val dependsOnProperties: List<String>,
+    val propertyDatatype: String?,
+    val validations: List<ValidationModel>,
+    val readOnly: Boolean,
+    val unmanagedAnnotations: List<String>,
+    val sqlType: String?,
 )
 
 private data class ExpectedSchemaColumn(
@@ -1827,10 +1981,20 @@ data class SchemaEntityAttributeSnapshot(
     val length: Int? = null,
     val precision: Int? = null,
     val scale: Int? = null,
+    val sqlType: String? = null,
     val persistent: Boolean = true,
     val association: Boolean,
     val associationDetails: SchemaAssociationSnapshot? = null,
     val moneyCandidate: Boolean,
+    val comment: String? = null,
+    val systemLevel: Boolean = false,
+    val lob: Boolean = false,
+    val jmixProperty: Boolean = false,
+    val dependsOnProperties: List<String> = emptyList(),
+    val propertyDatatype: String? = null,
+    val validations: List<ValidationModel> = emptyList(),
+    val readOnly: Boolean = false,
+    val unmanagedAnnotations: List<String> = emptyList(),
 )
 
 data class SchemaAssociationSnapshot(
