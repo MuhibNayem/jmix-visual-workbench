@@ -3660,6 +3660,8 @@ function existingEntityModel(
     },
     entityName: snapshot.entityName,
     tableName: snapshot.tableName,
+    tableSchema: snapshot.tableSchema,
+    tableCatalog: snapshot.tableCatalog,
     entityType: 'entity',
     id: {
       type: snapshot.idType,

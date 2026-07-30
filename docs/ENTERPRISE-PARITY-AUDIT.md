@@ -52,6 +52,12 @@ official
 Spring `@Bean` aliases and factory products follow the public
 [Spring bean naming contract](https://docs.spring.io/spring-framework/reference/core/beans/java/bean-annotation.html).
 
+Entity-generation evidence update (2026-07-30): Java and Kotlin generated
+embeddable identifiers now implement `Serializable` with deterministic
+member-based equality/hash semantics, and generated `@Table` mappings retain
+explicit schema and catalog qualifiers. Composite-ID schema migration proof is
+still tracked as a separate gate.
+
 | Requirement area | Status | Implemented evidence | Remaining enterprise gap |
 |---|---|---|---|
 | Existing multi-module projects | Strong | Composite Gradle topology, source sets, typed exact custom roots (`srcDir`, `srcDirs`, `setSrcDirs`, assignment and nested-DSL forms), generated roots, source-less/orphan/recovered modules, common `projectDir` remaps (`file`, `File(rootDir, …)`, `settingsDir.resolve`, layout directory APIs), IntelliJ and static dependency edges, deterministic ownership conflict handling, YAML/XML/SQL/Java/Kotlin/Groovy parsing, incremental cache, explicit partial-index health, and a verified remapped 16-module dependency chain. Recovered roots now remain authoritative destinations for Java/resource/test generation, FlowUI/BPMN/DMN, security, server logic, scenarios, Liquibase classpaths, base-package inference and runtime configuration discovery | Validate against more real 3,000+ file repositories, included builds outside registered IntelliJ roots, and build logic whose module/source topology is created dynamically at Gradle execution time |

@@ -105,7 +105,10 @@ export interface EntityModel {
   }
   entityName: string
   tableName: string
+  tableSchema?: string
+  tableCatalog?: string
   entityType: EntityType
+  embeddableIdentity?: boolean
   id: {
     type: IdType
     generation: IdGeneration

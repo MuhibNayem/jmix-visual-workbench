@@ -67,6 +67,21 @@ object EntityGenerator {
                 "JVW-ENTITY-EMBEDDED-ID-CLASS-MISSING: an embedded identifier needs an embeddable class."
             }
         }
+        if (entity.embeddableIdentity) {
+            require(entity.entityType == EntityType.EMBEDDABLE && entity.attributes.isNotEmpty()) {
+                "JVW-ENTITY-EMBEDDABLE-IDENTITY-INVALID: a composite identifier must be a non-empty embeddable."
+            }
+            require(entity.attributes.all {
+                !it.transientFlag &&
+                    it.type !in setOf(
+                        AttributeType.ASSOCIATION,
+                        AttributeType.COMPOSITION,
+                        AttributeType.EMBEDDED,
+                    )
+            }) {
+                "JVW-ENTITY-EMBEDDABLE-IDENTITY-SHAPE: composite identifier members must be persistent scalar attributes."
+            }
+        }
         if (entity.entityType == EntityType.DTO) {
             require(entity.id.type != IdType.EMBEDDED) {
                 "JVW-ENTITY-DTO-EMBEDDED-ID-UNSUPPORTED: DTO entities need a scalar Jmix identifier."
@@ -239,7 +254,13 @@ object EntityGenerator {
             b.annotation {
                 name = "Table"
                 importPath = "jakarta.persistence.Table"
-                param("name", "\"${entity.resolvedTableName}\"")
+                param("name", "\"${escapeJavaString(entity.resolvedTableName)}\"")
+                entity.tableSchema?.takeIf(String::isNotBlank)?.let {
+                    param("schema", "\"${escapeJavaString(it)}\"")
+                }
+                entity.tableCatalog?.takeIf(String::isNotBlank)?.let {
+                    param("catalog", "\"${escapeJavaString(it)}\"")
+                }
                 if (entity.indexes.isNotEmpty() || entity.uniqueConstraints.isNotEmpty()) {
                     val indexAnns = entity.indexes.map { idx ->
                         buildString {
@@ -347,6 +368,18 @@ object EntityGenerator {
         // Extends
         entity.extendsClass?.let { b.extends_(it) }
         entity.implementsInterfaces.forEach { b.implements_(it) }
+        if (entity.embeddableIdentity) {
+            b.implements_("java.io.Serializable")
+            b.import_("java.util.Objects")
+            b.field {
+                name = "serialVersionUID"
+                type = "long"
+                visibility = JavaClassBuilder.Visibility.PRIVATE
+                isStatic = true
+                isFinal = true
+                initializer = "1L"
+            }
+        }
 
         // JavaDoc mirrors the metadata comment for source readability.
         entity.comment?.let { b.comment_(it) }
@@ -413,6 +446,9 @@ object EntityGenerator {
             }
             generateAttributeAccessors(b, attr)
         }
+        if (entity.embeddableIdentity) {
+            generateEmbeddableIdentityEquality(b, entity)
+        }
 
         // ── Instance name ──
         entity.instanceNamePattern?.let { pattern ->
@@ -443,6 +479,32 @@ object EntityGenerator {
         }
 
         return b.build()
+    }
+
+    private fun generateEmbeddableIdentityEquality(
+        builder: JavaClassBuilder,
+        entity: EntityModel,
+    ) {
+        builder.method {
+            name = "equals"
+            returnType = "boolean"
+            isOverride = true
+            param("Object", "other")
+            line("if (this == other) return true;")
+            line("if (other == null || getClass() != other.getClass()) return false;")
+            line("${entity.className} that = (${entity.className}) other;")
+            line(
+                "return " + entity.attributes.joinToString(" && ") {
+                    "Objects.equals(${it.name}, that.${it.name})"
+                } + ";",
+            )
+        }
+        builder.method {
+            name = "hashCode"
+            returnType = "int"
+            isOverride = true
+            line("return Objects.hash(${entity.attributes.joinToString(", ") { it.name }});")
+        }
     }
 
     private val JAVA_IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")

@@ -39,6 +39,19 @@ object KotlinEntityGenerator {
         body += entity.attributes.flatMap { attribute ->
             attributeSource(entity, attribute, imports).split(FRAGMENT_SEPARATOR)
         }
+        if (entity.embeddableIdentity) {
+            imports += "java.util.Objects"
+            body += """
+                override fun equals(other: Any?): Boolean {
+                    if (this === other) return true
+                    if (other == null || javaClass != other.javaClass) return false
+                    other as ${entity.className}
+                    return ${entity.attributes.joinToString(" && ") { "${it.name} == other.${it.name}" }}
+                }
+
+                override fun hashCode(): Int = Objects.hash(${entity.attributes.joinToString(", ") { it.name }})
+            """.trimIndent()
+        }
         entity.instanceNamePattern?.let { expression ->
             imports += "io.jmix.core.metamodel.annotation.InstanceName"
             body += """
@@ -62,7 +75,10 @@ object KotlinEntityGenerator {
                 if ('.' in it) imports += it
                 append(" : ").append(it.substringAfterLast('.')).append("()")
             }
-            val interfaces = entity.implementsInterfaces.map {
+            val interfaces = (
+                entity.implementsInterfaces +
+                    if (entity.embeddableIdentity) listOf("java.io.Serializable") else emptyList()
+                ).distinct().map {
                 if ('.' in it) imports += it
                 it.substringAfterLast('.')
             }
@@ -209,6 +225,12 @@ object KotlinEntityGenerator {
         }
         if (entity.entityType == EntityType.ENTITY) {
             val parameters = linkedMapOf<String, String>("name" to quote(entity.resolvedTableName))
+            entity.tableSchema?.takeIf(String::isNotBlank)?.let {
+                parameters["schema"] = quote(it)
+            }
+            entity.tableCatalog?.takeIf(String::isNotBlank)?.let {
+                parameters["catalog"] = quote(it)
+            }
             if (entity.indexes.isNotEmpty()) {
                 parameters["indexes"] = entity.indexes.joinToString(prefix = "[", postfix = "]") {
                     annotation(
@@ -713,6 +735,21 @@ object KotlinEntityGenerator {
         entity.attributes.forEach {
             require(IDENTIFIER.matches(it.name)) {
                 "JVW-ENTITY-ATTRIBUTE-NAME-INVALID: '${it.name}' is not a valid Kotlin property name."
+            }
+        }
+        if (entity.embeddableIdentity) {
+            require(entity.entityType == EntityType.EMBEDDABLE && entity.attributes.isNotEmpty()) {
+                "JVW-ENTITY-EMBEDDABLE-IDENTITY-INVALID: a composite identifier must be a non-empty embeddable."
+            }
+            require(entity.attributes.all {
+                !it.transientFlag &&
+                    it.type !in setOf(
+                        AttributeType.ASSOCIATION,
+                        AttributeType.COMPOSITION,
+                        AttributeType.EMBEDDED,
+                    )
+            }) {
+                "JVW-ENTITY-EMBEDDABLE-IDENTITY-SHAPE: composite identifier members must be persistent scalar attributes."
             }
         }
         if (entity.entityType == EntityType.ENUM) {

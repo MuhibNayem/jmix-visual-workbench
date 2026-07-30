@@ -15,7 +15,10 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
 - JPA entity, mapped-superclass, embeddable, DTO and typed Jmix enumeration
   generation.
 - UUID, Long, Integer, String and configured embedded identifier classes, with
-  matching repository identifier types.
+  matching repository identifier types. Java and Kotlin embeddable identifier
+  generation now emits `Serializable` value objects with deterministic
+  member-based `equals()`/`hashCode()` rather than structurally valid but
+  identity-unsafe placeholder classes.
 - Scalar metadata for String, Character, Boolean, Integer, Long, Double,
   BigDecimal, `java.util.Date`, Java time and offset time types,
   `java.sql.Date`, `java.sql.Time`, UUID, URI, byte array, `FileRef`, Jmix
@@ -35,7 +38,8 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   removal, join tables, delete policy and Jmix cross-data-store to-one
   references.
 - Indexes, unique constraints, database views, DDL policy, protected unmapped
-  schema objects, repositories and localized captions.
+  schema objects, repositories and localized captions. Generated Java/Kotlin
+  `@Table` mappings preserve explicit table, schema, and catalog names.
 - Liquibase type alignment and remarks for the new scalar types, Jmix enum ID
   type and explicit custom SQL definitions.
 - Existing Java source updates remain revision-bound, previewed and atomic.

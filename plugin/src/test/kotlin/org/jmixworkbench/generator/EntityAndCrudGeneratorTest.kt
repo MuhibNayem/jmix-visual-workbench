@@ -506,6 +506,65 @@ class EntityAndCrudGeneratorTest {
     }
 
     @Test
+    fun `qualified table mappings and composite identity value semantics match in Java and Kotlin`() {
+        val identity = EntityModel(
+            className = "LedgerEntryId",
+            packageName = "com.company.ledger.entity",
+            entityType = EntityType.EMBEDDABLE,
+            embeddableIdentity = true,
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "accountCode",
+                    columnName = "ACCOUNT_CODE",
+                    mandatory = true,
+                    length = 40,
+                ),
+                AttributeModel(
+                    name = "postingSequence",
+                    type = org.jmixworkbench.model.AttributeType.LONG,
+                    columnName = "POSTING_SEQUENCE",
+                    mandatory = true,
+                ),
+            ),
+        )
+        val javaIdentity = EntityGenerator.generate(identity)
+        val kotlinIdentity = KotlinEntityGenerator.generate(
+            identity.copy(sourceLanguage = EntitySourceLanguage.KOTLIN),
+        )
+        val javaEntity = EntityGenerator.generate(
+            EntityModel(
+                className = "LedgerEntry",
+                packageName = "com.company.ledger.entity",
+                tableName = "LEDGER_ENTRY",
+                tableSchema = "accounting",
+                tableCatalog = "bank",
+                ddlGeneration = DdlGenerationConfig(enabled = false),
+            ),
+        )
+        val kotlinEntity = KotlinEntityGenerator.generate(
+            EntityModel(
+                className = "LedgerEntry",
+                packageName = "com.company.ledger.entity",
+                sourceLanguage = EntitySourceLanguage.KOTLIN,
+                tableName = "LEDGER_ENTRY",
+                tableSchema = "accounting",
+                tableCatalog = "bank",
+                ddlGeneration = DdlGenerationConfig(enabled = false),
+            ),
+        )
+
+        assertTrue(javaEntity.contains("@Table(name = \"LEDGER_ENTRY\", schema = \"accounting\", catalog = \"bank\")"))
+        assertTrue(kotlinEntity.contains("@Table(name = \"LEDGER_ENTRY\", schema = \"accounting\", catalog = \"bank\")"))
+        assertTrue(javaIdentity.contains("implements Serializable"))
+        assertTrue(javaIdentity.contains("private static final long serialVersionUID = 1L;"))
+        assertTrue(javaIdentity.contains("Objects.equals(accountCode, that.accountCode)"))
+        assertTrue(javaIdentity.contains("Objects.hash(accountCode, postingSequence)"))
+        assertTrue(kotlinIdentity.contains("open class LedgerEntryId : Serializable"))
+        assertTrue(kotlinIdentity.contains("other as LedgerEntryId"))
+        assertTrue(kotlinIdentity.contains("Objects.hash(accountCode, postingSequence)"))
+    }
+
+    @Test
     fun `advanced property metadata comments validation groups and read-only fields are generated`() {
         val source = EntityGenerator.generate(
             EntityModel(
