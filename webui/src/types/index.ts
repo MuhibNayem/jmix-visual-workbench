@@ -83,6 +83,8 @@ export interface AssociationConfig {
   onDelete?: string
   generateInverse?: boolean
   inverseAttributeName?: string
+  ownershipTransfer?: 'request' | 'receiver' | 'release'
+  ownershipJoinColumnName?: string
 }
 
 export interface AssociationJoinColumn {

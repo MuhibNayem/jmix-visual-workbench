@@ -3732,6 +3732,92 @@ function ExistingRelationshipSemanticsEditor({
   const relatedEntitySnapshot = schemaWorkspace?.entities.find(
     candidate => candidate.qualifiedName === sourceAssociation.relatedEntity,
   )
+  const ownershipTransferCandidate =
+    sourceAssociation.associationType === 'oneToOne' &&
+    !sourceAssociation.crossDataStore &&
+    Boolean(sourceAssociation.mappedBy) &&
+    !sourceAssociation.joinTable &&
+    Boolean(relatedEntitySnapshot)
+  const releasingAttribute = ownershipTransferCandidate
+    ? relatedEntitySnapshot?.attributes.find(
+      candidate => candidate.name === sourceAssociation.mappedBy,
+    )
+    : undefined
+  const releasingAssociation = releasingAttribute?.associationDetails
+  const releasingTable = physicalStore?.tables.find(
+    candidate => candidate.name.toLowerCase() ===
+      relatedEntitySnapshot?.tableName.split('.').pop()?.toLowerCase(),
+  )
+  const releasingColumn = releasingAssociation?.joinColumnName
+    ? releasingTable?.columns.find(
+      candidate => candidate.name.toLowerCase() ===
+        releasingAssociation.joinColumnName?.toLowerCase(),
+    )
+    : undefined
+  const releasingUniqueBackingCount = releasingAssociation?.joinColumnName
+    ? (
+      (releasingTable?.uniqueConstraints ?? []).filter(
+        constraint => constraint.columns.length === 1 &&
+          constraint.columns[0].toLowerCase() === releasingAssociation.joinColumnName?.toLowerCase(),
+      ).length +
+      (releasingTable?.indexes ?? []).filter(
+        index => index.unique &&
+          index.columns.length === 1 &&
+          index.columns[0].toLowerCase() === releasingAssociation.joinColumnName?.toLowerCase(),
+      ).length
+    )
+    : 0
+  const releasingForeignKeyCount = releasingAssociation?.joinColumnName
+    ? (releasingTable?.foreignKeys ?? []).filter(foreignKey =>
+      foreignKey.baseColumnNames.split(',').map(value => value.trim().toLowerCase()).length === 1 &&
+      foreignKey.baseColumnNames.trim().toLowerCase() === releasingAssociation.joinColumnName?.toLowerCase() &&
+      foreignKey.referencedTableName.toLowerCase() === physicalTable?.name.toLowerCase() &&
+      foreignKey.referencedColumnNames.trim().toLowerCase() === sourceEntity.idColumnName.toLowerCase(),
+    ).length
+    : 0
+  const ownershipColumnCandidates = [
+    `${toDatabaseName(attribute.name)}_ID`,
+    `OWNED_${toDatabaseName(attribute.name)}_ID`,
+    `REL_${toDatabaseName(attribute.name)}_ID`,
+  ]
+  const defaultOwnershipColumn = ownershipColumnCandidates.find(candidate =>
+    !physicalTable?.columns.some(column => column.name.toLowerCase() === candidate.toLowerCase()),
+  ) ?? ownershipColumnCandidates[0]
+  const suggestedOwnershipColumn =
+    association.ownershipJoinColumnName || defaultOwnershipColumn
+  const receiverColumnAvailable = !physicalTable?.columns.some(
+    column => column.name.toLowerCase() === suggestedOwnershipColumn.toLowerCase(),
+  )
+  const ownershipTransferEligible = Boolean(
+    ownershipTransferCandidate &&
+    relatedEntitySnapshot?.entityType === 'entity' &&
+    relatedEntitySnapshot.moduleId === sourceEntity.moduleId &&
+    relatedEntitySnapshot.storeName === sourceEntity.storeName &&
+    !sourceEntity.databaseView &&
+    sourceEntity.ddlMode !== 'DISABLED' &&
+    !sourceEntity.tableSchema &&
+    !sourceEntity.tableCatalog &&
+    !relatedEntitySnapshot.databaseView &&
+    relatedEntitySnapshot.ddlMode !== 'DISABLED' &&
+    !relatedEntitySnapshot.tableSchema &&
+    !relatedEntitySnapshot.tableCatalog &&
+    physicalStore?.complete === true &&
+    physicalTable &&
+    releasingTable &&
+    releasingAssociation?.associationType === 'oneToOne' &&
+    releasingAssociation.relatedEntity === sourceEntity.qualifiedName &&
+    !releasingAssociation.mappedBy &&
+    !releasingAssociation.crossDataStore &&
+    !releasingAssociation.joinTable &&
+    Boolean(releasingAssociation.joinColumnName) &&
+    !releasingAssociation.composition &&
+    !releasingAssociation.orphanRemoval &&
+    !releasingAssociation.onDelete &&
+    releasingColumn?.unique === true &&
+    releasingColumn.primaryKey === false &&
+    releasingUniqueBackingCount === 1 &&
+    releasingForeignKeyCount === 1
+  )
   const inverseRepairSupported = Boolean(
     relatedEntitySnapshot?.entityType === 'entity' &&
     relatedEntitySnapshot.moduleId === sourceEntity.moduleId &&
@@ -3840,6 +3926,78 @@ function ExistingRelationshipSemanticsEditor({
               One-to-many reuse is locked because the physical schema does not prove exactly one named, single-column
               unique constraint or index for <code>{sourceAssociation.joinColumnName}</code>. Refresh complete
               Liquibase coverage or resolve competing constraints before widening this relationship.
+            </div>
+          )}
+          {ownershipTransferCandidate && (
+            <div className={`mt-3 rounded-lg border p-3 ${
+              ownershipTransferEligible
+                ? 'border-fuchsia-500/30 bg-fuchsia-500/[0.06]'
+                : 'border-amber-500/25 bg-amber-500/[0.05]'
+            }`}>
+              <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className={`text-[10px] font-semibold uppercase tracking-wider ${
+                    ownershipTransferEligible ? 'text-fuchsia-200' : 'text-amber-200'
+                  }`}>
+                    Transfer one-to-one ownership
+                  </div>
+                  <p className="mt-1 text-[9px] leading-relaxed text-gray-500">
+                    Move the foreign key from {relatedEntitySnapshot?.className}.
+                    {releasingAttribute?.name} to {sourceEntity.className}.{attribute.name}. Both handwritten
+                    sources, the data backfill, constraints, and reverse rollback are previewed atomically.
+                  </p>
+                </div>
+                <label className={`flex shrink-0 items-center gap-2 text-[10px] ${
+                  ownershipTransferEligible
+                    ? 'cursor-pointer text-gray-300'
+                    : 'cursor-not-allowed text-gray-600'
+                }`}>
+                  <input
+                    type="checkbox"
+                    disabled={!ownershipTransferEligible}
+                    checked={association.ownershipTransfer === 'request'}
+                    onChange={event => updateAssociation({
+                      ownershipTransfer: event.target.checked ? 'request' : undefined,
+                      ownershipJoinColumnName: event.target.checked
+                        ? suggestedOwnershipColumn
+                        : undefined,
+                      generateInverse: false,
+                    })}
+                  />
+                  transfer ownership
+                </label>
+              </div>
+              {ownershipTransferEligible && association.ownershipTransfer === 'request' ? (
+                <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
+                  <Field label={`New column in ${physicalTable?.name}`}>
+                    <input
+                      value={association.ownershipJoinColumnName || ''}
+                      onChange={event => updateAssociation({
+                        ownershipJoinColumnName: event.target.value || undefined,
+                      })}
+                      className="w-full min-w-0 font-mono"
+                      placeholder={`${toDatabaseName(attribute.name)}_ID`}
+                      aria-label={`New owning join column for ${attribute.name}`}
+                    />
+                    {!receiverColumnAvailable && (
+                      <p className="mt-1 text-[8px] leading-relaxed text-amber-300">
+                        This column already exists in the physical table. Choose a new portable column name.
+                      </p>
+                    )}
+                  </Field>
+                  <div className="min-w-0 rounded border border-fuchsia-500/20 bg-black/10 p-2 text-[9px] leading-relaxed text-fuchsia-100/70">
+                    Forward migration adds and backfills the new unique FK before removing
+                    <code> {releasingAssociation?.joinColumnName}</code>. Rollback recreates the exact former
+                    constraint or index and restores the data in the opposite direction.
+                  </div>
+                </div>
+              ) : !ownershipTransferEligible ? (
+                <p className="mt-2 text-[9px] leading-relaxed text-amber-200/75">
+                  Locked until both entities are writable in the same module/store and complete Liquibase history
+                  proves one named unique backing plus one exact foreign key on the current owner. Composition,
+                  orphan removal, delete policies, qualified tables, collisions, and partial schema evidence fail closed.
+                </p>
+              ) : null}
             </div>
           )}
           {inverseRepairSupported && (

@@ -17,6 +17,7 @@ import org.jmixworkbench.model.AttributeModel
 import org.jmixworkbench.model.AttributeType
 import org.jmixworkbench.model.AssociationConfig
 import org.jmixworkbench.model.AssociationCollectionType
+import org.jmixworkbench.model.AssociationOwnershipTransfer
 import org.jmixworkbench.model.AssociationType
 import org.jmixworkbench.model.CascadeType
 import org.jmixworkbench.model.EntityGenerationTarget
@@ -733,6 +734,371 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             crossModuleRejected.issues.any { it.code == "JVW-ENTITY-INVERSE-MODULE-CYCLE" },
             crossModuleRejected.issues.toString(),
         )
+    }
+
+    fun testOneToOneOwnershipTransferMovesForeignKeyDataAndBothSourcesAtomically() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/Account.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "ACCOUNT")
+                public class Account {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    private UUID id;
+
+                    @OneToOne(mappedBy = "account", fetch = FetchType.LAZY)
+                    private AccountProfile profile;
+
+                    public String manualAccountCode() { return "account"; }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/AccountProfile.kt",
+                """
+                package com.acme.entity
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.util.UUID
+                @JmixEntity
+                @Entity
+                @Table(name = "ACCOUNT_PROFILE")
+                open class AccountProfile {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    var id: UUID? = null
+
+                    @OneToOne(fetch = FetchType.LAZY, optional = false)
+                    @JoinColumn(name = "ACCOUNT_ID", nullable = false, unique = true)
+                    var account: Account? = null
+
+                    fun manualProfileCode(): String = "profile"
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/KotlinContract.kt",
+                """
+                package com.acme.entity
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.util.UUID
+                @JmixEntity
+                @Entity
+                @Table(name = "KOTLIN_CONTRACT")
+                open class KotlinContract {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    var id: UUID? = null
+
+                    @OneToOne(mappedBy = "contract", fetch = FetchType.LAZY)
+                    var owner: ContractOwner? = null
+
+                    fun manualContractCode(): String = "contract"
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/ContractOwner.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "CONTRACT_OWNER")
+                public class ContractOwner {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    private UUID id;
+
+                    @OneToOne(fetch = FetchType.LAZY)
+                    @JoinColumn(name = "CONTRACT_ID", unique = true)
+                    private KotlinContract contract;
+
+                    public String manualOwnerCode() { return "owner"; }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/resources/com/acme/liquibase/changelog/015-account-profile.xml",
+                """
+                <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                    <changeSet id="account-profile" author="team">
+                        <createTable tableName="ACCOUNT">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                        </createTable>
+                        <createTable tableName="ACCOUNT_PROFILE">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                            <column name="ACCOUNT_ID" type="UUID">
+                                <constraints nullable="false"/>
+                            </column>
+                        </createTable>
+                        <addUniqueConstraint
+                            tableName="ACCOUNT_PROFILE"
+                            constraintName="UQ_ACCOUNT_PROFILE_ACCOUNT"
+                            columnNames="ACCOUNT_ID"/>
+                        <addForeignKeyConstraint
+                            constraintName="FK_ACCOUNT_PROFILE_ACCOUNT"
+                            baseTableName="ACCOUNT_PROFILE"
+                            baseColumnNames="ACCOUNT_ID"
+                            referencedTableName="ACCOUNT"
+                            referencedColumnNames="ID"
+                            onDelete="CASCADE"/>
+                        <createTable tableName="KOTLIN_CONTRACT">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                        </createTable>
+                        <createTable tableName="CONTRACT_OWNER">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                            <column name="CONTRACT_ID" type="UUID"/>
+                        </createTable>
+                        <createIndex
+                            tableName="CONTRACT_OWNER"
+                            indexName="UX_CONTRACT_OWNER_CONTRACT"
+                            unique="true">
+                            <column name="CONTRACT_ID"/>
+                        </createIndex>
+                        <addForeignKeyConstraint
+                            constraintName="FK_CONTRACT_OWNER_CONTRACT"
+                            baseTableName="CONTRACT_OWNER"
+                            baseColumnNames="CONTRACT_ID"
+                            referencedTableName="KOTLIN_CONTRACT"
+                            referencedColumnNames="ID"/>
+                    </changeSet>
+                </databaseChangeLog>
+                """.trimIndent(),
+            )
+        }
+
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val account = workspace.entities.single { it.className == "Account" }
+        val profile = workspace.entities.single { it.className == "AccountProfile" }
+        val current = account.attributes.single { it.name == "profile" }
+        val relation = requireNotNull(current.associationDetails)
+        val store = workspace.stores.single()
+        val requested = EntityModel(
+            className = account.className,
+            packageName = account.qualifiedName.substringBeforeLast('.'),
+            sourceLanguage = EntitySourceLanguage.JAVA,
+            tableName = account.tableName,
+            dataStore = account.storeName,
+            generationTarget = EntityGenerationTarget(account.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = current.name,
+                    type = AttributeType.ASSOCIATION,
+                    columnName = current.columnName,
+                    mandatory = !current.nullable,
+                    unique = current.unique,
+                    association = AssociationConfig(
+                        associationType = relation.associationType,
+                        relatedEntity = relation.relatedEntity,
+                        relatedTableName = relation.relatedTableName,
+                        relatedIdColumnName = relation.relatedIdColumnName,
+                        relatedIdType = relation.relatedIdType,
+                        mappedBy = relation.mappedBy,
+                        joinColumnName = relation.joinColumnName,
+                        cascade = relation.cascade.toMutableList(),
+                        fetch = relation.fetch,
+                        collectionType = relation.collectionType,
+                        crossDataStore = relation.crossDataStore,
+                        orphanRemoval = relation.orphanRemoval,
+                        onDelete = relation.onDelete,
+                        ownershipTransfer = AssociationOwnershipTransfer.REQUEST,
+                        ownershipJoinColumnName = "PROFILE_ID",
+                    ),
+                ),
+            ),
+        )
+        val service = ExistingEntityChangeService.getInstance(project)
+        val preview = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(account.sourceLocator, requested),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(3, preview.files.size)
+        val java = preview.files.single { it.relativePath.endsWith("/Account.java") }.resultContent
+        val kotlin = preview.files.single { it.relativePath.endsWith("/AccountProfile.kt") }.resultContent
+        val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+        assertTrue(java.contains("@OneToOne(fetch = FetchType.LAZY)"))
+        assertFalse(java.contains("mappedBy = \"account\""))
+        assertTrue(java.contains("@JoinColumn(name = \"PROFILE_ID\", unique = true)"))
+        assertTrue(java.contains("manualAccountCode"))
+        assertTrue(kotlin.contains("@OneToOne("))
+        assertTrue(kotlin.contains("mappedBy = \"profile\""))
+        assertTrue(kotlin.contains("fetch = FetchType.LAZY"))
+        assertFalse(kotlin.contains("optional = false"))
+        assertFalse(kotlin.contains("@JoinColumn"))
+        assertTrue(kotlin.contains("manualProfileCode"))
+        assertTrue(migration.contains("""<addColumn tableName="ACCOUNT">"""))
+        assertTrue(migration.contains("""name="PROFILE_ID" type="UUID""""))
+        assertTrue(migration.contains("UPDATE ACCOUNT SET PROFILE_ID = ("))
+        assertTrue(migration.contains("UPDATE ACCOUNT_PROFILE SET ACCOUNT_ID = ("))
+        assertTrue(migration.contains("""constraintName="UQ_ACCOUNT_PROFILE_ACCOUNT""""))
+        assertTrue(migration.contains("""constraintName="FK_ACCOUNT_PROFILE_ACCOUNT""""))
+        assertTrue(migration.contains("""baseTableName="ACCOUNT" baseColumnNames="PROFILE_ID""""))
+        assertTrue(migration.contains("""referencedTableName="ACCOUNT_PROFILE""""))
+        assertTrue(migration.contains("""<dropColumn tableName="ACCOUNT_PROFILE" columnName="ACCOUNT_ID""""))
+        assertTrue(migration.contains("""<addNotNullConstraint tableName="ACCOUNT_PROFILE" columnName="ACCOUNT_ID""""))
+        assertTrue(migration.contains("<rollback>"))
+        assertTrue(preview.files.none { it.relativePath.endsWith("LoanApp.java") })
+        assertEquals(
+            profile.qualifiedName,
+            relation.relatedEntity,
+        )
+
+        val kotlinContract = workspace.entities.single { it.className == "KotlinContract" }
+        val contractOwner = workspace.entities.single { it.className == "ContractOwner" }
+        val currentOwner = kotlinContract.attributes.single { it.name == "owner" }
+        val ownerRelation = requireNotNull(currentOwner.associationDetails)
+        val kotlinRequest = EntityModel(
+            className = kotlinContract.className,
+            packageName = kotlinContract.qualifiedName.substringBeforeLast('.'),
+            sourceLanguage = EntitySourceLanguage.KOTLIN,
+            tableName = kotlinContract.tableName,
+            dataStore = kotlinContract.storeName,
+            generationTarget = EntityGenerationTarget(kotlinContract.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = currentOwner.name,
+                    type = AttributeType.ASSOCIATION,
+                    columnName = currentOwner.columnName,
+                    mandatory = !currentOwner.nullable,
+                    unique = currentOwner.unique,
+                    association = AssociationConfig(
+                        associationType = ownerRelation.associationType,
+                        relatedEntity = ownerRelation.relatedEntity,
+                        relatedTableName = ownerRelation.relatedTableName,
+                        relatedIdColumnName = ownerRelation.relatedIdColumnName,
+                        relatedIdType = ownerRelation.relatedIdType,
+                        mappedBy = ownerRelation.mappedBy,
+                        joinColumnName = ownerRelation.joinColumnName,
+                        cascade = ownerRelation.cascade.toMutableList(),
+                        fetch = ownerRelation.fetch,
+                        collectionType = ownerRelation.collectionType,
+                        crossDataStore = ownerRelation.crossDataStore,
+                        orphanRemoval = ownerRelation.orphanRemoval,
+                        onDelete = ownerRelation.onDelete,
+                        ownershipTransfer = AssociationOwnershipTransfer.REQUEST,
+                        ownershipJoinColumnName = "OWNER_ID",
+                    ),
+                ),
+            ),
+        )
+        val kotlinPreview = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(kotlinContract.sourceLocator, kotlinRequest),
+        )
+        assertTrue(
+            kotlinPreview.accepted,
+            kotlinPreview.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        assertEquals(3, kotlinPreview.files.size)
+        val kotlinReceiver = kotlinPreview.files.single {
+            it.relativePath.endsWith("/KotlinContract.kt")
+        }.resultContent
+        val javaReleaser = kotlinPreview.files.single {
+            it.relativePath.endsWith("/ContractOwner.java")
+        }.resultContent
+        val indexMigration = kotlinPreview.files.single {
+            it.relativePath.endsWith(".xml")
+        }.resultContent
+        assertTrue(kotlinReceiver.contains("@JoinColumn(name = \"OWNER_ID\", unique = true)"))
+        assertFalse(kotlinReceiver.contains("mappedBy = \"contract\""))
+        assertTrue(kotlinReceiver.contains("manualContractCode"))
+        assertTrue(javaReleaser.contains("mappedBy = \"owner\""))
+        assertFalse(javaReleaser.contains("@JoinColumn"))
+        assertTrue(javaReleaser.contains("manualOwnerCode"))
+        assertTrue(indexMigration.contains("""indexName="UX_CONTRACT_OWNER_CONTRACT""""))
+        assertTrue(indexMigration.contains("""<dropIndex tableName="CONTRACT_OWNER""""))
+        assertTrue(indexMigration.contains("""<createIndex tableName="CONTRACT_OWNER""""))
+        assertTrue(indexMigration.contains("""unique="true""""))
+        assertTrue(indexMigration.contains("UPDATE KOTLIN_CONTRACT SET OWNER_ID = ("))
+        assertTrue(indexMigration.contains("UPDATE CONTRACT_OWNER SET CONTRACT_ID = ("))
+        assertEquals(
+            contractOwner.qualifiedName,
+            ownerRelation.relatedEntity,
+        )
+
+        val collision = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                account.sourceLocator,
+                requested.copy(
+                    attributes = requested.attributes.map { attribute ->
+                        attribute.copy(
+                            association = attribute.association?.copy(
+                                ownershipJoinColumnName = "ID",
+                            ),
+                        )
+                    }.toMutableList(),
+                ),
+            ),
+        )
+        assertFalse(collision.accepted)
+        assertTrue(
+            collision.issues.any { it.code == "JVW-ENTITY-OWNERSHIP-TRANSFER-COLUMN-COLLISION" },
+            collision.issues.toString(),
+        )
+
+        val prepared = service.prepareAttributeAdditions(
+            ExistingEntityAttributeAdditionApplyRequest(
+                change = ExistingEntityAttributeAdditionRequest(account.sourceLocator, requested),
+                expectedPlanDigest = requireNotNull(preview.planDigest),
+            ),
+        )
+        val applied = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+        assertTrue(applied.success, applied.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(3, applied.filesChanged.size)
+        val refreshed = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val physical = refreshed.physicalSchemas.single { it.storeId == store.id }
+        assertTrue(physical.complete)
+        val accountTable = physical.tables.single { it.name == "ACCOUNT" }
+        val profileTable = physical.tables.single { it.name == "ACCOUNT_PROFILE" }
+        assertTrue(accountTable.columns.any { it.name == "PROFILE_ID" && it.unique })
+        assertTrue(accountTable.foreignKeys.any {
+            it.baseColumnNames == "PROFILE_ID" &&
+                it.referencedTableName == "ACCOUNT_PROFILE" &&
+                it.referencedColumnNames == "ID"
+        })
+        assertFalse(profileTable.columns.any { it.name == "ACCOUNT_ID" })
+        assertFalse(profileTable.foreignKeys.any { it.constraintName == "FK_ACCOUNT_PROFILE_ACCOUNT" })
+        assertFalse(profileTable.uniqueConstraints.any { it.name == "UQ_ACCOUNT_PROFILE_ACCOUNT" })
+        assertFalse(refreshed.findings.any { it.code == "SCHEMA_RAW_SQL_NOT_SCOPED" })
+        val refreshedAccount = refreshed.entities.single { it.className == "Account" }
+        val refreshedProfile = refreshed.entities.single { it.className == "AccountProfile" }
+        val refreshedReceiver = requireNotNull(
+            refreshedAccount.attributes.single { it.name == "profile" }.associationDetails,
+        )
+        val refreshedReleaser = assertNotNull(
+            refreshedProfile.attributes.single { it.name == "account" }.associationDetails,
+            kotlin,
+        )
+        assertEquals(null, refreshedReceiver.mappedBy)
+        assertEquals("PROFILE_ID", refreshedReceiver.joinColumnName)
+        assertEquals("profile", refreshedReleaser.mappedBy)
+        assertEquals(null, refreshedReleaser.joinColumnName)
     }
 
     fun testIncludeAllStoreEntityCoverageAndSourceSafeMigrationDestination() {

@@ -25,6 +25,7 @@ import org.jmixworkbench.model.AttributeModel
 import org.jmixworkbench.model.AttributeType
 import org.jmixworkbench.model.AssociationCollectionType
 import org.jmixworkbench.model.AssociationConfig
+import org.jmixworkbench.model.AssociationOwnershipTransfer
 import org.jmixworkbench.model.AssociationType
 import org.jmixworkbench.model.ChangeSetModel
 import org.jmixworkbench.model.ColumnDef
@@ -139,7 +140,10 @@ class ExistingEntityChangeService(
         val requestedInverseRelationships = request.entity.attributes.filter {
             it.association?.generateInverse == true
         }
-        if (requestedInverseRelationships.isEmpty()) {
+        val requestedOwnershipTransfers = request.entity.attributes.filter {
+            it.association?.ownershipTransfer != null
+        }
+        if (requestedInverseRelationships.isEmpty() && requestedOwnershipTransfers.isEmpty()) {
             return BidirectionalRequestPlan(listOf(request), emptyList())
         }
         val workspace = SchemaWorkspaceService.getInstance(project).load()
@@ -155,6 +159,43 @@ class ExistingEntityChangeService(
                 ),
             ),
         )
+        if (
+            requestedOwnershipTransfers.any {
+                it.association?.ownershipTransfer != AssociationOwnershipTransfer.REQUEST
+            }
+        ) {
+            return BidirectionalRequestPlan(
+                emptyList(),
+                listOf(
+                    WorkspaceChangeIssue(
+                        "JVW-ENTITY-OWNERSHIP-TRANSFER-INTERNAL-ROLE",
+                        "Receiver/release ownership roles are planner-owned and cannot be submitted directly.",
+                    ),
+                ),
+            )
+        }
+        if (requestedOwnershipTransfers.isNotEmpty()) {
+            if (
+                requestedOwnershipTransfers.size != 1 ||
+                requestedInverseRelationships.isNotEmpty()
+            ) {
+                return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-OWNERSHIP-TRANSFER-ISOLATION",
+                            "Transfer exactly one relationship at a time and do not combine it with inverse generation.",
+                        ),
+                    ),
+                )
+            }
+            return planOneToOneOwnershipTransfer(
+                request,
+                workspace,
+                sourceSnapshot,
+                requestedOwnershipTransfers.single(),
+            )
+        }
         val targetAdditions = linkedMapOf<String, MutableList<AttributeModel>>()
         val targets = linkedMapOf<String, SchemaEntitySnapshot>()
         var primaryEntity = request.entity
@@ -342,6 +383,193 @@ class ExistingEntityChangeService(
         }
         return BidirectionalRequestPlan(requests, emptyList())
     }
+
+    private fun planOneToOneOwnershipTransfer(
+        request: ExistingEntityAttributeAdditionRequest,
+        workspace: SchemaWorkspaceResponse,
+        sourceSnapshot: SchemaEntitySnapshot,
+        requestedAttribute: AttributeModel,
+    ): BidirectionalRequestPlan {
+        val requestedAssociation = requestedAttribute.association
+            ?: return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-MAPPING-MISSING",
+                "${requestedAttribute.name} has no relationship mapping.",
+            )
+        val currentSourceAttribute = sourceSnapshot.attributes.singleOrNull {
+            it.name == requestedAttribute.name
+        } ?: return ownershipTransferRejected(
+            "JVW-ENTITY-OWNERSHIP-TRANSFER-SOURCE-MISSING",
+            "${sourceSnapshot.qualifiedName}.${requestedAttribute.name} is not an indexed existing property.",
+        )
+        val currentSourceAssociation = currentSourceAttribute.associationDetails
+            ?: return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-SOURCE-UNRESOLVED",
+                "The existing inverse mapping for ${requestedAttribute.name} could not be reconstructed exactly.",
+            )
+        if (
+            currentSourceAssociation.associationType != AssociationType.ONE_TO_ONE ||
+            currentSourceAssociation.crossDataStore ||
+            currentSourceAssociation.mappedBy.isNullOrBlank() ||
+            currentSourceAssociation.joinTable != null ||
+            requestedAssociation.associationType != AssociationType.ONE_TO_ONE ||
+            requestedAssociation.relatedEntity != currentSourceAssociation.relatedEntity
+        ) {
+            return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-SOURCE-NOT-INVERSE",
+                "${requestedAttribute.name} must be a local inverse one-to-one with an exact mappedBy property.",
+            )
+        }
+        val newJoinColumn = requestedAssociation.ownershipJoinColumnName?.trim().orEmpty()
+        if (!DATABASE_IDENTIFIER.matches(newJoinColumn)) {
+            return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-COLUMN-INVALID",
+                "'$newJoinColumn' is not a portable unquoted join-column name.",
+            )
+        }
+        if (
+            sourceSnapshot.attributes.any {
+                it.name != requestedAttribute.name &&
+                    it.persistent &&
+                    it.columnName.equals(newJoinColumn, ignoreCase = true)
+            }
+        ) {
+            return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-COLUMN-COLLISION",
+                "$newJoinColumn is already mapped by another ${sourceSnapshot.className} property.",
+            )
+        }
+        val targetMatches = workspace.entities.filter {
+            it.qualifiedName == currentSourceAssociation.relatedEntity
+        }
+        if (targetMatches.size != 1) {
+            return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-TARGET-${if (targetMatches.isEmpty()) "MISSING" else "AMBIGUOUS"}",
+                "The owner target ${currentSourceAssociation.relatedEntity} must resolve exactly once.",
+            )
+        }
+        val targetSnapshot = targetMatches.single()
+        if (
+            targetSnapshot.entityType != EntityType.ENTITY ||
+            targetSnapshot.databaseView ||
+            targetSnapshot.storeName != sourceSnapshot.storeName
+        ) {
+            return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-TARGET-INCOMPATIBLE",
+                "${targetSnapshot.qualifiedName} must be a writable JPA entity in the same data store.",
+            )
+        }
+        moduleDependencyIssue(sourceSnapshot, targetSnapshot)?.let {
+            return BidirectionalRequestPlan(emptyList(), listOf(it))
+        }
+        if (targetSnapshot.sourceLocator.relativePath == sourceSnapshot.sourceLocator.relativePath) {
+            return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-SELF-REFERENCE",
+                "Self-referencing one-to-one ownership transfer requires a dedicated single-table column-rename workflow.",
+            )
+        }
+        val ownerName = requireNotNull(currentSourceAssociation.mappedBy)
+        val targetOwner = targetSnapshot.attributes.singleOrNull { it.name == ownerName }
+            ?: return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-OWNER-MISSING",
+                "${targetSnapshot.qualifiedName}.$ownerName does not exist.",
+            )
+        val targetOwnerAssociation = targetOwner.associationDetails
+            ?: return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-OWNER-UNRESOLVED",
+                "${targetSnapshot.qualifiedName}.$ownerName has no exact relationship metadata.",
+            )
+        if (
+            targetOwnerAssociation.associationType != AssociationType.ONE_TO_ONE ||
+            targetOwnerAssociation.relatedEntity != sourceSnapshot.qualifiedName ||
+            !targetOwnerAssociation.mappedBy.isNullOrBlank() ||
+            targetOwnerAssociation.crossDataStore ||
+            targetOwnerAssociation.joinTable != null ||
+            targetOwnerAssociation.joinColumnName.isNullOrBlank()
+        ) {
+            return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-OWNER-SHAPE",
+                "${targetSnapshot.qualifiedName}.$ownerName must be the local owning one-to-one counterpart.",
+            )
+        }
+        if (
+            targetOwnerAssociation.composition ||
+            targetOwnerAssociation.orphanRemoval ||
+            !targetOwnerAssociation.onDelete.isNullOrBlank()
+        ) {
+            return ownershipTransferRejected(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-OWNER-SEMANTICS",
+                "The releasing owner has composition, orphan-removal, or delete-policy semantics. " +
+                    "Move those policies explicitly before transferring physical ownership.",
+            )
+        }
+
+        val receiverAssociation = requestedAssociation.copy(
+            mappedBy = null,
+            joinColumnName = newJoinColumn,
+            joinTable = null,
+            generateInverse = false,
+            inverseAttributeName = null,
+            ownershipTransfer = AssociationOwnershipTransfer.RECEIVER,
+            ownershipJoinColumnName = newJoinColumn,
+        )
+        val receiverAttribute = requestedAttribute.copy(
+            mandatory = false,
+            unique = true,
+            association = receiverAssociation,
+        )
+        val receiverEntity = request.entity.copy(
+            attributes = request.entity.attributes.map { attribute ->
+                if (attribute.name == requestedAttribute.name) receiverAttribute else attribute
+            }.toMutableList(),
+        )
+        val evidence = oneToOneOwnershipTransferEvidence(
+            receiverEntity,
+            currentSourceAttribute,
+            targetSnapshot,
+            targetOwner,
+        )
+        if (evidence.issue != null) {
+            return BidirectionalRequestPlan(emptyList(), listOf(evidence.issue))
+        }
+
+        val targetBase = entityModel(targetSnapshot, workspace)
+        val releasingAttributes = targetBase.attributes.map { attribute ->
+            if (attribute.name != ownerName) {
+                attribute
+            } else {
+                attribute.copy(
+                    mandatory = false,
+                    unique = false,
+                    association = requireNotNull(attribute.association).copy(
+                        mappedBy = requestedAttribute.name,
+                        joinColumnName = null,
+                        joinColumns = mutableListOf(),
+                        joinTable = null,
+                        ownershipTransfer = AssociationOwnershipTransfer.RELEASE,
+                        ownershipJoinColumnName = newJoinColumn,
+                    ),
+                )
+            }
+        }.toMutableList()
+        return BidirectionalRequestPlan(
+            requests = listOf(
+                request.copy(entity = receiverEntity),
+                ExistingEntityAttributeAdditionRequest(
+                    sourceLocator = targetSnapshot.sourceLocator,
+                    entity = targetBase.copy(attributes = releasingAttributes),
+                ),
+            ),
+            issues = emptyList(),
+        )
+    }
+
+    private fun ownershipTransferRejected(
+        code: String,
+        message: String,
+    ): BidirectionalRequestPlan = BidirectionalRequestPlan(
+        emptyList(),
+        listOf(WorkspaceChangeIssue(code, message)),
+    )
 
     private fun moduleDependencyIssue(
         source: SchemaEntitySnapshot,
@@ -752,7 +980,8 @@ class ExistingEntityChangeService(
         metadataChanges.firstOrNull {
             it.current.unique &&
                 !it.desired.unique &&
-                !isOwningToOneWidening(it.current, it.desired)
+                !isOwningToOneWidening(it.current, it.desired) &&
+                it.desired.association?.ownershipTransfer != AssociationOwnershipTransfer.RELEASE
         }?.let { change ->
             return rejected(
                 "JVW-ENTITY-UNIQUE-DROP-REQUIRES-CONSTRAINT",
@@ -1088,7 +1317,8 @@ class ExistingEntityChangeService(
         metadataChanges.firstOrNull {
             it.current.unique &&
                 !it.desired.unique &&
-                !isOwningToOneWidening(it.current, it.desired)
+                !isOwningToOneWidening(it.current, it.desired) &&
+                it.desired.association?.ownershipTransfer != AssociationOwnershipTransfer.RELEASE
         }?.let {
             return rejected(
                 "JVW-ENTITY-UNIQUE-DROP-REQUIRES-CONSTRAINT",
@@ -1302,6 +1532,46 @@ class ExistingEntityChangeService(
                 "JVW-ENTITY-STORE-MISSING",
                 "No managed Liquibase data store matches ${entity.dataStore}. Refresh project ownership before adding persisted attributes.",
             )
+        val receiverTransfers = metadataChanges.filter {
+            it.desired.association?.ownershipTransfer == AssociationOwnershipTransfer.RECEIVER
+        }
+        val releaseTransfers = metadataChanges.filter {
+            it.desired.association?.ownershipTransfer == AssociationOwnershipTransfer.RELEASE
+        }
+        if (receiverTransfers.isNotEmpty() || releaseTransfers.isNotEmpty()) {
+            if (
+                additions.isNotEmpty() ||
+                metadataChanges.size != 1 ||
+                receiverTransfers.size + releaseTransfers.size != 1
+            ) {
+                return SchemaMigrationProposal.failure(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-ISOLATION",
+                    "One-to-one ownership transfer must be the only physical change in each entity proposal.",
+                )
+            }
+            if (releaseTransfers.isNotEmpty()) {
+                val identity = listOf(
+                    entity.fullName,
+                    releaseTransfers.single().current.name,
+                    releaseTransfers.single().current.columnName,
+                ).joinToString("\u0000")
+                return SchemaMigrationProposal(
+                    changeSet = WorkspaceChangeSet(
+                        id = "existing-entity-ownership-release:" +
+                            CanonicalDiscoveryJson.sha256(identity).take(24),
+                        label = "Release one-to-one ownership from ${entity.className}",
+                        files = emptyList(),
+                    ),
+                    issues = emptyList(),
+                )
+            }
+            return oneToOneOwnershipTransferMigrationProposal(
+                entity = entity,
+                change = receiverTransfers.single(),
+                workspace = workspace,
+                storeId = store.id,
+            )
+        }
         val dbType = JmixProjectService.getInstance(project).getConfig()?.databaseType
             ?: DatabaseType.POSTGRES
         val scalarColumns = additions
@@ -1636,6 +1906,251 @@ class ExistingEntityChangeService(
         )
     }
 
+    private fun oneToOneOwnershipTransferMigrationProposal(
+        entity: EntityModel,
+        change: ExistingAttributeMetadataChange,
+        workspace: SchemaWorkspaceResponse,
+        storeId: String,
+    ): SchemaMigrationProposal {
+        val currentAssociation = change.current.associationDetails
+            ?: return SchemaMigrationProposal.failure(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-SOURCE-UNRESOLVED",
+                "The receiving inverse relationship could not be reconstructed.",
+            )
+        val releasingEntity = workspace.entities.singleOrNull {
+            it.qualifiedName == currentAssociation.relatedEntity &&
+                it.storeName == entity.dataStore
+        } ?: return SchemaMigrationProposal.failure(
+            "JVW-ENTITY-OWNERSHIP-TRANSFER-TARGET-UNRESOLVED",
+            "The releasing one-to-one entity is absent or ambiguous.",
+        )
+        val releasingAttribute = releasingEntity.attributes.singleOrNull {
+            it.name == currentAssociation.mappedBy
+        } ?: return SchemaMigrationProposal.failure(
+            "JVW-ENTITY-OWNERSHIP-TRANSFER-OWNER-MISSING",
+            "The releasing one-to-one property no longer exists.",
+        )
+        val evidence = oneToOneOwnershipTransferEvidence(
+            receiverEntity = entity,
+            currentReceiver = change.current,
+            releasingEntity = releasingEntity,
+            currentReleasingOwner = releasingAttribute,
+        )
+        evidence.issue?.let { return SchemaMigrationProposal(null, listOf(it)) }
+        if (evidence.storeId != storeId) {
+            return SchemaMigrationProposal.failure(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-STORE-STALE",
+                "The physical ownership evidence no longer belongs to the selected data store.",
+            )
+        }
+        val receiver = requireNotNull(evidence.receiverEntity)
+        val releasing = requireNotNull(evidence.releasingEntity)
+        val receiverTable = requireNotNull(evidence.receiverTable)
+        val releasingTable = requireNotNull(evidence.releasingTable)
+        val oldColumn = requireNotNull(evidence.oldColumn)
+        val oldForeignKey = requireNotNull(evidence.oldForeignKey)
+        val oldUnique = requireNotNull(evidence.oldUniqueBacking)
+        val newColumn = requireNotNull(evidence.newColumnName)
+        val newForeignKey = requireNotNull(evidence.newForeignKeyName)
+        val newUnique = requireNotNull(evidence.newUniqueName)
+        val receiverId = receiver.idColumnName
+        val releasingId = releasing.idColumnName
+        val stableSuffix = CanonicalDiscoveryJson.sha256(
+            listOf(
+                receiver.qualifiedName,
+                change.current.name,
+                releasing.qualifiedName,
+                releasingAttribute.name,
+                oldColumn.name,
+                newColumn,
+            ).joinToString("\u0000"),
+        ).take(10)
+        val changes = mutableListOf<DbChange>(
+            DbChange.AddColumn(
+                tableName = receiverTable.name,
+                columns = mutableListOf(
+                    ColumnDef(
+                        name = newColumn,
+                        type = oldColumn.type,
+                        nullable = true,
+                    ),
+                ),
+            ),
+            DbChange.RawSql(
+                sql = "/* JVW_DATA_ONLY_BACKFILL */ UPDATE ${receiverTable.name} SET $newColumn = (" +
+                    "SELECT ${releasingTable.name}.$releasingId FROM ${releasingTable.name} " +
+                    "WHERE ${releasingTable.name}.${oldColumn.name} = ${receiverTable.name}.$receiverId" +
+                    ") WHERE EXISTS (" +
+                    "SELECT 1 FROM ${releasingTable.name} " +
+                    "WHERE ${releasingTable.name}.${oldColumn.name} = ${receiverTable.name}.$receiverId" +
+                    ")",
+            ),
+            DbChange.AddUniqueConstraint(
+                tableName = receiverTable.name,
+                constraintName = newUnique,
+                columnNames = listOf(newColumn),
+            ),
+            DbChange.AddForeignKeyConstraint(
+                constraintName = newForeignKey,
+                baseTableName = receiverTable.name,
+                baseColumnNames = newColumn,
+                referencedTableName = releasingTable.name,
+                referencedColumnNames = releasingId,
+            ),
+            DbChange.DropForeignKeyConstraint(
+                constraintName = oldForeignKey.constraintName,
+                baseTableName = releasingTable.name,
+            ),
+        )
+        changes += when (oldUnique) {
+            is RelationshipUniqueBacking.Constraint -> DbChange.DropUniqueConstraint(
+                tableName = releasingTable.name,
+                constraintName = oldUnique.name,
+            )
+            is RelationshipUniqueBacking.Index -> DbChange.DropIndex(
+                tableName = releasingTable.name,
+                indexName = oldUnique.name,
+            )
+        }
+        changes += DbChange.DropColumn(
+            tableName = releasingTable.name,
+            columnName = oldColumn.name,
+        )
+
+        val rollback = mutableListOf<DbChange>(
+            DbChange.AddColumn(
+                tableName = releasingTable.name,
+                columns = mutableListOf(
+                    ColumnDef(
+                        name = oldColumn.name,
+                        type = oldColumn.type,
+                        nullable = true,
+                    ),
+                ),
+            ),
+            DbChange.RawSql(
+                sql = "/* JVW_DATA_ONLY_BACKFILL */ UPDATE ${releasingTable.name} SET ${oldColumn.name} = (" +
+                    "SELECT ${receiverTable.name}.$receiverId FROM ${receiverTable.name} " +
+                    "WHERE ${receiverTable.name}.$newColumn = ${releasingTable.name}.$releasingId" +
+                    ") WHERE EXISTS (" +
+                    "SELECT 1 FROM ${receiverTable.name} " +
+                    "WHERE ${receiverTable.name}.$newColumn = ${releasingTable.name}.$releasingId" +
+                    ")",
+            ),
+        )
+        if (!oldColumn.nullable) {
+            rollback += DbChange.AddNotNullConstraint(
+                tableName = releasingTable.name,
+                columnName = oldColumn.name,
+                columnDataType = oldColumn.type,
+            )
+        }
+        rollback += when (oldUnique) {
+            is RelationshipUniqueBacking.Constraint -> DbChange.AddUniqueConstraint(
+                tableName = releasingTable.name,
+                constraintName = oldUnique.name,
+                columnNames = listOf(oldColumn.name),
+            )
+            is RelationshipUniqueBacking.Index -> DbChange.CreateIndex(
+                tableName = releasingTable.name,
+                indexName = oldUnique.name,
+                columns = listOf(IndexColumnDef(oldColumn.name)),
+                unique = true,
+            )
+        }
+        rollback += listOf(
+            DbChange.AddForeignKeyConstraint(
+                constraintName = oldForeignKey.constraintName,
+                baseTableName = releasingTable.name,
+                baseColumnNames = oldColumn.name,
+                referencedTableName = receiverTable.name,
+                referencedColumnNames = receiverId,
+                onDelete = oldForeignKey.onDelete,
+            ),
+            DbChange.DropForeignKeyConstraint(
+                constraintName = newForeignKey,
+                baseTableName = receiverTable.name,
+            ),
+            DbChange.DropUniqueConstraint(
+                tableName = receiverTable.name,
+                constraintName = newUnique,
+            ),
+            DbChange.DropColumn(
+                tableName = receiverTable.name,
+                columnName = newColumn,
+            ),
+        )
+
+        val preConditions = mutableListOf(
+            PreCondition(
+                type = PreConditionType.TABLE_EXISTS,
+                params = mutableMapOf("tableName" to receiverTable.name),
+            ),
+            PreCondition(
+                type = PreConditionType.TABLE_EXISTS,
+                params = mutableMapOf("tableName" to releasingTable.name),
+            ),
+            PreCondition(
+                type = PreConditionType.COLUMN_NOT_EXISTS,
+                params = mutableMapOf(
+                    "tableName" to receiverTable.name,
+                    "columnName" to newColumn,
+                ),
+            ),
+            PreCondition(
+                type = PreConditionType.COLUMN_EXISTS,
+                params = mutableMapOf(
+                    "tableName" to releasingTable.name,
+                    "columnName" to oldColumn.name,
+                ),
+            ),
+            PreCondition(
+                type = PreConditionType.SQL_CHECK,
+                params = mutableMapOf(
+                    "expectedResult" to "0",
+                    "sql" to "SELECT COUNT(*) FROM ${releasingTable.name} " +
+                        "WHERE ${oldColumn.name} IS NOT NULL AND NOT EXISTS (" +
+                        "SELECT 1 FROM ${receiverTable.name} " +
+                        "WHERE ${receiverTable.name}.$receiverId = " +
+                        "${releasingTable.name}.${oldColumn.name})",
+                ),
+            ),
+            PreCondition(
+                type = PreConditionType.SQL_CHECK,
+                params = mutableMapOf(
+                    "expectedResult" to "0",
+                    "sql" to "SELECT COUNT(*) FROM (" +
+                        "SELECT ${oldColumn.name} FROM ${releasingTable.name} " +
+                        "WHERE ${oldColumn.name} IS NOT NULL GROUP BY ${oldColumn.name} " +
+                        "HAVING COUNT(*) > 1) JVW_DUPLICATES",
+                ),
+            ),
+        )
+        val migrationId =
+            "transfer-${receiverTable.name.lowercase(Locale.ROOT)}-${newColumn.lowercase(Locale.ROOT)}-$stableSuffix"
+        return SchemaWorkspaceService.getInstance(project).migrationProposal(
+            SchemaMigrationChangeRequest(
+                storeId = storeId,
+                migration = MigrationModel(
+                    changelogId = migrationId,
+                    changes = mutableListOf(
+                        ChangeSetModel(
+                            id = migrationId,
+                            comment = "Move one-to-one ownership from " +
+                                "${releasing.qualifiedName}.${releasingAttribute.name} to " +
+                                "${receiver.qualifiedName}.${change.current.name}; backfill both directions safely.",
+                            changes = changes,
+                            preConditions = preConditions,
+                            rollback = rollback,
+                            runInTransaction = true,
+                        ),
+                    ),
+                ),
+                fileName = migrationId,
+            ),
+        )
+    }
+
     private fun isOwningToOneWidening(
         current: SchemaEntityAttributeSnapshot,
         desired: AttributeModel,
@@ -1752,6 +2267,214 @@ class ExistingEntityChangeService(
         return RelationshipUniquenessEvidence(backing = candidates.single())
     }
 
+    private fun oneToOneOwnershipTransferEvidence(
+        receiverEntity: EntityModel,
+        currentReceiver: SchemaEntityAttributeSnapshot,
+        releasingEntity: SchemaEntitySnapshot,
+        currentReleasingOwner: SchemaEntityAttributeSnapshot,
+    ): OwnershipTransferEvidence {
+        val newColumn = receiverEntity.attributes
+            .single { it.name == currentReceiver.name }
+            .association
+            ?.ownershipJoinColumnName
+            ?.trim()
+            .orEmpty()
+        if (
+            receiverEntity.databaseView ||
+            receiverEntity.ddlGeneration.effectiveMode == DdlGenerationMode.DISABLED ||
+            releasingEntity.databaseView ||
+            releasingEntity.ddlMode == SchemaDdlMode.DISABLED
+        ) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-DDL-REQUIRED",
+                    "Both one-to-one entities must use a complete managed Liquibase schema.",
+                ),
+            )
+        }
+        if (
+            !receiverEntity.tableSchema.isNullOrBlank() ||
+            !receiverEntity.tableCatalog.isNullOrBlank() ||
+            !releasingEntity.tableSchema.isNullOrBlank() ||
+            !releasingEntity.tableCatalog.isNullOrBlank()
+        ) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-QUALIFIED-TABLE",
+                    "Ownership transfer is locked until physical constraint inventory preserves schema/catalog qualification.",
+                ),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load()
+        val receiverSnapshot = workspace.entities.singleOrNull {
+            it.qualifiedName == receiverEntity.fullName &&
+                it.storeName == receiverEntity.dataStore
+        } ?: return OwnershipTransferEvidence(
+            issue = WorkspaceChangeIssue(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-RECEIVER-STALE",
+                "The receiving entity is absent or ambiguous in the current schema snapshot.",
+            ),
+        )
+        val storeId = receiverEntity.generationTarget?.storeId
+            ?: workspace.stores.singleOrNull {
+                it.moduleId == receiverSnapshot.moduleId && it.name == receiverEntity.dataStore
+            }?.id
+            ?: return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-STORE-UNRESOLVED",
+                    "The relationship data store is not uniquely resolved.",
+                ),
+            )
+        val physicalStore = workspace.physicalSchemas.singleOrNull { it.storeId == storeId }
+            ?: return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-SCHEMA-MISSING",
+                    "No physical Liquibase inventory is available for the relationship data store.",
+                ),
+            )
+        if (!physicalStore.complete) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-SCHEMA-PARTIAL",
+                    "Raw or unsupported Liquibase operations make ownership transfer evidence incomplete.",
+                ),
+            )
+        }
+        val receiverTableName = receiverSnapshot.tableName.substringAfterLast('.')
+        val releasingTableName = releasingEntity.tableName.substringAfterLast('.')
+        if (
+            listOf(
+                receiverTableName,
+                releasingTableName,
+                receiverSnapshot.idColumnName,
+                releasingEntity.idColumnName,
+                currentReleasingOwner.columnName,
+                newColumn,
+            ).any { !DATABASE_IDENTIFIER.matches(it) }
+        ) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-IDENTIFIER-UNSUPPORTED",
+                    "Ownership transfer currently requires portable unquoted table, ID, and join-column identifiers.",
+                ),
+            )
+        }
+        val receiverTable = physicalStore.tables.singleOrNull {
+            it.name.equals(receiverTableName, ignoreCase = true)
+        } ?: return OwnershipTransferEvidence(
+            issue = WorkspaceChangeIssue(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-RECEIVER-TABLE",
+                "Receiving table $receiverTableName is absent or ambiguous in Liquibase history.",
+            ),
+        )
+        val releasingTable = physicalStore.tables.singleOrNull {
+            it.name.equals(releasingTableName, ignoreCase = true)
+        } ?: return OwnershipTransferEvidence(
+            issue = WorkspaceChangeIssue(
+                "JVW-ENTITY-OWNERSHIP-TRANSFER-OWNER-TABLE",
+                "Releasing table $releasingTableName is absent or ambiguous in Liquibase history.",
+            ),
+        )
+        if (receiverTable.columns.any { it.name.equals(newColumn, ignoreCase = true) }) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-NEW-COLUMN-EXISTS",
+                    "$receiverTableName.$newColumn already exists.",
+                ),
+            )
+        }
+        val oldColumn = releasingTable.columns.singleOrNull {
+            it.name.equals(currentReleasingOwner.columnName, ignoreCase = true)
+        }
+        if (oldColumn == null || oldColumn.primaryKey || !oldColumn.unique) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-OLD-COLUMN-UNPROVEN",
+                    "${releasingTable.name}.${currentReleasingOwner.columnName} must be a proven non-key unique column.",
+                ),
+            )
+        }
+        val backingCandidates = releasingTable.uniqueConstraints
+            .filter {
+                it.columns.size == 1 &&
+                    it.columns.single().equals(oldColumn.name, ignoreCase = true)
+            }
+            .map { RelationshipUniqueBacking.Constraint(it.name) } +
+            releasingTable.indexes
+                .filter {
+                    it.unique &&
+                        it.columns.size == 1 &&
+                        it.columns.single().equals(oldColumn.name, ignoreCase = true)
+                }
+                .map { RelationshipUniqueBacking.Index(it.name) }
+        if (backingCandidates.size != 1) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-UNIQUE-BACKING-${if (backingCandidates.isEmpty()) "MISSING" else "AMBIGUOUS"}",
+                    "The releasing join column must have exactly one named single-column unique constraint or index.",
+                ),
+            )
+        }
+        val foreignKeys = releasingTable.foreignKeys.filter { foreignKey ->
+            splitPhysicalColumns(foreignKey.baseColumnNames).singleOrNull()
+                ?.equals(oldColumn.name, ignoreCase = true) == true &&
+                foreignKey.referencedTableName.equals(receiverTable.name, ignoreCase = true) &&
+                splitPhysicalColumns(foreignKey.referencedColumnNames).singleOrNull()
+                    ?.equals(receiverSnapshot.idColumnName, ignoreCase = true) == true
+        }
+        if (foreignKeys.size != 1) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-FOREIGN-KEY-${if (foreignKeys.isEmpty()) "MISSING" else "AMBIGUOUS"}",
+                    "The releasing join column must have exactly one named foreign key to the receiving entity ID.",
+                ),
+            )
+        }
+        val newForeignKey = stableDatabaseObjectName("FK", receiverTable.name, newColumn)
+        val newUnique = stableDatabaseObjectName("UQ", receiverTable.name, newColumn)
+        val existingNames = physicalStore.tables.flatMap { table ->
+            table.foreignKeys.map(SchemaPhysicalForeignKeySnapshot::constraintName) +
+                table.uniqueConstraints.map { it.name } +
+                table.indexes.map(SchemaPhysicalIndexSnapshot::name)
+        }.map { it.uppercase(Locale.ROOT) }.toSet()
+        if (
+            newForeignKey.uppercase(Locale.ROOT) in existingNames ||
+            newUnique.uppercase(Locale.ROOT) in existingNames
+        ) {
+            return OwnershipTransferEvidence(
+                issue = WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-CONSTRAINT-COLLISION",
+                    "Generated constraint names collide with existing schema objects.",
+                ),
+            )
+        }
+        return OwnershipTransferEvidence(
+            receiverEntity = receiverSnapshot,
+            releasingEntity = releasingEntity,
+            receiverTable = receiverTable,
+            releasingTable = releasingTable,
+            oldColumn = oldColumn,
+            oldForeignKey = foreignKeys.single(),
+            oldUniqueBacking = backingCandidates.single(),
+            newColumnName = newColumn,
+            newForeignKeyName = newForeignKey,
+            newUniqueName = newUnique,
+            storeId = storeId,
+        )
+    }
+
+    private fun stableDatabaseObjectName(prefix: String, vararg parts: String): String {
+        val raw = (listOf(prefix) + parts)
+            .joinToString("_")
+            .replace(Regex("[^A-Za-z0-9_]"), "_")
+            .uppercase(Locale.ROOT)
+        if (raw.length <= 60) return raw
+        return "${raw.take(49)}_${CanonicalDiscoveryJson.sha256(raw).take(10).uppercase(Locale.ROOT)}"
+    }
+
+    private fun splitPhysicalColumns(value: String): List<String> =
+        value.split(',').map(String::trim).filter(String::isNotBlank)
+
     private fun relationshipEvolutionIssue(
         current: SchemaEntityAttributeSnapshot,
         desired: AttributeModel,
@@ -1767,6 +2490,53 @@ class ExistingEntityChangeService(
                 "JVW-ENTITY-RELATIONSHIP-MAPPING-MISSING",
                 "${current.name} is an existing relationship and must retain its explicit association mapping.",
             )
+        target.ownershipTransfer?.let { role ->
+            return when (role) {
+                AssociationOwnershipTransfer.REQUEST -> WorkspaceChangeIssue(
+                    "JVW-ENTITY-OWNERSHIP-TRANSFER-UNPLANNED",
+                    "Ownership transfer request was not expanded into receiver/release changes.",
+                )
+                AssociationOwnershipTransfer.RECEIVER -> {
+                    if (
+                        source.associationType == AssociationType.ONE_TO_ONE &&
+                        target.associationType == AssociationType.ONE_TO_ONE &&
+                        !source.mappedBy.isNullOrBlank() &&
+                        target.mappedBy.isNullOrBlank() &&
+                        source.relatedEntity == target.relatedEntity &&
+                        !target.joinColumnName.isNullOrBlank() &&
+                        desired.unique &&
+                        !desired.mandatory
+                    ) {
+                        null
+                    } else {
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-OWNERSHIP-TRANSFER-RECEIVER-SHAPE",
+                            "${current.name} is not the planned inverse-to-owning one-to-one receiver.",
+                        )
+                    }
+                }
+                AssociationOwnershipTransfer.RELEASE -> {
+                    if (
+                        source.associationType == AssociationType.ONE_TO_ONE &&
+                        target.associationType == AssociationType.ONE_TO_ONE &&
+                        source.mappedBy.isNullOrBlank() &&
+                        !target.mappedBy.isNullOrBlank() &&
+                        source.relatedEntity == target.relatedEntity &&
+                        source.joinColumnName == current.columnName &&
+                        target.joinColumnName.isNullOrBlank() &&
+                        !desired.unique &&
+                        !desired.mandatory
+                    ) {
+                        null
+                    } else {
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-OWNERSHIP-TRANSFER-RELEASE-SHAPE",
+                            "${current.name} is not the planned owning-to-inverse one-to-one release.",
+                        )
+                    }
+                }
+            }
+        }
         val owningToOneNarrowing =
             source.associationType == AssociationType.MANY_TO_ONE &&
                 target.associationType == AssociationType.ONE_TO_ONE &&
@@ -2087,6 +2857,8 @@ class ExistingEntityChangeService(
         val target = desired.association ?: return true
         return source.associationType != target.associationType ||
             source.composition != (desired.type == AttributeType.COMPOSITION) ||
+            desired.mandatory != !current.nullable ||
+            source.mappedBy != target.mappedBy ||
             source.cascade != target.cascade ||
             source.fetch != target.fetch ||
             source.orphanRemoval != target.orphanRemoval ||
@@ -2277,15 +3049,26 @@ class ExistingEntityChangeService(
             .substringAfter('(', "")
             .substringBeforeLast(')', "")
         val existingArguments = splitTopLevelArguments(argumentsText)
+        val transferRole = target.ownershipTransfer
         val preservedArguments = existingArguments.filter { argument ->
             val equals = topLevelEquals(argument)
             val name = if (equals < 0) "value" else argument.substring(0, equals).trim()
-            name !in MANAGED_RELATION_ARGUMENTS
+            name !in MANAGED_RELATION_ARGUMENTS &&
+                !(transferRole != null && name == "mappedBy")
         }
         val managedArguments = mutableListOf<String>()
+        if (transferRole != null && !target.mappedBy.isNullOrBlank()) {
+            managedArguments += "mappedBy = \"${escapeJavaString(target.mappedBy)}\""
+        }
         if (target.cascade.isNotEmpty()) {
             val cascades = target.cascade.joinToString(", ") { "CascadeType.${it.name}" }
             managedArguments += "cascade = ${if (kotlin) "[$cascades]" else "{$cascades}"}"
+        }
+        if (
+            target.associationType in setOf(AssociationType.MANY_TO_ONE, AssociationType.ONE_TO_ONE) &&
+            desired.mandatory
+        ) {
+            managedArguments += "optional = false"
         }
         val defaultFetch = if (
             target.associationType in setOf(AssociationType.MANY_TO_ONE, AssociationType.ONE_TO_ONE)
@@ -2448,6 +3231,19 @@ class ExistingEntityChangeService(
             edits += relationshipMetadata.edits
             imports += relationshipMetadata.imports
             if (!change.physicalMappingChanged) return@forEach
+            val transferRole = change.desired.association?.ownershipTransfer
+            if (transferRole == AssociationOwnershipTransfer.RELEASE) {
+                val joinColumn = modifierList.annotations.singleOrNull { annotation ->
+                    annotation.nameReferenceElement?.text?.substringAfterLast('.') == "JoinColumn"
+                } ?: return null
+                if (explicitColumnName(joinColumn.text) != change.current.columnName) return null
+                edits += annotationRemovalEdit(
+                    source = source,
+                    startOffset = joinColumn.textRange.startOffset,
+                    endOffset = joinColumn.textRange.endOffset,
+                )
+                return@forEach
+            }
             val managedAnnotationName = if (change.relationshipPhysicalMappingChanged) "JoinColumn" else "Column"
             val columnAnnotation = modifierList.annotations.firstOrNull { annotation ->
                 val name = annotation.nameReferenceElement?.text?.substringAfterLast('.')
@@ -2455,6 +3251,7 @@ class ExistingEntityChangeService(
             }
             if (
                 change.columnRenamed &&
+                transferRole != AssociationOwnershipTransfer.RECEIVER &&
                 columnAnnotation?.text?.let {
                     explicitColumnName(it) == change.current.columnName
                 } != true
@@ -2574,6 +3371,26 @@ class ExistingEntityChangeService(
             edits += relationshipMetadata.edits
             imports += relationshipMetadata.imports
             if (!change.physicalMappingChanged) return@forEach
+            val transferRole = change.desired.association?.ownershipTransfer
+            if (transferRole == AssociationOwnershipTransfer.RELEASE) {
+                val joinColumn = PsiTreeUtil.findChildrenOfType(
+                    property,
+                    com.intellij.psi.PsiElement::class.java,
+                ).singleOrNull { element ->
+                    element.javaClass.simpleName == "KtAnnotationEntry" &&
+                        element.text.substringBefore('(')
+                            .substringAfterLast(':')
+                            .substringAfterLast('.')
+                            .removePrefix("@") == "JoinColumn"
+                } ?: return null
+                if (explicitColumnName(joinColumn.text) != change.current.columnName) return null
+                edits += annotationRemovalEdit(
+                    source = source,
+                    startOffset = joinColumn.textRange.startOffset,
+                    endOffset = joinColumn.textRange.endOffset,
+                )
+                return@forEach
+            }
             val managedAnnotationName = if (change.relationshipPhysicalMappingChanged) "JoinColumn" else "Column"
             val columnAnnotation = PsiTreeUtil.findChildrenOfType(
                 property,
@@ -2587,6 +3404,7 @@ class ExistingEntityChangeService(
             }
             if (
                 change.columnRenamed &&
+                transferRole != AssociationOwnershipTransfer.RECEIVER &&
                 columnAnnotation?.text?.let {
                     explicitColumnName(it) == change.current.columnName
                 } != true
@@ -2704,6 +3522,28 @@ class ExistingEntityChangeService(
         }
         result += arguments.substring(start).trim()
         return result.filter(String::isNotBlank)
+    }
+
+    private fun annotationRemovalEdit(
+        source: String,
+        startOffset: Int,
+        endOffset: Int,
+    ): WorkspaceTextEdit {
+        val lineStart = source.lastIndexOf('\n', (startOffset - 1).coerceAtLeast(0)) + 1
+        val nextLineBreak = source.indexOf('\n', endOffset)
+        val lineEnd = if (nextLineBreak < 0) source.length else nextLineBreak + 1
+        val contentEnd = if (nextLineBreak < 0) lineEnd else nextLineBreak
+        val occupiesWholeLine =
+            source.substring(lineStart, startOffset).isBlank() &&
+                source.substring(endOffset, contentEnd).isBlank()
+        val editStart = if (occupiesWholeLine) lineStart else startOffset
+        val editEnd = if (occupiesWholeLine) lineEnd else endOffset
+        return WorkspaceTextEdit(
+            startOffset = editStart,
+            endOffset = editEnd,
+            expectedText = source.substring(editStart, editEnd),
+            replacement = "",
+        )
     }
 
     private fun topLevelEquals(argument: String): Int {
@@ -2856,7 +3696,7 @@ class ExistingEntityChangeService(
         private val RELATION_ANNOTATIONS =
             setOf("ManyToOne", "OneToMany", "ManyToMany", "OneToOne")
         private val MANAGED_RELATION_ARGUMENTS =
-            setOf("cascade", "fetch", "orphanRemoval")
+            setOf("cascade", "fetch", "optional", "orphanRemoval")
         private val DELETE_POLICIES = setOf("DENY", "CASCADE", "UNLINK")
         private val SOURCE_METADATA_ANNOTATIONS = setOf(
             "SystemLevel",
@@ -2919,6 +3759,21 @@ private sealed interface RelationshipUniqueBacking {
 
 private data class RelationshipUniquenessEvidence(
     val backing: RelationshipUniqueBacking? = null,
+    val issue: WorkspaceChangeIssue? = null,
+)
+
+private data class OwnershipTransferEvidence(
+    val receiverEntity: SchemaEntitySnapshot? = null,
+    val releasingEntity: SchemaEntitySnapshot? = null,
+    val receiverTable: SchemaPhysicalTableSnapshot? = null,
+    val releasingTable: SchemaPhysicalTableSnapshot? = null,
+    val oldColumn: SchemaPhysicalColumnSnapshot? = null,
+    val oldForeignKey: SchemaPhysicalForeignKeySnapshot? = null,
+    val oldUniqueBacking: RelationshipUniqueBacking? = null,
+    val newColumnName: String? = null,
+    val newForeignKeyName: String? = null,
+    val newUniqueName: String? = null,
+    val storeId: String? = null,
     val issue: WorkspaceChangeIssue? = null,
 )
 

@@ -495,8 +495,9 @@ class SchemaWorkspaceService(
             var complete = true
             orderedPaths.forEach { path ->
                 val source = content(path) ?: return@forEach
-                if (RAW_SQL.containsMatchIn(source)) complete = false
-                applyPhysicalOperations(source, path, tables)
+                val forwardSource = ROLLBACK_BLOCK.replace(source, "")
+                if (hasUnclassifiedRawSql(forwardSource)) complete = false
+                applyPhysicalOperations(forwardSource, path, tables)
             }
             SchemaPhysicalStoreSnapshot(
                 storeId = store.id,
@@ -1176,7 +1177,10 @@ class SchemaWorkspaceService(
         }
         changelogs.filter(SchemaChangelogSnapshot::containsRawSql).forEach { changelog ->
             val source = content(changelog.relativePath).orEmpty()
-            if (RAW_SQL_WITHOUT_DBMS.containsMatchIn(source)) {
+            if (
+                hasUnclassifiedRawSql(source) &&
+                RAW_SQL_WITHOUT_DBMS.containsMatchIn(source)
+            ) {
                 findings += finding(
                     SchemaFindingSeverity.WARNING,
                     "SCHEMA_RAW_SQL_NOT_SCOPED",
@@ -1208,6 +1212,22 @@ class SchemaWorkspaceService(
             }
         }
         return findings.sortedWith(compareByDescending<SchemaFinding> { it.severity.ordinal }.thenBy { it.code })
+    }
+
+    private fun hasUnclassifiedRawSql(source: String): Boolean {
+        if (!RAW_SQL.containsMatchIn(source)) return false
+        val blocks = RAW_SQL_BLOCK.findAll(source).map { it.groupValues[1] }.toList()
+        if (blocks.isEmpty()) return true
+        return blocks.any { body ->
+            val sql = body.trim()
+            if (!sql.startsWith(DATA_ONLY_BACKFILL_MARKER)) {
+                true
+            } else {
+                val statement = sql.removePrefix(DATA_ONLY_BACKFILL_MARKER).trimStart()
+                !statement.startsWith("UPDATE ", ignoreCase = true) ||
+                    RAW_SQL_SCHEMA_OPERATION.containsMatchIn(statement)
+            }
+        }
     }
 
     private fun entityAttributes(
@@ -1845,6 +1865,11 @@ class SchemaWorkspaceService(
         private val ROOT_CLOSE = Regex("""(?i)</databaseChangeLog\s*>""")
         private val RAW_SQL = Regex("""(?is)<sql(?:\s|>)""")
         private val RAW_SQL_WITHOUT_DBMS = Regex("""(?is)<sql\b(?![^>]*\bdbms\s*=)[^>]*>""")
+        private val RAW_SQL_BLOCK = Regex("""(?is)<sql\b[^>]*>(.*?)</sql\s*>""")
+        private val ROLLBACK_BLOCK = Regex("""(?is)<rollback\b[^>]*>.*?</rollback\s*>""")
+        private val RAW_SQL_SCHEMA_OPERATION =
+            Regex("""(?i)\b(?:ALTER|CREATE|DROP|TRUNCATE|RENAME|GRANT|REVOKE)\b""")
+        private const val DATA_ONLY_BACKFILL_MARKER = "/* JVW_DATA_ONLY_BACKFILL */"
         private val BUSINESS_IDENTIFIER = Regex("""(?i)(number|code|applicationNo|applicationNumber|loanNo|loanNumber)$""")
         private val MONEY_NAME = Regex("""(?i)(amount|balance|salary|wage|rate|price|total|interest|principal|deduction)""")
         private val SCALAR_TYPES = setOf(

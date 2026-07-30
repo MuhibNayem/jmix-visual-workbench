@@ -178,6 +178,20 @@ still tracked as a separate gate.
   fails closed. The responsive designer explains the conditional rollback and
   remained complete at 480 pixels with no browser diagnostics. Dual-host
   contracts cover both constraint-backed Java and index-backed Kotlin mappings.
+- An established inverse one-to-one can now receive physical ownership from its
+  exact handwritten counterpart. The planner resolves and revision-checks both
+  Java/Kotlin sources, changes `mappedBy` and `@JoinColumn` on the correct sides,
+  preserves manual code and unmanaged annotation arguments, and keeps JPA
+  optionality aligned with database nullability. Complete same-store Liquibase
+  evidence must prove the old non-key join column, exactly one named unique
+  constraint or index, exactly one matching foreign key, and a collision-free
+  destination column. The atomic migration adds and backfills the new unique
+  foreign key before removing the old mapping; rollback restores the old column,
+  data, nullability, exact constraint/index and foreign key before retiring the
+  new column. Dual-host contracts cover Java receiving from Kotlin and Kotlin
+  receiving from Java, constraint- and index-backed schemas, collision rejection
+  and preservation of both manual sources. The responsive control was exercised
+  at 1440, 480 and 360 pixels with no horizontal overflow or browser diagnostics.
 - The Integration Designer was exercised in a real browser. Catalog selection,
   indexed Kafka handler binding, non-blocking retry and dead-letter property
   authoring, and the immutable two-file Java/policy preview completed
@@ -197,9 +211,9 @@ still tracked as a separate gate.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 247 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 257 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 247 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 257 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,

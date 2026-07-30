@@ -303,7 +303,15 @@ data class AssociationConfig(
     val onDelete: String? = null,
     val generateInverse: Boolean = false,
     val inverseAttributeName: String? = null,
+    val ownershipTransfer: AssociationOwnershipTransfer? = null,
+    val ownershipJoinColumnName: String? = null,
 )
+
+enum class AssociationOwnershipTransfer {
+    @SerializedName("request") REQUEST,
+    @SerializedName("receiver") RECEIVER,
+    @SerializedName("release") RELEASE,
+}
 
 data class AssociationJoinColumn(
     val name: String,
