@@ -20,6 +20,8 @@ import org.jetbrains.plugins.gradle.settings.GradleProjectSettings
 import org.jetbrains.plugins.gradle.settings.GradleSettings
 import java.nio.file.Path
 import javax.swing.Icon
+import javax.swing.JComboBox
+import javax.swing.DefaultComboBoxModel
 
 class JmixNewProjectWizard : GeneratorNewProjectWizard {
     override val id: String = "jmix-visual-workbench"
@@ -56,21 +58,30 @@ private class JmixProjectSettingsStep(
     private val localesProperty = propertyGraph.property("en")
     private val useMavenLocalProperty = propertyGraph.property(false)
     private val repositoriesProperty = propertyGraph.property("")
+    private val baselineProperty =
+        propertyGraph.property<JmixProjectBaseline>(JmixProjectBaseline.BuiltIn)
+    private val catalogInventory: JmixTemplateCatalogInventory by lazy {
+        JmixTemplateCatalogManager.getInstance().inventory()
+    }
+    private lateinit var baselineCombo: JComboBox<JmixProjectBaseline>
 
     override fun setupUI(builder: Panel) {
         builder.group("Jmix project") {
             row("Template:") {
                 comboBox(JmixProjectTemplateKind.entries)
                     .bindItem(templateKindProperty)
+                    .onChanged { refreshBaselineChoices() }
             }
             row("Language:") {
                 comboBox(JmixProjectLanguage.entries)
                     .bindItem(languageProperty)
+                    .onChanged { refreshBaselineChoices() }
                 comment("Application, add-on, tests and composite modules use the selected language.")
             }
             row("Application UI:") {
                 comboBox(JmixProjectUiKind.entries)
                     .bindItem(uiKindProperty)
+                    .onChanged { refreshBaselineChoices() }
                 comment("Applies to application and composite templates. Add-ons remain UI-neutral.")
             }
             row("Jmix version:") {
@@ -83,12 +94,38 @@ private class JmixProjectSettingsStep(
                         if (javaVersionProperty.get() !in version.supportedJavaVersions) {
                             javaVersionProperty.set(version.supportedJavaVersions.min())
                         }
+                        refreshBaselineChoices()
                     }
             }
             row("Java:") {
                 comboBox(listOf(17, 21, 25))
                     .bindItem(javaVersionProperty)
+                    .onChanged { refreshBaselineChoices() }
                 comment("Jmix 2.8: Java 17/21. Jmix 3.0: Java 21/25 (Java 21 bytecode).")
+            }
+            row("Project baseline:") {
+                comboBox(listOf<JmixProjectBaseline>())
+                    .applyToComponent {
+                        baselineCombo = this
+                        accessibleContext.accessibleName = "Jmix project baseline"
+                    }
+                    .onChanged { combo ->
+                        baselineProperty.set(
+                            combo.selectedItem as? JmixProjectBaseline ?: JmixProjectBaseline.BuiltIn,
+                        )
+                    }
+                comment(
+                    "Signed organization templates are reverified at generation time. " +
+                        "Manage and refresh them in Settings → Tools → Jmix Organization Templates.",
+                )
+            }
+            if (catalogInventory.issues.isNotEmpty()) {
+                row {
+                    label(
+                        "${catalogInventory.issues.size} configured organization catalog(s) are unavailable. " +
+                            "Open Jmix Organization Templates settings for verification details.",
+                    )
+                }
             }
         }
         builder.group("Coordinates") {
@@ -128,6 +165,7 @@ private class JmixProjectSettingsStep(
                 )
             }
         }
+        refreshBaselineChoices()
     }
 
     override fun setupProject(project: Project) {
@@ -152,7 +190,11 @@ private class JmixProjectSettingsStep(
         )
         try {
             ensureSelectedJdkMatches(request)
-            val generated = JmixProjectTemplateGenerator.generate(request)
+            val generated = when (val baseline = baselineProperty.get()) {
+                JmixProjectBaseline.BuiltIn -> JmixProjectTemplateGenerator.generate(request)
+                is JmixProjectBaseline.Organization ->
+                    JmixTemplateCatalogManager.getInstance().apply(baseline.option, request)
+            }
             val root = Path.of(requireNotNull(project.basePath) {
                 "IntelliJ did not provide the new project directory."
             })
@@ -199,5 +241,46 @@ private class JmixProjectSettingsStep(
         require(feature == request.javaVersion) {
             "The selected SDK is Java $feature, but the template targets Java ${request.javaVersion}."
         }
+    }
+
+    private fun refreshBaselineChoices() {
+        if (!::baselineCombo.isInitialized) return
+        val selectedStableId = (baselineCombo.selectedItem as? JmixProjectBaseline.Organization)
+            ?.option
+            ?.stableId
+        val templateKind = templateKindProperty.get()
+        val effectiveUiKind = if (templateKind == JmixProjectTemplateKind.ADDON) {
+            JmixProjectUiKind.HEADLESS
+        } else {
+            uiKindProperty.get()
+        }
+        val compatible = catalogInventory.options.filter { option ->
+            val template = option.template
+            template.baseTemplate == templateKind &&
+                languageProperty.get() in template.languages &&
+                effectiveUiKind in template.uiKinds &&
+                jmixVersionProperty.get() in template.jmixVersions &&
+                javaVersionProperty.get() in template.javaVersions
+        }
+        val choices = listOf<JmixProjectBaseline>(JmixProjectBaseline.BuiltIn) +
+            compatible.map(JmixProjectBaseline::Organization)
+        baselineCombo.model = DefaultComboBoxModel(choices.toTypedArray())
+        val restored = choices.filterIsInstance<JmixProjectBaseline.Organization>()
+            .singleOrNull { it.option.stableId == selectedStableId }
+            ?: JmixProjectBaseline.BuiltIn
+        baselineCombo.selectedItem = restored
+        baselineProperty.set(restored)
+    }
+}
+
+private sealed interface JmixProjectBaseline {
+    data object BuiltIn : JmixProjectBaseline {
+        override fun toString(): String = "Built-in certified Jmix baseline"
+    }
+
+    data class Organization(
+        val option: JmixTemplateCatalogOption,
+    ) : JmixProjectBaseline {
+        override fun toString(): String = option.toString()
     }
 }

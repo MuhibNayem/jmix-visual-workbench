@@ -17,12 +17,19 @@ The certified template set contains:
   roles, entity-backed production users and a local-only in-memory
   administrator whose password is environment-controlled or randomly generated;
 - a source-first reusable Jmix add-on with sources/Javadoc publication;
-- a composite build containing a connected application and shared add-on.
+- a composite build containing a connected application and shared add-on; and
+- optional Ed25519-signed organization baselines selected from an immutable,
+  reverified offline cache.
 
 The wizard exposes template type, Java/Kotlin language, headless/FlowUI
 application mode, Jmix version, Java target, SDK, Maven coordinates, base
 package, seven-character Jmix project ID, locales, `mavenLocal()` opt-in and
 credential-free HTTPS repository URLs.
+
+Organization baselines are managed natively under **Settings → Tools → Jmix
+Organization Templates**. Exact bundle SHA-256, signer, catalog/version and
+anti-rollback policy are reverified before generation. See
+`ORGANIZATION-TEMPLATE-CATALOGS.md`.
 
 ## Safety and reproducibility
 
@@ -78,12 +85,19 @@ selected runtime; Java 25 cannot silently fall back to Java 21. Jmix 3 Java 25
 templates use the Java 25 toolchain while `--release 21` and Kotlin JVM target
 21 retain framework-compatible bytecode.
 
+A separate eight-variant organization-template matrix covers Java/Kotlin
+FlowUI projects in all four cells. Each cell authors and signs a catalog,
+verifies and applies its overlay, builds the production frontend, runs
+Liquibase and starts Jmix on the selected runtime. The final post-hardening run
+passed in 4 minutes 41 seconds on 2026-07-31.
+
 ## Packaging gates
 
 Both installable ZIPs must contain:
 
 - `JmixNewProjectWizard`, `JmixProjectTemplateGenerator` and
   `JmixProjectInstaller`;
+- the catalog verifier, manager and native organization-template configurable;
 - `project-template/gradlew` and `gradlew.bat`;
 - `project-template/gradle/wrapper/gradle-wrapper.jar`;
 - the `newProjectWizard.generator` registration; and
@@ -94,13 +108,13 @@ nested ZIP verifier enforce these requirements.
 
 ## Release evidence
 
-The clean `phase1Check` release gate passed in 7 minutes 59 seconds on
+The final clean `phase1Check` release gate passed in 7 minutes 56 seconds on
 2026-07-31:
 
 | Host | Regression + smoke tests | Plugin Verifier | Installable ZIP SHA-256 |
 |---|---:|---|---|
-| IntelliJ IDEA 2025.3 | 341 passed (338 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `6faffeb2595a5115aee55477fffc1d19c58b742f76aa403f95dfd324c1ee1cc5` |
-| IntelliJ IDEA 2026.2 | 341 passed (338 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `84f32952485fa490e0f4524bd85bb395c5bd47b3190b88ef349e322bb526bf09` |
+| IntelliJ IDEA 2025.3 | 350 passed (347 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `86894620a6947cdcf2945676ade22a753ff4dda4c891c76f9b750e4b01441da2` |
+| IntelliJ IDEA 2026.2 | 350 passed (347 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `ef2787bd7c520641ad5a0fd02f7acb9eb4f74d63f79ac06dc15941cb8e65b5ee` |
 
 The same gate passed strict dependency verification, generated-code
 compatibility for all four Jmix/JDK cells, mutation/index architecture checks,
@@ -110,5 +124,4 @@ SHA-256 pinned in Gradle verification metadata.
 
 ## Remaining before STRONG
 
-- organization-controlled, signed and offline custom-template catalogs;
 - installed IntelliJ keyboard, screen-reader, validation and recovery journeys.

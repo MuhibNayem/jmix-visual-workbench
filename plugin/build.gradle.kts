@@ -483,6 +483,9 @@ tasks.register("verifyHostBuildDefinitions") {
         "hosts/idea262/build.gradle.kts",
         "hosts/idea262/src/main/resources/META-INF/plugin.xml",
         "src/main/kotlin/org/jmixworkbench/project/JmixNewProjectWizard.kt",
+        "src/main/kotlin/org/jmixworkbench/project/JmixOrganizationTemplateCatalog.kt",
+        "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogSettings.kt",
+        "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogConfigurable.kt",
     )
     doLast {
         val idea253Build = file("hosts/idea253/build.gradle.kts").readText()
@@ -504,6 +507,7 @@ tasks.register("verifyHostBuildDefinitions") {
         check("untilBuild.set(\"253.*\")" in idea253Build)
         check("<depends>com.intellij.gradle</depends>" in idea253Descriptor)
         check("org.jmixworkbench.project.JmixNewProjectWizard" in idea253Descriptor)
+        check("org.jmixworkbench.project.JmixTemplateCatalogConfigurable" in idea253Descriptor)
         check("<depends>com.intellij.modules.jcef</depends>" !in idea253Descriptor)
 
         check("JavaLanguageVersion.of(25)" in idea262Build)
@@ -518,6 +522,7 @@ tasks.register("verifyHostBuildDefinitions") {
         check("untilBuild.set(\"262.*\")" in idea262Build)
         check("<depends>com.intellij.gradle</depends>" in idea262Descriptor)
         check("org.jmixworkbench.project.JmixNewProjectWizard" in idea262Descriptor)
+        check("org.jmixworkbench.project.JmixTemplateCatalogConfigurable" in idea262Descriptor)
         check("bundledModule(\"intellij.libraries.jcef\")" in idea262Build)
         check("bundledModule(\"intellij.platform.ui.jcef\")" in idea262Build)
         check("<depends>com.intellij.modules.jcef</depends>" in idea262Descriptor)
@@ -593,6 +598,9 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
             ) {
                 "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register the native Jmix project wizard."
             }
+            check("org.jmixworkbench.project.JmixTemplateCatalogConfigurable" in descriptorText) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register organization template settings."
+            }
             check(
                 """<projectService serviceImplementation="org.jmixworkbench.toolwindow.WorkbenchNavigationService"/>""" in
                     descriptorText,
@@ -643,6 +651,12 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
         val projectTemplateBoundary = setOf(
             "src/main/kotlin/org/jmixworkbench/project/JmixProjectInstaller.kt",
         )
+        val catalogCacheBoundary = setOf(
+            "src/main/kotlin/org/jmixworkbench/project/JmixOrganizationTemplateCatalog.kt",
+        )
+        val catalogAuthoringBoundary = setOf(
+            "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogAuthoring.kt",
+        )
         val allowedByMarker = linkedMapOf(
             "WriteCommandAction" to
                 sharedBoundary + "src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt",
@@ -655,10 +669,17 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
                 "src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt",
             ),
             ".delete(this)" to sharedBoundary,
-            "Files.newOutputStream(" to projectTemplateBoundary,
-            "Files.move(" to projectTemplateBoundary,
+            "Files.newOutputStream(" to projectTemplateBoundary + catalogCacheBoundary,
+            "Files.write(" to catalogAuthoringBoundary,
+            "Files.copy(" to catalogCacheBoundary,
+            "Files.move(" to
+                projectTemplateBoundary + catalogCacheBoundary + catalogAuthoringBoundary,
             "Files.createDirectory(" to projectTemplateBoundary,
-            "Files.deleteIfExists(" to projectTemplateBoundary,
+            "Files.createDirectories(" to projectTemplateBoundary + catalogCacheBoundary,
+            "Files.createTempDirectory(" to projectTemplateBoundary,
+            "Files.createTempFile(" to catalogCacheBoundary,
+            "Files.deleteIfExists(" to
+                projectTemplateBoundary + catalogCacheBoundary + catalogAuthoringBoundary,
         )
         productionSources.files.sorted().forEach { source ->
             val relativePath = source.relativeTo(projectDirectoryRoot).invariantSeparatorsPath
@@ -697,6 +718,36 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
         ).forEach { requiredSafetyControl ->
             check(requiredSafetyControl in projectInstaller) {
                 "Native project installation boundary lost safety control '$requiredSafetyControl'."
+            }
+        }
+        val catalogCache = file(
+            "src/main/kotlin/org/jmixworkbench/project/JmixOrganizationTemplateCatalog.kt",
+        ).readText()
+        listOf(
+            "LinkOption.NOFOLLOW_LINKS",
+            "MAX_ARCHIVE_BYTES",
+            "expectedBundleSha256",
+            "JmixTemplateCatalogVerifier.verify(incoming",
+            ".incoming-",
+            "StandardCopyOption.ATOMIC_MOVE",
+            "Files.isSymbolicLink(",
+        ).forEach { requiredSafetyControl ->
+            check(requiredSafetyControl in catalogCache) {
+                "Organization template cache boundary lost safety control '$requiredSafetyControl'."
+            }
+        }
+        val catalogAuthoring = file(
+            "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogAuthoring.kt",
+        ).readText()
+        listOf(
+            "JmixTemplateCatalogVerifier.verify(",
+            "StandardOpenOption.CREATE_NEW",
+            "Refusing to replace existing catalog bundle",
+            "StandardCopyOption.ATOMIC_MOVE",
+            "Files.isSymbolicLink(",
+        ).forEach { requiredSafetyControl ->
+            check(requiredSafetyControl in catalogAuthoring) {
+                "Organization template authoring boundary lost safety control '$requiredSafetyControl'."
             }
         }
     }

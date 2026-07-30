@@ -19,6 +19,10 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <newProjectWizard.generator implementation="org.jmixworkbench.project.JmixNewProjectWizard"/>
+        <applicationConfigurable parentId="tools"
+                                 id="org.jmixworkbench.organizationTemplates"
+                                 displayName="Jmix Organization Templates"
+                                 instance="org.jmixworkbench.project.JmixTemplateCatalogConfigurable"/>
         <fileEditorProvider implementation="org.jmixworkbench.editor.JmixFlowUiFileEditorProvider"/>
         <fileEditorProvider implementation="org.jmixworkbench.editor.JmixEntityFileEditorProvider"/>
         <toolWindow id="Jmix Visual Workbench"

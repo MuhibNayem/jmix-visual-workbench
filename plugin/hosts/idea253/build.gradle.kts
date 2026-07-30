@@ -165,6 +165,7 @@ tasks.withType<Test>().configureEach {
         "jvw.project.template.runtime.languages",
         "jvw.project.template.runtime.templates",
         "jvw.project.template.runtime.uiKinds",
+        "jvw.project.template.runtime.organizationOnly",
         "jvw.project.template.java17Home",
         "jvw.project.template.java21Home",
         "jvw.project.template.java25Home",

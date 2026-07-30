@@ -4,6 +4,10 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.security.KeyPairGenerator
+import java.time.Instant
+import java.time.temporal.ChronoUnit
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -36,6 +40,8 @@ class JmixProjectTemplateRuntimeTest {
             propertyName = "jvw.project.template.runtime.uiKinds",
             entries = JmixProjectUiKind.entries,
         )
+        val organizationOnly =
+            System.getProperty("jvw.project.template.runtime.organizationOnly").toBoolean()
         cells.forEach { cell ->
             val (jmixVersion, javaText) = cell.split(':').also {
                 require(it.size == 2) { "Invalid project-template runtime cell '$cell'." }
@@ -48,23 +54,41 @@ class JmixProjectTemplateRuntimeTest {
             )
             assertTrue(Files.isExecutable(javaHome.resolve("bin/java")), "Invalid JAVA_HOME: $javaHome")
             languages.forEach { language ->
-                templateKinds.forEach { templateKind ->
-                    val uiKinds = if (templateKind == JmixProjectTemplateKind.ADDON) {
-                        listOf(JmixProjectUiKind.HEADLESS)
-                    } else {
-                        requestedUiKinds
+                if (!organizationOnly) {
+                    templateKinds.forEach { templateKind ->
+                        val uiKinds = if (templateKind == JmixProjectTemplateKind.ADDON) {
+                            listOf(JmixProjectUiKind.HEADLESS)
+                        } else {
+                            requestedUiKinds
+                        }
+                        uiKinds.forEach { uiKind ->
+                            certify(
+                                cell = cell,
+                                jmixVersion = jmixVersion,
+                                javaVersion = javaVersion,
+                                javaHome = javaHome,
+                                templateKind = templateKind,
+                                language = language,
+                                uiKind = uiKind,
+                                organizationBaseline = false,
+                            )
+                        }
                     }
-                    uiKinds.forEach { uiKind ->
-                        certify(
-                            cell = cell,
-                            jmixVersion = jmixVersion,
-                            javaVersion = javaVersion,
-                            javaHome = javaHome,
-                            templateKind = templateKind,
-                            language = language,
-                            uiKind = uiKind,
-                        )
-                    }
+                }
+                if (
+                    JmixProjectTemplateKind.APPLICATION in templateKinds &&
+                    JmixProjectUiKind.FLOW_UI in requestedUiKinds
+                ) {
+                    certify(
+                        cell = cell,
+                        jmixVersion = jmixVersion,
+                        javaVersion = javaVersion,
+                        javaHome = javaHome,
+                        templateKind = JmixProjectTemplateKind.APPLICATION,
+                        language = language,
+                        uiKind = JmixProjectUiKind.FLOW_UI,
+                        organizationBaseline = true,
+                    )
                 }
             }
         }
@@ -97,27 +121,34 @@ class JmixProjectTemplateRuntimeTest {
         templateKind: JmixProjectTemplateKind,
         language: JmixProjectLanguage,
         uiKind: JmixProjectUiKind,
+        organizationBaseline: Boolean,
     ) {
-        val variant = "${templateKind.name}-${language.name}-${uiKind.name}".lowercase()
+        val variant = buildString {
+            append("${templateKind.name}-${language.name}-${uiKind.name}".lowercase())
+            if (organizationBaseline) append("-organization")
+        }
         val root = Files.createTempDirectory(
             "jmix-template-${cell.replace(':', '-')}-$variant-",
         )
         try {
-            val generated = JmixProjectTemplateGenerator.generate(
-                JmixProjectTemplateRequest(
-                    projectName = "Certified Payroll",
-                    groupId = "com.acme",
-                    artifactId = "certified-payroll",
-                    basePackage = "com.acme.payroll",
-                    projectId = "payroll",
-                    jmixVersion = jmixVersion,
-                    javaVersion = javaVersion,
-                    templateKind = templateKind,
-                    language = language,
-                    uiKind = uiKind,
-                    locales = listOf("en", "bn"),
-                ),
+            val request = JmixProjectTemplateRequest(
+                projectName = "Certified Payroll",
+                groupId = "com.acme",
+                artifactId = "certified-payroll",
+                basePackage = "com.acme.payroll",
+                projectId = "payroll",
+                jmixVersion = jmixVersion,
+                javaVersion = javaVersion,
+                templateKind = templateKind,
+                language = language,
+                uiKind = uiKind,
+                locales = listOf("en", "bn"),
             )
+            val generated = if (organizationBaseline) {
+                organizationCatalogProject(request)
+            } else {
+                JmixProjectTemplateGenerator.generate(request)
+            }
             JmixProjectInstaller.install(root, generated)
             val tasks = when (templateKind) {
                 JmixProjectTemplateKind.APPLICATION -> when (uiKind) {
@@ -200,6 +231,102 @@ class JmixProjectTemplateRuntimeTest {
         } finally {
             deleteTree(root)
         }
+    }
+
+    private fun organizationCatalogProject(
+        request: JmixProjectTemplateRequest,
+    ): GeneratedJmixProject {
+        val keys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val signer = JmixTemplateCatalogSigner.fromPkcs8Base64(
+            keyId = "certification-release",
+            privateKeyPkcs8Base64 = Base64.getEncoder().encodeToString(keys.private.encoded),
+            publicKeyX509Base64 = Base64.getEncoder().encodeToString(keys.public.encoded),
+        )
+        val sourcePath: String
+        val source: String
+        when (request.language) {
+            JmixProjectLanguage.JAVA -> {
+                sourcePath = "src/main/java/com/acme/payroll/OrganizationBaseline.java"
+                source = """
+                    package com.acme.payroll;
+
+                    public final class OrganizationBaseline {
+                        public static final String CATALOG = "certified.enterprise";
+
+                        private OrganizationBaseline() {
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            JmixProjectLanguage.KOTLIN -> {
+                sourcePath = "src/main/kotlin/com/acme/payroll/OrganizationBaseline.kt"
+                source = """
+                    package com.acme.payroll
+
+                    object OrganizationBaseline {
+                        const val CATALOG: String = "certified.enterprise"
+                    }
+                """.trimIndent() + "\n"
+            }
+        }
+        val now = Instant.now()
+        val bundle = JmixTemplateCatalogAuthoring.createSignedBundle(
+            draft = JmixTemplateCatalogDraft(
+                catalogId = "certified.enterprise",
+                catalogVersion = "1.0.0",
+                displayName = "Runtime certification catalog",
+                issuedAt = now.minus(1, ChronoUnit.MINUTES),
+                expiresAt = now.plus(1, ChronoUnit.DAYS),
+                templates = listOf(
+                    JmixOrganizationProjectTemplateDraft(
+                        id = "certified-flowui-${request.language.name.lowercase()}",
+                        version = "1.0.0",
+                        name = "Certified ${request.language.displayName} FlowUI",
+                        description = "Runtime-only signed organization baseline",
+                        order = 1,
+                        baseTemplate = JmixProjectTemplateKind.APPLICATION,
+                        languages = setOf(request.language),
+                        uiKinds = setOf(JmixProjectUiKind.FLOW_UI),
+                        jmixVersions = setOf(request.jmixVersion),
+                        javaVersions = setOf(request.javaVersion),
+                        changes = listOf(
+                            JmixOrganizationTemplateChangeDraft(
+                                relativePath = sourcePath,
+                                action = JmixOrganizationTemplateChangeAction.ADD,
+                                content = source.toByteArray(StandardCharsets.UTF_8),
+                            ),
+                            JmixOrganizationTemplateChangeDraft(
+                                relativePath = "README.md",
+                                action = JmixOrganizationTemplateChangeAction.REPLACE,
+                                content = (
+                                    "# ${'$'}{JMIX_PROJECT_NAME}\n\n" +
+                                        "Generated from the signed runtime certification catalog.\n"
+                                    ).toByteArray(StandardCharsets.UTF_8),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            signer = signer,
+        )
+        val verified = JmixTemplateCatalogVerifier.verify(
+            bundleBytes = bundle,
+            policy = JmixTemplateTrustPolicy(
+                trustedKeys = mapOf(signer.keyId to signer.publicKeyX509Base64),
+                allowedCatalogIds = setOf("certified.enterprise"),
+                requiredCatalogVersions = mapOf("certified.enterprise" to "1.0.0"),
+                minimumCatalogVersions = mapOf("certified.enterprise" to "1.0.0"),
+            ),
+        )
+        val template = verified.compatibleTemplates(request).single()
+        val generated = verified.apply(template.id, request)
+        assertTrue(generated.files.any { it.relativePath == sourcePath })
+        assertTrue(
+            generated.files.single { it.relativePath == "README.md" }
+                .content.startsWith("# Certified Payroll"),
+        )
+        return generated
     }
 
     private fun deleteTree(root: Path) {

@@ -184,6 +184,21 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         );
         requireEntry(
                 contents,
+                "org/jmixworkbench/project/JmixTemplateCatalogVerifier.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/project/JmixTemplateCatalogManager.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/project/JmixTemplateCatalogConfigurable.class",
+                archive
+        );
+        requireEntry(
+                contents,
                 "org/jmixworkbench/services/EntityEventListenerService.class",
                 archive
         );
@@ -217,6 +232,13 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 "newProjectWizard.generator",
                 "implementation",
                 "org.jmixworkbench.project.JmixNewProjectWizard",
+                archive
+        );
+        requireExtensionRegistration(
+                descriptor,
+                "applicationConfigurable",
+                "instance",
+                "org.jmixworkbench.project.JmixTemplateCatalogConfigurable",
                 archive
         );
         requireExtensionRegistration(

@@ -197,6 +197,7 @@ class VerifyPluginZipContentsTaskTest {
                         + "<depends>com.intellij.gradle</depends>"
                         + "<extensions>"
                         + "<newProjectWizard.generator implementation=\"org.jmixworkbench.project.JmixNewProjectWizard\" />"
+                        + "<applicationConfigurable instance=\"org.jmixworkbench.project.JmixTemplateCatalogConfigurable\" />"
                         + "<fileEditorProvider implementation=\"org.jmixworkbench.editor.JmixEntityFileEditorProvider\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.toolwindow.WorkbenchNavigationService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.EntityEventListenerService\" />"
@@ -231,6 +232,18 @@ class VerifyPluginZipContentsTaskTest {
         );
         entries.put(
                 "org/jmixworkbench/project/JmixProjectInstaller.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/project/JmixTemplateCatalogVerifier.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/project/JmixTemplateCatalogManager.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/project/JmixTemplateCatalogConfigurable.class",
                 new byte[]{0, 1, 2}
         );
         entries.put(
