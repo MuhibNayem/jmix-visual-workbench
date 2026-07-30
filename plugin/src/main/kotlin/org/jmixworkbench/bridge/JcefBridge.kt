@@ -440,6 +440,10 @@ class JcefBridge(
                 handlePreviewDataRepositoryChange(action, requestId, payload)
                 return
             }
+            if (action == "validateDataRepositorySemantics") {
+                handleValidateDataRepositorySemantics(action, requestId, payload)
+                return
+            }
             if (action == "applyDataRepositoryChange") {
                 handleApplyDataRepositoryChange(action, requestId, payload)
                 return
@@ -2112,6 +2116,28 @@ class JcefBridge(
         }
         ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
             DataRepositoryChangeService.getInstance(project).preview(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { response ->
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleValidateDataRepositorySemantics(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, DataRepositoryChangeRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<org.jmixworkbench.services.RepositorySemanticValidationResponse> {
+            DataRepositoryChangeService.getInstance(project).validate(request)
         }
             .inSmartMode(project)
             .expireWith(project)

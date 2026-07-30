@@ -1042,6 +1042,10 @@ object EntityGenerator {
                     importPath = "jakarta.persistence.Embedded"
                 }
                 if (attr.embeddedAttributeOverrides.isNotEmpty()) {
+                    b.import_(
+                        "jakarta.persistence.AttributeOverride",
+                        "jakarta.persistence.Column",
+                    )
                     annotation {
                         name = "AttributeOverrides"
                         importPath = "jakarta.persistence.AttributeOverrides"
@@ -1055,6 +1059,10 @@ object EntityGenerator {
                     }
                 }
                 if (attr.embeddedAssociationOverrides.isNotEmpty()) {
+                    b.import_(
+                        "jakarta.persistence.AssociationOverride",
+                        "jakarta.persistence.JoinColumn",
+                    )
                     annotation {
                         name = "AssociationOverrides"
                         importPath = "jakarta.persistence.AssociationOverrides"

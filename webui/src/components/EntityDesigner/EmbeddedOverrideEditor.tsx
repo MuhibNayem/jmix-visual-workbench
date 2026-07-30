@@ -64,6 +64,34 @@ export default function EmbeddedOverrideEditor({
       ),
     })
   }
+  const replaceJoinColumn = (
+    associationIndex: number,
+    joinIndex: number,
+    patch: Partial<EmbeddedAssociationOverride['joinColumns'][number]>,
+  ) => {
+    const mapping = associationOverrides[associationIndex]
+    replaceAssociation(associationIndex, {
+      joinColumns: mapping.joinColumns.map((joinColumn, candidate) =>
+        candidate === joinIndex ? { ...joinColumn, ...patch } : joinColumn,
+      ),
+    })
+  }
+  const addJoinColumn = (associationIndex: number) => {
+    const mapping = associationOverrides[associationIndex]
+    replaceAssociation(associationIndex, {
+      joinColumns: [
+        ...mapping.joinColumns,
+        { name: '', referencedColumnName: 'ID' },
+      ],
+    })
+  }
+  const removeJoinColumn = (associationIndex: number, joinIndex: number) => {
+    const mapping = associationOverrides[associationIndex]
+    if (mapping.joinColumns.length <= 1) return
+    replaceAssociation(associationIndex, {
+      joinColumns: mapping.joinColumns.filter((_, candidate) => candidate !== joinIndex),
+    })
+  }
   const generateDefaults = () => {
     const prefix = attribute.name
       .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
@@ -95,7 +123,7 @@ export default function EmbeddedOverrideEditor({
   }
 
   return (
-    <section className="min-w-0 space-y-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.035] p-3 sm:col-span-2">
+    <section className="col-span-full min-w-0 space-y-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.035] p-3">
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <h4 className="text-[10px] font-semibold uppercase tracking-[0.16em] text-violet-200">
@@ -245,10 +273,12 @@ export default function EmbeddedOverrideEditor({
         })}
       >
         {associationOverrides.map((mapping, index) => {
-          const join = mapping.joinColumns[0] ?? { name: '', referencedColumnName: 'ID' }
+          const joinColumns = mapping.joinColumns.length > 0
+            ? mapping.joinColumns
+            : [{ name: '', referencedColumnName: 'ID' }]
           return (
             <div key={`${mapping.path}-${index}`} className="min-w-0 rounded-lg border border-surface-border bg-black/10 p-2.5">
-              <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="min-w-0">
                 <OverrideInput
                   label="Member path"
                   value={mapping.path}
@@ -259,32 +289,67 @@ export default function EmbeddedOverrideEditor({
                 <datalist id={`embedded-associations-${attribute.name}`}>
                   {associationMembers.map(member => <option key={member.artifactId} value={member.name} />)}
                 </datalist>
-                <OverrideInput
-                  label="Join column"
-                  value={join.name}
-                  disabled={existingSource}
-                  onChange={value => replaceAssociation(index, {
-                    joinColumns: [{ ...join, name: value }],
-                  })}
-                />
-                <OverrideInput
-                  label="Referenced column"
-                  value={join.referencedColumnName}
-                  disabled={existingSource}
-                  onChange={value => replaceAssociation(index, {
-                    joinColumns: [{ ...join, referencedColumnName: value }],
-                  })}
-                />
+              </div>
+              <div className="mt-2 space-y-2">
+                {joinColumns.map((join, joinIndex) => (
+                  <div
+                    key={`${join.name}-${join.referencedColumnName}-${joinIndex}`}
+                    className="min-w-0 rounded-lg border border-violet-400/15 bg-violet-400/[0.025] p-2"
+                  >
+                    <div className="mb-1.5 flex min-w-0 items-center justify-between gap-2">
+                      <span className="text-[8px] font-semibold uppercase tracking-[0.13em] text-violet-200/65">
+                        Join column {joinIndex + 1}
+                      </span>
+                      {!existingSource && joinColumns.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => removeJoinColumn(index, joinIndex)}
+                          className="inline-flex items-center gap-1 text-[8px] text-red-300/70 hover:text-red-200"
+                          aria-label={`Remove join column ${joinIndex + 1}`}
+                        >
+                          <Trash2 size={10} />
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                    <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
+                      <OverrideInput
+                        label="Join column"
+                        value={join.name}
+                        disabled={existingSource}
+                        onChange={value => replaceJoinColumn(index, joinIndex, { name: value })}
+                      />
+                      <OverrideInput
+                        label="Referenced column"
+                        value={join.referencedColumnName}
+                        disabled={existingSource}
+                        onChange={value => replaceJoinColumn(index, joinIndex, {
+                          referencedColumnName: value,
+                        })}
+                      />
+                    </div>
+                    <div className="mt-2 flex min-w-0 flex-wrap items-center gap-3">
+                      <TriState
+                        label="Nullable"
+                        value={join.nullable}
+                        disabled={existingSource}
+                        onChange={value => replaceJoinColumn(index, joinIndex, { nullable: value })}
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
               <div className="mt-2 flex min-w-0 flex-wrap items-center gap-3">
-                <TriState
-                  label="Nullable"
-                  value={join.nullable}
-                  disabled={existingSource}
-                  onChange={value => replaceAssociation(index, {
-                    joinColumns: [{ ...join, nullable: value }],
-                  })}
-                />
+                {!existingSource && (
+                  <button
+                    type="button"
+                    onClick={() => addJoinColumn(index)}
+                    className="inline-flex items-center gap-1 rounded-md border border-violet-400/20 px-2 py-1 text-[8px] text-violet-200/75 hover:border-violet-300/35 hover:text-violet-100"
+                  >
+                    <Plus size={10} />
+                    Add join column
+                  </button>
+                )}
                 {!existingSource && (
                   <button
                     type="button"

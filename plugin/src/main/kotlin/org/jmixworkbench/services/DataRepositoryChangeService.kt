@@ -35,6 +35,45 @@ import org.jmixworkbench.model.IdConfig
 @Service(Service.Level.PROJECT)
 class DataRepositoryChangeService(private val project: Project) {
 
+    fun validate(request: DataRepositoryChangeRequest): RepositorySemanticValidationResponse {
+        val schema = SchemaWorkspaceService.getInstance(project).load(forceRefresh = false)
+        val entity = schema.entities.singleOrNull { it.sourceLocator == request.entitySource }
+            ?: return RepositorySemanticValidationResponse(
+                accepted = false,
+                diagnostics = listOf(
+                    RepositorySemanticDiagnostic(
+                        severity = RepositorySemanticSeverity.ERROR,
+                        code = "JVW-REPOSITORY-ENTITY-STALE",
+                        message = "The selected entity is missing, ambiguous, or changed. Refresh Entity Designer.",
+                    ),
+                ),
+                propertyPaths = emptyList(),
+                methods = emptyList(),
+            )
+        val analyzed = RepositorySemanticAnalyzer.analyze(entity, schema.entities, request.config)
+        val lockedMethodCount = request.repositorySource
+            ?.let { locator ->
+                schema.repositories.singleOrNull { it.sourceLocator == locator }
+                    ?.config
+                    ?.methods
+                    ?.size
+            }
+            ?: 0
+        val diagnostics = analyzed.diagnostics.map { diagnostic ->
+            val sourceOwned = request.repositorySource != null &&
+                diagnostic.methodIndex != null &&
+                diagnostic.methodIndex < lockedMethodCount
+            diagnostic.copy(
+                blocking = diagnostic.severity == RepositorySemanticSeverity.ERROR && !sourceOwned,
+                sourceOwned = sourceOwned,
+            )
+        }
+        return analyzed.copy(
+            accepted = diagnostics.none(RepositorySemanticDiagnostic::blocking),
+            diagnostics = diagnostics,
+        )
+    }
+
     fun preview(request: DataRepositoryChangeRequest): WorkspaceChangePreviewResponse {
         val proposal = propose(request)
         return proposal.changeSet
@@ -85,6 +124,47 @@ class DataRepositoryChangeService(private val project: Project) {
             id = IdConfig(type = entity.idType, columnName = entity.idColumnName),
             dataRepository = request.config,
         )
+        val semantics = RepositorySemanticAnalyzer.analyze(
+            entity,
+            schema.entities,
+            request.config,
+        )
+        val lockedMethodCount = request.repositorySource
+            ?.let { locator ->
+                schema.repositories.singleOrNull { it.sourceLocator == locator }
+                    ?.config
+                    ?.methods
+                    ?.size
+            }
+            ?: 0
+        val blockingDiagnostics = semantics.diagnostics.filter { diagnostic ->
+            diagnostic.severity == RepositorySemanticSeverity.ERROR &&
+                (
+                    request.repositorySource == null ||
+                        diagnostic.methodIndex == null ||
+                        diagnostic.methodIndex >= lockedMethodCount
+                    )
+        }
+        if (blockingDiagnostics.isNotEmpty()) {
+            return DataRepositoryChangeProposal(
+                changeSet = null,
+                issues = blockingDiagnostics.map { diagnostic ->
+                        WorkspaceChangeIssue(
+                            diagnostic.code,
+                            buildString {
+                                diagnostic.methodIndex?.let { append("Method ${it + 1}: ") }
+                                append(diagnostic.message)
+                                if (diagnostic.suggestions.isNotEmpty()) {
+                                    append(" Suggestions: ")
+                                    append(diagnostic.suggestions.joinToString())
+                                    append('.')
+                                }
+                            },
+                            entity.sourceLocator.relativePath,
+                        )
+                    },
+            )
+        }
         return if (request.repositorySource == null) {
             createRepository(entity, model, request.config)
         } else {

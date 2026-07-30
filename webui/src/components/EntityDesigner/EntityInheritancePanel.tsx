@@ -53,7 +53,7 @@ export default function EntityInheritancePanel({
       next.discriminatorColumn = undefined
       next.discriminatorLength = undefined
     }
-    onChange(next, entity.extendsClass)
+    onChange(next, next.role === 'root' ? undefined : entity.extendsClass)
   }
 
   const selectParent = (qualifiedName: string) => {

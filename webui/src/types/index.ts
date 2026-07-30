@@ -644,6 +644,50 @@ export interface DataRepositoryChangeRequest {
   config: DataRepositoryConfig
 }
 
+export type RepositorySemanticSeverity = 'error' | 'warning' | 'info'
+export type RepositoryResultKind =
+  | 'entity'
+  | 'scalar'
+  | 'aggregate'
+  | 'count'
+  | 'exists'
+  | 'delete'
+  | 'unknown'
+
+export interface RepositorySemanticDiagnostic {
+  severity: RepositorySemanticSeverity
+  code: string
+  message: string
+  methodIndex?: number
+  field?: string
+  suggestions: string[]
+  blocking: boolean
+  sourceOwned: boolean
+}
+
+export interface RepositoryPropertyPathSnapshot {
+  path: string
+  javaType: string
+  nullable: boolean
+  association: boolean
+  collection: boolean
+  derivedToken: string
+}
+
+export interface RepositoryMethodSemanticSnapshot {
+  methodIndex: number
+  propertyPaths: string[]
+  expectedValueParameters: number
+  resultKind: RepositoryResultKind
+}
+
+export interface RepositorySemanticValidationResponse {
+  accepted: boolean
+  diagnostics: RepositorySemanticDiagnostic[]
+  propertyPaths: RepositoryPropertyPathSnapshot[]
+  methods: RepositoryMethodSemanticSnapshot[]
+}
+
 export interface EntityAttributeTypeMigrationRequest {
   sourceLocator: GraphSourceLocator
   entityClassName: string

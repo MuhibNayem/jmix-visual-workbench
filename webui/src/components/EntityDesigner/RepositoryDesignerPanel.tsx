@@ -1,5 +1,15 @@
 import { useMemo, useState } from 'react'
-import { ChevronDown, ChevronUp, Plus, ShieldAlert, Trash2 } from 'lucide-react'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  LoaderCircle,
+  Plus,
+  ShieldAlert,
+  Trash2,
+  XCircle,
+} from 'lucide-react'
 import type {
   AttributeModel,
   DataRepositoryConfig,
@@ -7,6 +17,7 @@ import type {
   RepositoryMethod,
   RepositoryMethodParameter,
   RepositoryParameterRole,
+  RepositorySemanticValidationResponse,
 } from '../../types'
 
 interface RepositoryDesignerPanelProps {
@@ -14,6 +25,8 @@ interface RepositoryDesignerPanelProps {
   onChange: (config: DataRepositoryConfig) => void
   sourceLocked?: boolean
   lockedMethodCount?: number
+  semantics?: RepositorySemanticValidationResponse | null
+  semanticsBusy?: boolean
   footer?: React.ReactNode
 }
 
@@ -159,12 +172,15 @@ export default function RepositoryDesignerPanel({
   onChange,
   sourceLocked = false,
   lockedMethodCount = 0,
+  semantics,
+  semanticsBusy = false,
   footer,
 }: RepositoryDesignerPanelProps) {
   const config = repositoryConfig(entity)
   const [expandedMethod, setExpandedMethod] = useState<number | null>(
     config.methods.length ? 0 : null,
   )
+  const [propertyDrafts, setPropertyDrafts] = useState<Record<number, string>>({})
   const update = (patch: Partial<DataRepositoryConfig>) => onChange({ ...config, ...patch })
   const updateMethod = (index: number, patch: Partial<RepositoryMethod>) => {
     const methods = config.methods.map((method, candidate) =>
@@ -183,6 +199,30 @@ export default function RepositoryDesignerPanel({
       if (current !== null && current > index) return current - 1
       return current
     })
+  }
+  const addDerivedCondition = (index: number) => {
+    const property = semantics?.propertyPaths.find(candidate =>
+      candidate.path === propertyDrafts[index])
+    if (!property) return
+    const method = config.methods[index]
+    const name = method.name.includes('By')
+      ? `${method.name}And${property.derivedToken}`
+      : `findBy${property.derivedToken}`
+    const parameterName = property.path.split('.').pop() || `value${method.parameters.length + 1}`
+    updateMethod(index, {
+      name,
+      parameters: [
+        ...method.parameters,
+        {
+          name: parameterName,
+          type: property.javaType,
+          bindingName: parameterName,
+          nullable: false,
+          role: 'value',
+        },
+      ],
+    })
+    setPropertyDrafts(current => ({ ...current, [index]: '' }))
   }
   const signatureCount = useMemo(() => {
     const counts = new Map<string, number>()
@@ -216,6 +256,55 @@ export default function RepositoryDesignerPanel({
 
       {config.enabled && (
         <div className="mt-3 space-y-3">
+          <div
+            role="status"
+            className={`flex min-w-0 flex-wrap items-start gap-2 rounded border p-2.5 ${
+              semanticsBusy
+                ? 'border-sky-500/25 bg-sky-500/5 text-sky-100'
+                : semantics?.accepted === false
+                  ? 'border-red-500/30 bg-red-500/[0.07] text-red-100'
+                  : (semantics?.diagnostics.some(diagnostic => diagnostic.severity === 'warning'))
+                    ? 'border-amber-500/30 bg-amber-500/[0.07] text-amber-100'
+                    : 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100'
+            }`}
+          >
+            {semanticsBusy
+              ? <LoaderCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
+              : semantics?.accepted === false
+                ? <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                : semantics?.diagnostics.some(diagnostic => diagnostic.severity === 'warning')
+                  ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  : <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+            <span className="min-w-0 flex-1">
+              <strong className="block text-[10px]">
+                {semanticsBusy
+                  ? 'Checking repository semantics…'
+                  : semantics?.accepted === false
+                    ? 'Source preview blocked by semantic errors'
+                    : semantics
+                      ? `Entity-aware contract valid · ${semantics.propertyPaths.length} paths indexed`
+                      : 'Entity semantics become live after selecting an indexed entity'}
+              </strong>
+              <span className="mt-0.5 block text-[9px] leading-relaxed opacity-70">
+                Derived names, nested properties, JPQL paths, parameter arity/types, result shape,
+                fetch-plan compatibility, and security bypasses are checked by the IntelliJ backend.
+              </span>
+            </span>
+          </div>
+
+          {semantics && semantics.diagnostics.filter(diagnostic =>
+            diagnostic.methodIndex === undefined).map(diagnostic => (
+              <div
+                key={`${diagnostic.code}-${diagnostic.message}`}
+                className={`rounded border px-2.5 py-2 text-[9px] leading-relaxed ${
+                  diagnostic.severity === 'error'
+                    ? 'border-red-500/25 bg-red-500/5 text-red-100'
+                    : 'border-amber-500/25 bg-amber-500/5 text-amber-100'
+                }`}
+              >
+                {diagnostic.message}
+              </div>
+            ))}
           <div className="grid min-w-0 gap-3 sm:grid-cols-2">
             <label className="min-w-0 text-[10px] text-gray-500">
               Interface name
@@ -307,11 +396,17 @@ export default function RepositoryDesignerPanel({
               const duplicate = (signatureCount.get(signature) ?? 0) > 1
               const parameterIssue = queryParameterIssue(method, config.useNamedParameters)
               const securityBypass = method.applyConstraints === false
+              const methodDiagnostics = semantics?.diagnostics.filter(diagnostic =>
+                diagnostic.methodIndex === index) ?? []
+              const semanticMethod = semantics?.methods.find(candidate =>
+                candidate.methodIndex === index)
+              const semanticError = methodDiagnostics.some(diagnostic =>
+                diagnostic.blocking)
               return (
                 <article
                   key={`${method.name}-${index}`}
                   className={`min-w-0 rounded border ${
-                    duplicate || parameterIssue || securityBypass
+                    duplicate || parameterIssue || securityBypass || methodDiagnostics.length > 0
                       ? 'border-amber-500/30'
                       : 'border-surface-border'
                   } bg-surface`}
@@ -338,6 +433,11 @@ export default function RepositoryDesignerPanel({
                     {securityBypass && (
                       <span title="Method bypasses Jmix security constraints">
                         <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-red-300" />
+                      </span>
+                    )}
+                    {semanticError && (
+                      <span title="This method has entity-semantic errors">
+                        <XCircle className="h-3.5 w-3.5 shrink-0 text-red-300" />
                       </span>
                     )}
                     {sourceMethod && (
@@ -371,6 +471,82 @@ export default function RepositoryDesignerPanel({
                         <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-[10px] text-amber-200">
                           {duplicate ? 'Another method has the same JVM signature. ' : ''}
                           {parameterIssue}
+                        </div>
+                      )}
+                      {methodDiagnostics.length > 0 && (
+                        <div className="space-y-1.5">
+                          {methodDiagnostics.map(diagnostic => (
+                            <div
+                              key={`${diagnostic.code}-${diagnostic.message}`}
+                              className={`rounded border px-2.5 py-2 text-[9px] leading-relaxed ${
+                                diagnostic.severity === 'error'
+                                  ? 'border-red-500/25 bg-red-500/5 text-red-100'
+                                  : 'border-amber-500/25 bg-amber-500/5 text-amber-100'
+                              }`}
+                            >
+                              <span className="font-medium">{diagnostic.message}</span>
+                              {diagnostic.sourceOwned && (
+                                <span className="ml-1 rounded bg-white/5 px-1.5 py-0.5 text-[8px] uppercase tracking-wide opacity-70">
+                                  Source-owned · advisory
+                                </span>
+                              )}
+                              {diagnostic.suggestions.length > 0 && (
+                                <span className="mt-1 block opacity-70">
+                                  Try: {diagnostic.suggestions.join(', ')}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {semanticMethod && (
+                        <div className="flex min-w-0 flex-wrap gap-1.5 text-[8px]">
+                          <span className="rounded bg-surface-light px-2 py-1 text-gray-400">
+                            {semanticMethod.resultKind} result
+                          </span>
+                          <span className="rounded bg-surface-light px-2 py-1 text-gray-400">
+                            {semanticMethod.expectedValueParameters} value parameter(s)
+                          </span>
+                          {semanticMethod.propertyPaths.map(path => (
+                            <span
+                              key={path}
+                              className="max-w-full truncate rounded bg-violet-500/10 px-2 py-1 font-mono text-violet-200/75"
+                            >
+                              {path}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {method.queryType === 'derived' && semantics && !sourceMethod && (
+                        <div className="grid min-w-0 gap-2 rounded border border-violet-500/20 bg-violet-500/[0.04] p-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                          <label className="min-w-0 text-[9px] text-violet-100/70">
+                            Add an entity property condition
+                            <select
+                              value={propertyDrafts[index] ?? ''}
+                              onChange={event => setPropertyDrafts(current => ({
+                                ...current,
+                                [index]: event.target.value,
+                              }))}
+                              className="mt-1 w-full min-w-0 font-mono text-[9px]"
+                            >
+                              <option value="">Choose an indexed property…</option>
+                              {semantics.propertyPaths
+                                .filter(property => !property.collection)
+                                .map(property => (
+                                  <option key={property.path} value={property.path}>
+                                    {property.path} · {property.javaType}
+                                  </option>
+                                ))}
+                            </select>
+                          </label>
+                          <button
+                            type="button"
+                            disabled={!propertyDrafts[index]}
+                            onClick={() => addDerivedCondition(index)}
+                            className="self-end rounded border border-violet-400/25 px-2.5 py-1.5 text-[9px] text-violet-100 disabled:opacity-35"
+                          >
+                            Add condition
+                          </button>
                         </div>
                       )}
                       <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">

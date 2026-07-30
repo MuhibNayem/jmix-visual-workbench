@@ -38,6 +38,7 @@ import type {
   EntityAttributeTypeMappingCutoverRequest,
   GraphSourceLocator,
   GraphArtifact,
+  RepositorySemanticValidationResponse,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 import {
@@ -157,6 +158,9 @@ export default function EntityDesigner({
   const [repositoryPreview, setRepositoryPreview] =
     useState<WorkspaceChangePreviewResponse | null>(null)
   const [repositoryBusy, setRepositoryBusy] = useState(false)
+  const [repositorySemantics, setRepositorySemantics] =
+    useState<RepositorySemanticValidationResponse | null>(null)
+  const [repositorySemanticsBusy, setRepositorySemanticsBusy] = useState(false)
   const [applicationGraph, setApplicationGraph] = useState<ApplicationGraphResponse | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renameBusy, setRenameBusy] = useState(false)
@@ -466,6 +470,39 @@ export default function EntityDesigner({
       repository.artifactId === selectedRepositoryArtifactId) ?? null,
     [entityRepositories, selectedRepositoryArtifactId],
   )
+
+  useEffect(() => {
+    if (!existingEntity || !entity.dataRepository?.enabled) {
+      setRepositorySemantics(null)
+      setRepositorySemanticsBusy(false)
+      return
+    }
+    let active = true
+    setRepositorySemanticsBusy(true)
+    const timer = window.setTimeout(() => {
+      bridge.validateDataRepositorySemantics({
+        entitySource: existingEntity.sourceLocator,
+        repositorySource: existingRepository?.sourceLocator,
+        config: entity.dataRepository!,
+      }).then(response => {
+        if (active) setRepositorySemantics(response)
+      }).catch(() => {
+        if (active) setRepositorySemantics(null)
+      }).finally(() => {
+        if (active) setRepositorySemanticsBusy(false)
+      })
+    }, 300)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [
+    existingEntity?.sourceLocator.relativePath,
+    existingEntity?.sourceLocator.revisionFingerprint,
+    existingRepository?.sourceLocator.relativePath,
+    existingRepository?.sourceLocator.revisionFingerprint,
+    entity.dataRepository,
+  ])
 
   const existingViewContractHasDraftChanges = useMemo(() => {
     if (!existingEntity) return false
@@ -1509,6 +1546,7 @@ export default function EntityDesigner({
 
   const selectRepository = (artifactId: string) => {
     setRepositoryPreview(null)
+    setRepositorySemantics(null)
     if (artifactId === 'new') {
       setSelectedRepositoryArtifactId('')
       setEntity({
@@ -2398,6 +2436,8 @@ export default function EntityDesigner({
                 entity={entity}
                 sourceLocked={Boolean(existingRepository)}
                 lockedMethodCount={existingRepository?.config.methods.length ?? 0}
+                semantics={repositorySemantics}
+                semanticsBusy={repositorySemanticsBusy}
                 onChange={dataRepository => {
                   setRepositoryPreview(null)
                   setEntity({ dataRepository })
@@ -2435,7 +2475,12 @@ export default function EntityDesigner({
                       <button
                         type="button"
                         onClick={() => void previewRepositoryChange()}
-                        disabled={repositoryBusy || !entity.dataRepository?.enabled}
+                        disabled={
+                          repositoryBusy ||
+                          repositorySemanticsBusy ||
+                          repositorySemantics?.accepted === false ||
+                          !entity.dataRepository?.enabled
+                        }
                         className="rounded border border-jmix-500/35 bg-jmix-500/10 px-3 py-1.5 text-[10px] text-jmix-100 disabled:opacity-40"
                       >
                         {repositoryBusy ? 'Checking…' : existingRepository
@@ -2967,12 +3012,27 @@ export default function EntityDesigner({
                               {attr.name}
                             </button>
                           ) : (
-                            <input
-                              value={attr.name}
-                              onChange={e => updateAttribute(i, { name: e.target.value })}
-                              onClick={e => e.stopPropagation()}
-                              className="w-28 bg-transparent border-none p-0 text-gray-200"
-                            />
+                            <div className="flex min-w-0 items-center gap-1.5">
+                              <input
+                                value={attr.name}
+                                onChange={e => updateAttribute(i, { name: e.target.value })}
+                                onClick={e => e.stopPropagation()}
+                                className="w-20 min-w-0 bg-transparent border-none p-0 text-gray-200 sm:w-28"
+                              />
+                              <button
+                                type="button"
+                                aria-pressed={selectedAttr === i}
+                                aria-label={`Inspect ${attr.name}`}
+                                title={`Open ${attr.name} details`}
+                                onClick={event => {
+                                  event.stopPropagation()
+                                  selectAttribute(i, attr.name)
+                                }}
+                                className="shrink-0 rounded border border-surface-border px-1.5 py-0.5 text-[8px] text-gray-500 transition-colors hover:border-jmix-400/40 hover:text-jmix-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-jmix-400"
+                              >
+                                Details
+                              </button>
+                            </div>
                           )}
                         </td>
                         <td className="px-3 py-2">
@@ -3977,7 +4037,7 @@ function AttributeDetail({
   return (
     <div className="mt-4 border border-surface-border rounded-lg p-4 bg-surface-light">
       <h4 className="text-xs font-semibold text-jmix-400 mb-3">Attribute: {attr.name || '(unnamed)'}</h4>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-3">
         {(attr.type === 'association' || attr.type === 'composition') && (
           <>
             <Field label="Association Type">
@@ -4095,7 +4155,7 @@ function AttributeDetail({
             )}
             {association.crossDataStore && (
               <>
-                <div className="sm:col-span-2 rounded border border-sky-500/30 bg-sky-500/5 p-2 text-[10px] leading-relaxed text-sky-200/80">
+                <div className="col-span-full rounded border border-sky-500/30 bg-sky-500/5 p-2 text-[10px] leading-relaxed text-sky-200/80">
                   Cross-data-store mode generates a system-level ID column plus a transient Jmix property. No invalid
                   database foreign key is created; DataManager resolves the to-one reference.
                 </div>
@@ -4161,7 +4221,7 @@ function AttributeDetail({
               </>
             )}
             {pairedInverseSupported && (
-              <div className="sm:col-span-2 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.05] p-3">
+              <div className="col-span-full rounded-lg border border-emerald-500/25 bg-emerald-500/[0.05] p-3">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0">
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-200">
@@ -4220,7 +4280,7 @@ function AttributeDetail({
                 <option value="RESTRICT">Restrict</option>
               </select>
             </Field>
-            <div className="sm:col-span-2">
+            <div className="col-span-full">
               <div className="text-[10px] text-gray-500">Cascade Operations</div>
               <div className="mt-1 flex flex-wrap gap-2">
                 {(['all', 'persist', 'merge', 'remove', 'refresh', 'detach'] as CascadeType[]).map(cascade => (
@@ -4367,7 +4427,7 @@ function AttributeDetail({
           />
         </Field>
 
-        <div className="col-span-2 flex flex-wrap gap-x-4 gap-y-2 mt-1">
+        <div className="col-span-full mt-1 flex min-w-0 flex-wrap gap-x-4 gap-y-2">
           <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
             <input type="checkbox" checked={attr.transientFlag} onChange={e => onChange({ transientFlag: e.target.checked })} />
             Transient

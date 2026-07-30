@@ -19,6 +19,10 @@ object KotlinDataRepositoryGenerator {
         config.methods.forEach { method ->
             RepositoryContract.collectMethodImports(method, imports, kotlin = true)
         }
+        val qualifyFetchPlanAnnotation = "io.jmix.core.FetchPlan" in imports
+        if (qualifyFetchPlanAnnotation) {
+            imports -= "io.jmix.core.repository.FetchPlan"
+        }
         if (!config.applyConstraints || config.methods.any { it.applyConstraints != null }) {
             imports += "io.jmix.core.repository.ApplyConstraints"
         }
@@ -56,7 +60,15 @@ object KotlinDataRepositoryGenerator {
                     append(")\n")
                 }
                 method.fetchPlan?.trim()?.takeIf(String::isNotEmpty)?.let {
-                    append("    @FetchPlan(")
+                    append("    @")
+                        .append(
+                            if (qualifyFetchPlanAnnotation) {
+                                "io.jmix.core.repository.FetchPlan"
+                            } else {
+                                "FetchPlan"
+                            },
+                        )
+                        .append('(')
                         .append(RepositoryContract.kotlinString(it))
                         .append(")\n")
                 }

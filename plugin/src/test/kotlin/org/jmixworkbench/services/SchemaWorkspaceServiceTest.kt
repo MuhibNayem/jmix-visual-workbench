@@ -63,7 +63,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
 
                 public interface LoanAppRepository extends JmixDataRepository<LoanApp, UUID> {
                     // manual repository contract must survive
-                    List<LoanApp> findByApplicationNo(String applicationNo);
+                    List<LoanApp> findByLegacyRiskBucket(String legacyRiskBucket);
                 }
                 """.trimIndent(),
             )
@@ -96,12 +96,21 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                     ).toMutableList(),
             ),
         )
+        val semantics = DataRepositoryChangeService.getInstance(project).validate(change)
+        assertTrue(semantics.accepted, semantics.diagnostics.joinToString { it.message })
+        assertTrue(
+            semantics.diagnostics.any {
+                it.code == "JVW-REPOSITORY-DERIVED-PROPERTY" &&
+                    it.sourceOwned &&
+                    !it.blocking
+            },
+        )
         val preview = DataRepositoryChangeService.getInstance(project).preview(change)
 
         assertTrue(preview.accepted, preview.issues.joinToString { it.message })
         val source = preview.files.single().resultContent
         assertTrue(source.contains("// manual repository contract must survive"))
-        assertTrue(source.contains("List<LoanApp> findByApplicationNo(String applicationNo);"))
+        assertTrue(source.contains("List<LoanApp> findByLegacyRiskBucket(String legacyRiskBucket);"))
         assertTrue(source.contains("Page<LoanApp> findRecent(Pageable pageable);"))
         assertTrue(source.contains("import org.springframework.data.domain.Page;"))
         assertTrue(source.contains("import org.springframework.data.domain.Pageable;"))

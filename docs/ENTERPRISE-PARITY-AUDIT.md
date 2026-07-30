@@ -281,9 +281,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 275 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 290 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 275 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 290 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -464,31 +464,30 @@ inspection control rather than relying on a hard-to-hit table-row target.
 
 ## Recommended next execution order
 
-1. Complete the remaining high-frequency entity workflows: localized-caption
-   workflows, safe enum-usage migration, and
-   evidence-complete shape migration for existing hierarchies/embedded mappings.
-   Root/subtype discriminator authoring and explicit nested scalar/association
-   overrides now round-trip through Java/Kotlin generation and parsing.
-   Copy/reorder, inherited/trait visibility, callback authoring and
-   current Java/Kotlin Jmix listener creation/navigation are now implemented
-   with source-protected existing declarations. Exact-revision existing-entity
-   view creation plus connected
-   source/visual navigation now work from both tool-window and native editor
-   surfaces without regenerating entity/table source or silently granting a
-   full-access role.
-   Typed secure Java/Kotlin repository creation, existing-source
-   reconstruction, and revision-bound additive method authoring are now
-   implemented. Complete repository injection/view-delegate integration,
-   native existing-method refactoring and runtime application certification.
-2. Continue splitting the 6,067-line central Entity Designer into bounded
+1. Remove the remaining manual fallback points in the ordinary
+   entity-to-repository-to-view journey. First add safe visual modification of
+   supported existing repository methods. Then generate repository-backed
+   FlowUI load/save delegates and Jmix-aware injection, and complete native
+   `@Param`/JPQL parameter refactoring. The current shared semantic model
+   already validates derived/JPQL drafts and supplies Java/Kotlin query-string
+   property completion, navigation, inspection, quick fix, Find Usages and
+   rename; source-owned handwritten diagnostics are advisory for independent
+   additions. Complete JPQL grammar coverage and runtime fixtures remain.
+2. Complete evidence-backed editing of existing inheritance and embedded
+   mappings, followed by localized-caption workflows and safe enum-usage
+   migration. Root/subtype authoring, explicit nested scalar/association
+   overrides including composite joins, copy/reorder, inherited/trait
+   visibility, callback authoring and Java/Kotlin listener creation/navigation
+   already round-trip for the supported new/additive shapes.
+3. Continue splitting the central Entity Designer into bounded
    feature modules. Inheritance and embedded-override controls are now isolated;
    add component, interaction, responsive and accessibility regression tests.
-3. Complete arbitrary handwritten Java/Kotlin fixtures, database-first
+4. Complete arbitrary handwritten Java/Kotlin fixtures, database-first
    usability and installed-IDE dual-host performance/memory/leak certification.
-4. Complete the remaining native IntelliJ semantic surface.
-5. DMN rule sets/trees, deployed-version governance and typed event/queue integration.
-6. Live workflow/security/runtime inspection and process migration.
-7. Complete connector runtime infrastructure, organization catalogs and
+5. Complete the remaining native IntelliJ semantic surface.
+6. DMN rule sets/trees, deployed-version governance and typed event/queue integration.
+7. Live workflow/security/runtime inspection and process migration.
+8. Complete connector runtime infrastructure, organization catalogs and
    provider fault-injection diagnostics.
-8. Recorded scenario execution across FlowUI, REST, workflow and migrations.
-9. Collaboration, release governance, performance and marketplace hardening.
+9. Recorded scenario execution across FlowUI, REST, workflow and migrations.
+10. Collaboration, release governance, performance and marketplace hardening.

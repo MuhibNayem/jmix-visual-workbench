@@ -107,6 +107,11 @@ class EntityAndCrudGeneratorTest {
                                     referencedColumnName = "ID",
                                     nullable = false,
                                 ),
+                                AssociationJoinColumn(
+                                    name = "COUNTRY_TENANT_ID",
+                                    referencedColumnName = "TENANT_ID",
+                                    nullable = false,
+                                ),
                             ),
                         ),
                     ),
@@ -145,6 +150,10 @@ class EntityAndCrudGeneratorTest {
         assertFalse(kotlinSubtype.contains("var id:"))
 
         assertTrue(javaEmbedded.contains("@Embedded"))
+        assertTrue(javaEmbedded.contains("import jakarta.persistence.AttributeOverride;"))
+        assertTrue(javaEmbedded.contains("import jakarta.persistence.AssociationOverride;"))
+        assertTrue(javaEmbedded.contains("import jakarta.persistence.Column;"))
+        assertTrue(javaEmbedded.contains("import jakarta.persistence.JoinColumn;"))
         assertTrue(
             javaEmbedded.contains(
                 "@AttributeOverride(name = \"city\", " +
@@ -157,7 +166,9 @@ class EntityAndCrudGeneratorTest {
             javaEmbedded.contains(
                 "@AssociationOverride(name = \"country\", " +
                     "joinColumns = {@JoinColumn(name = \"COUNTRY_ID\", " +
-                    "referencedColumnName = \"ID\", nullable = false)})",
+                    "referencedColumnName = \"ID\", nullable = false), " +
+                    "@JoinColumn(name = \"COUNTRY_TENANT_ID\", " +
+                    "referencedColumnName = \"TENANT_ID\", nullable = false)})",
             ),
         )
         assertTrue(kotlinEmbedded.contains("@AttributeOverrides("))
@@ -171,7 +182,9 @@ class EntityAndCrudGeneratorTest {
             kotlinEmbedded.contains(
                 "AssociationOverride(name = \"country\", " +
                     "joinColumns = [JoinColumn(name = \"COUNTRY_ID\", " +
-                    "referencedColumnName = \"ID\", nullable = false)])",
+                    "referencedColumnName = \"ID\", nullable = false), " +
+                    "JoinColumn(name = \"COUNTRY_TENANT_ID\", " +
+                    "referencedColumnName = \"TENANT_ID\", nullable = false)])",
             ),
         )
         val rootTable = rootMigration.changes.single().changes
@@ -508,13 +521,18 @@ class EntityAndCrudGeneratorTest {
         val kotlin = KotlinDataRepositoryGenerator.generate(kotlinEntity)
 
         assertTrue(java.contains("@ApplyConstraints(false)\npublic interface EmployeeReadRepository"))
-        assertTrue(java.contains("@FetchPlan(\"employee-summary\")"))
+        assertTrue(java.contains("@io.jmix.core.repository.FetchPlan(\"employee-summary\")"))
+        assertTrue(java.contains("import io.jmix.core.FetchPlan;"))
+        assertFalse(java.contains("import io.jmix.core.repository.FetchPlan;"))
         assertTrue(java.contains("Page<Employee> findByEmployeeNumberContainingIgnoreCase("))
         assertTrue(java.contains("@Nullable FetchPlan fetchPlan"))
         assertTrue(java.contains("properties = {\"department\", \"count\"}"))
         assertTrue(java.contains("@Param(\"departmentCode\") String department"))
         assertTrue(java.contains("@QueryHints({@QueryHint(name = \"jmix.query.cacheable\", value = \"true\")})"))
         assertTrue(kotlin.contains("@ApplyConstraints(false)\ninterface EmployeeReadRepository"))
+        assertTrue(kotlin.contains("@io.jmix.core.repository.FetchPlan(\"employee-summary\")"))
+        assertTrue(kotlin.contains("import io.jmix.core.FetchPlan"))
+        assertFalse(kotlin.contains("import io.jmix.core.repository.FetchPlan\n"))
         assertTrue(kotlin.contains("Page<Employee>"))
         assertTrue(kotlin.contains("fetchPlan: FetchPlan?"))
         assertTrue(kotlin.contains("properties = [\"department\", \"count\"]"))

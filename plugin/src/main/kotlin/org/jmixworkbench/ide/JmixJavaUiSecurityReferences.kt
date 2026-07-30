@@ -3,6 +3,7 @@ package org.jmixworkbench.ide
 import com.intellij.codeInsight.lookup.LookupElementBuilder
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.JavaPsiFacade
+import com.intellij.psi.ElementManipulators
 import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiClassObjectAccessExpression
@@ -229,10 +230,10 @@ internal class JmixJavaMenuIdReference(
         jmixMenuIdDeclarations(element)
 }
 
-internal class JmixJavaEntityNameReference(
+internal open class JmixJavaEntityNameReference(
     element: PsiLiteralExpression,
     range: TextRange,
-    private val entityName: String,
+    protected val entityName: String,
 ) : PsiPolyVariantReferenceBase<PsiLiteralExpression>(element, range, false) {
     override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> =
         resolveJmixEntityClasses(element, entityName)
@@ -253,7 +254,7 @@ internal class JmixJavaEntityNameReference(
             .toList()
             .toTypedArray()
 
-    override fun handleElementRename(newElementName: String): PsiElement =
+    open override fun handleElementRename(newElementName: String): PsiElement =
         replaceJavaStringLiteral(
             element,
             renamedEntityIdentifier(element, entityName, newElementName),
@@ -287,16 +288,8 @@ internal class JmixJavaEntityPropertyReference(
             }
             .toTypedArray()
 
-    override fun handleElementRename(newElementName: String): PsiElement {
-        val raw = element.value as? String ?: return element
-        val start = rangeInElement.startOffset - 1
-        val end = rangeInElement.endOffset - 1
-        if (start < 0 || end > raw.length || start > end) return element
-        return replaceJavaStringLiteral(
-            element,
-            raw.replaceRange(start, end, newElementName),
-        )
-    }
+    override fun handleElementRename(newElementName: String): PsiElement =
+        ElementManipulators.handleContentChange(element, rangeInElement, newElementName)
 
     internal fun candidateProperties(): List<JmixEntityProperty> =
         entityClassAtPath(rootEntity, pathPrefix)

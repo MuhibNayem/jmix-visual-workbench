@@ -28,6 +28,7 @@ import type {
   EntityAttributeSafeDeleteLaunchResponse,
   EntityEventListenerRequest,
   DataRepositoryChangeRequest,
+  RepositorySemanticValidationResponse,
   EntityAttributeTypeMigrationRequest,
   EntityAttributeTypeMigrationLaunchResponse,
   EntityAttributeTypeExpansionPreviewResponse,
@@ -844,6 +845,69 @@ ${javaMethods}
                   }],
                   issues: [],
                 } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'validateDataRepositorySemantics': {
+                const change = payload as DataRepositoryChangeRequest
+                const propertyPaths = [
+                  { path: 'id', javaType: 'UUID', nullable: false, association: false, collection: false, derivedToken: 'Id' },
+                  { path: 'employeeNumber', javaType: 'String', nullable: false, association: false, collection: false, derivedToken: 'EmployeeNumber' },
+                  { path: 'department', javaType: 'Department', nullable: true, association: true, collection: false, derivedToken: 'Department' },
+                  { path: 'department.code', javaType: 'String', nullable: false, association: false, collection: false, derivedToken: 'DepartmentCode' },
+                  { path: 'active', javaType: 'Boolean', nullable: false, association: false, collection: false, derivedToken: 'Active' },
+                ]
+                const diagnostics: RepositorySemanticValidationResponse['diagnostics'] = []
+                change.config.methods.forEach((method, methodIndex) => {
+                  if (method.queryType === 'derived' &&
+                    method.name.includes('DoesNotExist')) {
+                    diagnostics.push({
+                      severity: 'error',
+                      code: 'JVW-REPOSITORY-DERIVED-PROPERTY',
+                      message: "Cannot resolve derived property 'doesNotExist' against the entity model.",
+                      methodIndex,
+                      field: 'name',
+                      suggestions: ['department.code', 'employeeNumber'],
+                      blocking: true,
+                      sourceOwned: false,
+                    })
+                    return
+                  }
+                  if (method.applyConstraints === false) {
+                    diagnostics.push({
+                      severity: 'warning',
+                      code: 'JVW-REPOSITORY-METHOD-SECURITY-BYPASS',
+                      message: `Method '${method.name}' explicitly bypasses Jmix data constraints.`,
+                      methodIndex,
+                      field: 'applyConstraints',
+                      suggestions: [],
+                      blocking: false,
+                      sourceOwned: false,
+                    })
+                  }
+                })
+                if (!change.config.applyConstraints) {
+                  diagnostics.push({
+                    severity: 'warning',
+                    code: 'JVW-REPOSITORY-SECURITY-BYPASS',
+                    message: 'Repository-wide security constraints are disabled.',
+                    field: 'applyConstraints',
+                    suggestions: [],
+                    blocking: false,
+                    sourceOwned: false,
+                  })
+                }
+                return {
+                  accepted: diagnostics.every(diagnostic => diagnostic.severity !== 'error'),
+                  diagnostics,
+                  propertyPaths,
+                  methods: change.config.methods.map((method, methodIndex) => ({
+                    methodIndex,
+                    propertyPaths: propertyPaths
+                      .filter(path => method.name.includes(path.derivedToken) || method.query?.includes(`.${path.path}`))
+                      .map(path => path.path),
+                    expectedValueParameters: method.parameters.filter(parameter => parameter.role === 'value').length,
+                    resultKind: method.queryType === 'jpql' ? 'entity' : 'entity',
+                  })),
+                } satisfies RepositorySemanticValidationResponse
               }
               case 'applyDataRepositoryChange':
                 developmentHistory = {
@@ -2256,6 +2320,13 @@ ${javaMethods}
   previewDataRepositoryChange(change: DataRepositoryChangeRequest) {
     return this.request<WorkspaceChangePreviewResponse>(
       'previewDataRepositoryChange',
+      change,
+    )
+  }
+
+  validateDataRepositorySemantics(change: DataRepositoryChangeRequest) {
+    return this.request<RepositorySemanticValidationResponse>(
+      'validateDataRepositorySemantics',
       change,
     )
   }

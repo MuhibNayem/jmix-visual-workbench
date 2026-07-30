@@ -49,6 +49,8 @@ internal object JmixKotlinReferenceProvider : PsiReferenceProvider() {
         val annotation = host.kotlinAnnotationContext()
         jmixKotlinMappedByReference(host, valueRange, value, annotation)
             ?.let { return arrayOf(it) }
+        jmixKotlinRepositoryQueryReferences(host, valueRange, value, annotation)
+            ?.let { return it }
         if (annotation?.isJmixSpringBeanNameDeclaration(host) == true) {
             return arrayOf(
                 JmixKotlinSpringBeanDeclarationReference(

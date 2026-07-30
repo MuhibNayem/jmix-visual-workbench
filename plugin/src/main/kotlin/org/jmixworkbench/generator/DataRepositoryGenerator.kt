@@ -31,6 +31,10 @@ object DataRepositoryGenerator {
         config.methods.forEach { method ->
             RepositoryContract.collectMethodImports(method, imports, kotlin = false)
         }
+        val qualifyFetchPlanAnnotation = "io.jmix.core.FetchPlan" in imports
+        if (qualifyFetchPlanAnnotation) {
+            imports -= "io.jmix.core.repository.FetchPlan"
+        }
         if (!config.applyConstraints || config.methods.any { it.applyConstraints != null }) {
             imports += "io.jmix.core.repository.ApplyConstraints"
         }
@@ -45,7 +49,7 @@ object DataRepositoryGenerator {
                 .append(entity.className).append(", ").append(idType).append("> {\n")
             config.methods.forEach { method ->
                 append('\n')
-                appendJavaMethod(method, config)
+                appendJavaMethod(method, config, qualifyFetchPlanAnnotation)
             }
             append("}\n")
         }
@@ -54,6 +58,7 @@ object DataRepositoryGenerator {
     private fun StringBuilder.appendJavaMethod(
         method: RepositoryMethod,
         config: DataRepositoryConfig,
+        qualifyFetchPlanAnnotation: Boolean,
     ) {
         method.description?.trim()?.takeIf(String::isNotEmpty)?.let { description ->
             append("    /**\n")
@@ -78,7 +83,17 @@ object DataRepositoryGenerator {
             append(")\n")
         }
         method.fetchPlan?.trim()?.takeIf(String::isNotEmpty)?.let {
-            append("    @FetchPlan(").append(RepositoryContract.javaString(it)).append(")\n")
+            append("    @")
+                .append(
+                    if (qualifyFetchPlanAnnotation) {
+                        "io.jmix.core.repository.FetchPlan"
+                    } else {
+                        "FetchPlan"
+                    },
+                )
+                .append('(')
+                .append(RepositoryContract.javaString(it))
+                .append(")\n")
         }
         method.applyConstraints?.let {
             append("    @ApplyConstraints(").append(it).append(")\n")

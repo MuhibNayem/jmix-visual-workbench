@@ -25,6 +25,34 @@ contract and
   remain visible source-owned evidence instead of being silently rewritten.
   New repositories and additive methods share one responsive visual editor;
   existing methods are locked while additions remain editable.
+- Repository authoring now uses one entity-aware semantic model in the backend,
+  the responsive designer and native IntelliJ references. Derived queries
+  resolve inherited and nested properties, operators, arity, value types,
+  ordering and result shape. JPQL validates entity roots, joins (including
+  outer joins), aliases, mapped paths, parameters, aggregate/scalar/entity
+  projections, query properties and fetch-plan compatibility. Existing
+  source-owned methods remain visible advisory evidence: an unsupported or
+  invalid handwritten method no longer disables preview for an independent
+  valid additive method, while every new draft still fails closed on a
+  blocking diagnostic.
+- Java and Kotlin `@Query` strings now provide native entity/property
+  completion, segment navigation, Find Usages, inspections, quick fixes and
+  rename through the same PSI entity model used by FlowUI, fetch-plan and
+  security references. Escaped Java strings, Kotlin strings, qualified entity
+  names, nested paths and class/property rename are covered on both IDE hosts.
+  This remains a bounded JPQL analyzer, not a complete JPQL language
+  implementation: subqueries, constructor projections, `TREAT`, map functions,
+  complete correlated-alias scoping and parameter declaration refactoring are
+  explicit certification gaps.
+- Four release-blocking round-trip defects are closed. Java embedded mappings
+  collect nested override imports; repository fetch-plan annotations use a
+  qualified name when the `io.jmix.core.FetchPlan` parameter type would
+  collide; changing a subtype draft to a hierarchy root clears its superclass;
+  and the association-override editor preserves and independently edits every
+  composite join column. A real narrow-browser journey authored and retained
+  two join columns. Draft rows now expose an explicit keyboard-accessible
+  Details control, and attribute-detail fields no longer create an off-screen
+  implicit grid column.
 - Java and Kotlin generation now validates duplicate JVM signatures, result and
   parameter types, paging contracts, exact named/positional JPQL bindings,
   aggregate projections and read-only single-entity SELECT semantics.
@@ -60,7 +88,7 @@ contract and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 280 tests and three packaged-host
+  descriptors were inspected after assembly, 290 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
