@@ -2429,6 +2429,7 @@ export default function EntityDesigner() {
                       <ExistingRelationshipSemanticsEditor
                         attribute={selected}
                         sourceAssociation={sourceAssociation}
+                        sourceNullable={source?.nullable ?? true}
                         sourceUnique={source?.unique ?? false}
                         sourceEntity={existingEntity!}
                         schemaWorkspace={schemaWorkspace}
@@ -3666,6 +3667,7 @@ function ExistingAttributeSourceMetadataEditor({
 function ExistingRelationshipSemanticsEditor({
   attribute,
   sourceAssociation,
+  sourceNullable,
   sourceUnique,
   sourceEntity,
   schemaWorkspace,
@@ -3673,6 +3675,7 @@ function ExistingRelationshipSemanticsEditor({
 }: {
   attribute: AttributeModel
   sourceAssociation: NonNullable<SchemaEntityAttributeSnapshot['associationDetails']>
+  sourceNullable: boolean
   sourceUnique: boolean
   sourceEntity: SchemaEntitySnapshot
   schemaWorkspace: SchemaWorkspaceResponse | null
@@ -3731,6 +3734,45 @@ function ExistingRelationshipSemanticsEditor({
   const checkedCardinalityEligible = owningToOneUpgradeEligible || owningToOneWideningEligible
   const relatedEntitySnapshot = schemaWorkspace?.entities.find(
     candidate => candidate.qualifiedName === sourceAssociation.relatedEntity,
+  )
+  const relatedPhysicalTable = physicalStore?.tables.find(
+    candidate => candidate.name.toLowerCase() ===
+      relatedEntitySnapshot?.tableName.split('.').pop()?.toLowerCase(),
+  )
+  const relationshipPhysicalColumn = sourceAssociation.joinColumnName
+    ? physicalTable?.columns.find(
+      candidate => candidate.name.toLowerCase() === sourceAssociation.joinColumnName?.toLowerCase(),
+    )
+    : undefined
+  const mandatoryForeignKeyCount = sourceAssociation.joinColumnName
+    ? (physicalTable?.foreignKeys ?? []).filter(foreignKey =>
+      foreignKey.baseColumnNames.split(',').map(value => value.trim()).length === 1 &&
+      foreignKey.baseColumnNames.trim().toLowerCase() === sourceAssociation.joinColumnName?.toLowerCase() &&
+      foreignKey.referencedTableName.toLowerCase() === relatedPhysicalTable?.name.toLowerCase() &&
+      foreignKey.referencedColumnNames.split(',').map(value => value.trim()).length === 1 &&
+      foreignKey.referencedColumnNames.trim().toLowerCase() === sourceAssociation.relatedIdColumnName.toLowerCase(),
+    ).length
+    : 0
+  const nullabilityChangeCandidate =
+    ['manyToOne', 'oneToOne'].includes(sourceAssociation.associationType) &&
+    !sourceAssociation.crossDataStore &&
+    !sourceAssociation.mappedBy &&
+    !sourceAssociation.joinTable &&
+    Boolean(sourceAssociation.joinColumnName)
+  const nullabilityChangeEligible = Boolean(
+    nullabilityChangeCandidate &&
+    association.associationType === sourceAssociation.associationType &&
+    attribute.unique === sourceUnique &&
+    !sourceEntity.databaseView &&
+    sourceEntity.ddlMode !== 'DISABLED' &&
+    !sourceEntity.tableSchema &&
+    !sourceEntity.tableCatalog &&
+    physicalStore?.complete === true &&
+    relatedPhysicalTable &&
+    relationshipPhysicalColumn?.nullable === sourceNullable &&
+    relationshipPhysicalColumn.primaryKey === false &&
+    relationshipPhysicalColumn.unique === sourceUnique &&
+    mandatoryForeignKeyCount === 1
   )
   const ownershipTransferCandidate =
     sourceAssociation.associationType === 'oneToOne' &&
@@ -3867,6 +3909,7 @@ function ExistingRelationshipSemanticsEditor({
                   onChange={event => {
                     const associationType = event.target.value as AssociationType
                     onChange({
+                      mandatory: !sourceNullable,
                       unique: associationType === 'oneToOne',
                       association: {
                         ...association,
@@ -3921,6 +3964,59 @@ function ExistingRelationshipSemanticsEditor({
               </select>
             </Field>
           </div>
+          {nullabilityChangeCandidate && (
+            <div className={`mt-3 rounded-lg border p-3 ${
+              nullabilityChangeEligible
+                ? 'border-sky-500/30 bg-sky-500/[0.06]'
+                : 'border-amber-500/25 bg-amber-500/[0.05]'
+            }`}>
+              <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className={`text-[10px] font-semibold uppercase tracking-wider ${
+                    nullabilityChangeEligible ? 'text-sky-200' : 'text-amber-200'
+                  }`}>
+                    {sourceNullable ? 'Contract optional relationship' : 'Expand required relationship'}
+                  </div>
+                  <p className="mt-1 text-[9px] leading-relaxed text-gray-500">
+                    {sourceNullable ? (
+                      <>
+                        Make <code>{sourceEntity.className}.{attribute.name}</code> mandatory only after
+                        complete Liquibase history proves the exact nullable join column and foreign key.
+                        Preview halts when existing rows contain nulls and rollback restores nullability.
+                      </>
+                    ) : (
+                      <>
+                        Allow <code>{sourceEntity.className}.{attribute.name}</code> to become optional by dropping
+                        only the proven foreign-key NOT NULL constraint. Rollback restores it and fails safely if
+                        new null references were introduced.
+                      </>
+                    )}
+                  </p>
+                </div>
+                <label className={`flex shrink-0 items-center gap-2 text-[10px] ${
+                  nullabilityChangeEligible
+                    ? 'cursor-pointer text-gray-300'
+                    : 'cursor-not-allowed text-gray-600'
+                }`}>
+                  <input
+                    type="checkbox"
+                    disabled={!nullabilityChangeEligible}
+                    checked={attribute.mandatory}
+                    onChange={event => onChange({ mandatory: event.target.checked })}
+                    aria-label={`Mandatory relationship ${attribute.name}`}
+                  />
+                  require relationship
+                </label>
+              </div>
+              {!nullabilityChangeEligible && (
+                <p className="mt-2 text-[9px] leading-relaxed text-amber-200/75">
+                  Locked until the original cardinality is retained and a complete, unqualified managed schema
+                  proves the exact non-key column nullability plus one foreign key. Partial schemas, drift, missing
+                  constraints, database views, and combined cardinality changes fail closed.
+                </p>
+              )}
+            </div>
+          )}
           {owningToOneWideningCandidate && !owningToOneWideningEligible && (
             <div className="mt-3 rounded border border-amber-500/25 bg-amber-500/[0.05] p-2 text-[9px] leading-relaxed text-amber-200/80">
               One-to-many reuse is locked because the physical schema does not prove exactly one named, single-column

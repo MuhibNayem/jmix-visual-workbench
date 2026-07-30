@@ -58,6 +58,15 @@ member-based equality/hash semantics, and generated `@Table` mappings retain
 explicit schema and catalog qualifiers. Composite-ID schema migration proof is
 still tracked as a separate gate.
 
+Relationship-evolution evidence update (2026-07-30): established local owning
+many-to-one and one-to-one mappings can now change between optional and required
+without replacing the relationship. Complete Liquibase evidence must prove the
+exact unqualified non-key column, its current nullability/uniqueness and one
+matching foreign key. Java/Kotlin annotations and checked forward/rollback
+nullability changes are previewed and applied together; optional-to-required
+halts on existing null references, while required-to-optional rollback fails
+safely if later data introduces nulls.
+
 | Requirement area | Status | Implemented evidence | Remaining enterprise gap |
 |---|---|---|---|
 | Existing multi-module projects | Strong | Composite Gradle topology, source sets, typed exact custom roots (`srcDir`, `srcDirs`, `setSrcDirs`, assignment and nested-DSL forms), generated roots, source-less/orphan/recovered modules, common `projectDir` remaps (`file`, `File(rootDir, …)`, `settingsDir.resolve`, layout directory APIs), IntelliJ and static dependency edges, deterministic ownership conflict handling, YAML/XML/SQL/Java/Kotlin/Groovy parsing, incremental cache, explicit partial-index health, and a verified remapped 16-module dependency chain. Recovered roots now remain authoritative destinations for Java/resource/test generation, FlowUI/BPMN/DMN, security, server logic, scenarios, Liquibase classpaths, base-package inference and runtime configuration discovery | Validate against more real 3,000+ file repositories, included builds outside registered IntelliJ roots, and build logic whose module/source topology is created dynamically at Gradle execution time |
@@ -142,7 +151,7 @@ still tracked as a separate gate.
   Jmix composition and delete policy remained source-only, while an explicit
   local owning many-to-one could be narrowed to one-to-one through a
   duplicate-data precondition and reversible unique constraint. Other target,
-  cardinality, ownership, join structure and nullability changes remained
+  target, ownership, join structure and combined physical changes remained
   structurally locked. The 480-pixel browser view retained every control
   without right-edge clipping and reported no warnings or errors. Dual-host
   contracts prove Jakarta Persistence default fetch reconstruction, exact
@@ -192,6 +201,18 @@ still tracked as a separate gate.
   receiving from Java, constraint- and index-backed schemas, collision rejection
   and preservation of both manual sources. The responsive control was exercised
   at 1440, 480 and 360 pixels with no horizontal overflow or browser diagnostics.
+- Established Java and Kotlin owning to-one relationships can now move in both
+  directions between optional and required. The planner requires complete,
+  unqualified physical evidence for the exact non-key join column, its current
+  nullability/uniqueness and one matching foreign key; schema drift, missing or
+  ambiguous keys, views, partial history and combined cardinality changes fail
+  closed. Source edits preserve manual annotations/methods and unmanaged
+  `@JoinColumn` arguments while keeping Jakarta `optional` and database
+  `nullable` aligned. Liquibase checks column existence and null data before
+  contraction, expands only the proven NOT NULL constraint, and generates
+  reverse rollback. Apply-and-refresh contracts prove both source and physical
+  schema re-index to the new state. The responsive control was exercised at
+  1440, 480 and 360 pixels without horizontal overflow or browser diagnostics.
 - The Integration Designer was exercised in a real browser. Catalog selection,
   indexed Kafka handler binding, non-blocking retry and dead-letter property
   authoring, and the immutable two-file Java/policy preview completed
@@ -211,9 +232,9 @@ still tracked as a separate gate.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 257 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 259 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 257 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 259 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,

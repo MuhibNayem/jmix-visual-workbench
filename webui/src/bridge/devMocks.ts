@@ -1251,13 +1251,24 @@ export const developmentSchemaWorkspace: SchemaWorkspaceResponse = {
         unique: true,
         primaryKey: true,
       }, {
+        name: 'PRIMARY_SCHEDULE_ID',
+        type: 'UUID',
+        nullable: true,
+        unique: false,
+        primaryKey: false,
+      }, {
         name: 'EXCLUSIVE_SCHEDULE_ID',
         type: 'UUID',
         nullable: true,
         unique: true,
         primaryKey: false,
       }],
-      foreignKeys: [],
+      foreignKeys: [{
+        constraintName: 'FK_LOAN_LOAN_APP_PRIMARY_SCHEDULE',
+        baseColumnNames: 'PRIMARY_SCHEDULE_ID',
+        referencedTableName: 'LOAN_SCHEDULE',
+        referencedColumnNames: 'ID',
+      }],
       uniqueConstraints: [{
         name: 'UQ_LOAN_LOAN_APP_EXCLUSIVE_SCHEDULE',
         columns: ['EXCLUSIVE_SCHEDULE_ID'],

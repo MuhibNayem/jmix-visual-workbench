@@ -374,6 +374,316 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(rejected.issues.any { it.code == "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT" })
     }
 
+    fun testOwningRelationshipNullabilityChangesAreEvidenceCheckedAndReversible() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/Department.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "DEPARTMENT")
+                public class Department {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    private UUID id;
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/EmployeeAssignment.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "EMPLOYEE_ASSIGNMENT")
+                public class EmployeeAssignment {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    private UUID id;
+
+                    @ManualRelationshipMarker("preserve")
+                    @ManyToOne(fetch = FetchType.LAZY)
+                    @JoinColumn(name = "DEPARTMENT_ID", referencedColumnName = "ID")
+                    private Department department;
+
+                    public String manualAssignmentCode() { return "assignment"; }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/Person.kt",
+                """
+                package com.acme.entity
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.util.UUID
+                @JmixEntity
+                @Entity
+                @Table(name = "PERSON")
+                open class Person {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    var id: UUID? = null
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/PersonBadge.kt",
+                """
+                package com.acme.entity
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.util.UUID
+                @JmixEntity
+                @Entity
+                @Table(name = "PERSON_BADGE")
+                open class PersonBadge {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    var id: UUID? = null
+
+                    @ManualKotlinRelationship
+                    @OneToOne(fetch = FetchType.LAZY, optional = false)
+                    @JoinColumn(name = "PERSON_ID", referencedColumnName = "ID", nullable = false, unique = true)
+                    var person: Person? = null
+
+                    fun manualBadgeCode(): String = "badge"
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/resources/com/acme/liquibase/changelog/014-relationship-nullability.xml",
+                """
+                <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                    <changeSet id="relationship-nullability" author="team">
+                        <createTable tableName="DEPARTMENT">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                        </createTable>
+                        <createTable tableName="EMPLOYEE_ASSIGNMENT">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                            <column name="DEPARTMENT_ID" type="UUID"/>
+                        </createTable>
+                        <addForeignKeyConstraint
+                            constraintName="FK_EMPLOYEE_ASSIGNMENT_DEPARTMENT"
+                            baseTableName="EMPLOYEE_ASSIGNMENT"
+                            baseColumnNames="DEPARTMENT_ID"
+                            referencedTableName="DEPARTMENT"
+                            referencedColumnNames="ID"/>
+                        <createTable tableName="PERSON">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                        </createTable>
+                        <createTable tableName="PERSON_BADGE">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                            <column name="PERSON_ID" type="UUID">
+                                <constraints nullable="false"/>
+                            </column>
+                        </createTable>
+                        <addUniqueConstraint
+                            tableName="PERSON_BADGE"
+                            constraintName="UQ_PERSON_BADGE_PERSON"
+                            columnNames="PERSON_ID"/>
+                        <addForeignKeyConstraint
+                            constraintName="FK_PERSON_BADGE_PERSON"
+                            baseTableName="PERSON_BADGE"
+                            baseColumnNames="PERSON_ID"
+                            referencedTableName="PERSON"
+                            referencedColumnNames="ID"/>
+                    </changeSet>
+                </databaseChangeLog>
+                """.trimIndent(),
+            )
+        }
+
+        val schemaService = SchemaWorkspaceService.getInstance(project)
+        val service = ExistingEntityChangeService.getInstance(project)
+        val changeService = WorkspaceChangeService.getInstance(project)
+        val initialWorkspace = schemaService.load(forceRefresh = true)
+        val store = initialWorkspace.stores.single()
+
+        fun model(
+            snapshot: SchemaEntitySnapshot,
+            attributeName: String,
+            mandatory: Boolean,
+        ): EntityModel {
+            val current = snapshot.attributes.single { it.name == attributeName }
+            val relation = requireNotNull(current.associationDetails)
+            return EntityModel(
+                className = snapshot.className,
+                packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+                sourceLanguage = if (snapshot.sourceLocator.relativePath.endsWith(".kt")) {
+                    EntitySourceLanguage.KOTLIN
+                } else {
+                    EntitySourceLanguage.JAVA
+                },
+                tableName = snapshot.tableName,
+                dataStore = snapshot.storeName,
+                generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+                attributes = mutableListOf(
+                    AttributeModel(
+                        name = current.name,
+                        type = AttributeType.ASSOCIATION,
+                        columnName = current.columnName,
+                        mandatory = mandatory,
+                        unique = current.unique,
+                        association = AssociationConfig(
+                            associationType = relation.associationType,
+                            relatedEntity = relation.relatedEntity,
+                            relatedTableName = relation.relatedTableName,
+                            relatedIdColumnName = relation.relatedIdColumnName,
+                            relatedIdType = relation.relatedIdType,
+                            localIdAttributeName = relation.localIdAttributeName,
+                            mappedBy = relation.mappedBy,
+                            joinColumnName = relation.joinColumnName,
+                            joinTable = relation.joinTable,
+                            cascade = relation.cascade.toMutableList(),
+                            fetch = relation.fetch,
+                            collectionType = relation.collectionType,
+                            crossDataStore = relation.crossDataStore,
+                            orphanRemoval = relation.orphanRemoval,
+                            onDelete = relation.onDelete,
+                        ),
+                    ),
+                ),
+                ddlGeneration = DdlGenerationConfig(true, DdlGenerationMode.CREATE_AND_DROP),
+            )
+        }
+
+        val assignment = initialWorkspace.entities.single { it.className == "EmployeeAssignment" }
+        val requiredRequest = ExistingEntityAttributeAdditionRequest(
+            assignment.sourceLocator,
+            model(assignment, "department", mandatory = true),
+        )
+        val requiredPreview = service.previewAttributeAdditions(requiredRequest)
+        assertTrue(
+            requiredPreview.accepted,
+            requiredPreview.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        assertEquals(2, requiredPreview.files.size)
+        val requiredJava = requiredPreview.files.single {
+            it.relativePath.endsWith("/EmployeeAssignment.java")
+        }.resultContent
+        val requiredMigration = requiredPreview.files.single {
+            it.relativePath.endsWith(".xml")
+        }.resultContent
+        assertTrue(requiredJava.contains("@ManualRelationshipMarker(\"preserve\")"))
+        assertTrue(requiredJava.contains("optional = false"))
+        assertTrue(requiredJava.contains("nullable = false"))
+        assertTrue(requiredJava.contains("referencedColumnName = \"ID\""))
+        assertTrue(requiredJava.contains("manualAssignmentCode"))
+        assertTrue(requiredMigration.contains("""<columnExists tableName="EMPLOYEE_ASSIGNMENT" columnName="DEPARTMENT_ID""""))
+        assertTrue(requiredMigration.contains("WHERE DEPARTMENT_ID IS NULL"))
+        assertTrue(requiredMigration.contains("""<addNotNullConstraint tableName="EMPLOYEE_ASSIGNMENT" columnName="DEPARTMENT_ID""""))
+        assertTrue(requiredMigration.contains("""<dropNotNullConstraint tableName="EMPLOYEE_ASSIGNMENT" columnName="DEPARTMENT_ID""""))
+        assertTrue(requiredMigration.contains("<rollback>"))
+
+        val qualifiedRejected = service.previewAttributeAdditions(
+            requiredRequest.copy(
+                entity = requiredRequest.entity.copy(tableSchema = "PUBLIC"),
+            ),
+        )
+        assertFalse(qualifiedRejected.accepted)
+        assertTrue(
+            qualifiedRejected.issues.any {
+                it.code == "JVW-ENTITY-RELATIONSHIP-NULLABILITY-QUALIFIED-TABLE"
+            },
+            qualifiedRejected.issues.toString(),
+        )
+
+        val requiredPrepared = service.prepareAttributeAdditions(
+            ExistingEntityAttributeAdditionApplyRequest(
+                change = requiredRequest,
+                expectedPlanDigest = requireNotNull(requiredPreview.planDigest),
+            ),
+        )
+        val requiredApplied = changeService.applyPrepared(requiredPrepared)
+        assertTrue(
+            requiredApplied.success,
+            requiredApplied.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        val afterRequired = schemaService.load(forceRefresh = true)
+        assertFalse(
+            afterRequired.entities.single { it.className == "EmployeeAssignment" }
+                .attributes.single { it.name == "department" }.nullable,
+        )
+        assertFalse(
+            afterRequired.physicalSchemas.single { it.storeId == store.id }
+                .tables.single { it.name == "EMPLOYEE_ASSIGNMENT" }
+                .columns.single { it.name == "DEPARTMENT_ID" }.nullable,
+        )
+
+        val badge = afterRequired.entities.single { it.className == "PersonBadge" }
+        val optionalRequest = ExistingEntityAttributeAdditionRequest(
+            badge.sourceLocator,
+            model(badge, "person", mandatory = false),
+        )
+        val optionalPreview = service.previewAttributeAdditions(optionalRequest)
+        assertTrue(
+            optionalPreview.accepted,
+            optionalPreview.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        assertEquals(2, optionalPreview.files.size)
+        val optionalKotlin = optionalPreview.files.single {
+            it.relativePath.endsWith("/PersonBadge.kt")
+        }.resultContent
+        val optionalMigration = optionalPreview.files.single {
+            it.relativePath.endsWith(".xml")
+        }.resultContent
+        assertTrue(optionalKotlin.contains("@ManualKotlinRelationship"))
+        assertFalse(optionalKotlin.contains("optional = false"))
+        assertFalse(optionalKotlin.contains("nullable = false, unique = true"))
+        assertTrue(optionalKotlin.contains("unique = true"))
+        assertTrue(optionalKotlin.contains("referencedColumnName = \"ID\""))
+        assertTrue(optionalKotlin.contains("manualBadgeCode"))
+        assertTrue(optionalMigration.contains("""<columnExists tableName="PERSON_BADGE" columnName="PERSON_ID""""))
+        assertTrue(optionalMigration.contains("""<dropNotNullConstraint tableName="PERSON_BADGE" columnName="PERSON_ID""""))
+        assertTrue(optionalMigration.contains("""<addNotNullConstraint tableName="PERSON_BADGE" columnName="PERSON_ID""""))
+        assertTrue(optionalMigration.contains("<rollback>"))
+
+        val optionalPrepared = service.prepareAttributeAdditions(
+            ExistingEntityAttributeAdditionApplyRequest(
+                change = optionalRequest,
+                expectedPlanDigest = requireNotNull(optionalPreview.planDigest),
+            ),
+        )
+        val optionalApplied = changeService.applyPrepared(optionalPrepared)
+        assertTrue(
+            optionalApplied.success,
+            optionalApplied.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        val afterOptional = schemaService.load(forceRefresh = true)
+        assertTrue(
+            afterOptional.entities.single { it.className == "PersonBadge" }
+                .attributes.single { it.name == "person" }.nullable,
+        )
+        assertTrue(
+            afterOptional.physicalSchemas.single { it.storeId == store.id }
+                .tables.single { it.name == "PERSON_BADGE" }
+                .columns.single { it.name == "PERSON_ID" }.nullable,
+        )
+    }
+
     fun testBidirectionalRelationshipGenerationUpdatesJavaKotlinAndSelfReferencesAtomically() {
         createFixture(includeAll = true)
         val root = getOrCreateProjectBaseDir()
@@ -1099,6 +1409,337 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertEquals("PROFILE_ID", refreshedReceiver.joinColumnName)
         assertEquals("profile", refreshedReleaser.mappedBy)
         assertEquals(null, refreshedReleaser.joinColumnName)
+    }
+
+    fun testOwningRelationshipsChangeNullabilityOnlyWithExactPhysicalProof() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/MandatoryDepartment.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "MANDATORY_DEPARTMENT")
+                public class MandatoryDepartment {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    private UUID id;
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/OptionalAssignment.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "OPTIONAL_ASSIGNMENT")
+                public class OptionalAssignment {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    private UUID id;
+
+                    @ManyToOne(fetch = FetchType.LAZY)
+                    @JoinColumn(
+                        name = "DEPARTMENT_ID",
+                        referencedColumnName = "ID",
+                        foreignKey = @ForeignKey(name = "FK_OPTIONAL_ASSIGNMENT_DEPARTMENT")
+                    )
+                    private MandatoryDepartment department;
+
+                    public String manualAssignmentCode() { return "assignment"; }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/OptionalApproval.kt",
+                """
+                package com.acme.entity
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.util.UUID
+                @JmixEntity
+                @Entity
+                @Table(name = "OPTIONAL_APPROVAL")
+                open class OptionalApproval {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    var id: UUID? = null
+
+                    @OneToOne(fetch = FetchType.LAZY)
+                    @JoinColumn(
+                        name = "DEPARTMENT_ID",
+                        referencedColumnName = "ID",
+                        unique = true,
+                        foreignKey = ForeignKey(name = "FK_OPTIONAL_APPROVAL_DEPARTMENT"),
+                    )
+                    var department: MandatoryDepartment? = null
+
+                    fun manualApprovalCode(): String = "approval"
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/RequiredAssignment.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "REQUIRED_ASSIGNMENT")
+                public class RequiredAssignment {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    private UUID id;
+
+                    @ManyToOne(optional = false)
+                    @JoinColumn(name = "DEPARTMENT_ID", nullable = false)
+                    private MandatoryDepartment department;
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/UnprovenOptionalAssignment.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "UNPROVEN_OPTIONAL_ASSIGNMENT")
+                public class UnprovenOptionalAssignment {
+                    @Id
+                    @Column(name = "ID", nullable = false)
+                    private UUID id;
+
+                    @ManyToOne
+                    @JoinColumn(name = "DEPARTMENT_ID")
+                    private MandatoryDepartment department;
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/resources/com/acme/liquibase/changelog/016-mandatory-relationships.xml",
+                """
+                <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                    <changeSet id="mandatory-relationships" author="team">
+                        <createTable tableName="MANDATORY_DEPARTMENT">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                        </createTable>
+                        <createTable tableName="OPTIONAL_ASSIGNMENT">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                            <column name="DEPARTMENT_ID" type="UUID"/>
+                        </createTable>
+                        <addForeignKeyConstraint
+                            constraintName="FK_OPTIONAL_ASSIGNMENT_DEPARTMENT"
+                            baseTableName="OPTIONAL_ASSIGNMENT"
+                            baseColumnNames="DEPARTMENT_ID"
+                            referencedTableName="MANDATORY_DEPARTMENT"
+                            referencedColumnNames="ID"/>
+                        <createTable tableName="OPTIONAL_APPROVAL">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                            <column name="DEPARTMENT_ID" type="UUID"/>
+                        </createTable>
+                        <addUniqueConstraint
+                            tableName="OPTIONAL_APPROVAL"
+                            constraintName="UQ_OPTIONAL_APPROVAL_DEPARTMENT"
+                            columnNames="DEPARTMENT_ID"/>
+                        <addForeignKeyConstraint
+                            constraintName="FK_OPTIONAL_APPROVAL_DEPARTMENT"
+                            baseTableName="OPTIONAL_APPROVAL"
+                            baseColumnNames="DEPARTMENT_ID"
+                            referencedTableName="MANDATORY_DEPARTMENT"
+                            referencedColumnNames="ID"/>
+                        <createTable tableName="REQUIRED_ASSIGNMENT">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                            <column name="DEPARTMENT_ID" type="UUID">
+                                <constraints nullable="false"/>
+                            </column>
+                        </createTable>
+                        <addForeignKeyConstraint
+                            constraintName="FK_REQUIRED_ASSIGNMENT_DEPARTMENT"
+                            baseTableName="REQUIRED_ASSIGNMENT"
+                            baseColumnNames="DEPARTMENT_ID"
+                            referencedTableName="MANDATORY_DEPARTMENT"
+                            referencedColumnNames="ID"/>
+                        <createTable tableName="UNPROVEN_OPTIONAL_ASSIGNMENT">
+                            <column name="ID" type="UUID">
+                                <constraints nullable="false" primaryKey="true"/>
+                            </column>
+                            <column name="DEPARTMENT_ID" type="UUID"/>
+                        </createTable>
+                    </changeSet>
+                </databaseChangeLog>
+                """.trimIndent(),
+            )
+        }
+
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val store = workspace.stores.single()
+        val service = ExistingEntityChangeService.getInstance(project)
+
+        fun model(
+            snapshot: SchemaEntitySnapshot,
+            mandatory: Boolean,
+            associationType: AssociationType? = null,
+            unique: Boolean? = null,
+        ): EntityModel {
+            val current = snapshot.attributes.single { it.name == "department" }
+            val relation = requireNotNull(current.associationDetails)
+            return EntityModel(
+                className = snapshot.className,
+                packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+                sourceLanguage = if (snapshot.sourceLocator.relativePath.endsWith(".kt")) {
+                    EntitySourceLanguage.KOTLIN
+                } else {
+                    EntitySourceLanguage.JAVA
+                },
+                tableName = snapshot.tableName,
+                dataStore = snapshot.storeName,
+                generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+                attributes = mutableListOf(
+                    AttributeModel(
+                        name = current.name,
+                        type = AttributeType.ASSOCIATION,
+                        columnName = current.columnName,
+                        mandatory = mandatory,
+                        unique = unique ?: current.unique,
+                        association = AssociationConfig(
+                            associationType = associationType ?: relation.associationType,
+                            relatedEntity = relation.relatedEntity,
+                            relatedTableName = relation.relatedTableName,
+                            relatedIdColumnName = relation.relatedIdColumnName,
+                            relatedIdType = relation.relatedIdType,
+                            localIdAttributeName = relation.localIdAttributeName,
+                            mappedBy = relation.mappedBy,
+                            joinColumnName = relation.joinColumnName,
+                            joinTable = relation.joinTable,
+                            cascade = relation.cascade.toMutableList(),
+                            fetch = relation.fetch,
+                            collectionType = relation.collectionType,
+                            crossDataStore = relation.crossDataStore,
+                            orphanRemoval = relation.orphanRemoval,
+                            onDelete = relation.onDelete,
+                        ),
+                    ),
+                ),
+            )
+        }
+
+        listOf("OptionalAssignment", "OptionalApproval").forEach { className ->
+            val snapshot = workspace.entities.single { it.className == className }
+            val preview = service.previewAttributeAdditions(
+                ExistingEntityAttributeAdditionRequest(
+                    snapshot.sourceLocator,
+                    model(snapshot, mandatory = true),
+                ),
+            )
+            assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+            assertEquals(2, preview.files.size)
+            val source = preview.files.single {
+                it.relativePath.endsWith(if (className == "OptionalApproval") ".kt" else ".java")
+            }.resultContent
+            assertTrue(source.contains("optional = false"))
+            assertTrue(source.contains("nullable = false"))
+            assertTrue(source.contains("referencedColumnName = \"ID\""))
+            assertTrue(source.contains("manual"))
+            if (className == "OptionalApproval") {
+                assertTrue(source.contains("unique = true"))
+                assertTrue(source.contains("FK_OPTIONAL_APPROVAL_DEPARTMENT"))
+            } else {
+                assertTrue(source.contains("FK_OPTIONAL_ASSIGNMENT_DEPARTMENT"))
+            }
+            val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+            assertTrue(migration.contains("<preConditions onFail=\"HALT\" onError=\"HALT\">"))
+            assertTrue(migration.contains("columnExists"))
+            assertTrue(migration.contains("WHERE DEPARTMENT_ID IS NULL"))
+            assertTrue(migration.contains("expectedResult=\"0\""))
+            assertTrue(migration.contains("<addNotNullConstraint"))
+            assertTrue(migration.contains("<rollback>"))
+            assertTrue(migration.contains("<dropNotNullConstraint"))
+        }
+
+        val required = workspace.entities.single { it.className == "RequiredAssignment" }
+        val loosening = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                required.sourceLocator,
+                model(required, mandatory = false),
+            ),
+        )
+        assertTrue(
+            loosening.accepted,
+            loosening.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        val looseningSource = loosening.files.single {
+            it.relativePath.endsWith("/RequiredAssignment.java")
+        }.resultContent
+        assertFalse(looseningSource.contains("optional = false"))
+        assertFalse(looseningSource.contains("@JoinColumn(name = \"DEPARTMENT_ID\", nullable = false"))
+        assertTrue(looseningSource.contains("@JoinColumn(name = \"DEPARTMENT_ID\")"))
+        val looseningMigration = loosening.files.single { it.relativePath.endsWith(".xml") }.resultContent
+        assertTrue(looseningMigration.contains("<dropNotNullConstraint"))
+        assertTrue(looseningMigration.contains("<rollback>"))
+        assertTrue(looseningMigration.contains("<addNotNullConstraint"))
+
+        val unproven = workspace.entities.single { it.className == "UnprovenOptionalAssignment" }
+        val missingForeignKey = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                unproven.sourceLocator,
+                model(unproven, mandatory = true),
+            ),
+        )
+        assertFalse(missingForeignKey.accepted)
+        assertTrue(
+            missingForeignKey.issues.any {
+                it.code == "JVW-ENTITY-RELATIONSHIP-NULLABILITY-FOREIGN-KEY-MISSING"
+            },
+            missingForeignKey.issues.toString(),
+        )
+
+        val optional = workspace.entities.single { it.className == "OptionalAssignment" }
+        val combinedCardinalityChange = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                optional.sourceLocator,
+                model(
+                    optional,
+                    mandatory = true,
+                    associationType = AssociationType.ONE_TO_ONE,
+                    unique = true,
+                ),
+            ),
+        )
+        assertFalse(combinedCardinalityChange.accepted)
+        assertTrue(
+            combinedCardinalityChange.issues.any {
+                it.code == "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT"
+            },
+            combinedCardinalityChange.issues.toString(),
+        )
     }
 
     fun testIncludeAllStoreEntityCoverageAndSourceSafeMigrationDestination() {

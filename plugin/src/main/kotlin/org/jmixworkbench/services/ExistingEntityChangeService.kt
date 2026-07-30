@@ -1746,6 +1746,15 @@ class ExistingEntityChangeService(
             }
             if (change.relationshipColumnRenamed) return@forEach
             if (desired.mandatory != !current.nullable) {
+                if (!change.columnRenamed) {
+                    preConditions += PreCondition(
+                        type = PreConditionType.COLUMN_EXISTS,
+                        params = mutableMapOf(
+                            "tableName" to entity.resolvedTableName,
+                            "columnName" to columnName,
+                        ),
+                    )
+                }
                 if (desired.mandatory) {
                     preConditions += PreCondition(
                         type = PreConditionType.SQL_CHECK,
@@ -2159,15 +2168,159 @@ class ExistingEntityChangeService(
         val target = desired.association ?: return false
         return source.associationType == AssociationType.ONE_TO_ONE &&
             target.associationType == AssociationType.MANY_TO_ONE &&
+            source.relatedEntity == target.relatedEntity &&
+            source.relatedTableName == target.relatedTableName &&
+            source.relatedIdColumnName == target.relatedIdColumnName &&
+            source.relatedIdType == target.relatedIdType &&
+            source.localIdAttributeName == target.localIdAttributeName &&
             !source.crossDataStore &&
             source.mappedBy.isNullOrBlank() &&
             target.mappedBy.isNullOrBlank() &&
+            source.joinTable == target.joinTable &&
+            source.collectionType == target.collectionType &&
             source.joinColumnName != null &&
             source.joinColumnName == current.columnName &&
             desiredPhysicalColumnName(desired) == current.columnName &&
             current.unique &&
             !desired.unique &&
             desired.mandatory == !current.nullable
+    }
+
+    private fun isOwningToOneNullabilityChange(
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): Boolean {
+        val source = current.associationDetails ?: return false
+        val target = desired.association ?: return false
+        return source.associationType in setOf(AssociationType.MANY_TO_ONE, AssociationType.ONE_TO_ONE) &&
+            target.associationType == source.associationType &&
+            source.relatedEntity == target.relatedEntity &&
+            source.relatedTableName == target.relatedTableName &&
+            source.relatedIdColumnName == target.relatedIdColumnName &&
+            source.relatedIdType == target.relatedIdType &&
+            source.localIdAttributeName == target.localIdAttributeName &&
+            !source.crossDataStore &&
+            !target.crossDataStore &&
+            source.mappedBy.isNullOrBlank() &&
+            target.mappedBy.isNullOrBlank() &&
+            source.joinTable == target.joinTable &&
+            source.collectionType == target.collectionType &&
+            source.joinColumnName != null &&
+            source.joinColumnName == current.columnName &&
+            target.joinColumnName == current.columnName &&
+            desiredPhysicalColumnName(desired) == current.columnName &&
+            desired.unique == current.unique &&
+            desired.mandatory != !current.nullable
+    }
+
+    private fun relationshipNullabilityIssue(
+        entity: EntityModel,
+        current: SchemaEntityAttributeSnapshot,
+    ): WorkspaceChangeIssue? {
+        val relationship = current.associationDetails
+            ?: return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-METADATA",
+                "${entity.className}.${current.name} has no exact relationship metadata.",
+            )
+        if (
+            entity.databaseView ||
+            entity.ddlGeneration.effectiveMode == DdlGenerationMode.DISABLED
+        ) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-DDL-REQUIRED",
+                "${entity.className}.${current.name} needs a managed Liquibase store before its nullability can change.",
+            )
+        }
+        if (!entity.tableSchema.isNullOrBlank() || !entity.tableCatalog.isNullOrBlank()) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-QUALIFIED-TABLE",
+                "The physical inventory does not preserve schema/catalog qualification. " +
+                    "Relationship nullability changes are locked to avoid selecting a same-named table.",
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load()
+        val snapshot = workspace.entities.singleOrNull {
+            it.qualifiedName == entity.fullName &&
+            it.storeName == entity.dataStore
+        } ?: return WorkspaceChangeIssue(
+            "JVW-ENTITY-RELATIONSHIP-NULLABILITY-ENTITY-UNRESOLVED",
+            "The exact entity is absent or ambiguous in the current schema snapshot.",
+        )
+        val storeId = entity.generationTarget?.storeId
+            ?: workspace.stores.singleOrNull {
+                it.moduleId == snapshot.moduleId && it.name == entity.dataStore
+            }?.id
+            ?: return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-STORE-UNRESOLVED",
+                "The managed data store for ${entity.className}.${current.name} is not uniquely resolved.",
+            )
+        val physicalStore = workspace.physicalSchemas.singleOrNull { it.storeId == storeId }
+            ?: return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-SCHEMA-MISSING",
+                "No physical Liquibase inventory is available for ${entity.className}.${current.name}.",
+            )
+        if (!physicalStore.complete) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-SCHEMA-PARTIAL",
+                "Raw or unsupported Liquibase operations make relationship nullability evidence incomplete.",
+            )
+        }
+        val tableName = snapshot.tableName.substringAfterLast('.')
+        val targetTableName = relationship.relatedTableName
+            ?.substringAfterLast('.')
+            ?.takeIf(String::isNotBlank)
+            ?: workspace.entities.singleOrNull {
+                it.qualifiedName == relationship.relatedEntity &&
+                    it.storeName == entity.dataStore
+            }?.tableName?.substringAfterLast('.')
+            ?: return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-TARGET-UNRESOLVED",
+                "The related table for ${entity.className}.${current.name} is absent or ambiguous.",
+            )
+        val targetIdColumn = relationship.relatedIdColumnName
+        if (
+            listOf(tableName, current.columnName, targetTableName, targetIdColumn)
+                .any { !DATABASE_IDENTIFIER.matches(it) }
+        ) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-IDENTIFIER-UNSUPPORTED",
+                "Relationship nullability changes require portable unquoted table, join-column, and ID identifiers.",
+            )
+        }
+        val table = physicalStore.tables.singleOrNull {
+            it.name.equals(tableName, ignoreCase = true)
+        } ?: return WorkspaceChangeIssue(
+            "JVW-ENTITY-RELATIONSHIP-NULLABILITY-TABLE-UNRESOLVED",
+            "Table $tableName is absent or ambiguous in the physical schema inventory.",
+        )
+        val column = table.columns.singleOrNull {
+            it.name.equals(current.columnName, ignoreCase = true)
+        }
+        if (
+            column == null ||
+            column.nullable != current.nullable ||
+            column.primaryKey ||
+            column.unique != current.unique
+        ) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-COLUMN-UNPROVEN",
+                "$tableName.${current.columnName} does not exactly match the indexed non-key relationship column.",
+            )
+        }
+        val foreignKeys = table.foreignKeys.filter { foreignKey ->
+            splitPhysicalColumns(foreignKey.baseColumnNames).singleOrNull()
+                ?.equals(column.name, ignoreCase = true) == true &&
+                foreignKey.referencedTableName.equals(targetTableName, ignoreCase = true) &&
+                splitPhysicalColumns(foreignKey.referencedColumnNames).singleOrNull()
+                    ?.equals(targetIdColumn, ignoreCase = true) == true
+        }
+        if (foreignKeys.size != 1) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-FOREIGN-KEY-${if (foreignKeys.isEmpty()) "MISSING" else "AMBIGUOUS"}",
+                "The join column must have exactly one named foreign key to the related entity ID.",
+            )
+        }
+        return null
     }
 
     private fun relationshipUniquenessEvidence(
@@ -2540,14 +2693,26 @@ class ExistingEntityChangeService(
         val owningToOneNarrowing =
             source.associationType == AssociationType.MANY_TO_ONE &&
                 target.associationType == AssociationType.ONE_TO_ONE &&
+                source.relatedEntity == target.relatedEntity &&
+                source.relatedTableName == target.relatedTableName &&
+                source.relatedIdColumnName == target.relatedIdColumnName &&
+                source.relatedIdType == target.relatedIdType &&
+                source.localIdAttributeName == target.localIdAttributeName &&
                 !source.crossDataStore &&
+                !target.crossDataStore &&
                 source.mappedBy.isNullOrBlank() &&
                 target.mappedBy.isNullOrBlank() &&
+                source.joinTable == target.joinTable &&
+                source.collectionType == target.collectionType &&
                 source.joinColumnName != null &&
                 source.joinColumnName == current.columnName &&
+                target.joinColumnName == current.columnName &&
                 desiredPhysicalColumnName(desired) == current.columnName &&
+                desired.mandatory == !current.nullable &&
                 desired.unique
         val owningToOneWidening = isOwningToOneWidening(current, desired)
+        val owningToOneNullabilityChange =
+            isOwningToOneNullabilityChange(current, desired)
         val immutableShapeChanged =
             (
                 source.associationType != target.associationType &&
@@ -2563,20 +2728,27 @@ class ExistingEntityChangeService(
                 source.joinTable != target.joinTable ||
                 source.collectionType != target.collectionType ||
                 source.crossDataStore != target.crossDataStore ||
-                desired.mandatory != !current.nullable ||
+                (
+                    desired.mandatory != !current.nullable &&
+                        !owningToOneNullabilityChange
+                    ) ||
                 desired.unique != current.unique
         val onlySafeUniquenessUpgrade =
             owningToOneNarrowing &&
                 desired.mandatory == !current.nullable &&
                 (!current.unique && desired.unique)
         val shapeOrConstraintChangeAllowed =
-            desired.mandatory == !current.nullable &&
+            (
+                desired.mandatory == !current.nullable ||
+                    owningToOneNullabilityChange
+                ) &&
                 (
                     (
                         owningToOneNarrowing &&
                             (current.unique || onlySafeUniquenessUpgrade)
                         ) ||
-                        owningToOneWidening
+                        owningToOneWidening ||
+                        owningToOneNullabilityChange
                     )
         if (immutableShapeChanged && !shapeOrConstraintChangeAllowed) {
             return WorkspaceChangeIssue(
@@ -2621,6 +2793,9 @@ class ExistingEntityChangeService(
                 )
             }
             relationshipUniquenessEvidence(entity, current).issue?.let { return it }
+        }
+        if (owningToOneNullabilityChange) {
+            relationshipNullabilityIssue(entity, current)?.let { return it }
         }
         if (source.crossDataStore && relationshipSourceMetadataChanged(current, desired)) {
             return WorkspaceChangeIssue(
