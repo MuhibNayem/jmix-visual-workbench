@@ -53,7 +53,8 @@ class JmixProjectTemplateGeneratorTest {
             request(jmixVersion = "3.0.0", javaVersion = 25),
         )
 
-        assertContains(generated.text("build.gradle.kts"), "JavaLanguageVersion.of(21)")
+        assertContains(generated.text("build.gradle.kts"), "JavaLanguageVersion.of(25)")
+        assertContains(generated.text("build.gradle.kts"), "options.release.set(21)")
         assertContains(generated.text("gradle.properties"), "jmix.runtime.java=25")
         assertContains(
             generated.files.single { it.relativePath.endsWith("PayrollApplication.java") }.content,
@@ -86,6 +87,66 @@ class JmixProjectTemplateGeneratorTest {
             1,
             composite.files.count { it.relativePath == "gradle/wrapper/gradle-wrapper.properties" },
         )
+    }
+
+    @Test
+    fun `generates complete responsive Java FlowUI application without a fixed credential`() {
+        val generated = JmixProjectTemplateGenerator.generate(
+            request(uiKind = JmixProjectUiKind.FLOW_UI),
+        )
+
+        val build = generated.text("build.gradle.kts")
+        assertContains(build, """implementation("io.jmix.flowui:jmix-flowui-starter")""")
+        assertContains(build, """implementation("io.jmix.security:jmix-security-data-starter")""")
+        assertContains(build, """tasks.named<BootRun>("bootRun")""")
+        assertTrue(generated.files.any { it.relativePath.endsWith("/entity/User.java") })
+        assertTrue(generated.files.any { it.relativePath.endsWith("/view/main/MainView.java") })
+        assertTrue(generated.files.any { it.relativePath.endsWith("/view/login/LoginView.java") })
+        assertTrue(generated.files.any { it.relativePath.endsWith("/view/welcome/WelcomeView.java") })
+        assertContains(generated.singleEndingWith("/menu.xml"), """<menu id="application"""")
+        assertContains(generated.singleEndingWith("/menu.xml"), """<menu id="workspace"""")
+        assertContains(generated.singleEndingWith("/menu.xml"), """<menu id="getting-started"""")
+        assertContains(generated.singleEndingWith("/menu.xml"), """<item id="welcome"""")
+        assertContains(generated.singleEndingWith("/liquibase/changelog.xml"), "securitydata")
+        assertContains(generated.text("src/main/frontend/themes/payroll/view/main-view.css"), "@media")
+        assertTrue(generated.files.any { it.relativePath.endsWith("messages_bn.properties") })
+        assertFalse(generated.files.any { "password=admin" in it.content })
+        assertFalse(generated.files.any { "JMIX_DEV_ADMIN_PASSWORD=" in it.content })
+        assertTrue(generated.files.any { "SecureRandom" in it.content })
+    }
+
+    @Test
+    fun `generates native Kotlin applications addons and FlowUI sources`() {
+        val headless = JmixProjectTemplateGenerator.generate(
+            request(language = JmixProjectLanguage.KOTLIN),
+        )
+        assertContains(headless.text("build.gradle.kts"), """kotlin("jvm") version "2.4.0"""")
+        assertContains(headless.text("build.gradle.kts"), "JvmTarget.JVM_17")
+        assertTrue(headless.files.any { it.relativePath.endsWith("/PayrollApplication.kt") })
+        assertFalse(headless.files.any { it.relativePath.endsWith(".java") })
+
+        val addon = JmixProjectTemplateGenerator.generate(
+            request(
+                templateKind = JmixProjectTemplateKind.ADDON,
+                language = JmixProjectLanguage.KOTLIN,
+            ),
+        )
+        assertTrue(addon.files.any { it.relativePath.endsWith("/PayrollModule.kt") })
+
+        val flowUi = JmixProjectTemplateGenerator.generate(
+            request(
+                jmixVersion = "3.0.0",
+                javaVersion = 25,
+                language = JmixProjectLanguage.KOTLIN,
+                uiKind = JmixProjectUiKind.FLOW_UI,
+            ),
+        )
+        assertTrue(flowUi.files.any { it.relativePath.endsWith("/entity/User.kt") })
+        assertTrue(flowUi.files.any { it.relativePath.endsWith("/view/main/MainView.kt") })
+        assertContains(flowUi.singleEndingWith("/security/UiMinimalRole.kt"), "UiMinimalPolicies")
+        assertContains(flowUi.text("build.gradle.kts"), "JavaLanguageVersion.of(25)")
+        assertContains(flowUi.text("build.gradle.kts"), "jvmToolchain(25)")
+        assertContains(flowUi.text("build.gradle.kts"), "JvmTarget.JVM_21")
     }
 
     @Test
@@ -130,6 +191,8 @@ class JmixProjectTemplateGeneratorTest {
         jmixVersion: String = "2.8.2",
         javaVersion: Int = 17,
         templateKind: JmixProjectTemplateKind = JmixProjectTemplateKind.APPLICATION,
+        language: JmixProjectLanguage = JmixProjectLanguage.JAVA,
+        uiKind: JmixProjectUiKind = JmixProjectUiKind.HEADLESS,
         locales: List<String> = listOf("en", "bn"),
         additionalRepositories: List<String> = emptyList(),
     ): JmixProjectTemplateRequest = JmixProjectTemplateRequest(
@@ -141,10 +204,15 @@ class JmixProjectTemplateGeneratorTest {
         jmixVersion = jmixVersion,
         javaVersion = javaVersion,
         templateKind = templateKind,
+        language = language,
+        uiKind = uiKind,
         locales = locales,
         additionalRepositories = additionalRepositories,
     )
 
     private fun GeneratedJmixProject.text(relativePath: String): String =
         files.single { it.relativePath == relativePath }.content
+
+    private fun GeneratedJmixProject.singleEndingWith(suffix: String): String =
+        files.single { it.relativePath.endsWith(suffix) }.content
 }

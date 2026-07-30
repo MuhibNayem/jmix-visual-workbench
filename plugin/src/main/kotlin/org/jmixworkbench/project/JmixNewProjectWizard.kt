@@ -43,6 +43,10 @@ private class JmixProjectSettingsStep(
 ) : AbstractNewProjectWizardStep(parent) {
     private val templateKindProperty =
         propertyGraph.property(JmixProjectTemplateKind.APPLICATION)
+    private val languageProperty =
+        propertyGraph.property(JmixProjectLanguage.JAVA)
+    private val uiKindProperty =
+        propertyGraph.property(JmixProjectUiKind.FLOW_UI)
     private val jmixVersionProperty = propertyGraph.property("2.8.2")
     private val javaVersionProperty = propertyGraph.property(17)
     private val groupIdProperty = propertyGraph.property("com.company")
@@ -58,6 +62,16 @@ private class JmixProjectSettingsStep(
             row("Template:") {
                 comboBox(JmixProjectTemplateKind.entries)
                     .bindItem(templateKindProperty)
+            }
+            row("Language:") {
+                comboBox(JmixProjectLanguage.entries)
+                    .bindItem(languageProperty)
+                comment("Application, add-on, tests and composite modules use the selected language.")
+            }
+            row("Application UI:") {
+                comboBox(JmixProjectUiKind.entries)
+                    .bindItem(uiKindProperty)
+                comment("Applies to application and composite templates. Add-ons remain UI-neutral.")
             }
             row("Jmix version:") {
                 comboBox(JmixProjectTemplateGenerator.certifiedVersions.map { it.jmixVersion })
@@ -126,6 +140,12 @@ private class JmixProjectSettingsStep(
             jmixVersion = jmixVersionProperty.get(),
             javaVersion = javaVersionProperty.get(),
             templateKind = templateKindProperty.get(),
+            language = languageProperty.get(),
+            uiKind = if (templateKindProperty.get() == JmixProjectTemplateKind.ADDON) {
+                JmixProjectUiKind.HEADLESS
+            } else {
+                uiKindProperty.get()
+            },
             locales = localesProperty.get().split(','),
             useMavenLocal = useMavenLocalProperty.get(),
             additionalRepositories = repositoriesProperty.get().lineSequence().toList(),

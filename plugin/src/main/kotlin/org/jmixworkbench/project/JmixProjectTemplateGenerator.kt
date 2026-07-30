@@ -11,11 +11,26 @@ enum class JmixProjectTemplateKind(
     COMPOSITE("Composite Jmix project"),
 }
 
+enum class JmixProjectLanguage(
+    val displayName: String,
+) {
+    JAVA("Java"),
+    KOTLIN("Kotlin"),
+}
+
+enum class JmixProjectUiKind(
+    val displayName: String,
+) {
+    HEADLESS("Headless / service"),
+    FLOW_UI("FlowUI web application"),
+}
+
 data class JmixProjectVersion(
     val jmixVersion: String,
     val supportedJavaVersions: Set<Int>,
     val gradleVersion: String,
     val gradleDistributionSha256: String,
+    val kotlinVersion: String,
     val compileJavaVersion: Int? = null,
 ) {
     fun effectiveCompileJavaVersion(runtimeJavaVersion: Int): Int =
@@ -31,6 +46,8 @@ data class JmixProjectTemplateRequest(
     val jmixVersion: String,
     val javaVersion: Int,
     val templateKind: JmixProjectTemplateKind = JmixProjectTemplateKind.APPLICATION,
+    val language: JmixProjectLanguage = JmixProjectLanguage.JAVA,
+    val uiKind: JmixProjectUiKind = JmixProjectUiKind.HEADLESS,
     val locales: List<String> = listOf("en"),
     val useMavenLocal: Boolean = false,
     val additionalRepositories: List<String> = emptyList(),
@@ -72,6 +89,7 @@ object JmixProjectTemplateGenerator {
             gradleVersion = "8.14.4",
             gradleDistributionSha256 =
                 "f1771298a70f6db5a29daf62378c4e18a17fc33c9ba6b14362e0cdf40610380d",
+            kotlinVersion = "2.4.0",
         ),
         JmixProjectVersion(
             jmixVersion = "3.0.0",
@@ -79,6 +97,7 @@ object JmixProjectTemplateGenerator {
             gradleVersion = "9.5.1",
             gradleDistributionSha256 =
                 "bafc141b619ad6350fd975fc903156dd5c151998cc8b058e8c1044ab5f7b031f",
+            kotlinVersion = "2.4.0",
             compileJavaVersion = 21,
         ),
     )
@@ -180,30 +199,57 @@ object JmixProjectTemplateGenerator {
         }
         val moduleId = "${request.basePackage}.${request.projectId}"
         val compileJava = version.effectiveCompileJavaVersion(request.javaVersion)
-        return listOf(
+        val commonFiles = listOf(
             file(prefix, ".gitignore", commonGitignore()),
             file(prefix, "README.md", applicationReadme(request, version, applicationClass)),
             file(prefix, "settings.gradle.kts", settingsFile(request.projectName)),
             file(prefix, "gradle.properties", gradleProperties(request.javaVersion)),
             file(prefix, "build.gradle.kts", applicationBuild(request, version, applicationClass, compileJava)),
-            file(prefix, "src/main/java/$packagePath/$applicationClass.java", applicationSource(
+            wrapperProperties(prefix, version),
+        )
+        val applicationFiles = when (request.uiKind) {
+            JmixProjectUiKind.HEADLESS -> {
+                val sourceExtension = request.language.sourceExtension
+                val sourceRoot = request.language.sourceRoot
+                listOf(
+                    file(
+                        prefix,
+                        "src/main/$sourceRoot/$packagePath/$applicationClass.$sourceExtension",
+                        applicationSource(
+                            request = request,
+                            version = version,
+                            applicationClass = applicationClass,
+                            moduleId = moduleId,
+                        ),
+                    ),
+                    file(
+                        prefix,
+                        "src/main/resources/application.properties",
+                        applicationProperties(request),
+                    ),
+                    file(
+                        prefix,
+                        "src/main/resources/$packagePath/liquibase/changelog.xml",
+                        liquibaseChangelog(request),
+                    ),
+                    file(
+                        prefix,
+                        "src/test/$sourceRoot/$packagePath/${applicationClass}Test.$sourceExtension",
+                        applicationTestSource(
+                            request = request,
+                            applicationClass = applicationClass,
+                        ),
+                    ),
+                )
+            }
+            JmixProjectUiKind.FLOW_UI -> JmixFlowUiProjectTemplate.files(
                 request = request,
                 version = version,
                 applicationClass = applicationClass,
-                moduleId = moduleId,
-            )),
-            file(prefix, "src/main/resources/application.properties", applicationProperties(request)),
-            file(
-                prefix,
-                "src/main/resources/$packagePath/liquibase/changelog.xml",
-                liquibaseChangelog(request),
-            ),
-            file(prefix, "src/test/java/$packagePath/${applicationClass}Test.java", applicationTestSource(
-                request = request,
-                applicationClass = applicationClass,
-            )),
-            wrapperProperties(prefix, version),
-        )
+                prefix = prefix,
+            )
+        }
+        return (commonFiles + applicationFiles).sortedBy(GeneratedProjectFile::relativePath)
     }
 
     private fun addonFiles(
@@ -215,6 +261,8 @@ object JmixProjectTemplateGenerator {
         val moduleClass = "${classStem}Module"
         val moduleId = "${request.basePackage}.${request.projectId}"
         val compileJava = version.effectiveCompileJavaVersion(request.javaVersion)
+        val sourceRoot = request.language.sourceRoot
+        val sourceExtension = request.language.sourceExtension
         return listOf(
             GeneratedProjectFile(".gitignore", commonGitignore()),
             GeneratedProjectFile("README.md", addonReadme(request, version)),
@@ -222,35 +270,12 @@ object JmixProjectTemplateGenerator {
             GeneratedProjectFile("gradle.properties", gradleProperties(request.javaVersion)),
             GeneratedProjectFile("build.gradle.kts", addonBuild(request, version, compileJava)),
             GeneratedProjectFile(
-                "src/main/java/$packagePath/$moduleClass.java",
-                """
-                package ${request.basePackage};
-
-                import io.jmix.core.annotation.JmixModule;
-                import org.springframework.context.annotation.Configuration;
-
-                @Configuration
-                @JmixModule(id = "$moduleId")
-                public class $moduleClass {
-                }
-                """.trimIndent() + "\n",
+                "src/main/$sourceRoot/$packagePath/$moduleClass.$sourceExtension",
+                addonModuleSource(request, moduleClass, moduleId),
             ),
             GeneratedProjectFile(
-                "src/test/java/$packagePath/${moduleClass}Test.java",
-                """
-                package ${request.basePackage};
-
-                import org.junit.jupiter.api.Test;
-
-                import static org.junit.jupiter.api.Assertions.assertNotNull;
-
-                class ${moduleClass}Test {
-                    @Test
-                    void moduleTypeIsAvailable() {
-                        assertNotNull($moduleClass.class);
-                    }
-                }
-                """.trimIndent() + "\n",
+                "src/test/$sourceRoot/$packagePath/${moduleClass}Test.$sourceExtension",
+                addonModuleTestSource(request, moduleClass),
             ),
             wrapperProperties("", version),
         ).sortedBy(GeneratedProjectFile::relativePath)
@@ -272,6 +297,7 @@ object JmixProjectTemplateGenerator {
             basePackage = "${request.basePackage}.shared",
             projectId = request.projectId.take(6) + "s",
             templateKind = JmixProjectTemplateKind.ADDON,
+            uiKind = JmixProjectUiKind.HEADLESS,
         )
         val root = listOf(
             GeneratedProjectFile(".gitignore", commonGitignore()),
@@ -331,6 +357,18 @@ object JmixProjectTemplateGenerator {
         version: JmixProjectVersion,
         applicationClass: String,
         compileJava: Int,
+    ): String = when (request.uiKind) {
+        JmixProjectUiKind.HEADLESS ->
+            headlessApplicationBuild(request, version, applicationClass, compileJava)
+        JmixProjectUiKind.FLOW_UI ->
+            flowUiApplicationBuild(request, version, applicationClass, compileJava)
+    }
+
+    private fun headlessApplicationBuild(
+        request: JmixProjectTemplateRequest,
+        version: JmixProjectVersion,
+        applicationClass: String,
+        compileJava: Int,
     ): String = """
         import org.gradle.api.tasks.JavaExec
         import org.gradle.api.tasks.compile.JavaCompile
@@ -349,6 +387,7 @@ object JmixProjectTemplateGenerator {
         plugins {
             java
             application
+        __LANGUAGE_PLUGINS__
         }
 
         apply(plugin = "io.jmix")
@@ -368,7 +407,7 @@ object JmixProjectTemplateGenerator {
 
         java {
             toolchain {
-                languageVersion.set(JavaLanguageVersion.of($compileJava))
+                languageVersion.set(JavaLanguageVersion.of(${request.javaVersion}))
             }
         }
 
@@ -381,6 +420,7 @@ object JmixProjectTemplateGenerator {
             implementation("io.jmix.core:jmix-core-starter")
             implementation("io.jmix.data:jmix-eclipselink-starter")
             runtimeOnly("org.hsqldb:hsqldb")
+        __LANGUAGE_DEPENDENCIES__
 
             testImplementation("org.junit.jupiter:junit-jupiter")
             testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -390,6 +430,8 @@ object JmixProjectTemplateGenerator {
             options.release.set($compileJava)
             options.encoding = "UTF-8"
         }
+
+        __LANGUAGE_CONFIGURATION__
 
         tasks.withType<Test>().configureEach {
             useJUnitPlatform()
@@ -406,6 +448,135 @@ object JmixProjectTemplateGenerator {
         .replace(
             "    __PROJECT_REPOSITORIES__",
             repositoryBlocks(request, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_PLUGINS__",
+            languagePlugins(request, version, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_DEPENDENCIES__",
+            languageDependencies(request, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_CONFIGURATION__",
+            languageConfiguration(request, request.javaVersion, compileJava),
+        ) + "\n"
+
+    private fun flowUiApplicationBuild(
+        request: JmixProjectTemplateRequest,
+        version: JmixProjectVersion,
+        applicationClass: String,
+        compileJava: Int,
+    ): String = """
+        import org.gradle.api.tasks.compile.JavaCompile
+        import org.gradle.jvm.toolchain.JavaLanguageVersion
+        import org.springframework.boot.gradle.tasks.run.BootRun
+
+        buildscript {
+            repositories {
+                mavenCentral()
+                __BUILD_REPOSITORIES__
+            }
+            dependencies {
+                classpath("io.jmix.gradle:jmix-gradle-plugin:${version.jmixVersion}")
+            }
+        }
+
+        plugins {
+            java
+        __LANGUAGE_PLUGINS__
+        }
+
+        apply(plugin = "io.jmix")
+        apply(plugin = "org.springframework.boot")
+        apply(plugin = "com.vaadin")
+
+        group = "${escapeKotlin(request.groupId)}"
+        version = "1.0.0-SNAPSHOT"
+
+        repositories {
+            mavenCentral()
+            __PROJECT_REPOSITORIES__
+        }
+
+        extensions.configure<io.jmix.gradle.JmixExtension>("jmix") {
+            bomVersion = "${version.jmixVersion}"
+            entitiesEnhancing.enabled = true
+        }
+
+        java {
+            toolchain {
+                languageVersion.set(JavaLanguageVersion.of(${request.javaVersion}))
+            }
+        }
+
+        dependencies {
+            implementation(platform("io.jmix.bom:jmix-bom:${version.jmixVersion}"))
+            implementation("io.jmix.core:jmix-core-starter")
+            implementation("io.jmix.data:jmix-eclipselink-starter")
+            implementation("io.jmix.security:jmix-security-starter")
+            implementation("io.jmix.security:jmix-security-flowui-starter")
+            implementation("io.jmix.security:jmix-security-data-starter")
+            implementation("io.jmix.flowui:jmix-flowui-starter")
+            implementation("io.jmix.flowui:jmix-flowui-data-starter")
+            implementation("io.jmix.flowui:jmix-flowui-themes")
+            implementation("io.jmix.datatools:jmix-datatools-starter")
+            implementation("io.jmix.datatools:jmix-datatools-flowui-starter")
+            implementation("org.springframework.boot:spring-boot-starter-web")
+            implementation("com.vaadin:vaadin-dev")
+            runtimeOnly("org.hsqldb:hsqldb")
+        __LANGUAGE_DEPENDENCIES__
+
+            testImplementation("org.springframework.boot:spring-boot-starter-test")
+            testImplementation("io.jmix.flowui:jmix-flowui-test-assist")
+            testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+        }
+
+        configurations.named("implementation") {
+            exclude(group = "com.vaadin", module = "hilla")
+            exclude(group = "com.vaadin", module = "hilla-dev")
+            exclude(group = "com.vaadin", module = "copilot")
+        }
+
+        tasks.withType<JavaCompile>().configureEach {
+            options.release.set($compileJava)
+            options.encoding = "UTF-8"
+        }
+
+        __LANGUAGE_CONFIGURATION__
+
+        tasks.withType<Test>().configureEach {
+            useJUnitPlatform()
+        }
+
+        tasks.named<BootRun>("bootRun") {
+            mainClass.set("${request.basePackage}.$applicationClass")
+            systemProperty("spring.profiles.active", "dev")
+            if (providers.gradleProperty("jvw.certifyStartup").orNull == "true") {
+                systemProperty("jvw.certify.startup", "true")
+                systemProperty("server.port", "0")
+            }
+        }
+    """.trimIndent()
+        .replace(
+            "        __BUILD_REPOSITORIES__",
+            repositoryBlocks(request, indent = "        "),
+        )
+        .replace(
+            "    __PROJECT_REPOSITORIES__",
+            repositoryBlocks(request, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_PLUGINS__",
+            languagePlugins(request, version, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_DEPENDENCIES__",
+            languageDependencies(request, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_CONFIGURATION__",
+            languageConfiguration(request, request.javaVersion, compileJava),
         ) + "\n"
 
     private fun addonBuild(
@@ -429,6 +600,7 @@ object JmixProjectTemplateGenerator {
         plugins {
             `java-library`
             `maven-publish`
+        __LANGUAGE_PLUGINS__
         }
 
         apply(plugin = "io.jmix")
@@ -447,7 +619,7 @@ object JmixProjectTemplateGenerator {
 
         java {
             toolchain {
-                languageVersion.set(JavaLanguageVersion.of($compileJava))
+                languageVersion.set(JavaLanguageVersion.of(${request.javaVersion}))
             }
             withSourcesJar()
             withJavadocJar()
@@ -457,6 +629,7 @@ object JmixProjectTemplateGenerator {
             api(platform("io.jmix.bom:jmix-bom:${version.jmixVersion}"))
             api("io.jmix.core:jmix-core")
             implementation("org.springframework:spring-context")
+        __LANGUAGE_DEPENDENCIES__
             testImplementation("org.junit.jupiter:junit-jupiter")
             testRuntimeOnly("org.junit.platform:junit-platform-launcher")
         }
@@ -465,6 +638,8 @@ object JmixProjectTemplateGenerator {
             options.release.set($compileJava)
             options.encoding = "UTF-8"
         }
+
+        __LANGUAGE_CONFIGURATION__
 
         tasks.withType<Test>().configureEach {
             useJUnitPlatform()
@@ -485,9 +660,33 @@ object JmixProjectTemplateGenerator {
         .replace(
             "    __PROJECT_REPOSITORIES__",
             repositoryBlocks(request, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_PLUGINS__",
+            languagePlugins(request, version, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_DEPENDENCIES__",
+            languageDependencies(request, indent = "    "),
+        )
+        .replace(
+            "__LANGUAGE_CONFIGURATION__",
+            languageConfiguration(request, request.javaVersion, compileJava),
         ) + "\n"
 
     private fun applicationSource(
+        request: JmixProjectTemplateRequest,
+        version: JmixProjectVersion,
+        applicationClass: String,
+        moduleId: String,
+    ): String = when (request.language) {
+        JmixProjectLanguage.JAVA ->
+            javaHeadlessApplicationSource(request, version, applicationClass, moduleId)
+        JmixProjectLanguage.KOTLIN ->
+            kotlinHeadlessApplicationSource(request, version, applicationClass, moduleId)
+    }
+
+    private fun javaHeadlessApplicationSource(
         request: JmixProjectTemplateRequest,
         version: JmixProjectVersion,
         applicationClass: String,
@@ -564,10 +763,86 @@ object JmixProjectTemplateGenerator {
         """.trimIndent() + "\n"
     }
 
+    private fun kotlinHeadlessApplicationSource(
+        request: JmixProjectTemplateRequest,
+        version: JmixProjectVersion,
+        applicationClass: String,
+        moduleId: String,
+    ): String {
+        val dataSourcePropertiesImport = if (version.jmixVersion.startsWith("3.")) {
+            "org.springframework.boot.jdbc.autoconfigure.DataSourceProperties"
+        } else {
+            "org.springframework.boot.autoconfigure.jdbc.DataSourceProperties"
+        }
+        return """
+        package ${request.basePackage}
+
+        import io.jmix.core.JmixModules
+        import io.jmix.core.Resources
+        import io.jmix.core.annotation.JmixModule
+        import io.jmix.data.impl.JmixEntityManagerFactoryBean
+        import io.jmix.data.persistence.DbmsSpecifics
+        import org.springframework.boot.WebApplicationType
+        import org.springframework.boot.autoconfigure.SpringBootApplication
+        import org.springframework.boot.builder.SpringApplicationBuilder
+        import $dataSourcePropertiesImport
+        import org.springframework.boot.context.properties.ConfigurationProperties
+        import org.springframework.context.ConfigurableApplicationContext
+        import org.springframework.context.annotation.Bean
+        import org.springframework.context.annotation.Primary
+        import org.springframework.orm.jpa.JpaVendorAdapter
+        import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean
+        import javax.sql.DataSource
+
+        @SpringBootApplication
+        @JmixModule(id = "$moduleId")
+        class $applicationClass {
+
+            @Bean
+            @Primary
+            @ConfigurationProperties("main.datasource")
+            fun dataSourceProperties(): DataSourceProperties = DataSourceProperties()
+
+            @Bean
+            @Primary
+            fun dataSource(properties: DataSourceProperties): DataSource =
+                properties.initializeDataSourceBuilder().build()
+
+            @Bean
+            fun entityManagerFactory(
+                dataSource: DataSource,
+                jpaVendorAdapter: JpaVendorAdapter,
+                dbmsSpecifics: DbmsSpecifics,
+                jmixModules: JmixModules,
+                resources: Resources,
+            ): LocalContainerEntityManagerFactoryBean =
+                JmixEntityManagerFactoryBean(
+                    "main",
+                    dataSource,
+                    jpaVendorAdapter,
+                    dbmsSpecifics,
+                    jmixModules,
+                    resources,
+                )
+
+            companion object {
+                @JvmStatic
+                fun main(args: Array<String>) {
+                    SpringApplicationBuilder($applicationClass::class.java)
+                        .web(WebApplicationType.NONE)
+                        .run(*args)
+                        .use(ConfigurableApplicationContext::close)
+                }
+            }
+        }
+        """.trimIndent() + "\n"
+    }
+
     private fun applicationTestSource(
         request: JmixProjectTemplateRequest,
         applicationClass: String,
-    ): String = """
+    ): String = when (request.language) {
+        JmixProjectLanguage.JAVA -> """
         package ${request.basePackage};
 
         import org.junit.jupiter.api.Test;
@@ -580,7 +855,84 @@ object JmixProjectTemplateGenerator {
                 assertNotNull($applicationClass.class);
             }
         }
-    """.trimIndent() + "\n"
+        """.trimIndent() + "\n"
+        JmixProjectLanguage.KOTLIN -> """
+        package ${request.basePackage}
+
+        import kotlin.test.Test
+        import kotlin.test.assertNotNull
+
+        class ${applicationClass}Test {
+            @Test
+            fun applicationTypeIsAvailable() {
+                assertNotNull($applicationClass::class.java)
+            }
+        }
+        """.trimIndent() + "\n"
+    }
+
+    private fun addonModuleSource(
+        request: JmixProjectTemplateRequest,
+        moduleClass: String,
+        moduleId: String,
+    ): String = when (request.language) {
+        JmixProjectLanguage.JAVA -> """
+        package ${request.basePackage};
+
+        import io.jmix.core.CoreConfiguration;
+        import io.jmix.core.annotation.JmixModule;
+        import org.springframework.context.annotation.Configuration;
+
+        @Configuration
+        @JmixModule(id = "$moduleId", dependsOn = CoreConfiguration.class)
+        public class $moduleClass {
+        }
+        """.trimIndent() + "\n"
+        JmixProjectLanguage.KOTLIN -> """
+        package ${request.basePackage}
+
+        import io.jmix.core.CoreConfiguration
+        import io.jmix.core.annotation.JmixModule
+        import org.springframework.context.annotation.Configuration
+
+        @Configuration(proxyBeanMethods = false)
+        @JmixModule(id = "$moduleId", dependsOn = [CoreConfiguration::class])
+        class $moduleClass
+        """.trimIndent() + "\n"
+    }
+
+    private fun addonModuleTestSource(
+        request: JmixProjectTemplateRequest,
+        moduleClass: String,
+    ): String = when (request.language) {
+        JmixProjectLanguage.JAVA -> """
+        package ${request.basePackage};
+
+        import org.junit.jupiter.api.Test;
+
+        import static org.junit.jupiter.api.Assertions.assertNotNull;
+
+        class ${moduleClass}Test {
+            @Test
+            void moduleTypeIsAvailable() {
+                assertNotNull($moduleClass.class);
+            }
+        }
+        """.trimIndent() + "\n"
+        JmixProjectLanguage.KOTLIN -> """
+        package ${request.basePackage}
+
+        import kotlin.test.Test
+        import kotlin.test.assertNotNull
+
+        class ${moduleClass}Test {
+            @Test
+            fun moduleTypeIsAvailable() {
+                assertNotNull($moduleClass::class.java)
+            }
+        }
+        """.trimIndent() + "\n"
+    }
 
     private fun applicationProperties(request: JmixProjectTemplateRequest): String = """
         spring.main.banner-mode=off
@@ -656,6 +1008,57 @@ object JmixProjectTemplateGenerator {
         return blocks.joinToString("\n")
     }
 
+    private fun languagePlugins(
+        request: JmixProjectTemplateRequest,
+        version: JmixProjectVersion,
+        indent: String,
+    ): String = when (request.language) {
+        JmixProjectLanguage.JAVA -> ""
+        JmixProjectLanguage.KOTLIN -> listOf(
+            """${indent}kotlin("jvm") version "${version.kotlinVersion}"""",
+            """${indent}kotlin("plugin.spring") version "${version.kotlinVersion}"""",
+            """${indent}kotlin("plugin.jpa") version "${version.kotlinVersion}"""",
+        ).joinToString("\n")
+    }
+
+    private fun languageDependencies(
+        request: JmixProjectTemplateRequest,
+        indent: String,
+    ): String = when (request.language) {
+        JmixProjectLanguage.JAVA -> ""
+        JmixProjectLanguage.KOTLIN -> listOf(
+            """${indent}implementation(kotlin("reflect"))""",
+            """${indent}testImplementation(kotlin("test"))""",
+        ).joinToString("\n")
+    }
+
+    private fun languageConfiguration(
+        request: JmixProjectTemplateRequest,
+        runtimeJava: Int,
+        compileJava: Int,
+    ): String = when (request.language) {
+        JmixProjectLanguage.JAVA -> ""
+        JmixProjectLanguage.KOTLIN -> {
+            val target = when (compileJava) {
+                17 -> "JVM_17"
+                21 -> "JVM_21"
+                else -> error("No certified Kotlin JVM target for Java $compileJava.")
+            }
+            """
+            kotlin {
+                jvmToolchain($runtimeJava)
+            }
+
+            tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+                compilerOptions {
+                    jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.$target)
+                    javaParameters.set(true)
+                }
+            }
+            """.trimIndent()
+        }
+    }
+
     private fun commonGitignore(): String = """
         .gradle/
         .idea/
@@ -674,11 +1077,12 @@ object JmixProjectTemplateGenerator {
         # ${request.projectName}
 
         Generated by Jmix Visual Workbench from a certified Jmix ${version.jmixVersion} / Java
-        ${request.javaVersion} template. The Gradle distribution and Jmix dependency graph are pinned.
+        ${request.javaVersion} ${request.language.displayName} ${request.uiKind.displayName} template.
+        The Gradle distribution and Jmix dependency graph are pinned.
 
         ## Run
 
-        `./gradlew run`
+        `${if (request.uiKind == JmixProjectUiKind.FLOW_UI) "./gradlew bootRun" else "./gradlew run"}`
 
         Main class: `${request.basePackage}.$applicationClass`
 
@@ -711,8 +1115,9 @@ object JmixProjectTemplateGenerator {
         # ${request.projectName}
 
         Composite Jmix ${version.jmixVersion} workspace with an application module and a reusable
-        shared add-on module. Run `./gradlew :application:run` or verify all modules with
-        `./gradlew test`.
+        shared add-on module. Run
+        `${if (request.uiKind == JmixProjectUiKind.FLOW_UI) "./gradlew :application:bootRun" else "./gradlew :application:run"}`
+        or verify all modules with `./gradlew test`.
     """.trimIndent() + "\n"
 
     private fun file(
@@ -776,6 +1181,12 @@ object JmixProjectTemplateGenerator {
 
     private fun escapeKotlin(value: String): String =
         value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\$", "\\\$")
+
+    private val JmixProjectLanguage.sourceRoot: String
+        get() = if (this == JmixProjectLanguage.JAVA) "java" else "kotlin"
+
+    private val JmixProjectLanguage.sourceExtension: String
+        get() = if (this == JmixProjectLanguage.JAVA) "java" else "kt"
 
     private val wrapperResources = listOf(
         GeneratedProjectResource(
