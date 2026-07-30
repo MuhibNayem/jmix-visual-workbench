@@ -373,6 +373,239 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(rejected.issues.any { it.code == "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT" })
     }
 
+    fun testBidirectionalRelationshipGenerationUpdatesJavaKotlinAndSelfReferencesAtomically() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/JavaAssignment.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "JAVA_ASSIGNMENT")
+                public class JavaAssignment {
+                    @Id
+                    private UUID id;
+                    public String manualLabel() { return "assignment"; }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/KotlinWorker.kt",
+                """
+                package com.acme.entity
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.util.UUID
+                @JmixEntity
+                @Entity
+                @Table(name = "KOTLIN_WORKER")
+                open class KotlinWorker {
+                    @Id
+                    var id: UUID? = null
+                    @Column(name = "WORKER_CODE", nullable = false)
+                    var workerCode: String? = null
+                    fun manualLabel(): String = workerCode ?: "worker"
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/OrgUnit.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "ORG_UNIT")
+                public class OrgUnit {
+                    @Id
+                    private UUID id;
+                    public String manualPath() { return "root"; }
+                }
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val store = workspace.stores.single()
+        val javaSource = workspace.entities.single { it.className == "JavaAssignment" }
+        val kotlinTarget = workspace.entities.single { it.className == "KotlinWorker" }
+        val service = ExistingEntityChangeService.getInstance(project)
+        val sourceModel = EntityModel(
+            className = javaSource.className,
+            packageName = javaSource.qualifiedName.substringBeforeLast('.'),
+            tableName = javaSource.tableName,
+            dataStore = javaSource.storeName,
+            generationTarget = EntityGenerationTarget(javaSource.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "worker",
+                    type = AttributeType.ASSOCIATION,
+                    mandatory = true,
+                    association = AssociationConfig(
+                        associationType = AssociationType.MANY_TO_ONE,
+                        relatedEntity = kotlinTarget.qualifiedName,
+                        relatedTableName = kotlinTarget.tableName,
+                        relatedIdColumnName = kotlinTarget.idColumnName,
+                        relatedIdType = kotlinTarget.idType,
+                        joinColumnName = "WORKER_ID",
+                        cascade = mutableListOf(),
+                        fetch = FetchType.LAZY,
+                        collectionType = AssociationCollectionType.LIST,
+                        generateInverse = true,
+                        inverseAttributeName = "assignments",
+                    ),
+                ),
+            ),
+        )
+        val preview = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(javaSource.sourceLocator, sourceModel),
+        )
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(3, preview.files.size)
+        val java = preview.files.single { it.relativePath.endsWith("JavaAssignment.java") }.resultContent
+        val kotlin = preview.files.single { it.relativePath.endsWith("KotlinWorker.kt") }.resultContent
+        val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+        assertTrue(java.contains("@ManyToOne(fetch = FetchType.LAZY, optional = false)"))
+        assertTrue(java.contains("""@JoinColumn(name = "WORKER_ID""""))
+        assertTrue(java.contains("nullable = false"))
+        assertTrue(java.contains("KotlinWorker worker;"))
+        assertTrue(java.contains("manualLabel"))
+        assertTrue(kotlin.contains("@OneToMany("))
+        assertTrue(kotlin.contains("mappedBy = \"worker\""))
+        assertTrue(kotlin.contains("fetch = FetchType.LAZY"))
+        assertTrue(kotlin.contains("assignments"))
+        assertTrue(kotlin.contains("manualLabel"))
+        assertTrue(kotlin.contains("workerCode"))
+        assertTrue(migration.contains("""tableName="JAVA_ASSIGNMENT""""))
+        assertTrue(migration.contains("""name="WORKER_ID""""))
+        assertTrue(migration.contains("""referencedTableName="KOTLIN_WORKER""""))
+        assertFalse(migration.contains("""tableName="KOTLIN_WORKER""""))
+
+        val orgUnit = workspace.entities.single { it.className == "OrgUnit" }
+        val selfModel = EntityModel(
+            className = orgUnit.className,
+            packageName = orgUnit.qualifiedName.substringBeforeLast('.'),
+            tableName = orgUnit.tableName,
+            dataStore = orgUnit.storeName,
+            generationTarget = EntityGenerationTarget(orgUnit.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "manager",
+                    type = AttributeType.ASSOCIATION,
+                    association = AssociationConfig(
+                        associationType = AssociationType.MANY_TO_ONE,
+                        relatedEntity = orgUnit.qualifiedName,
+                        relatedTableName = orgUnit.tableName,
+                        relatedIdColumnName = orgUnit.idColumnName,
+                        relatedIdType = orgUnit.idType,
+                        joinColumnName = "MANAGER_ID",
+                        cascade = mutableListOf(),
+                        fetch = FetchType.LAZY,
+                        collectionType = AssociationCollectionType.LIST,
+                        generateInverse = true,
+                        inverseAttributeName = "directReports",
+                    ),
+                ),
+            ),
+        )
+        val selfPreview = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(orgUnit.sourceLocator, selfModel),
+        )
+        assertTrue(
+            selfPreview.accepted,
+            selfPreview.issues.joinToString { "${it.code}: ${it.message}" },
+        )
+        assertEquals(2, selfPreview.files.size)
+        val selfJava = selfPreview.files.single { it.relativePath.endsWith("OrgUnit.java") }.resultContent
+        assertTrue(selfJava.contains("OrgUnit manager;"))
+        assertTrue(selfJava.contains("@OneToMany("))
+        assertTrue(selfJava.contains("mappedBy = \"manager\""))
+        assertTrue(selfJava.contains("List<OrgUnit> directReports;"))
+        assertTrue(selfJava.contains("manualPath"))
+
+        val collision = sourceModel.copy(
+            attributes = sourceModel.attributes.map {
+                it.copy(
+                    association = it.association?.copy(inverseAttributeName = "workerCode"),
+                )
+            }.toMutableList(),
+        )
+        val rejected = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(javaSource.sourceLocator, collision),
+        )
+        assertFalse(rejected.accepted)
+        assertTrue(rejected.issues.any { it.code == "JVW-ENTITY-INVERSE-NAME-COLLISION" })
+
+        lateinit var isolatedRoot: com.intellij.openapi.vfs.VirtualFile
+        WriteAction.run<RuntimeException> {
+            isolatedRoot = requireNotNull(VfsUtil.createDirectoryIfMissing(root, "isolated-target"))
+            val isolatedModule = ModuleManager.getInstance(project).newModule(
+                "${isolatedRoot.path}/isolated-target.iml",
+                ModuleType.EMPTY.id,
+            )
+            val isolatedModel = ModuleRootManager.getInstance(isolatedModule).modifiableModel
+            isolatedModel.addContentEntry(isolatedRoot)
+            isolatedModel.commit()
+            write(
+                isolatedRoot,
+                "src/main/java/com/acme/isolated/IsolatedTarget.java",
+                """
+                package com.acme.isolated;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "ISOLATED_TARGET")
+                public class IsolatedTarget {
+                    @Id
+                    private UUID id;
+                }
+                """.trimIndent(),
+            )
+        }
+        val crossModuleWorkspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val isolatedTarget = crossModuleWorkspace.entities.single { it.className == "IsolatedTarget" }
+        val crossModuleModel = sourceModel.copy(
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "isolatedTarget",
+                    type = AttributeType.ASSOCIATION,
+                    association = AssociationConfig(
+                        associationType = AssociationType.MANY_TO_ONE,
+                        relatedEntity = isolatedTarget.qualifiedName,
+                        relatedTableName = isolatedTarget.tableName,
+                        relatedIdColumnName = isolatedTarget.idColumnName,
+                        relatedIdType = isolatedTarget.idType,
+                        joinColumnName = "ISOLATED_TARGET_ID",
+                        cascade = mutableListOf(),
+                        fetch = FetchType.LAZY,
+                        collectionType = AssociationCollectionType.LIST,
+                        generateInverse = true,
+                        inverseAttributeName = "assignments",
+                    ),
+                ),
+            ),
+        )
+        val crossModuleRejected = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(javaSource.sourceLocator, crossModuleModel),
+        )
+        assertFalse(crossModuleRejected.accepted)
+        assertTrue(
+            crossModuleRejected.issues.any { it.code == "JVW-ENTITY-INVERSE-MODULE-CYCLE" },
+            crossModuleRejected.issues.toString(),
+        )
+    }
+
     fun testIncludeAllStoreEntityCoverageAndSourceSafeMigrationDestination() {
         createFixture(includeAll = true)
         val service = SchemaWorkspaceService.getInstance(project)

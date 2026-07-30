@@ -81,6 +81,8 @@ export interface AssociationConfig {
   crossDataStore: boolean
   orphanRemoval: boolean
   onDelete?: string
+  generateInverse?: boolean
+  inverseAttributeName?: string
 }
 
 export interface AssociationJoinColumn {

@@ -300,7 +300,9 @@ data class AssociationConfig(
     val collectionType: AssociationCollectionType = AssociationCollectionType.LIST,
     val crossDataStore: Boolean = false,
     val orphanRemoval: Boolean = false,
-    val onDelete: String? = null
+    val onDelete: String? = null,
+    val generateInverse: Boolean = false,
+    val inverseAttributeName: String? = null,
 )
 
 data class AssociationJoinColumn(

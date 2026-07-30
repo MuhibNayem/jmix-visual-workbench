@@ -2829,6 +2829,7 @@ export default function EntityDesigner() {
                 entity={entity}
                 projectId={effectiveProjectId}
                 schemaWorkspace={schemaWorkspace}
+                existingSource={Boolean(existingEntity)}
                 onChange={(partial) => updateAttribute(selectedAttr, partial)}
               />
             )
@@ -3041,12 +3042,14 @@ function AttributeDetail({
   entity,
   projectId,
   schemaWorkspace,
+  existingSource,
   onChange,
 }: {
   attr: AttributeModel
   entity: EntityModel
   projectId?: string
   schemaWorkspace: SchemaWorkspaceResponse | null
+  existingSource: boolean
   onChange: (patch: Partial<AttributeModel>) => void
 }) {
   const association = attr.association ?? defaultAssociation(attr.type)
@@ -3061,6 +3064,24 @@ function AttributeDetail({
   const updateAssociation = (patch: Partial<NonNullable<AttributeModel['association']>>) => {
     onChange({ association: { ...association, ...patch } })
   }
+  const relatedEntitySnapshot = schemaWorkspace?.entities.find(
+    candidate => candidate.qualifiedName === association.relatedEntity,
+  )
+  const pairedInverseSupported = Boolean(
+    existingSource &&
+    relatedEntitySnapshot?.entityType === 'entity' &&
+    relatedEntitySnapshot.moduleId === entity.generationTarget?.moduleId &&
+    relatedEntitySnapshot.storeName === entity.dataStore &&
+    !association.crossDataStore &&
+    (
+      association.associationType === 'manyToOne' ||
+      (association.associationType === 'oneToOne' && !association.mappedBy) ||
+      (association.associationType === 'manyToMany' && !association.mappedBy && association.joinTable)
+    ),
+  )
+  const suggestedInverseName = association.associationType === 'manyToOne'
+    ? `${entity.className.charAt(0).toLowerCase()}${entity.className.slice(1)}s`
+    : `${entity.className.charAt(0).toLowerCase()}${entity.className.slice(1)}`
 
   return (
     <div className="mt-4 border border-surface-border rounded-lg p-4 bg-surface-light">
@@ -3080,6 +3101,9 @@ function AttributeDetail({
                       ? association.joinTable ?? suggestedJoinTable(entity, attr, association, projectId)
                       : association.joinTable,
                     collectionType: association.collectionType ?? 'list',
+                    generateInverse: associationType === 'manyToOne'
+                      ? association.generateInverse
+                      : false,
                   }
                   updateAssociation(next)
                 }}
@@ -3110,6 +3134,7 @@ function AttributeDetail({
                     associationType: crossDataStore && toMany ? 'manyToOne' : association.associationType,
                     mappedBy: crossDataStore ? undefined : association.mappedBy,
                     joinTable: crossDataStore ? undefined : association.joinTable,
+                    generateInverse: crossDataStore ? false : association.generateInverse,
                   })
                 }}
                 placeholder="com.example.entity.Order"
@@ -3156,6 +3181,7 @@ function AttributeDetail({
                     value={association.mappedBy || ''}
                     onChange={e => updateAssociation({
                       mappedBy: e.target.value || undefined,
+                      generateInverse: e.target.value ? false : association.generateInverse,
                       joinTable: association.associationType === 'manyToMany' && !e.target.value
                         ? association.joinTable ?? suggestedJoinTable(entity, attr, association, projectId)
                         : association.joinTable,
@@ -3242,6 +3268,53 @@ function AttributeDetail({
                   </div>
                 </Field>
               </>
+            )}
+            {pairedInverseSupported && (
+              <div className="sm:col-span-2 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.05] p-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-200">
+                      Atomic inverse side
+                    </div>
+                    <p className="mt-1 text-[9px] leading-relaxed text-gray-500">
+                      Generate the matching property in {relatedEntitySnapshot?.className} and preview both
+                      Java/Kotlin entities plus owning-side Liquibase as one revision-bound change.
+                    </p>
+                  </div>
+                  <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[10px] text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(association.generateInverse)}
+                      onChange={event => updateAssociation({
+                        generateInverse: event.target.checked,
+                        inverseAttributeName: event.target.checked
+                          ? association.inverseAttributeName || suggestedInverseName
+                          : association.inverseAttributeName,
+                      })}
+                    />
+                    generate inverse
+                  </label>
+                </div>
+                {association.generateInverse && (
+                  <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2">
+                    <Field label={`Property in ${relatedEntitySnapshot?.className}`}>
+                      <input
+                        value={association.inverseAttributeName || ''}
+                        onChange={event => updateAssociation({
+                          inverseAttributeName: event.target.value || undefined,
+                        })}
+                        placeholder={suggestedInverseName}
+                        className="w-full min-w-0 font-mono"
+                        aria-label={`Inverse attribute for ${attr.name}`}
+                      />
+                    </Field>
+                    <div className="min-w-0 rounded border border-emerald-500/15 bg-black/10 p-2 text-[9px] leading-relaxed text-emerald-100/70">
+                      The generated inverse uses <code>mappedBy=&quot;{attr.name}&quot;</code>. Name collisions,
+                      stale target source, cross-store targets, and unsupported ownership shapes fail closed.
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
             <Field label="Database Delete Policy">
               <select

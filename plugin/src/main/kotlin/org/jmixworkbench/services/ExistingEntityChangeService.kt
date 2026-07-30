@@ -23,13 +23,19 @@ import org.jmixworkbench.generator.EntityGenerator
 import org.jmixworkbench.generator.KotlinEntityGenerator
 import org.jmixworkbench.model.AttributeModel
 import org.jmixworkbench.model.AttributeType
+import org.jmixworkbench.model.AssociationCollectionType
+import org.jmixworkbench.model.AssociationConfig
 import org.jmixworkbench.model.AssociationType
 import org.jmixworkbench.model.ChangeSetModel
 import org.jmixworkbench.model.ColumnDef
 import org.jmixworkbench.model.DatabaseType
 import org.jmixworkbench.model.DbChange
 import org.jmixworkbench.model.DdlGenerationMode
+import org.jmixworkbench.model.DdlGenerationConfig
+import org.jmixworkbench.model.EntityGenerationTarget
 import org.jmixworkbench.model.EntityModel
+import org.jmixworkbench.model.EntitySourceLanguage
+import org.jmixworkbench.model.EntityType
 import org.jmixworkbench.model.EnumIdType
 import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.IdType
@@ -83,6 +89,416 @@ class ExistingEntityChangeService(
     }
 
     internal fun proposeAttributeAdditions(
+        request: ExistingEntityAttributeAdditionRequest,
+    ): ExistingEntityChangeProposal {
+        val planned = planBidirectionalRequests(request)
+        if (planned.issues.isNotEmpty()) {
+            return ExistingEntityChangeProposal(null, planned.issues)
+        }
+        val proposals = planned.requests.map(::proposeSingleEntityAttributeAdditions)
+        proposals.firstOrNull { it.changeSet == null }?.let { return it }
+        if (proposals.size == 1) return proposals.single()
+
+        val allFiles = proposals.flatMap { requireNotNull(it.changeSet).files }
+        val conflictingPath = allFiles.groupBy(WorkspaceFileChange::relativePath)
+            .entries
+            .firstOrNull { (_, changes) -> changes.distinct().size > 1 }
+        if (conflictingPath != null) {
+            return rejected(
+                "JVW-ENTITY-INVERSE-FILE-CONFLICT",
+                "Bidirectional generation produced competing edits for ${conflictingPath.key}. " +
+                    "Refresh both entities and retry from a single relationship definition.",
+            )
+        }
+        val files = allFiles.distinct()
+        val identity = proposals.joinToString("\u0000") { requireNotNull(it.changeSet).id }
+        return ExistingEntityChangeProposal(
+            changeSet = WorkspaceChangeSet(
+                id = "existing-bidirectional-relationship:" +
+                    CanonicalDiscoveryJson.sha256(identity).take(24),
+                label = "Update ${planned.requests.size} entity sources as one bidirectional relationship",
+                files = files,
+            ),
+            issues = emptyList(),
+        )
+    }
+
+    private fun planBidirectionalRequests(
+        request: ExistingEntityAttributeAdditionRequest,
+    ): BidirectionalRequestPlan {
+        val requestedInverseRelationships = request.entity.attributes.filter {
+            it.association?.generateInverse == true
+        }
+        if (requestedInverseRelationships.isEmpty()) {
+            return BidirectionalRequestPlan(listOf(request), emptyList())
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load()
+        val sourceSnapshot = workspace.entities.singleOrNull {
+            it.qualifiedName == request.entity.fullName &&
+                it.sourceLocator.relativePath == request.sourceLocator.relativePath
+        } ?: return BidirectionalRequestPlan(
+            emptyList(),
+            listOf(
+                WorkspaceChangeIssue(
+                    "JVW-ENTITY-INVERSE-SOURCE-SNAPSHOT-MISSING",
+                    "The exact source entity is absent from the schema workspace. Refresh before generating an inverse side.",
+                ),
+            ),
+        )
+        val existingSourceNames = sourceSnapshot.attributes.mapTo(mutableSetOf()) { it.name }
+        val targetAdditions = linkedMapOf<String, MutableList<AttributeModel>>()
+        val targets = linkedMapOf<String, SchemaEntitySnapshot>()
+        var primaryEntity = request.entity
+
+        requestedInverseRelationships.forEach { sourceAttribute ->
+            if (sourceAttribute.name in existingSourceNames) {
+                return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-INVERSE-EXISTING-RELATIONSHIP-REQUIRES-IMPACT",
+                            "${sourceAttribute.name} already exists. Adding an inverse to an established relationship " +
+                                "requires the dedicated two-sided impact workflow.",
+                        ),
+                    ),
+                )
+            }
+            val sourceAssociation = sourceAttribute.association
+                ?: return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-INVERSE-MAPPING-MISSING",
+                            "${sourceAttribute.name} requests inverse generation without relationship metadata.",
+                        ),
+                    ),
+                )
+            val inverseName = sourceAssociation.inverseAttributeName?.trim().orEmpty()
+            if (!JAVA_IDENTIFIER.matches(inverseName)) {
+                return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-INVERSE-NAME-INVALID",
+                            "'$inverseName' is not a valid Java/Kotlin inverse property name.",
+                        ),
+                    ),
+                )
+            }
+            if (
+                sourceAssociation.crossDataStore ||
+                sourceAssociation.associationType !in setOf(
+                    AssociationType.MANY_TO_ONE,
+                    AssociationType.ONE_TO_ONE,
+                    AssociationType.MANY_TO_MANY,
+                ) ||
+                !sourceAssociation.mappedBy.isNullOrBlank()
+            ) {
+                return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-INVERSE-OWNERSHIP-UNSUPPORTED",
+                            "${sourceAttribute.name} must be a local owning many-to-one, one-to-one, or many-to-many " +
+                                "relationship before its inverse can be generated.",
+                        ),
+                    ),
+                )
+            }
+            if (
+                sourceAssociation.associationType == AssociationType.MANY_TO_MANY &&
+                sourceAssociation.joinTable == null
+            ) {
+                return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-INVERSE-JOIN-TABLE-MISSING",
+                            "${sourceAttribute.name} needs an explicit owning join table before a many-to-many inverse is generated.",
+                        ),
+                    ),
+                )
+            }
+            val targetMatches = workspace.entities.filter {
+                it.qualifiedName == sourceAssociation.relatedEntity
+            }
+            if (targetMatches.size != 1) {
+                return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-INVERSE-TARGET-${if (targetMatches.isEmpty()) "MISSING" else "AMBIGUOUS"}",
+                            "Inverse target ${sourceAssociation.relatedEntity} must resolve to exactly one indexed entity.",
+                        ),
+                    ),
+                )
+            }
+            val target = targetMatches.single()
+            if (
+                target.entityType != EntityType.ENTITY ||
+                target.databaseView ||
+                target.storeName != sourceSnapshot.storeName
+            ) {
+                return BidirectionalRequestPlan(
+                    emptyList(),
+                    listOf(
+                        WorkspaceChangeIssue(
+                            "JVW-ENTITY-INVERSE-TARGET-INCOMPATIBLE",
+                            "${target.qualifiedName} must be a writable JPA entity in the same data store.",
+                        ),
+                    ),
+                )
+            }
+            moduleDependencyIssue(sourceSnapshot, target)?.let { issue ->
+                return BidirectionalRequestPlan(emptyList(), listOf(issue))
+            }
+            val inverseAttribute = inverseAttribute(
+                sourceSnapshot = sourceSnapshot,
+                sourceAttribute = sourceAttribute,
+                inverseName = inverseName,
+            )
+            val targetExisting = target.attributes.firstOrNull { it.name == inverseName }
+            if (targetExisting != null) {
+                if (!matchesGeneratedInverse(targetExisting, inverseAttribute)) {
+                    return BidirectionalRequestPlan(
+                        emptyList(),
+                        listOf(
+                            WorkspaceChangeIssue(
+                                "JVW-ENTITY-INVERSE-NAME-COLLISION",
+                                "${target.qualifiedName}.$inverseName already exists with a different type or mapping.",
+                                target.sourceLocator.relativePath,
+                            ),
+                        ),
+                    )
+                }
+                return@forEach
+            }
+
+            if (target.sourceLocator.relativePath == sourceSnapshot.sourceLocator.relativePath) {
+                val requestedCollision = primaryEntity.attributes.firstOrNull { it.name == inverseName }
+                if (requestedCollision != null) {
+                    if (!matchesGeneratedInverse(requestedCollision, inverseAttribute)) {
+                        return BidirectionalRequestPlan(
+                            emptyList(),
+                            listOf(
+                                WorkspaceChangeIssue(
+                                    "JVW-ENTITY-INVERSE-NAME-COLLISION",
+                                    "${sourceSnapshot.qualifiedName}.$inverseName conflicts with the generated self-inverse mapping.",
+                                ),
+                            ),
+                        )
+                    }
+                } else {
+                    primaryEntity = primaryEntity.copy(
+                        attributes = (primaryEntity.attributes + inverseAttribute).toMutableList(),
+                    )
+                }
+            } else {
+                val additions = targetAdditions.getOrPut(target.artifactId) { mutableListOf() }
+                if (additions.any { it.name == inverseName }) {
+                    return BidirectionalRequestPlan(
+                        emptyList(),
+                        listOf(
+                            WorkspaceChangeIssue(
+                                "JVW-ENTITY-INVERSE-NAME-COLLISION",
+                                "Multiple requested relationships generate ${target.qualifiedName}.$inverseName.",
+                            ),
+                        ),
+                    )
+                }
+                additions += inverseAttribute
+                targets[target.artifactId] = target
+            }
+        }
+
+        val requests = mutableListOf(
+            request.copy(entity = primaryEntity),
+        )
+        targetAdditions.forEach { (artifactId, additions) ->
+            val target = requireNotNull(targets[artifactId])
+            val baseTarget = entityModel(target, workspace)
+            val targetEntity = baseTarget.copy(
+                attributes = (baseTarget.attributes + additions).toMutableList(),
+            )
+            requests += ExistingEntityAttributeAdditionRequest(
+                sourceLocator = target.sourceLocator,
+                entity = targetEntity,
+            )
+        }
+        return BidirectionalRequestPlan(requests, emptyList())
+    }
+
+    private fun moduleDependencyIssue(
+        source: SchemaEntitySnapshot,
+        target: SchemaEntitySnapshot,
+    ): WorkspaceChangeIssue? {
+        if (source.moduleId == target.moduleId) return null
+        return WorkspaceChangeIssue(
+            "JVW-ENTITY-INVERSE-MODULE-CYCLE",
+            "A bidirectional mapping between module ${source.moduleId} and ${target.moduleId} would require both " +
+                "modules to import each other's entity classes and create a Gradle dependency cycle. " +
+                "Move the shared model to one module or keep this relationship unidirectional.",
+            target.sourceLocator.relativePath,
+        )
+    }
+
+    private fun inverseAttribute(
+        sourceSnapshot: SchemaEntitySnapshot,
+        sourceAttribute: AttributeModel,
+        inverseName: String,
+    ): AttributeModel {
+        val sourceAssociation = requireNotNull(sourceAttribute.association)
+        val inverseType = when (sourceAssociation.associationType) {
+            AssociationType.MANY_TO_ONE -> AssociationType.ONE_TO_MANY
+            AssociationType.ONE_TO_ONE -> AssociationType.ONE_TO_ONE
+            AssociationType.MANY_TO_MANY -> AssociationType.MANY_TO_MANY
+            AssociationType.ONE_TO_MANY -> error("One-to-many is not an owning inverse-generation source.")
+        }
+        return AttributeModel(
+            name = inverseName,
+            type = AttributeType.ASSOCIATION,
+            association = AssociationConfig(
+                associationType = inverseType,
+                relatedEntity = sourceSnapshot.qualifiedName,
+                relatedTableName = sourceSnapshot.tableName,
+                relatedIdColumnName = sourceSnapshot.idColumnName,
+                relatedIdType = sourceSnapshot.idType,
+                mappedBy = sourceAttribute.name,
+                cascade = mutableListOf(),
+                fetch = FetchType.LAZY,
+                collectionType = if (inverseType in setOf(
+                        AssociationType.ONE_TO_MANY,
+                        AssociationType.MANY_TO_MANY,
+                    )
+                ) {
+                    sourceAssociation.collectionType
+                } else {
+                    AssociationCollectionType.LIST
+                },
+                crossDataStore = false,
+                orphanRemoval = false,
+                generateInverse = false,
+            ),
+        )
+    }
+
+    private fun matchesGeneratedInverse(
+        current: SchemaEntityAttributeSnapshot,
+        expected: AttributeModel,
+    ): Boolean {
+        val currentAssociation = current.associationDetails ?: return false
+        val expectedAssociation = expected.association ?: return false
+        return current.association &&
+            currentAssociation.associationType == expectedAssociation.associationType &&
+            currentAssociation.relatedEntity == expectedAssociation.relatedEntity &&
+            currentAssociation.mappedBy == expectedAssociation.mappedBy
+    }
+
+    private fun matchesGeneratedInverse(
+        current: AttributeModel,
+        expected: AttributeModel,
+    ): Boolean {
+        val currentAssociation = current.association ?: return false
+        val expectedAssociation = expected.association ?: return false
+        return current.type in RELATIONSHIP_ATTRIBUTE_TYPES &&
+            currentAssociation.associationType == expectedAssociation.associationType &&
+            currentAssociation.relatedEntity == expectedAssociation.relatedEntity &&
+            currentAssociation.mappedBy == expectedAssociation.mappedBy
+    }
+
+    private fun entityModel(
+        snapshot: SchemaEntitySnapshot,
+        workspace: SchemaWorkspaceResponse,
+    ): EntityModel {
+        val store = workspace.stores.firstOrNull {
+            it.moduleId == snapshot.moduleId && it.name == snapshot.storeName
+        }
+        return EntityModel(
+            className = snapshot.className,
+            packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+            sourceLanguage = if (snapshot.sourceLocator.relativePath.endsWith(".kt")) {
+                EntitySourceLanguage.KOTLIN
+            } else {
+                EntitySourceLanguage.JAVA
+            },
+            dataStore = snapshot.storeName,
+            generationTarget = EntityGenerationTarget(snapshot.moduleId, store?.id),
+            entityName = snapshot.entityName,
+            tableName = snapshot.tableName,
+            tableSchema = snapshot.tableSchema,
+            tableCatalog = snapshot.tableCatalog,
+            entityType = snapshot.entityType,
+            id = org.jmixworkbench.model.IdConfig(
+                type = snapshot.idType,
+                columnName = snapshot.idColumnName,
+            ),
+            attributes = snapshot.attributes
+                .filterNot { it.name == "id" }
+                .map(::attributeModel)
+                .toMutableList(),
+            databaseView = snapshot.databaseView,
+            ddlGeneration = DdlGenerationConfig(
+                enabled = snapshot.entityType == EntityType.ENTITY &&
+                    snapshot.ddlMode != SchemaDdlMode.DISABLED,
+                mode = when (snapshot.ddlMode) {
+                    SchemaDdlMode.CREATE_AND_DROP -> DdlGenerationMode.CREATE_AND_DROP
+                    SchemaDdlMode.CREATE_ONLY -> DdlGenerationMode.CREATE_ONLY
+                    SchemaDdlMode.DISABLED -> DdlGenerationMode.DISABLED
+                },
+            ),
+        )
+    }
+
+    private fun attributeModel(snapshot: SchemaEntityAttributeSnapshot): AttributeModel {
+        val type = attributeType(
+            snapshot.javaType,
+            snapshot.association,
+            snapshot.associationDetails?.composition == true,
+        )
+        val association = snapshot.associationDetails?.let {
+            AssociationConfig(
+                associationType = it.associationType,
+                relatedEntity = it.relatedEntity,
+                relatedTableName = it.relatedTableName,
+                relatedIdColumnName = it.relatedIdColumnName,
+                relatedIdType = it.relatedIdType,
+                localIdAttributeName = it.localIdAttributeName,
+                mappedBy = it.mappedBy,
+                joinColumnName = it.joinColumnName,
+                joinTable = it.joinTable,
+                cascade = it.cascade.toMutableList(),
+                fetch = it.fetch,
+                collectionType = it.collectionType,
+                crossDataStore = it.crossDataStore,
+                orphanRemoval = it.orphanRemoval,
+                onDelete = it.onDelete,
+            )
+        }
+        return AttributeModel(
+            name = snapshot.name,
+            type = type,
+            columnName = snapshot.columnName,
+            mandatory = !snapshot.nullable,
+            unique = snapshot.unique,
+            length = snapshot.length,
+            precision = snapshot.precision,
+            scale = snapshot.scale,
+            comment = snapshot.comment,
+            transientFlag = !snapshot.persistent,
+            systemLevel = snapshot.systemLevel,
+            readOnly = snapshot.readOnly,
+            jmixProperty = snapshot.jmixProperty,
+            dependsOnProperties = snapshot.dependsOnProperties.toMutableList(),
+            propertyDatatype = snapshot.propertyDatatype,
+            lob = snapshot.lob,
+            sqlType = snapshot.sqlType,
+            association = association,
+            enumClass = snapshot.javaType.takeIf { type == AttributeType.ENUM },
+            validations = snapshot.validations.toMutableList(),
+        )
+    }
+
+    private fun proposeSingleEntityAttributeAdditions(
         request: ExistingEntityAttributeAdditionRequest,
     ): ExistingEntityChangeProposal {
         val resolved = ProjectFileResolver.getInstance(project)
@@ -2261,6 +2677,11 @@ data class ExistingEntityAttributeAdditionApplyRequest(
 private data class GeneratedEntityFragments(
     val body: String,
     val imports: Set<String>,
+)
+
+private data class BidirectionalRequestPlan(
+    val requests: List<ExistingEntityAttributeAdditionRequest>,
+    val issues: List<WorkspaceChangeIssue>,
 )
 
 private data class ExistingAttributeMetadataChange(
