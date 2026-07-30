@@ -281,9 +281,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 290 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 308 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 290 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 308 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -444,6 +444,14 @@ inspection control rather than relying on a hard-to-hit table-row target.
   Java/Kotlin JPQL parameters and explicit `@Param` literals participate in one
   native rename/find-usages symbol. Derived-condition insertion retains any
   static `OrderBy` suffix.
+- IntelliJ's native Generate menu now discovers accessible Jmix repositories
+  through inheritor indexes and module dependency scope, including custom
+  generic repository hierarchies. It injects Java fields or Kotlin properties
+  with PSI, recognizes existing field/constructor injection, applies one
+  undoable command, restores the original document on mutation failure and
+  warns natively when inherited `@ApplyConstraints` is disabled or cannot be
+  proven. `@NoRepositoryBean` fragments are excluded, dumb mode is disabled,
+  and shared plus both host descriptors register the action.
 - The conventional `./gradlew test` lifecycle now builds and fingerprints the
   current self-managed-Node web bundle before starting isolated IntelliJ
   2025.3 and 2026.2 lanes, avoiding stale-bundle races and retaining the outer

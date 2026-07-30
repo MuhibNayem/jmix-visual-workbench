@@ -198,5 +198,12 @@
                 description="Open the Jmix Visual Workbench">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
+
+        <action id="JmixWorkbench.InjectRepository"
+                class="org.jmixworkbench.actions.InjectJmixRepositoryAction"
+                text="Inject Jmix Data Repository..."
+                description="Inject an accessible Jmix data repository into the current Java or Kotlin class">
+            <add-to-group group-id="GenerateGroup" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>

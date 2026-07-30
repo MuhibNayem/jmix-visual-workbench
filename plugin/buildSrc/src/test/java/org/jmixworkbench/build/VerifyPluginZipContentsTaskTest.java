@@ -110,6 +110,30 @@ class VerifyPluginZipContentsTaskTest {
         assertTrue(error.getMessage().contains("JmixEntityFileEditorProvider"));
     }
 
+    @Test
+    void rejectsAPluginWhosePackagedDescriptorOmitsNativeRepositoryInjection() throws Exception {
+        byte[] pluginJar = validPluginJar();
+        byte[] withoutRepositoryInjection = rewriteNestedEntry(
+                pluginJar,
+                "META-INF/plugin.xml",
+                text(pluginJar, "META-INF/plugin.xml").replace(
+                        "<action id=\"JmixWorkbench.InjectRepository\" "
+                                + "class=\"org.jmixworkbench.actions.InjectJmixRepositoryAction\">"
+                                + "<add-to-group group-id=\"GenerateGroup\"/></action>",
+                        ""
+                )
+        );
+        Path archive = writeArchive("missing-repository-injection.zip", Map.of(
+                "plugin/lib/main.jar", withoutRepositoryInjection
+        ));
+
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> VerifyPluginZipContentsTask.inspectArchive(archive, "idea253")
+        );
+        assertTrue(error.getMessage().contains("JmixWorkbench.InjectRepository"));
+    }
+
     private Path writeArchive(String name, Map<String, byte[]> entries) throws Exception {
         Path archive = temporaryDirectory.resolve(name);
         try (ZipOutputStream output = new ZipOutputStream(java.nio.file.Files.newOutputStream(archive))) {
@@ -131,6 +155,9 @@ class VerifyPluginZipContentsTaskTest {
                         + "<projectService serviceImplementation=\"org.jmixworkbench.toolwindow.WorkbenchNavigationService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.EntityEventListenerService\" />"
                         + "</extensions>"
+                        + "<actions><action id=\"JmixWorkbench.InjectRepository\" "
+                        + "class=\"org.jmixworkbench.actions.InjectJmixRepositoryAction\">"
+                        + "<add-to-group group-id=\"GenerateGroup\"/></action></actions>"
                         + "<idea-version since-build=\"253\" until-build=\"253.*\"/></idea-plugin>"
         ));
         entries.put("webui/index.html", bytes(
@@ -145,6 +172,10 @@ class VerifyPluginZipContentsTaskTest {
         entries.put("NOTICE", bytes("notice"));
         entries.put(
                 "org/jmixworkbench/services/EntityEventListenerService.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/actions/InjectJmixRepositoryAction.class",
                 new byte[]{0, 1, 2}
         );
         return nestedArchive(entries);

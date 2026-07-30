@@ -169,6 +169,11 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 "org/jmixworkbench/services/EntityEventListenerService.class",
                 archive
         );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/actions/InjectJmixRepositoryAction.class",
+                archive
+        );
 
         String descriptor = text(contents.get("META-INF/plugin.xml"));
         requireContains(descriptor, "<id>org.jmixworkbench</id>", archive);
@@ -192,6 +197,13 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 "projectService",
                 "serviceImplementation",
                 "org.jmixworkbench.services.EntityEventListenerService",
+                archive
+        );
+        requireActionRegistration(
+                descriptor,
+                "JmixWorkbench.InjectRepository",
+                "org.jmixworkbench.actions.InjectJmixRepositoryAction",
+                "GenerateGroup",
                 archive
         );
         if ("idea253".equals(lane)) {
@@ -267,6 +279,59 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         throw new IllegalStateException(
                 archive + " descriptor is missing <" + elementName + " "
                         + attributeName + "=\"" + expectedValue + "\">"
+        );
+    }
+
+    private static void requireActionRegistration(
+            String descriptor,
+            String actionId,
+            String implementationClass,
+            String groupId,
+            Path archive
+    ) {
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            factory.setExpandEntityReferences(false);
+            factory.setXIncludeAware(false);
+            var document = factory.newDocumentBuilder().parse(
+                    new ByteArrayInputStream(descriptor.getBytes(StandardCharsets.UTF_8))
+            );
+            var actions = document.getElementsByTagName("action");
+            for (int index = 0; index < actions.getLength(); index++) {
+                var action = actions.item(index);
+                var attributes = action.getAttributes();
+                var id = attributes.getNamedItem("id");
+                var implementation = attributes.getNamedItem("class");
+                if (id == null
+                        || implementation == null
+                        || !actionId.equals(id.getNodeValue())
+                        || !implementationClass.equals(implementation.getNodeValue())) {
+                    continue;
+                }
+                var children = action.getChildNodes();
+                for (int childIndex = 0; childIndex < children.getLength(); childIndex++) {
+                    var child = children.item(childIndex);
+                    if (!"add-to-group".equals(child.getNodeName()) || child.getAttributes() == null) {
+                        continue;
+                    }
+                    var registeredGroup = child.getAttributes().getNamedItem("group-id");
+                    if (registeredGroup != null && groupId.equals(registeredGroup.getNodeValue())) {
+                        return;
+                    }
+                }
+            }
+        } catch (Exception exception) {
+            throw new IllegalStateException(
+                    archive + " contains an unreadable META-INF/plugin.xml",
+                    exception
+            );
+        }
+        throw new IllegalStateException(
+                archive + " descriptor is missing action " + actionId
+                        + " (" + implementationClass + ") in group " + groupId
         );
     }
 

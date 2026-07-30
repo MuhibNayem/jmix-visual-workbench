@@ -87,6 +87,18 @@ contract and
   precedence, follows resolvable parent interfaces, rejects unproven custom
   hierarchies during indexing and exposes no bridge-controlled unconstrained
   override.
+- Java and Kotlin classes now expose **Inject Jmix Data Repository...** in
+  IntelliJ's native Generate menu. Candidate discovery uses IntelliJ inheritor
+  indexes in the target module's dependency scope, resolves entity types
+  through custom generic repository bases, excludes `@NoRepositoryBean`
+  fragments and never scans the whole project. Java fields and Kotlin
+  properties are added through their native PSI under one undoable command;
+  existing field and constructor injection is idempotently recognized, manual
+  class bodies are not replaced, and a failed mutation restores the exact
+  pre-command document. Effective inherited repository constraint policy is
+  evaluated conservatively, with disabled or unproven policy requiring an
+  explicit native warning decision. The action is absent during dumb mode and
+  registered in the shared plus both independently packaged host descriptors.
 - Entity Designer pane selection now responds to its actual IntelliJ/JCEF
   container width rather than the outer browser viewport. At 360 and 768
   pixels, configuration, attributes and preview are keyboard-selectable full
@@ -106,7 +118,7 @@ contract and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 290 tests and three packaged-host
+  descriptors were inspected after assembly, 308 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
@@ -406,10 +418,12 @@ blocked until all of the following pass:
 6. Installed-IDE interaction, undo, accessibility, large-project latency,
    memory and leak evidence.
 
-Repository creation and additive Java/Kotlin method authoring are implemented.
-Remaining repository work is IntelliJ-native injection/refactoring assistance,
-view delegate integration, safe mutation of existing source-owned methods and
-runtime integration certification against representative Jmix applications.
+Repository creation, additive Java/Kotlin method authoring, lossless supported
+metadata edits, native Java/Kotlin injection and repository-backed view
+delegates are implemented. Remaining repository work is native structural
+change-signature/delete refactoring, transactional aggregate update-service
+generation, complete JPQL semantics and runtime integration certification
+against representative Jmix applications.
 
 No release or marketing claim may describe complete Studio Entity Designer
 parity until those gates are closed.
