@@ -19,6 +19,7 @@ import java.util.Properties
 import java.util.logging.Logger
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DatabaseReverseEngineeringIntegrationTest : HeavyPlatformTestCase() {
@@ -66,7 +67,7 @@ class DatabaseReverseEngineeringIntegrationTest : HeavyPlatformTestCase() {
 
                 @JmixEntity
                 @Entity(name = "loan_LoanApp")
-                @Table(name = "LOAN_APP")
+                @Table(name = "LOAN_APP", schema = "public", catalog = "payroll")
                 public class LoanApp {
                     @Id
                     @Column(name = "ID", nullable = false)
@@ -111,6 +112,9 @@ class DatabaseReverseEngineeringIntegrationTest : HeavyPlatformTestCase() {
         assertEquals("fixture-secret", MetadataDriver.lastProperties?.getProperty("password"))
         assertEquals(entity.qualifiedName, response.existingEntityQualifiedName)
         assertEquals("FixtureDB", response.database?.name)
+        assertEquals("public", entity.tableSchema)
+        assertEquals("payroll", entity.tableCatalog)
+        assertEquals(entity.qualifiedName, response.existingEntityQualifiedName)
         assertEquals(2, response.table?.columns?.count { it.alreadyMapped })
         val approvedAmount = response.table?.columns?.firstOrNull { it.name == "APPROVED_AMOUNT" }
             ?: error("Live metadata column was not returned: $response")
@@ -123,6 +127,70 @@ class DatabaseReverseEngineeringIntegrationTest : HeavyPlatformTestCase() {
         assertFalse(serialized.contains("fixture-secret"))
         assertFalse(serialized.contains("fixture-user"))
         assertFalse(serialized.contains("jdbc:jvw-fixture:payroll"))
+
+        val archive = service.inspectEntityTable(
+            DatabaseEntityTableInspectionRequest(
+                storeId = store.id,
+                tableName = "LOAN_APP",
+                schemaName = "archive",
+                catalogName = "payroll",
+                expectedEntityQualifiedName = entity.qualifiedName,
+            ),
+        )
+        assertTrue(archive.accepted, archive.issues.toString())
+        assertNull(archive.existingEntityQualifiedName)
+
+        val browse = service.browseEntityTables(
+            DatabaseEntityTableBrowseRequest(
+                storeId = store.id,
+                catalogName = "payroll",
+                schemaName = "public",
+                search = "loan",
+                includeViews = true,
+            ),
+        )
+        assertTrue(browse.accepted, browse.issues.toString())
+        assertEquals(listOf("payroll"), browse.catalogs)
+        assertTrue(browse.schemas.any { it.catalog == "payroll" && it.name == "public" })
+        assertEquals(listOf("LOAN_APP", "V_LOAN_EXPOSURE"), browse.tables.map { it.name })
+        assertEquals(listOf("TABLE", "VIEW"), browse.tables.map { it.type })
+        val browseJson = Gson().toJson(browse)
+        assertFalse(browseJson.contains("fixture-secret"))
+        assertFalse(browseJson.contains("fixture-user"))
+        assertFalse(browseJson.contains("jdbc:jvw-fixture:payroll"))
+
+        val tablesOnly = service.browseEntityTables(
+            DatabaseEntityTableBrowseRequest(
+                storeId = store.id,
+                catalogName = "payroll",
+                schemaName = "public",
+                search = "loan",
+                includeViews = false,
+            ),
+        )
+        assertEquals(listOf("LOAN_APP"), tablesOnly.tables.map { it.name })
+
+        val limited = service.browseEntityTables(
+            DatabaseEntityTableBrowseRequest(
+                storeId = store.id,
+                catalogName = "payroll",
+                schemaName = "public",
+                includeViews = true,
+                limit = 1,
+            ),
+        )
+        assertTrue(limited.truncated)
+        assertEquals(1, limited.tables.size)
+        assertEquals("JVW-DB-BROWSE-TRUNCATED", limited.issues.single().code)
+
+        val invalid = service.browseEntityTables(
+            DatabaseEntityTableBrowseRequest(
+                storeId = store.id,
+                search = "x".repeat(121),
+            ),
+        )
+        assertFalse(invalid.accepted)
+        assertEquals("JVW-DB-BROWSE-FILTER-INVALID", invalid.issues.single().code)
     }
 
     override fun tearDown() {
@@ -158,7 +226,8 @@ class DatabaseReverseEngineeringIntegrationTest : HeavyPlatformTestCase() {
             connection = proxy(Connection::class.java) { method, _ ->
                 when (method.name) {
                     "getMetaData" -> fixtureMetadata()
-                    "getCatalog" -> null
+                    "getCatalog" -> "payroll"
+                    "getSchema" -> "public"
                     "isClosed" -> false
                     "getAutoCommit" -> false
                     "isReadOnly" -> true
@@ -177,35 +246,57 @@ class DatabaseReverseEngineeringIntegrationTest : HeavyPlatformTestCase() {
                 "getDatabaseProductVersion" -> "17.2"
                 "getDriverName" -> "Jmix Workbench Metadata Driver"
                 "getDriverVersion" -> "1.0"
+                "getCatalogs" -> resultSet(listOf(mapOf("TABLE_CAT" to "payroll")))
+                "getSchemas" -> resultSet(
+                    listOf(
+                        mapOf("TABLE_CATALOG" to "payroll", "TABLE_SCHEM" to "public"),
+                        mapOf("TABLE_CATALOG" to "payroll", "TABLE_SCHEM" to "archive"),
+                    ),
+                )
                 "getTables" -> {
                     val schema = args?.get(1) as? String
                     val pattern = args?.get(2) as? String
+                    val requestedTypes = (args?.get(3) as? Array<*>)
+                        ?.filterIsInstance<String>()
+                        ?.toSet()
+                        .orEmpty()
+                    val allRows = buildList {
+                        add(
+                            mapOf(
+                                "TABLE_CAT" to "payroll",
+                                "TABLE_SCHEM" to "public",
+                                "TABLE_NAME" to "LOAN_APP",
+                                "TABLE_TYPE" to "TABLE",
+                                "REMARKS" to "Loan applications",
+                            ),
+                        )
+                        add(
+                            mapOf(
+                                "TABLE_CAT" to "payroll",
+                                "TABLE_SCHEM" to "archive",
+                                "TABLE_NAME" to "LOAN_APP",
+                                "TABLE_TYPE" to "TABLE",
+                                "REMARKS" to "Archived loan applications",
+                            ),
+                        )
+                        add(
+                            mapOf(
+                                "TABLE_CAT" to "payroll",
+                                "TABLE_SCHEM" to "public",
+                                "TABLE_NAME" to "V_LOAN_EXPOSURE",
+                                "TABLE_TYPE" to "VIEW",
+                                "REMARKS" to "Loan exposure",
+                            ),
+                        )
+                    }
                     resultSet(
-                        if (pattern.equals("LOAN_APP", ignoreCase = true)) {
-                            buildList {
-                                add(
-                                    mapOf(
-                                        "TABLE_CAT" to null,
-                                        "TABLE_SCHEM" to "public",
-                                        "TABLE_NAME" to "LOAN_APP",
-                                        "TABLE_TYPE" to "TABLE",
-                                        "REMARKS" to "Loan applications",
-                                    ),
-                                )
-                                if (schema == null) {
-                                    add(
-                                        mapOf(
-                                            "TABLE_CAT" to null,
-                                            "TABLE_SCHEM" to "archive",
-                                            "TABLE_NAME" to "LOAN_APP",
-                                            "TABLE_TYPE" to "TABLE",
-                                            "REMARKS" to "Archived loan applications",
-                                        ),
-                                    )
-                                }
-                            }
-                        } else {
-                            emptyList()
+                        allRows.filter { row ->
+                            val rowSchema = row["TABLE_SCHEM"] as String
+                            val rowName = row["TABLE_NAME"] as String
+                            val rowType = row["TABLE_TYPE"] as String
+                            (schema == null || rowSchema.equals(schema, ignoreCase = true)) &&
+                                (pattern == "%" || rowName.equals(pattern, ignoreCase = true)) &&
+                                (requestedTypes.isEmpty() || rowType in requestedTypes)
                         },
                     )
                 }

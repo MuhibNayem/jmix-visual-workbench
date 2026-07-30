@@ -118,14 +118,20 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   bound, and apply is atomic. Later contraction and final deletion remain
   separate retention gates because reversing the declaration cannot restore
   intentionally retired data.
-- Existing entities can inspect their live mapped table through the
+- Existing handwritten `@Table` mappings now round-trip `name`, `schema`, and
+  `catalog` for Java and Kotlin instead of collapsing qualified mappings to a
+  table name. Existing entities can browse live catalogs, schemas, tables, and
+  views, then inspect any selected object through the
   project-owned JDBC driver and the active profile configuration. The backend
   supports datasource-only stores with Liquibase intentionally disabled,
   ordered active profiles, property/environment placeholders, driver-specific
   connection/read timeouts, read-only metadata access and redacted failures.
-  It returns a credential-free, digest-stamped snapshot of columns, primary
+  Browsing is bounded, filterable, case-tolerant across JDBC implementations,
+  and credential-free; large result sets are explicitly reported as truncated.
+  Inspection returns a credential-free, digest-stamped snapshot of columns, primary
   keys, imported foreign keys, indexes and dependency tables. The responsive
-  in-IDE review surface distinguishes mapped, primary-key, generated,
+  in-IDE browser uses a fluid two-column/intermediate layout and table cards
+  rather than viewport-forced cramped controls. Its review surface distinguishes mapped, primary-key, generated,
   relationship and unsupported columns; lets developers edit proposed
   property names/types; and stages only selected additions into the existing
   revision-bound Java/Kotlin atomic source/Liquibase preview. Known foreign
@@ -133,6 +139,12 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   the developer chooses an explicit supported datatype. An optional schema
   selector resolves multi-schema databases; duplicate table names without an
   explicit schema fail closed instead of depending on driver return order.
+  Arbitrary tables remain useful for read-only metadata comparison, but every
+  checkbox and import action stays locked unless the backend resolves the exact
+  expected entity, data store, table, explicit/default schema, and catalog.
+  Same-named tables in another schema therefore cannot be imported into the
+  selected entity. Browser checks covered both the locked arbitrary-table path
+  and the exact mapped-table path, with no runtime errors.
 - Existing attributes now have a connected, revision-bound propagation
   workflow beyond Studio's basic "Add to Views" operation. The impact review
   discovers every matching FlowUI instance/collection container, form, grid,
@@ -172,11 +184,11 @@ blocked until all of the following pass:
    project-wide Java/Kotlin type-migration preview with physical dependency
    classification, Native Safe Delete and reversible quarantine are implemented.
    Additive and managed-mapping Java/Kotlin round trip is implemented.
-2. The first partial live-database merge is implemented for a selected
-   existing entity/table and missing columns. Complete table/view selection,
-   composite-key and join-table mapping, all FK dependency import, database
-   catalog browsing, saved mapping overrides and repeatable regeneration
-   across schema evolution remain.
+2. Credential-safe live catalog/schema/table/view browsing, arbitrary read-only
+   inspection, and exact-mapping-gated missing-column merge are implemented.
+   Composite-key and join-table mapping, recursive FK dependency import, saved
+   mapping overrides and repeatable regeneration across schema evolution
+   remain.
 3. Deeper propagation remains for controller code that constructs components
    dynamically, inherited fetch-plan coverage, fragment-owned bindings and
    translation-catalog/provider integration. Static FlowUI forms/grids,

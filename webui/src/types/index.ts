@@ -404,6 +404,8 @@ export interface SchemaEntitySnapshot {
   qualifiedName: string
   entityName: string
   tableName: string
+  tableSchema?: string
+  tableCatalog?: string
   storeName: string
   idType: IdType
   idColumnName: string
@@ -534,8 +536,46 @@ export interface DatabaseEntityTableInspectionRequest {
   storeId: string
   tableName: string
   schemaName?: string
+  catalogName?: string
+  expectedEntityQualifiedName?: string
   connectTimeoutSeconds?: number
   networkTimeoutSeconds?: number
+}
+
+export interface DatabaseEntityTableBrowseRequest {
+  storeId: string
+  catalogName?: string
+  schemaName?: string
+  search?: string
+  includeViews?: boolean
+  limit?: number
+  connectTimeoutSeconds?: number
+  networkTimeoutSeconds?: number
+}
+
+export interface DatabaseEntityTableBrowseResponse {
+  accepted: boolean
+  storeId?: string
+  database?: DatabaseProductSnapshot
+  activeCatalog?: string
+  catalogs: string[]
+  schemas: DatabaseSchemaReference[]
+  tables: DatabaseTableReference[]
+  truncated: boolean
+  issues: WorkspaceChangeIssue[]
+}
+
+export interface DatabaseSchemaReference {
+  catalog?: string
+  name: string
+}
+
+export interface DatabaseTableReference {
+  catalog?: string
+  schema?: string
+  name: string
+  type: string
+  remarks?: string
 }
 
 export interface DatabaseEntityTableInspectionResponse {

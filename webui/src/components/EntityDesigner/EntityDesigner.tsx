@@ -17,6 +17,8 @@ import type {
   WorkspaceChangePreviewResponse,
   ApplicationGraphResponse,
   DatabaseEntityTableInspectionResponse,
+  DatabaseEntityTableBrowseResponse,
+  DatabaseTableReference,
   DatabaseColumnSnapshot,
   EntityAttributePropagationChangeRequest,
   EntityAttributePropagationInspectionResponse,
@@ -113,6 +115,13 @@ export default function EntityDesigner() {
     useState<Record<string, DatabaseColumnDraft>>({})
   const [databaseInspectBusy, setDatabaseInspectBusy] = useState(false)
   const [databaseSchemaName, setDatabaseSchemaName] = useState('')
+  const [databaseCatalogName, setDatabaseCatalogName] = useState('')
+  const [databaseBrowseSearch, setDatabaseBrowseSearch] = useState('')
+  const [databaseIncludeViews, setDatabaseIncludeViews] = useState(true)
+  const [databaseBrowse, setDatabaseBrowse] =
+    useState<DatabaseEntityTableBrowseResponse | null>(null)
+  const [databaseBrowseBusy, setDatabaseBrowseBusy] = useState(false)
+  const [databaseInspectionMergeAllowed, setDatabaseInspectionMergeAllowed] = useState(true)
   const [propagationInspection, setPropagationInspection] =
     useState<EntityAttributePropagationInspectionResponse | null>(null)
   const [propagationSelection, setPropagationSelection] = useState<string[]>([])
@@ -491,28 +500,31 @@ export default function EntityDesigner() {
     }
   }
 
-  const inspectMappedDatabaseTable = async () => {
+  const inspectDatabaseTable = async (selection?: DatabaseTableReference) => {
     const storeId = entity.generationTarget?.storeId
-    const configuredTableName = existingEntity?.tableName || entity.tableName
+    const configuredTableName = selection?.name || existingEntity?.tableName || entity.tableName
     if (!existingEntity || !storeId || !configuredTableName.trim()) {
       addToast('Select an existing mapped entity and data store first', 'error')
       return
     }
     const tableParts = configuredTableName.split('.').map(part => part.trim()).filter(Boolean)
     const tableName = tableParts.pop() ?? configuredTableName
-    const schemaName = databaseSchemaName.trim() ||
+    const schemaName = selection?.schema || databaseSchemaName.trim() ||
       (tableParts.length ? tableParts.join('.') : undefined)
     setDatabaseInspectBusy(true)
     setDatabaseInspection(null)
     setDatabaseColumnDrafts({})
-    setDatabaseSchemaName('')
+    setDatabaseInspectionMergeAllowed(false)
     try {
       const response = await bridge.inspectDatabaseEntityTable({
         storeId,
         tableName,
         schemaName,
+        catalogName: selection?.catalog || databaseCatalogName.trim() || undefined,
+        expectedEntityQualifiedName: existingEntity.qualifiedName,
       })
       setDatabaseInspection(response)
+      setDatabaseBrowse(null)
       if (!response.accepted || !response.table) {
         addToast(
           response.issues.map(issue => issue.message).join(', ') || 'Database inspection was rejected',
@@ -520,10 +532,12 @@ export default function EntityDesigner() {
         )
         return
       }
+      const mergeAllowed = response.existingEntityQualifiedName === existingEntity.qualifiedName
+      setDatabaseInspectionMergeAllowed(mergeAllowed)
       const drafts = Object.fromEntries(response.table.columns.map(column => [
         column.name,
         {
-          selected: databaseColumnCanBeStaged(column),
+          selected: mergeAllowed && databaseColumnCanBeStaged(column),
           attributeName: column.suggestion.attributeName,
           attributeType: column.suggestion.attributeType,
         },
@@ -531,8 +545,10 @@ export default function EntityDesigner() {
       setDatabaseColumnDrafts(drafts)
       const missingCount = response.table.columns.filter(databaseColumnCanBeStaged).length
       addToast(
-        `Inspected ${qualifiedDatabaseTable(response)}: ${missingCount} safe unmapped column${missingCount === 1 ? '' : 's'}`,
-        'success',
+        mergeAllowed
+          ? `Inspected ${qualifiedDatabaseTable(response)}: ${missingCount} safe unmapped column${missingCount === 1 ? '' : 's'}`
+          : `Inspected ${qualifiedDatabaseTable(response)} in read-only comparison mode`,
+        mergeAllowed ? 'success' : 'info',
       )
     } catch (error: any) {
       addToast(`Database inspection failed: ${error.message}`, 'error')
@@ -541,7 +557,43 @@ export default function EntityDesigner() {
     }
   }
 
+  const browseDatabaseTables = async () => {
+    const storeId = entity.generationTarget?.storeId
+    if (!existingEntity || !storeId) {
+      addToast('Select an existing mapped entity and data store first', 'error')
+      return
+    }
+    setDatabaseBrowseBusy(true)
+    try {
+      const response = await bridge.browseDatabaseEntityTables({
+        storeId,
+        catalogName: databaseCatalogName.trim() || undefined,
+        schemaName: databaseSchemaName.trim() || undefined,
+        search: databaseBrowseSearch.trim(),
+        includeViews: databaseIncludeViews,
+        limit: 500,
+      })
+      setDatabaseBrowse(response)
+      if (!response.accepted) {
+        addToast(response.issues[0]?.message ?? 'Database browsing failed', 'error')
+      } else if (response.truncated) {
+        addToast(response.issues[0]?.message ?? 'Database results were truncated', 'info')
+      }
+    } catch (error: any) {
+      addToast(`Database browsing failed: ${error.message}`, 'error')
+    } finally {
+      setDatabaseBrowseBusy(false)
+    }
+  }
+
   const stageSelectedDatabaseColumns = () => {
+    if (
+      !databaseInspectionMergeAllowed ||
+      databaseInspection?.existingEntityQualifiedName !== existingEntity?.qualifiedName
+    ) {
+      addToast('Import is locked because this is not the selected entity’s exact mapped table', 'error')
+      return
+    }
     const columns = databaseInspection?.table?.columns ?? []
     const selected = columns.filter(column => databaseColumnDrafts[column.name]?.selected)
     if (!selected.length) {
@@ -1513,20 +1565,21 @@ export default function EntityDesigner() {
               <div className="flex flex-wrap justify-end gap-2">
                 {existingEntity && (
                   <>
-                    <input
-                      value={databaseSchemaName}
-                      onChange={event => setDatabaseSchemaName(event.target.value)}
-                      placeholder="DB schema (optional)"
-                      aria-label="Database schema"
-                      className="w-32 min-w-0 text-xs sm:w-40"
-                    />
                     <button
                       type="button"
-                      onClick={inspectMappedDatabaseTable}
-                      disabled={databaseInspectBusy || !entity.generationTarget?.storeId}
+                      onClick={browseDatabaseTables}
+                      disabled={databaseBrowseBusy || databaseInspectBusy || !entity.generationTarget?.storeId}
                       className="rounded border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200 transition-colors hover:bg-cyan-500/20 disabled:opacity-50"
                     >
-                      {databaseInspectBusy ? 'Inspecting database…' : '↻ Import missing DB columns'}
+                      {databaseBrowseBusy ? 'Browsing database…' : '⌕ Browse live database'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => inspectDatabaseTable()}
+                      disabled={databaseInspectBusy || databaseBrowseBusy || !entity.generationTarget?.storeId}
+                      className="rounded border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200 transition-colors hover:bg-cyan-500/20 disabled:opacity-50"
+                    >
+                      {databaseInspectBusy ? 'Comparing database…' : '↻ Compare mapped table'}
                     </button>
                     <button
                       type="button"
@@ -1558,10 +1611,32 @@ export default function EntityDesigner() {
             )}
           </div>
 
+          {(databaseBrowseBusy || databaseBrowse) && (
+            <DatabaseBrowsePanel
+              busy={databaseBrowseBusy}
+              browse={databaseBrowse}
+              catalogName={databaseCatalogName}
+              schemaName={databaseSchemaName}
+              search={databaseBrowseSearch}
+              includeViews={databaseIncludeViews}
+              mappedTableName={existingEntity?.tableName ?? entity.tableName}
+              mappedTableSchema={existingEntity?.tableSchema}
+              mappedTableCatalog={existingEntity?.tableCatalog}
+              onCatalogChange={setDatabaseCatalogName}
+              onSchemaChange={setDatabaseSchemaName}
+              onSearchChange={setDatabaseBrowseSearch}
+              onIncludeViewsChange={setDatabaseIncludeViews}
+              onRefresh={browseDatabaseTables}
+              onInspect={inspectDatabaseTable}
+              onClose={() => setDatabaseBrowse(null)}
+            />
+          )}
+
           {(databaseInspectBusy || databaseInspection) && (
             <DatabaseInspectionPanel
               busy={databaseInspectBusy}
               inspection={databaseInspection}
+              mergeAllowed={databaseInspectionMergeAllowed}
               drafts={databaseColumnDrafts}
               onDraftChange={(columnName, change) => setDatabaseColumnDrafts(current => ({
                 ...current,
@@ -2989,9 +3064,255 @@ function AttributeDetail({
   )
 }
 
+function DatabaseBrowsePanel({
+  busy,
+  browse,
+  catalogName,
+  schemaName,
+  search,
+  includeViews,
+  mappedTableName,
+  mappedTableSchema,
+  mappedTableCatalog,
+  onCatalogChange,
+  onSchemaChange,
+  onSearchChange,
+  onIncludeViewsChange,
+  onRefresh,
+  onInspect,
+  onClose,
+}: {
+  busy: boolean
+  browse: DatabaseEntityTableBrowseResponse | null
+  catalogName: string
+  schemaName: string
+  search: string
+  includeViews: boolean
+  mappedTableName: string
+  mappedTableSchema?: string
+  mappedTableCatalog?: string
+  onCatalogChange: (value: string) => void
+  onSchemaChange: (value: string) => void
+  onSearchChange: (value: string) => void
+  onIncludeViewsChange: (value: boolean) => void
+  onRefresh: () => void
+  onInspect: (table: DatabaseTableReference) => void
+  onClose: () => void
+}) {
+  if (busy && !browse) {
+    return (
+      <section className="mb-4 min-w-0 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-cyan-300" />
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-cyan-100">Browsing database metadata</div>
+            <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+              Catalogs, schemas, tables, and views are read through the project’s JDBC driver.
+              Credentials and connection URLs stay inside IntelliJ.
+            </p>
+          </div>
+        </div>
+      </section>
+    )
+  }
+  if (!browse) return null
+  if (!browse.accepted) {
+    return (
+      <section className="mb-4 min-w-0 rounded-xl border border-red-500/25 bg-red-500/5 p-4">
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-red-200">Database browser could not connect</div>
+            <ul className="mt-2 space-y-1 text-[10px] leading-relaxed text-red-100/70">
+              {browse.issues.map(issue => (
+                <li className="break-words" key={`${issue.code}-${issue.message}`}>{issue.message}</li>
+              ))}
+            </ul>
+          </div>
+          <button type="button" onClick={onClose} className="shrink-0 text-xs text-gray-500 hover:text-gray-200">✕</button>
+        </div>
+      </section>
+    )
+  }
+  const schemaOptions = browse.schemas.filter(schema =>
+    !catalogName ||
+    !schema.catalog ||
+    schema.catalog.toLowerCase() === catalogName.toLowerCase(),
+  )
+  const mappedName = mappedTableName.split('.').pop()?.toLowerCase()
+  const tableCount = browse.tables.filter(table => table.type.toUpperCase() !== 'VIEW').length
+  const viewCount = browse.tables.length - tableCount
+  return (
+    <section className="mb-4 min-w-0 overflow-hidden rounded-xl border border-cyan-500/25 bg-gradient-to-br from-cyan-500/[0.08] to-surface">
+      <div className="relative min-w-0 border-b border-cyan-500/15 p-3 pr-10 sm:p-4 sm:pr-12">
+        <div className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-cyan-100">Live database browser</span>
+            <span className="max-w-full truncate rounded bg-surface-lighter px-2 py-0.5 text-[9px] text-gray-400">
+              {browse.database?.name} {browse.database?.version}
+            </span>
+            <span className="rounded bg-cyan-500/10 px-2 py-0.5 text-[9px] text-cyan-200/70">
+              {tableCount} tables · {viewCount} views
+            </span>
+          </div>
+          <p className="mt-2 max-w-4xl text-[10px] leading-relaxed text-gray-500">
+            Inspect any table safely. Attribute import unlocks only when the backend proves that the selected
+            catalog, schema, store, table, and entity mapping are the same target.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close database browser"
+          className="absolute right-3 top-3 rounded p-1 text-xs text-gray-500 hover:bg-white/5 hover:text-gray-200 sm:right-4 sm:top-4"
+        >
+          ✕
+        </button>
+      </div>
+
+      <div className="grid min-w-0 gap-2 border-b border-cyan-500/15 bg-black/10 p-3 sm:grid-cols-2 sm:p-4 2xl:grid-cols-[minmax(8rem,0.75fr)_minmax(8rem,0.75fr)_minmax(11rem,1.5fr)_auto_auto]">
+        <label className="min-w-0 text-[9px] uppercase tracking-wider text-gray-600">
+          Catalog
+          <select
+            value={catalogName}
+            onChange={event => {
+              onCatalogChange(event.target.value)
+              onSchemaChange('')
+            }}
+            className="mt-1 w-full min-w-0"
+          >
+            <option value="">Connection default</option>
+            {browse.catalogs.map(catalog => <option key={catalog} value={catalog}>{catalog}</option>)}
+          </select>
+        </label>
+        <label className="min-w-0 text-[9px] uppercase tracking-wider text-gray-600">
+          Schema
+          <select
+            value={schemaName}
+            onChange={event => onSchemaChange(event.target.value)}
+            className="mt-1 w-full min-w-0"
+          >
+            <option value="">All visible schemas</option>
+            {schemaOptions.map(schema => (
+              <option key={`${schema.catalog ?? ''}:${schema.name}`} value={schema.name}>
+                {schema.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="min-w-0 text-[9px] uppercase tracking-wider text-gray-600">
+          Find table or view
+          <input
+            value={search}
+            onChange={event => onSearchChange(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter') onRefresh()
+            }}
+            placeholder="LOAN, EMPLOYEE, LEDGER…"
+            className="mt-1 w-full min-w-0"
+          />
+        </label>
+        <label className="flex min-w-0 items-center gap-2 self-end rounded border border-surface-border px-3 py-2 text-[10px] text-gray-400">
+          <input
+            type="checkbox"
+            checked={includeViews}
+            onChange={event => onIncludeViewsChange(event.target.checked)}
+          />
+          Include views
+        </label>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={busy}
+          className="self-end rounded bg-cyan-600 px-3 py-2 text-[10px] font-medium text-white hover:bg-cyan-500 disabled:opacity-50 sm:col-span-2 2xl:col-span-1"
+        >
+          {busy ? 'Refreshing…' : 'Apply filters'}
+        </button>
+      </div>
+
+      {browse.issues.length > 0 && (
+        <div className="border-b border-amber-500/15 bg-amber-500/5 px-3 py-2 sm:px-4">
+          {browse.issues.map(issue => (
+            <div key={`${issue.code}-${issue.message}`} className="break-words text-[10px] text-amber-200/75">
+              {issue.message}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {browse.tables.length ? (
+        <div className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 sm:p-4 2xl:grid-cols-3">
+          {browse.tables.map(table => {
+            const nameMatches = table.name.toLowerCase() === mappedName
+            const explicitSchemaMatches = !mappedTableSchema ||
+              table.schema?.toLowerCase() === mappedTableSchema.toLowerCase()
+            const explicitCatalogMatches = !mappedTableCatalog ||
+              table.catalog?.toLowerCase() === mappedTableCatalog.toLowerCase()
+            const mappedCandidate = nameMatches && explicitSchemaMatches && explicitCatalogMatches
+            const qualifiedName = [table.catalog, table.schema, table.name].filter(Boolean).join('.')
+            return (
+              <article
+                key={`${table.catalog ?? ''}:${table.schema ?? ''}:${table.name}:${table.type}`}
+                className={`min-w-0 rounded-lg border p-3 ${
+                  mappedCandidate
+                    ? 'border-cyan-400/35 bg-cyan-500/[0.08]'
+                    : 'border-surface-border bg-surface/75'
+                }`}
+              >
+                <div className="flex min-w-0 items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <span className="max-w-full break-all font-mono text-[10px] text-gray-200" title={qualifiedName}>
+                        {table.name}
+                      </span>
+                      <DatabaseStatus
+                        label={table.type.toUpperCase() === 'VIEW' ? 'view' : 'table'}
+                        tone={table.type.toUpperCase() === 'VIEW' ? 'warning' : 'neutral'}
+                      />
+                      {mappedCandidate && <DatabaseStatus label="mapping candidate" tone="cyan" />}
+                    </div>
+                    <div className="mt-1 break-all font-mono text-[9px] text-gray-600">
+                      {[table.catalog, table.schema].filter(Boolean).join('.') || 'connection default'}
+                    </div>
+                  </div>
+                </div>
+                {table.remarks && (
+                  <p className="mt-2 line-clamp-2 break-words text-[9px] leading-relaxed text-gray-500">
+                    {table.remarks}
+                  </p>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onInspect(table)}
+                  disabled={busy}
+                  className="mt-3 w-full rounded border border-cyan-500/25 bg-cyan-500/10 px-2 py-1.5 text-[10px] text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-50"
+                >
+                  {mappedCandidate ? 'Compare and import safely' : 'Inspect metadata'}
+                </button>
+              </article>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="p-8 text-center">
+          <div className="text-xs text-gray-400">No matching tables or views</div>
+          <p className="mt-1 text-[10px] text-gray-600">Clear or narrow the catalog, schema, and search filters.</p>
+        </div>
+      )}
+
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-cyan-500/15 bg-black/10 px-3 py-2 text-[9px] text-gray-600 sm:px-4">
+        <span className="min-w-0 break-all">
+          Active catalog {browse.activeCatalog || 'driver default'} · URL fingerprint {browse.database?.urlFingerprint}
+        </span>
+        <span>{browse.schemas.length} schemas discovered</span>
+      </div>
+    </section>
+  )
+}
+
 function DatabaseInspectionPanel({
   busy,
   inspection,
+  mergeAllowed,
   drafts,
   onDraftChange,
   onClose,
@@ -2999,6 +3320,7 @@ function DatabaseInspectionPanel({
 }: {
   busy: boolean
   inspection: DatabaseEntityTableInspectionResponse | null
+  mergeAllowed: boolean
   drafts: Record<string, DatabaseColumnDraft>
   onDraftChange: (columnName: string, change: Partial<DatabaseColumnDraft>) => void
   onClose: () => void
@@ -3040,10 +3362,12 @@ function DatabaseInspectionPanel({
   const missingCount = table.columns.filter(column => !column.alreadyMapped && !column.primaryKey).length
   return (
     <section className="mb-4 overflow-hidden rounded-xl border border-cyan-500/25 bg-gradient-to-br from-cyan-500/[0.08] to-surface">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-cyan-500/15 p-3 sm:p-4">
+      <div className="relative min-w-0 border-b border-cyan-500/15 p-3 pr-10 sm:p-4 sm:pr-12">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold text-cyan-100">Database → existing entity</span>
+            <span className="text-xs font-semibold text-cyan-100">
+              {mergeAllowed ? 'Database → existing entity' : 'Read-only database inspection'}
+            </span>
             <span className="rounded bg-cyan-500/15 px-2 py-0.5 font-mono text-[9px] text-cyan-200">
               {qualifiedDatabaseTable(inspection)}
             </span>
@@ -3057,8 +3381,24 @@ function DatabaseInspectionPanel({
             source and Liquibase edit before atomic apply.
           </p>
         </div>
-        <button type="button" onClick={onClose} className="text-xs text-gray-500 hover:text-gray-200">✕</button>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close database inspection"
+          className="absolute right-3 top-3 rounded p-1 text-xs text-gray-500 hover:bg-white/5 hover:text-gray-200 sm:right-4 sm:top-4"
+        >
+          ✕
+        </button>
       </div>
+
+      {!mergeAllowed && (
+        <div className="border-b border-amber-500/20 bg-amber-500/[0.07] px-3 py-2 sm:px-4">
+          <div className="text-[10px] leading-relaxed text-amber-100/75">
+            Import is locked. The backend did not resolve this catalog/schema/table as the selected entity’s
+            exact mapping. You can inspect its types, keys, relationships, and indexes without changing source.
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-px bg-surface-border/60 sm:grid-cols-2 lg:grid-cols-4">
         {[
@@ -3089,7 +3429,7 @@ function DatabaseInspectionPanel({
           const draft = drafts[column.name]
           const locked = column.alreadyMapped || column.primaryKey || column.generated
           const unsupported = Boolean(column.suggestion.unsupportedReason)
-          const selectable = !locked
+          const selectable = mergeAllowed && !locked
           const availableTypes = ATTRIBUTE_TYPES.filter(type =>
             !['composition', 'embedded', 'enum', 'fileRef'].includes(type) &&
             (type !== 'association' || Boolean(column.suggestion.relatedEntity)),
@@ -3130,7 +3470,7 @@ function DatabaseInspectionPanel({
                   </div>
                 </div>
               </div>
-              {!locked && draft && (
+              {mergeAllowed && !locked && draft && (
                 <div className="mt-3 grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(7rem,0.8fr)]">
                   <label className="min-w-0 text-[9px] uppercase tracking-wider text-gray-600">
                     Property
@@ -3159,7 +3499,7 @@ function DatabaseInspectionPanel({
                   → {column.suggestion.relatedEntity}
                 </div>
               )}
-              {unsupported && !locked && (
+              {unsupported && mergeAllowed && !locked && (
                 <p className="mt-2 text-[9px] leading-relaxed text-amber-200/60">
                   {column.suggestion.unsupportedReason}
                 </p>
@@ -3178,11 +3518,13 @@ function DatabaseInspectionPanel({
         </div>
         <button
           type="button"
-          disabled={selectedCount === 0}
+          disabled={!mergeAllowed || selectedCount === 0}
           onClick={onStage}
           className="rounded bg-cyan-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
         >
-          Stage {selectedCount || ''} selected {selectedCount === 1 ? 'attribute' : 'attributes'}
+          {mergeAllowed
+            ? `Stage ${selectedCount || ''} selected ${selectedCount === 1 ? 'attribute' : 'attributes'}`
+            : 'Import locked for this table'}
         </button>
       </div>
     </section>

@@ -52,6 +52,7 @@ import org.jmixworkbench.services.EntityAttributePropagationInspectionRequest
 import org.jmixworkbench.services.EntityAttributePropagationInspectionResponse
 import org.jmixworkbench.services.EntityAttributePropagationService
 import org.jmixworkbench.services.DatabaseEntityTableInspectionRequest
+import org.jmixworkbench.services.DatabaseEntityTableBrowseRequest
 import org.jmixworkbench.services.DatabaseReverseEngineeringService
 import org.jmixworkbench.services.ApplicationGraphService
 import org.jmixworkbench.services.FlowUiPropertyChangeRequest
@@ -374,6 +375,10 @@ class JcefBridge(
             }
             if (action == "inspectDatabaseEntityTable") {
                 handleInspectDatabaseEntityTable(action, requestId, payload)
+                return
+            }
+            if (action == "browseDatabaseEntityTables") {
+                handleBrowseDatabaseEntityTables(action, requestId, payload)
                 return
             }
             if (action == "inspectEntityAttributePropagation") {
@@ -1614,6 +1619,9 @@ class JcefBridge(
                 storeId = payload.get("storeId")?.asString.orEmpty(),
                 tableName = payload.get("tableName")?.asString.orEmpty(),
                 schemaName = payload.get("schemaName")?.takeUnless { it.isJsonNull }?.asString,
+                catalogName = payload.get("catalogName")?.takeUnless { it.isJsonNull }?.asString,
+                expectedEntityQualifiedName = payload.get("expectedEntityQualifiedName")
+                    ?.takeUnless { it.isJsonNull }?.asString,
                 connectTimeoutSeconds = payload.get("connectTimeoutSeconds")?.asInt ?: 10,
                 networkTimeoutSeconds = payload.get("networkTimeoutSeconds")?.asInt ?: 30,
             )
@@ -1633,6 +1641,46 @@ class JcefBridge(
         AppExecutorUtil.getAppExecutorService().submit {
             val response = DatabaseReverseEngineeringService.getInstance(project)
                 .inspectEntityTable(request)
+            ApplicationManager.getApplication().invokeLater({
+                if (!project.isDisposed) {
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+            }, ModalityState.any())
+        }
+    }
+
+    private fun handleBrowseDatabaseEntityTables(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            DatabaseEntityTableBrowseRequest(
+                storeId = payload.get("storeId")?.asString.orEmpty(),
+                catalogName = payload.get("catalogName")?.takeUnless { it.isJsonNull }?.asString,
+                schemaName = payload.get("schemaName")?.takeUnless { it.isJsonNull }?.asString,
+                search = payload.get("search")?.asString.orEmpty(),
+                includeViews = payload.get("includeViews")?.asBoolean ?: true,
+                limit = payload.get("limit")?.asInt ?: 500,
+                connectTimeoutSeconds = payload.get("connectTimeoutSeconds")?.asInt ?: 10,
+                networkTimeoutSeconds = payload.get("networkTimeoutSeconds")?.asInt ?: 30,
+            )
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    org.jmixworkbench.services.DatabaseEntityTableBrowseResponse.failure(
+                        "JVW-DB-BROWSE-REQUEST-INVALID",
+                        error.message ?: "The database browse request is malformed.",
+                    ),
+                ),
+            )
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().submit {
+            val response = DatabaseReverseEngineeringService.getInstance(project)
+                .browseEntityTables(request)
             ApplicationManager.getApplication().invokeLater({
                 if (!project.isDisposed) {
                     sendResponse(action, requestId, gson.toJson(response))

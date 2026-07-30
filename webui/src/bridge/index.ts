@@ -12,6 +12,8 @@ import type {
   ExistingEntityAttributeAdditionRequest,
   DatabaseEntityTableInspectionRequest,
   DatabaseEntityTableInspectionResponse,
+  DatabaseEntityTableBrowseRequest,
+  DatabaseEntityTableBrowseResponse,
   DatabaseColumnSnapshot,
   EntityAttributePropagationChangeRequest,
   EntityAttributePropagationInspectionRequest,
@@ -869,7 +871,12 @@ class ${scenario.className} {
                   accepted: true,
                   snapshotDigest: 'development-loan-app-database-snapshot',
                   storeId: payload.storeId,
-                  existingEntityQualifiedName: 'com.company.loan.entity.LoanApp',
+                  existingEntityQualifiedName:
+                    payload.expectedEntityQualifiedName === 'com.company.loan.entity.LoanApp' &&
+                    (payload.tableName || '').toUpperCase() === 'LOAN_LOAN_APP' &&
+                    (payload.schemaName || 'public').toLowerCase() === 'public'
+                      ? 'com.company.loan.entity.LoanApp'
+                      : undefined,
                   database: {
                     name: 'PostgreSQL',
                     version: '17.2',
@@ -878,8 +885,9 @@ class ${scenario.className} {
                     urlFingerprint: '0a17f0a17f0a17f0',
                   },
                   table: {
+                    catalog: payload.catalogName || 'payroll',
                     schema: payload.schemaName || 'public',
-                    name: payload.tableName || 'LOAN_APP',
+                    name: payload.tableName || 'LOAN_LOAN_APP',
                     type: 'TABLE',
                     primaryKeyColumns: ['ID'],
                     dependencyTables: ['EMPLOYEE', 'LOAN_CATEGORY'],
@@ -1017,6 +1025,54 @@ class ${scenario.className} {
                   changeSetId: 'entity-attribute-propagation:development',
                   planDigest: payload.expectedPlanDigest,
                   filesChanged: ['loan/src/main/resources/com/company/loan/entity/messages.properties'],
+                  issues: [],
+                }
+              case 'browseDatabaseEntityTables':
+                return {
+                  accepted: true,
+                  storeId: payload.storeId,
+                  database: {
+                    name: 'PostgreSQL',
+                    version: '17',
+                    driverName: 'PostgreSQL JDBC Driver',
+                    driverVersion: '42.7',
+                    urlFingerprint: 'development-db',
+                  },
+                  activeCatalog: 'payroll',
+                  catalogs: ['payroll'],
+                  schemas: [
+                    { catalog: 'payroll', name: 'public' },
+                    { catalog: 'payroll', name: 'audit' },
+                  ],
+                  tables: [
+                    {
+                      catalog: 'payroll',
+                      schema: 'public',
+                      name: 'LOAN_LOAN_APP',
+                      type: 'TABLE',
+                      remarks: 'Loan applications',
+                    },
+                    {
+                      catalog: 'payroll',
+                      schema: 'public',
+                      name: 'LOAN_ACCT',
+                      type: 'TABLE',
+                      remarks: 'Loan accounts',
+                    },
+                    {
+                      catalog: 'payroll',
+                      schema: 'audit',
+                      name: 'V_LOAN_EXPOSURE',
+                      type: 'VIEW',
+                      remarks: 'Current loan exposure',
+                    },
+                  ].filter(table =>
+                    (!payload.schemaName || table.schema === payload.schemaName) &&
+                    (!payload.search || table.name.toLowerCase().includes(
+                      String(payload.search).toLowerCase(),
+                    )),
+                  ),
+                  truncated: false,
                   issues: [],
                 }
               case 'previewCrudGeneration': {
@@ -1735,6 +1791,13 @@ class ${scenario.className} {
   inspectDatabaseEntityTable(request: DatabaseEntityTableInspectionRequest) {
     return this.request<DatabaseEntityTableInspectionResponse>(
       'inspectDatabaseEntityTable',
+      request,
+    )
+  }
+
+  browseDatabaseEntityTables(request: DatabaseEntityTableBrowseRequest) {
+    return this.request<DatabaseEntityTableBrowseResponse>(
+      'browseDatabaseEntityTables',
       request,
     )
   }

@@ -208,6 +208,10 @@ class SchemaWorkspaceService(
                         ?.takeIf(String::isNotBlank)
                         ?: entity.displayName,
                     tableName = tableName,
+                    tableSchema = TABLE_SCHEMA_ANNOTATION.find(source)
+                        ?.groupValues?.get(1)?.takeIf(String::isNotBlank),
+                    tableCatalog = TABLE_CATALOG_ANNOTATION.find(source)
+                        ?.groupValues?.get(1)?.takeIf(String::isNotBlank),
                     storeName = storeName,
                     idType = idMapping.first,
                     idColumnName = idMapping.second,
@@ -1606,7 +1610,15 @@ class SchemaWorkspaceService(
     companion object {
         private const val ORACLE_IDENTIFIER_LIMIT = 30
         private val SAFE_FILE_NAME = Regex("""[A-Za-z0-9][A-Za-z0-9._-]*""")
-        private val TABLE_ANNOTATION = Regex("""(?s)@Table\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
+        private val TABLE_ANNOTATION = Regex(
+            """(?s)@(?:[\w.]+\.)?Table\s*\([^)]*?\bname\s*=\s*"([^"]+)"""",
+        )
+        private val TABLE_SCHEMA_ANNOTATION = Regex(
+            """(?s)@(?:[\w.]+\.)?Table\s*\([^)]*?\bschema\s*=\s*"([^"]+)"""",
+        )
+        private val TABLE_CATALOG_ANNOTATION = Regex(
+            """(?s)@(?:[\w.]+\.)?Table\s*\([^)]*?\bcatalog\s*=\s*"([^"]+)"""",
+        )
         private val ENTITY_ANNOTATION = Regex("""(?s)@Entity\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
         private val COLUMN_ANNOTATION = Regex("""@Column\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
         private val JAVA_FIELD_DECLARATION = Regex(
@@ -1778,6 +1790,8 @@ data class SchemaEntitySnapshot(
     val attributes: List<SchemaEntityAttributeSnapshot>,
     val migrationCoverage: SchemaMigrationCoverage,
     val migrationArtifactIds: List<String>,
+    val tableSchema: String? = null,
+    val tableCatalog: String? = null,
 )
 
 data class SchemaEntityAttributeSnapshot(

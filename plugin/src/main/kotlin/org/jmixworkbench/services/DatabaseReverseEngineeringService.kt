@@ -37,7 +37,17 @@ class DatabaseReverseEngineeringService(
         request: DatabaseEntityTableInspectionRequest,
     ): DatabaseEntityTableInspectionResponse {
         val tableName = request.tableName.trim()
-        if (tableName.isBlank() || tableName.length > MAX_IDENTIFIER_LENGTH) {
+        if (
+            tableName.isBlank() ||
+            tableName.length > MAX_IDENTIFIER_LENGTH ||
+            tableName.any { it.isISOControl() } ||
+            request.catalogName?.let(::invalidMetadataName) == true ||
+            request.schemaName?.let(::invalidMetadataName) == true ||
+            request.expectedEntityQualifiedName?.let {
+                it.length > MAX_QUALIFIED_NAME_LENGTH ||
+                    !QUALIFIED_JVM_NAME.matches(it)
+            } == true
+        ) {
             return DatabaseEntityTableInspectionResponse.failure(
                 "JVW-DB-TABLE-NAME-INVALID",
                 "Enter a valid database table or view name.",
@@ -59,6 +69,32 @@ class DatabaseReverseEngineeringService(
         return result.value ?: DatabaseEntityTableInspectionResponse.failure(
             result.issue?.code ?: "JVW-DB-INSPECTION-FAILED",
             result.issue?.message ?: "Database inspection failed.",
+        )
+    }
+
+    fun browseEntityTables(
+        request: DatabaseEntityTableBrowseRequest,
+    ): DatabaseEntityTableBrowseResponse {
+        if (
+            request.catalogName?.let(::invalidMetadataName) == true ||
+            request.schemaName?.let(::invalidMetadataName) == true ||
+            request.search.length > MAX_SEARCH_LENGTH
+        ) {
+            return DatabaseEntityTableBrowseResponse.failure(
+                "JVW-DB-BROWSE-FILTER-INVALID",
+                "Catalog, schema, and search filters must be concise database metadata names.",
+            )
+        }
+        val result = withReadOnlyConnection(
+            storeId = request.storeId,
+            connectTimeoutSeconds = request.connectTimeoutSeconds,
+            networkTimeoutSeconds = request.networkTimeoutSeconds,
+        ) { connection, context ->
+            browseConnected(connection, context.configuration, request)
+        }
+        return result.value ?: DatabaseEntityTableBrowseResponse.failure(
+            result.issue?.code ?: "JVW-DB-BROWSE-FAILED",
+            result.issue?.message ?: "Database schema browsing failed.",
         )
     }
 
@@ -90,7 +126,7 @@ class DatabaseReverseEngineeringService(
         val metadata = connection.metaData
         val matchedTables = findTables(
             metadata,
-            connection.catalog,
+            request.catalogName?.trim()?.takeIf(String::isNotBlank) ?: connection.catalog,
             request.schemaName?.trim()?.takeIf(String::isNotBlank),
             request.tableName.trim(),
         )
@@ -115,10 +151,14 @@ class DatabaseReverseEngineeringService(
         val primaryKeys = readPrimaryKeys(metadata, table)
         val foreignKeys = readForeignKeys(metadata, table)
         val indexes = readIndexes(metadata, table)
-        val existing = workspace.entities.firstOrNull {
-            it.storeName == store.name &&
-                it.tableName.equals(table.name, ignoreCase = true)
-        }
+        val existing = resolveMappedEntity(
+            workspace = workspace,
+            store = store,
+            table = table,
+            defaultCatalog = connection.catalog,
+            defaultSchema = runCatching { connection.schema }.getOrNull(),
+            expectedQualifiedName = request.expectedEntityQualifiedName,
+        )
         val mappedColumns = existing?.attributes
             .orEmpty()
             .map { it.columnName.uppercase(Locale.ROOT) }
@@ -211,6 +251,152 @@ class DatabaseReverseEngineeringService(
             existingEntityQualifiedName = existing?.qualifiedName,
             issues = warnings,
         )
+    }
+
+    private fun browseConnected(
+        connection: Connection,
+        configuration: DatabaseConnectionConfiguration,
+        request: DatabaseEntityTableBrowseRequest,
+    ): DatabaseEntityTableBrowseResponse {
+        val metadata = connection.metaData
+        val requestedCatalog = request.catalogName?.trim()?.takeIf(String::isNotBlank)
+        val effectiveCatalog = requestedCatalog ?: connection.catalog
+        val catalogs = linkedSetOf<String>()
+        connection.catalog?.takeIf(String::isNotBlank)?.let(catalogs::add)
+        runCatching {
+            metadata.catalogs.use { rows ->
+                while (rows.next() && catalogs.size < MAX_METADATA_NAMES) {
+                    rows.stringOrNull("TABLE_CAT")?.let(catalogs::add)
+                }
+            }
+        }
+        val schemas = linkedSetOf<DatabaseSchemaReference>()
+        runCatching {
+            metadata.schemas.use { rows ->
+                while (rows.next() && schemas.size < MAX_METADATA_NAMES) {
+                    val name = rows.stringOrNull("TABLE_SCHEM") ?: continue
+                    val catalog = rows.stringOrNull("TABLE_CATALOG")
+                    if (
+                        effectiveCatalog == null ||
+                        catalog == null ||
+                        catalog.equals(effectiveCatalog, ignoreCase = true)
+                    ) {
+                        schemas += DatabaseSchemaReference(catalog, name)
+                    }
+                }
+            }
+        }
+        val schemaPatterns = request.schemaName
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?.let {
+                linkedSetOf(
+                    it,
+                    it.uppercase(Locale.ROOT),
+                    it.lowercase(Locale.ROOT),
+                ).toList()
+            }
+            ?: listOf(null)
+        val search = request.search.trim()
+        val types = if (request.includeViews) {
+            arrayOf("TABLE", "VIEW")
+        } else {
+            arrayOf("TABLE")
+        }
+        val tables = linkedMapOf<String, DatabaseTableReference>()
+        var truncated = false
+        schemaPatterns.forEach { schemaPattern ->
+            if (truncated) return@forEach
+            metadata.getTables(effectiveCatalog, schemaPattern, "%", types).use { rows ->
+                while (rows.next()) {
+                    val name = rows.stringOrNull("TABLE_NAME") ?: continue
+                    val schema = rows.stringOrNull("TABLE_SCHEM")
+                    if (
+                        request.schemaName?.isNotBlank() == true &&
+                        schema?.equals(request.schemaName.trim(), ignoreCase = true) != true
+                    ) {
+                        continue
+                    }
+                    if (
+                        search.isNotBlank() &&
+                        !name.contains(search, ignoreCase = true)
+                    ) {
+                        continue
+                    }
+                    val table = DatabaseTableReference(
+                        catalog = rows.stringOrNull("TABLE_CAT"),
+                        schema = schema,
+                        name = name,
+                        type = rows.stringOrNull("TABLE_TYPE").orEmpty().ifBlank { "TABLE" },
+                        remarks = rows.stringOrNull("REMARKS"),
+                    )
+                    val key = listOf(
+                        table.catalog.orEmpty(),
+                        table.schema.orEmpty(),
+                        table.name,
+                        table.type,
+                    ).joinToString("\u0000").uppercase(Locale.ROOT)
+                    tables.putIfAbsent(key, table)
+                    if (tables.size > request.limit.coerceIn(1, MAX_BROWSE_TABLES)) {
+                        truncated = true
+                        break
+                    }
+                }
+            }
+        }
+        val limit = request.limit.coerceIn(1, MAX_BROWSE_TABLES)
+        return DatabaseEntityTableBrowseResponse(
+            accepted = true,
+            storeId = request.storeId,
+            database = databaseProduct(metadata, configuration),
+            activeCatalog = effectiveCatalog,
+            catalogs = catalogs.sortedWith(String.CASE_INSENSITIVE_ORDER),
+            schemas = schemas.sortedWith(
+                compareBy<DatabaseSchemaReference> { it.catalog.orEmpty().lowercase(Locale.ROOT) }
+                    .thenBy { it.name.lowercase(Locale.ROOT) },
+            ),
+            tables = tables.values
+                .sortedWith(
+                    compareBy<DatabaseTableReference> { it.schema.orEmpty().lowercase(Locale.ROOT) }
+                        .thenBy { it.type }
+                        .thenBy { it.name.lowercase(Locale.ROOT) },
+                )
+                .take(limit),
+            truncated = truncated,
+            issues = if (truncated) {
+                listOf(
+                    WorkspaceChangeIssue(
+                        "JVW-DB-BROWSE-TRUNCATED",
+                        "More than $limit matching tables/views exist. Narrow the catalog, schema, or search filter.",
+                    ),
+                )
+            } else {
+                emptyList()
+            },
+        )
+    }
+
+    private fun resolveMappedEntity(
+        workspace: SchemaWorkspaceResponse,
+        store: SchemaDataStoreSnapshot,
+        table: DatabaseTableSnapshot,
+        defaultCatalog: String?,
+        defaultSchema: String?,
+        expectedQualifiedName: String?,
+    ): SchemaEntitySnapshot? {
+        val candidates = workspace.entities.asSequence()
+            .filter { it.storeName == store.name }
+            .filter {
+                expectedQualifiedName.isNullOrBlank() ||
+                    it.qualifiedName == expectedQualifiedName
+            }
+            .filter { entity ->
+                entity.tableName.equals(table.name, ignoreCase = true) &&
+                    databaseQualifierMatches(entity.tableSchema, table.schema, defaultSchema) &&
+                    databaseQualifierMatches(entity.tableCatalog, table.catalog, defaultCatalog)
+            }
+            .toList()
+        return candidates.singleOrNull()
     }
 
     private fun verifyConnectedExpansion(
@@ -721,15 +907,40 @@ class DatabaseReverseEngineeringService(
         else -> null
     }
 
+    private fun databaseQualifierMatches(
+        configured: String?,
+        discovered: String?,
+        connectionDefault: String?,
+    ): Boolean {
+        val explicit = configured?.trim()?.takeIf(String::isNotBlank)
+        if (explicit != null) {
+            return discovered?.equals(explicit, ignoreCase = true) == true
+        }
+        val connectionQualifier = connectionDefault?.trim()?.takeIf(String::isNotBlank)
+            ?: return true
+        return discovered == null || discovered.equals(connectionQualifier, ignoreCase = true)
+    }
+
     companion object {
         private const val MAX_IDENTIFIER_LENGTH = 256
+        private const val MAX_QUALIFIED_NAME_LENGTH = 1_024
+        private const val MAX_SEARCH_LENGTH = 120
+        private const val MAX_METADATA_NAMES = 500
+        private const val MAX_BROWSE_TABLES = 1_000
         private const val MAX_PLACEHOLDER_DEPTH = 12
         private val PORTABLE_IDENTIFIER = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
+        private val QUALIFIED_JVM_NAME =
+            Regex("""[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
         private val PROFILE_FILE =
             Regex("""^application-([A-Za-z0-9_.-]+)\.(?:properties|ya?ml)$""")
         private val PLACEHOLDER = Regex("""\$\{([^{}]+)}""")
         fun getInstance(project: Project): DatabaseReverseEngineeringService =
             project.getService(DatabaseReverseEngineeringService::class.java)
+
+        private fun invalidMetadataName(value: String): Boolean =
+            value.isBlank() ||
+                value.length > MAX_IDENTIFIER_LENGTH ||
+                value.any { it.isISOControl() }
     }
 }
 
@@ -821,8 +1032,61 @@ data class DatabaseEntityTableInspectionRequest(
     val storeId: String,
     val tableName: String,
     val schemaName: String? = null,
+    val catalogName: String? = null,
+    val expectedEntityQualifiedName: String? = null,
     val connectTimeoutSeconds: Int = 10,
     val networkTimeoutSeconds: Int = 30,
+)
+
+data class DatabaseEntityTableBrowseRequest(
+    val storeId: String,
+    val catalogName: String? = null,
+    val schemaName: String? = null,
+    val search: String = "",
+    val includeViews: Boolean = true,
+    val limit: Int = 500,
+    val connectTimeoutSeconds: Int = 10,
+    val networkTimeoutSeconds: Int = 30,
+)
+
+data class DatabaseEntityTableBrowseResponse(
+    val accepted: Boolean,
+    val storeId: String?,
+    val database: DatabaseProductSnapshot?,
+    val activeCatalog: String?,
+    val catalogs: List<String>,
+    val schemas: List<DatabaseSchemaReference>,
+    val tables: List<DatabaseTableReference>,
+    val truncated: Boolean,
+    val issues: List<WorkspaceChangeIssue>,
+) {
+    companion object {
+        fun failure(code: String, message: String) =
+            DatabaseEntityTableBrowseResponse(
+                accepted = false,
+                storeId = null,
+                database = null,
+                activeCatalog = null,
+                catalogs = emptyList(),
+                schemas = emptyList(),
+                tables = emptyList(),
+                truncated = false,
+                issues = listOf(WorkspaceChangeIssue(code, message)),
+            )
+    }
+}
+
+data class DatabaseSchemaReference(
+    val catalog: String?,
+    val name: String,
+)
+
+data class DatabaseTableReference(
+    val catalog: String?,
+    val schema: String?,
+    val name: String,
+    val type: String,
+    val remarks: String?,
 )
 
 data class DatabaseEntityTableInspectionResponse(
