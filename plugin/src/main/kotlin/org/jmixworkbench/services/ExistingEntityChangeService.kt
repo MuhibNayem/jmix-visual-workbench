@@ -973,12 +973,12 @@ class ExistingEntityChangeService(
         metadataChanges.forEach { change ->
             val current = change.current
             val desired = change.desired
-            val oldType = if (change.relationshipColumnRenamed) {
+            val oldType = if (current.association) {
                 idColumnType(requireNotNull(current.associationDetails).relatedIdType, dbType)
             } else {
                 columnType(current, dbType)
             }
-            val newType = if (change.relationshipColumnRenamed) oldType else columnType(desired, dbType)
+            val newType = if (current.association) oldType else columnType(desired, dbType)
             val columnName = change.desiredColumnName
             if (change.columnRenamed) {
                 preConditions += PreCondition(
@@ -1152,8 +1152,18 @@ class ExistingEntityChangeService(
                 "JVW-ENTITY-RELATIONSHIP-MAPPING-MISSING",
                 "${current.name} is an existing relationship and must retain its explicit association mapping.",
             )
+        val owningToOneNarrowing =
+            source.associationType == AssociationType.MANY_TO_ONE &&
+                target.associationType == AssociationType.ONE_TO_ONE &&
+                !source.crossDataStore &&
+                source.mappedBy.isNullOrBlank() &&
+                target.mappedBy.isNullOrBlank() &&
+                source.joinColumnName != null &&
+                source.joinColumnName == current.columnName &&
+                desiredPhysicalColumnName(desired) == current.columnName &&
+                desired.unique
         val immutableShapeChanged =
-            source.associationType != target.associationType ||
+            (source.associationType != target.associationType && !owningToOneNarrowing) ||
                 source.relatedEntity != target.relatedEntity ||
                 source.relatedTableName != target.relatedTableName ||
                 source.relatedIdColumnName != target.relatedIdColumnName ||
@@ -1165,11 +1175,40 @@ class ExistingEntityChangeService(
                 source.crossDataStore != target.crossDataStore ||
                 desired.mandatory != !current.nullable ||
                 desired.unique != current.unique
-        if (immutableShapeChanged) {
+        val onlySafeUniquenessUpgrade =
+            owningToOneNarrowing &&
+                desired.mandatory == !current.nullable &&
+                (!current.unique && desired.unique)
+        val shapeOrConstraintChangeAllowed =
+            owningToOneNarrowing &&
+                desired.mandatory == !current.nullable &&
+                (current.unique || onlySafeUniquenessUpgrade)
+        if (immutableShapeChanged && !shapeOrConstraintChangeAllowed) {
             return WorkspaceChangeIssue(
                 "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT",
                 "${current.name} changes relationship cardinality, target, ownership, constraints, collection type, " +
                     "or cross-store semantics. Use the structural relationship choreography workflow.",
+            )
+        }
+        if (source.associationType != target.associationType && !owningToOneNarrowing) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT",
+                "${current.name} changes relationship cardinality outside the checked owning many-to-one " +
+                    "to one-to-one upgrade.",
+            )
+        }
+        if (
+            owningToOneNarrowing &&
+            !current.unique &&
+            (
+                entity.databaseView ||
+                    entity.ddlGeneration.effectiveMode == DdlGenerationMode.DISABLED
+                )
+        ) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-UNIQUENESS-DDL-REQUIRED",
+                "${current.name} needs a guarded unique constraint before it can become one-to-one. " +
+                    "DDL generation is disabled or the entity maps a database view.",
             )
         }
         if (source.crossDataStore && relationshipSourceMetadataChanged(current, desired)) {
@@ -1405,7 +1444,8 @@ class ExistingEntityChangeService(
     ): Boolean {
         val source = current.associationDetails ?: return false
         val target = desired.association ?: return true
-        return source.composition != (desired.type == AttributeType.COMPOSITION) ||
+        return source.associationType != target.associationType ||
+            source.composition != (desired.type == AttributeType.COMPOSITION) ||
             source.cascade != target.cascade ||
             source.fetch != target.fetch ||
             source.orphanRemoval != target.orphanRemoval ||
@@ -1585,6 +1625,12 @@ class ExistingEntityChangeService(
             AssociationType.ONE_TO_ONE -> "OneToOne"
         }
         if (relationshipAnnotation.name != expectedRelationshipName) return null
+        val desiredRelationshipName = when (target.associationType) {
+            AssociationType.MANY_TO_ONE -> "ManyToOne"
+            AssociationType.ONE_TO_MANY -> "OneToMany"
+            AssociationType.MANY_TO_MANY -> "ManyToMany"
+            AssociationType.ONE_TO_ONE -> "OneToOne"
+        }
 
         val argumentsText = relationshipAnnotation.text
             .substringAfter('(', "")
@@ -1618,7 +1664,14 @@ class ExistingEntityChangeService(
             managedArguments += "orphanRemoval = true"
         }
         val relationArguments = preservedArguments + managedArguments
-        val relationshipPrefix = relationshipAnnotation.text.substringBefore('(').trim()
+        val existingPrefix = relationshipAnnotation.text.substringBefore('(').trim()
+        val relationshipPrefix = if (desiredRelationshipName == expectedRelationshipName) {
+            existingPrefix
+        } else if ('.' in existingPrefix) {
+            existingPrefix.substringBeforeLast('.') + ".$desiredRelationshipName"
+        } else {
+            "@$desiredRelationshipName"
+        }
         val relationshipReplacement = if (relationArguments.isEmpty()) {
             relationshipPrefix
         } else {
@@ -1635,6 +1688,9 @@ class ExistingEntityChangeService(
             )
         }
         if (target.cascade.isNotEmpty()) imports += "jakarta.persistence.CascadeType"
+        if (desiredRelationshipName != expectedRelationshipName) {
+            imports += "jakarta.persistence.$desiredRelationshipName"
+        }
         if (existingFetchExplicit || target.fetch != defaultFetch) {
             imports += "jakarta.persistence.FetchType"
         }
@@ -1751,7 +1807,7 @@ class ExistingEntityChangeService(
             edits += relationshipMetadata.edits
             imports += relationshipMetadata.imports
             if (!change.physicalMappingChanged) return@forEach
-            val managedAnnotationName = if (change.relationshipColumnRenamed) "JoinColumn" else "Column"
+            val managedAnnotationName = if (change.relationshipPhysicalMappingChanged) "JoinColumn" else "Column"
             val columnAnnotation = modifierList.annotations.firstOrNull { annotation ->
                 val name = annotation.nameReferenceElement?.text?.substringAfterLast('.')
                 name == managedAnnotationName
@@ -1765,8 +1821,8 @@ class ExistingEntityChangeService(
                 return null
             }
             val preserved = linkedMapOf<String, String>()
-            val managedArguments = if (change.relationshipColumnRenamed) {
-                setOf("name")
+            val managedArguments = if (change.relationshipPhysicalMappingChanged) {
+                MANAGED_RELATIONSHIP_COLUMN_ARGUMENTS
             } else {
                 MANAGED_COLUMN_ARGUMENTS
             }
@@ -1779,7 +1835,10 @@ class ExistingEntityChangeService(
             val desired = change.desired
             val managed = linkedMapOf<String, String>()
             managed["name"] = "\"${escapeJavaString(change.desiredColumnName)}\""
-            if (!change.relationshipColumnRenamed) {
+            if (change.relationshipPhysicalMappingChanged) {
+                if (desired.mandatory) managed["nullable"] = "false"
+                if (desired.unique) managed["unique"] = "true"
+            } else {
                 if (desired.mandatory) managed["nullable"] = "false"
                 if (desired.unique) managed["unique"] = "true"
                 if (
@@ -1874,7 +1933,7 @@ class ExistingEntityChangeService(
             edits += relationshipMetadata.edits
             imports += relationshipMetadata.imports
             if (!change.physicalMappingChanged) return@forEach
-            val managedAnnotationName = if (change.relationshipColumnRenamed) "JoinColumn" else "Column"
+            val managedAnnotationName = if (change.relationshipPhysicalMappingChanged) "JoinColumn" else "Column"
             val columnAnnotation = PsiTreeUtil.findChildrenOfType(
                 property,
                 com.intellij.psi.PsiElement::class.java,
@@ -1894,8 +1953,8 @@ class ExistingEntityChangeService(
                 return null
             }
             val preserved = linkedMapOf<String, String>()
-            val managedArguments = if (change.relationshipColumnRenamed) {
-                setOf("name")
+            val managedArguments = if (change.relationshipPhysicalMappingChanged) {
+                MANAGED_RELATIONSHIP_COLUMN_ARGUMENTS
             } else {
                 MANAGED_COLUMN_ARGUMENTS
             }
@@ -1915,7 +1974,10 @@ class ExistingEntityChangeService(
             val desired = change.desired
             val managed = linkedMapOf<String, String>()
             managed["name"] = "\"${escapeJavaString(change.desiredColumnName)}\""
-            if (!change.relationshipColumnRenamed) {
+            if (change.relationshipPhysicalMappingChanged) {
+                if (desired.mandatory) managed["nullable"] = "false"
+                if (desired.unique) managed["unique"] = "true"
+            } else {
                 if (desired.mandatory) managed["nullable"] = "false"
                 if (desired.unique) managed["unique"] = "true"
                 if (
@@ -2146,6 +2208,8 @@ class ExistingEntityChangeService(
             "precision",
             "scale",
         )
+        private val MANAGED_RELATIONSHIP_COLUMN_ARGUMENTS =
+            setOf("name", "nullable", "unique")
         private val RELATIONSHIP_ATTRIBUTE_TYPES =
             setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION)
         private val RELATION_ANNOTATIONS =
@@ -2211,6 +2275,9 @@ private data class ExistingAttributeMetadataChange(
 
     val relationshipColumnRenamed: Boolean
         get() = current.association && columnRenamed
+
+    val relationshipPhysicalMappingChanged: Boolean
+        get() = current.association && physicalMappingChanged
 
     val physicalMappingChanged: Boolean
         get() = columnRenamed ||

@@ -139,13 +139,16 @@ still tracked as a separate gate.
   closed.
 - Existing handwritten Java and Kotlin relationships were exercised through
   the responsive relationship-semantics panel. Fetch, cascade, orphan removal,
-  Jmix composition and delete policy remained editable while target,
-  cardinality, ownership, join structure, nullability and constraints remained
+  Jmix composition and delete policy remained source-only, while an explicit
+  local owning many-to-one could be narrowed to one-to-one through a
+  duplicate-data precondition and reversible unique constraint. Other target,
+  cardinality, ownership, join structure and nullability changes remained
   structurally locked. The 480-pixel browser view retained every control
   without right-edge clipping and reported no warnings or errors. Dual-host
   contracts prove Jakarta Persistence default fetch reconstruction, exact
   source-only edits, custom-annotation and manual-method preservation, zero
-  Liquibase output, and fail-closed cardinality changes.
+  Liquibase output for source-only edits, checked uniqueness DDL for narrowing,
+  and fail-closed unsupported cardinality changes.
 - The Integration Designer was exercised in a real browser. Catalog selection,
   indexed Kafka handler binding, non-blocking retry and dead-letter property
   authoring, and the immutable two-file Java/policy preview completed

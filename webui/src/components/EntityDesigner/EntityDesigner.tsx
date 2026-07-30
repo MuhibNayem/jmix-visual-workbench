@@ -2420,8 +2420,8 @@ export default function EntityDesigner() {
                         </Field>
                         <div className="min-w-0 rounded border border-emerald-500/20 bg-emerald-500/5 p-2 text-[10px] leading-relaxed text-emerald-200/80">
                           Preview updates only the literal <code>@JoinColumn(name)</code> and creates a guarded
-                          Liquibase rename with reverse rollback. Target, cardinality, ownership, nullability, and
-                          constraints remain locked; source-only relationship semantics are edited below.
+                          Liquibase rename with reverse rollback. Target, ownership, and nullability remain locked;
+                          checked cardinality narrowing and source-only relationship semantics are edited below.
                         </div>
                       </div>
                     )}
@@ -2429,6 +2429,7 @@ export default function EntityDesigner() {
                       <ExistingRelationshipSemanticsEditor
                         attribute={selected}
                         sourceAssociation={sourceAssociation}
+                        sourceUnique={source?.unique ?? false}
                         onChange={(change) => updateAttribute(selectedAttr, change)}
                       />
                     )}
@@ -3590,16 +3591,23 @@ function ExistingAttributeSourceMetadataEditor({
 function ExistingRelationshipSemanticsEditor({
   attribute,
   sourceAssociation,
+  sourceUnique,
   onChange,
 }: {
   attribute: AttributeModel
   sourceAssociation: NonNullable<SchemaEntityAttributeSnapshot['associationDetails']>
+  sourceUnique: boolean
   onChange: (change: Partial<AttributeModel>) => void
 }) {
   const association = attribute.association!
   const semanticEditingDisabled = association.crossDataStore
   const compositionEligible = ['oneToMany', 'oneToOne'].includes(association.associationType)
   const orphanRemovalEligible = compositionEligible
+  const owningToOneUpgradeEligible =
+    sourceAssociation.associationType === 'manyToOne' &&
+    !sourceAssociation.crossDataStore &&
+    !sourceAssociation.mappedBy &&
+    Boolean(sourceAssociation.joinColumnName)
   const updateAssociation = (change: Partial<AssociationConfig>) => {
     onChange({ association: { ...association, ...change } })
   }
@@ -3626,7 +3634,29 @@ function ExistingRelationshipSemanticsEditor({
         </div>
       ) : (
         <>
-          <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {owningToOneUpgradeEligible && (
+              <Field label="Checked cardinality">
+                <select
+                  value={association.associationType}
+                  onChange={event => {
+                    const associationType = event.target.value as AssociationType
+                    onChange({
+                      unique: associationType === 'oneToOne' ? true : sourceUnique,
+                      association: {
+                        ...association,
+                        associationType,
+                      },
+                    })
+                  }}
+                  className="w-full min-w-0"
+                  aria-label={`Checked cardinality for ${attribute.name}`}
+                >
+                  <option value="manyToOne">Many to one</option>
+                  <option value="oneToOne">One to one</option>
+                </select>
+              </Field>
+            )}
             <Field label="Ownership semantics">
               <select
                 value={attribute.type}
@@ -3707,9 +3737,15 @@ function ExistingRelationshipSemanticsEditor({
             </div>
           </div>
           <p className="mt-3 text-[9px] leading-relaxed text-gray-600">
-            These controls are source-only and never create a schema migration. Structural changes remain blocked
-            until target, inverse side, usages, data migration, and rollback can be reviewed together.
+            Fetch, cascade, composition, orphan removal, and delete policy are source-only. Other structural changes
+            remain blocked until target, inverse side, usages, data migration, and rollback can be reviewed together.
           </p>
+          {owningToOneUpgradeEligible && association.associationType === 'oneToOne' && (
+            <div className="mt-3 rounded border border-emerald-500/20 bg-emerald-500/5 p-2 text-[9px] leading-relaxed text-emerald-200/80">
+              Checked narrowing adds a duplicate-data precondition and a deterministic unique constraint with reverse
+              rollback. It keeps the target, owning join column, Java/Kotlin property type, and call sites unchanged.
+            </div>
+          )}
         </>
       )}
     </div>

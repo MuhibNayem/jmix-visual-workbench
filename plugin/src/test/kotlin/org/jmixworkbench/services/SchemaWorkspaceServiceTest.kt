@@ -1813,7 +1813,12 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         val store = workspace.stores.single()
         val service = ExistingEntityChangeService.getInstance(project)
 
-        fun model(snapshot: SchemaEntitySnapshot, newColumn: String): EntityModel {
+        fun model(
+            snapshot: SchemaEntitySnapshot,
+            newColumn: String,
+            targetAssociationType: AssociationType? = null,
+            targetUnique: Boolean? = null,
+        ): EntityModel {
             val relationAttribute = snapshot.attributes.single { it.name == "department" }
             val relation = requireNotNull(relationAttribute.associationDetails)
             return EntityModel(
@@ -1833,9 +1838,9 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                         type = AttributeType.ASSOCIATION,
                         columnName = relationAttribute.columnName,
                         mandatory = !relationAttribute.nullable,
-                        unique = relationAttribute.unique,
+                        unique = targetUnique ?: relationAttribute.unique,
                         association = AssociationConfig(
-                            associationType = relation.associationType,
+                            associationType = targetAssociationType ?: relation.associationType,
                             relatedEntity = relation.relatedEntity,
                             relatedTableName = relation.relatedTableName,
                             relatedIdColumnName = relation.relatedIdColumnName,
@@ -1889,6 +1894,42 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             )
             assertTrue(migration.contains("columnName=\"DEPARTMENT_ID\""))
             assertTrue(migration.contains("columnName=\"ORG_UNIT_ID\""))
+        }
+
+        listOf("Employee", "KotlinEmployee").forEach { className ->
+            val snapshot = workspace.entities.single { it.className == className }
+            val preview = service.previewAttributeAdditions(
+                ExistingEntityAttributeAdditionRequest(
+                    snapshot.sourceLocator,
+                    model(
+                        snapshot,
+                        "DEPARTMENT_ID",
+                        AssociationType.ONE_TO_ONE,
+                        targetUnique = true,
+                    ),
+                ),
+            )
+            assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+            assertEquals(2, preview.files.size)
+            val source = preview.files.single {
+                it.relativePath.endsWith(if (className == "Employee") ".java" else ".kt")
+            }.resultContent
+            assertTrue(source.contains("@OneToOne"))
+            assertFalse(source.contains("@ManyToOne"))
+            assertTrue(source.contains("name = \"DEPARTMENT_ID\""))
+            assertTrue(source.contains("referencedColumnName = \"ID\""))
+            assertTrue(source.contains("nullable = false"))
+            assertTrue(source.contains("unique = true"))
+            assertTrue(source.contains("manualLabel"))
+            if (className == "Employee") {
+                assertTrue(source.contains("foreignKey = @ForeignKey(name = \"FK_EMPLOYEE_DEPARTMENT\")"))
+            }
+            val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+            val constraint = "UQ_${snapshot.tableName}_DEPARTMENT_ID"
+            assertTrue(migration.contains("HAVING COUNT(*) &gt; 1"))
+            assertTrue(migration.contains("""<addUniqueConstraint tableName="${snapshot.tableName}""""))
+            assertTrue(migration.contains("""constraintName="$constraint""""))
+            assertTrue(migration.contains("""<dropUniqueConstraint tableName="${snapshot.tableName}""""))
         }
 
         val unsafe = workspace.entities.single { it.className == "UnsafeEmployee" }
