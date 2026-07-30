@@ -717,6 +717,9 @@ object EntityGenerator {
             }
             return
         }
+        if (entity.id.type == IdType.UUID) {
+            b.import_("java.util.UUID")
+        }
 
         val idJavaType = when (entity.id.type) {
             IdType.UUID -> "UUID"

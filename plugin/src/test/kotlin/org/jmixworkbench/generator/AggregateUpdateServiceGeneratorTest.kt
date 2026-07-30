@@ -20,6 +20,8 @@ class AggregateUpdateServiceGeneratorTest {
         assertContains(source, "public void remove(final LoanApp entity)")
         assertContains(source, "dataManager.remove(Objects.requireNonNull(entity, \"entity\"));")
         assertContains(source, "@Transactional")
+        assertContains(source, "\nimport io.jmix.core.RemoveDelegate;\n")
+        assertFalse(source.startsWith(" "))
         assertFalse(source.contains("dataManager.unconstrained"))
     }
 
@@ -37,6 +39,7 @@ class AggregateUpdateServiceGeneratorTest {
         assertContains(source, """@Transactional("payrollTransactionManager")""")
         assertContains(source, "fun saveChanges(saveContext: SaveContext): Set<Any>")
         assertContains(source, "dataManager.save(saveContext)")
+        assertFalse(source.startsWith(" "))
         assertFalse(source.contains("SaveDelegate<LoanApp>"))
         assertFalse(source.contains("RemoveDelegate<LoanApp>"))
         assertFalse(source.contains("dataManager.unconstrained"))

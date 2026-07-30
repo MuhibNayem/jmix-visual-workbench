@@ -333,9 +333,9 @@ internal object RepositoryContract {
         imports: MutableSet<String>,
         kotlin: Boolean,
     ) {
-        collectTypeImports(method.returnType, imports)
+        collectTypeImports(method.returnType, imports, kotlin)
         method.parameters.forEach {
-            collectTypeImports(parameterType(it, kotlin), imports)
+            collectTypeImports(parameterType(it, kotlin), imports, kotlin)
             if (it.nullable && !kotlin) imports += "org.springframework.lang.Nullable"
         }
         if (method.queryType == QueryType.JPQL) {
@@ -414,10 +414,16 @@ internal object RepositoryContract {
             !value.contains('{') &&
             !value.contains('}')
 
-    private fun collectTypeImports(type: String, imports: MutableSet<String>) {
+    private fun collectTypeImports(
+        type: String,
+        imports: MutableSet<String>,
+        kotlin: Boolean,
+    ) {
         knownImports.forEach { (simple, qualified) ->
             if (Regex("""\b${Regex.escape(simple)}\b""").containsMatchIn(type)) {
-                imports += qualified
+                if (!kotlin || simple !in KOTLIN_DEFAULT_COLLECTION_TYPES) {
+                    imports += qualified
+                }
             }
         }
         Regex("""[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+""")
@@ -426,6 +432,12 @@ internal object RepositoryContract {
             .filterNot { it.startsWith("java.lang.") }
             .forEach(imports::add)
     }
+
+    private val KOTLIN_DEFAULT_COLLECTION_TYPES = setOf(
+        "List",
+        "Set",
+        "Collection",
+    )
 
     private fun simplifyType(value: String): String =
         Regex("""[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+""")

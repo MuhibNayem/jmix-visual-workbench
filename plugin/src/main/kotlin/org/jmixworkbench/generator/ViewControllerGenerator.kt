@@ -83,7 +83,7 @@ object ViewControllerGenerator {
             b.annotation {
                 name = "DialogMode"
                 importPath = "io.jmix.flowui.view.DialogMode"
-                view.dialogConfig?.let { dlg ->
+                view.dialogConfig.let { dlg ->
                     dlg.width?.let { param("width", "\"$it\"") }
                     dlg.height?.let { param("height", "\"$it\"") }
                     param("resizable", dlg.resizable.toString())
@@ -93,11 +93,12 @@ object ViewControllerGenerator {
             }
         }
 
-        // @PrimaryDetailDialog for detail views opened as dialogs
-        if (view.viewType == ViewType.DETAIL_VIEW) {
+        // Register the default entity detail view using the public Jmix contract.
+        if (view.viewType == ViewType.DETAIL_VIEW && view.entityClass != null) {
             b.annotation {
-                name = "PrimaryDetailDialog"
-                importPath = "io.jmix.flowui.view.PrimaryDetailDialog"
+                name = "PrimaryDetailView"
+                importPath = "io.jmix.flowui.view.PrimaryDetailView"
+                value("${simpleName(view.entityClass)}.class")
             }
         }
 

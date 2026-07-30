@@ -22,23 +22,58 @@ green. Manual installation and workbench opening in the two minimum IDEs remain
 pending; the host lanes are not presented as release-certified until that
 checkpoint is recorded.
 
-## Target Jmix project plan
+## Target Jmix generated-code matrix
 
-Phase 1 does not certify any repository mutation. The initial fixture cells
-planned for later adapter certification are:
+The compatibility gate generates its source corpus directly from the production
+Java/Kotlin generators and compiles it against exact public Jmix artifacts. It
+does not compile a hand-maintained imitation. Every cell contains a JPA/Jmix
+entity, an advanced `JmixDataRepository`, a FlowUI detail controller and a
+transactional aggregate update service. The corpus deliberately exercises the
+repository fetch-plan type/annotation name collision, named JPQL parameters,
+paging, query hints, constraints and the Jmix 3 `SaveDelegate` /
+`RemoveDelegate` contracts.
 
-| Jmix line | Target-project Java | Current mutation status |
-| --- | --- | --- |
-| Jmix 2.8.x | Java 17 and Java 21 | Non-certified and disabled for valuable repositories |
-| Jmix 3.0.x | Java 21 and Java 25 | Non-certified and disabled for valuable repositories |
+| Exact Jmix | Target-project JDK | Languages | Generated artifacts | Current evidence |
+| --- | --- | --- | --- | --- |
+| 2.8.2 | 17 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service | Strict compile passed; class major 61 |
+| 2.8.2 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service | Strict compile passed; class major 65 |
+| 3.0.0 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service | Strict compile passed; class major 65 |
+| 3.0.0 | 25 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service | Strict compile passed; class major 69 |
 
-Newer JDKs that are officially compatible with a detected Jmix line remain a
-read-only policy target until exact fixture evidence certifies an operation and
-profile cell. Earlier Jmix 2.x, Jmix 1.x, CUBA-era, future, ambiguous, stale,
-untrusted, or otherwise uncertified projects likewise must not receive write
-capability.
+This follows Jmix's published runtime boundary: the Jmix 2 line supports Java
+17/21, while [Jmix 3.0 requires Java 21 or
+25](https://docs.jmix.io/jmix/whats-new/release-3.0.html). Exact framework
+versions are pinned to the official [2.8.2 and 3.0.0
+releases](https://github.com/jmix-framework/jmix/releases). Dependencies are
+resolved only from Maven Central and the group-filtered official Jmix public
+repository, with reviewed SHA-256 verification metadata. Target JDKs are
+self-provisioned by Gradle when absent; no preinstalled Node.js or full JDK
+matrix is assumed.
 
-The current prototype does not yet implement the Phase 2 compatibility registry
-or safe read-only onboarding model. Existing generators and direct-write bridge
-paths are non-certified prototypes and must not be used against a valuable
-repository.
+`certifyGeneratedCodeCompatibility` is release-blocking through
+`phase1Check`. Its deterministic evidence report records:
+
+- the production-generated source-manifest digest;
+- exact Jmix and target JDK cell;
+- compiler vendor/runtime;
+- asserted Java/Kotlin class-file major version;
+- class counts;
+- resolved compile-classpath count and aggregate SHA-256 digest.
+
+The report is written to
+`plugin/build/reports/compatibility/generated-code-certification.json`.
+
+## Write-compatibility boundary
+
+Compilation evidence proves that the covered generated contracts are valid for
+the exact cells above. It does **not** by itself certify every visual mutation,
+database, add-on, application startup or runtime business flow.
+
+The Phase 2 compatibility-registry parser/evaluator and its fail-closed
+read-only decisions are implemented and release-tested. Production mutation
+services additionally revalidate project trust, index health, exact source
+ownership, revisions and operation-specific invariants. Earlier Jmix 2.x, Jmix
+1.x, CUBA-era, future, ambiguous, stale, untrusted or otherwise uncertified
+profiles remain diagnostic/read-only unless an operation has its own stronger
+evidence. Exact generated-code certification will not be used to imply blanket
+write authorization.

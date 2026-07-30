@@ -5,6 +5,10 @@ pluginManagement {
     }
 }
 
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+}
+
 dependencyResolutionManagement {
     // Node plugin 7.1.0 adds its pinned Node.js distribution Ivy repository at project scope.
     // The isolated IntelliJ host builds remain strict with FAIL_ON_PROJECT_REPOS.

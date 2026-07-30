@@ -131,7 +131,7 @@ contract and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 318 tests and three packaged-host
+  descriptors were inspected after assembly, 319 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.

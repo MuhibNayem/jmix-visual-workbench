@@ -129,6 +129,7 @@ class EntityAndCrudGeneratorTest {
         val subtypeMigration = MigrationGenerator.generateFromEntity(subtype, DatabaseType.POSTGRES)
         val embeddedMigration = MigrationGenerator.generateFromEntity(customer, DatabaseType.POSTGRES)
 
+        assertTrue(javaRoot.contains("import java.util.UUID;"))
         assertTrue(javaRoot.contains("@Inheritance(strategy = InheritanceType.JOINED)"))
         assertTrue(
             javaRoot.contains(
@@ -262,6 +263,7 @@ class EntityAndCrudGeneratorTest {
         assertTrue(source.contains("@OneToMany(fetch = FetchType.LAZY, cascade = [CascadeType.ALL]"))
         assertTrue(source.contains("var schedules: MutableList<RepaymentSchedule>? = null"))
         assertTrue(repository.contains("interface LoanApplicationRepository : JmixDataRepository<LoanApplication, UUID>"))
+        assertFalse(repository.contains("import java.util.List"))
     }
 
     @Test

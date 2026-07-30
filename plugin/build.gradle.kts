@@ -3,7 +3,11 @@ import org.jmixworkbench.build.AssembleWebBundleTask
 import org.jmixworkbench.build.SnapshotFileHashTask
 import org.jmixworkbench.build.VerifyPluginZipContentsTask
 import org.jmixworkbench.build.VerifyWebBundleTask
+import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.api.tasks.testing.Test
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.io.File
 import java.security.MessageDigest
 import java.util.HexFormat
@@ -21,6 +25,13 @@ repositories {
     // Node plugin 7.1.0 adds its distribution Ivy repository at project scope,
     // so aggregate JVM dependencies must use the reviewed project-level mirror too.
     mavenCentral()
+    maven {
+        name = "JmixPublic"
+        url = uri("https://global.repo.jmix.io/repository/public")
+        content {
+            includeGroupByRegex("io\\.jmix(?:\\..*)?")
+        }
+    }
 }
 
 val phase2CoreSourceSet = sourceSets.create("phase2Core") {
@@ -47,6 +58,23 @@ val phase2CoreTestSourceSet = sourceSets.create("phase2CoreTest") {
     runtimeClasspath += output + compileClasspath
 }
 
+val compatibilityGeneratorSourceSet = sourceSets.create("compatibilityGenerator") {
+    kotlin.setSrcDirs(listOf("src/main/kotlin", "src/compatibilityGenerator/kotlin"))
+    kotlin.include(
+        "org/jmixworkbench/model/EntityModel.kt",
+        "org/jmixworkbench/model/ViewModel.kt",
+        "org/jmixworkbench/generator/JavaClassBuilder.kt",
+        "org/jmixworkbench/generator/EntityGenerator.kt",
+        "org/jmixworkbench/generator/KotlinEntityGenerator.kt",
+        "org/jmixworkbench/generator/DataRepositoryGenerator.kt",
+        "org/jmixworkbench/generator/KotlinDataRepositoryGenerator.kt",
+        "org/jmixworkbench/generator/AggregateUpdateServiceGenerator.kt",
+        "org/jmixworkbench/generator/ViewControllerGenerator.kt",
+        "org/jmixworkbench/certification/CompatibilityFixtureGenerator.kt",
+    )
+    resources.setSrcDirs(emptyList<String>())
+}
+
 // IntelliJ-dependent production sources are compiled by the two explicit host
 // builds below. Keeping the aggregate JVM source sets empty prevents an
 // accidental SDK-less compilation when contributors run the conventional
@@ -66,6 +94,7 @@ configurations.named(phase2CoreTestSourceSet.implementationConfigurationName) {
 }
 
 dependencies {
+    add(compatibilityGeneratorSourceSet.implementationConfigurationName, libs.gson)
     add(phase2CoreTestSourceSet.implementationConfigurationName, kotlin("test-junit5"))
     add(
         phase2CoreTestSourceSet.runtimeOnlyConfigurationName,
@@ -75,6 +104,226 @@ dependencies {
         phase2CoreTestSourceSet.runtimeOnlyConfigurationName,
         "org.junit.platform:junit-platform-launcher:1.10.1",
     )
+}
+
+val generatedCompatibilitySources = layout.buildDirectory.dir("compatibility/generated-sources")
+val compatibilityEvidenceFile = layout.buildDirectory.file(
+    "reports/compatibility/generated-code-certification.json",
+)
+
+val generateCompatibilityFixtures = tasks.register<JavaExec>("generateCompatibilityFixtures") {
+    description = "Generates the exact Java/Kotlin source corpus used by the Jmix compatibility matrix."
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    dependsOn(tasks.named(compatibilityGeneratorSourceSet.classesTaskName))
+    classpath = compatibilityGeneratorSourceSet.runtimeClasspath
+    mainClass.set("org.jmixworkbench.certification.CompatibilityFixtureGenerator")
+    args(generatedCompatibilitySources.get().asFile.absolutePath)
+    inputs.files(
+        compatibilityGeneratorSourceSet.allSource,
+    ).withPathSensitivity(PathSensitivity.RELATIVE)
+    outputs.dir(generatedCompatibilitySources)
+}
+
+data class TargetCompatibilityCell(
+    val id: String,
+    val jmixVersion: String,
+    val jmixLineDirectory: String,
+    val targetJdk: Int,
+)
+
+val targetCompatibilityCells = listOf(
+    TargetCompatibilityCell("jmix28Jdk17", "2.8.2", "jmix28", 17),
+    TargetCompatibilityCell("jmix28Jdk21", "2.8.2", "jmix28", 21),
+    TargetCompatibilityCell("jmix30Jdk21", "3.0.0", "jmix30", 21),
+    TargetCompatibilityCell("jmix30Jdk25", "3.0.0", "jmix30", 25),
+)
+
+val targetCompatibilityCompileTasks = targetCompatibilityCells.flatMap { cell ->
+    val sourceSet = sourceSets.create("${cell.id}Compatibility") {
+        java.setSrcDirs(
+            listOf(
+                generatedCompatibilitySources.map { it.dir("common/java") },
+                generatedCompatibilitySources.map { it.dir("${cell.jmixLineDirectory}/java") },
+            ),
+        )
+        kotlin.setSrcDirs(
+            listOf(
+                generatedCompatibilitySources.map { it.dir("common/kotlin") },
+                generatedCompatibilitySources.map { it.dir("${cell.jmixLineDirectory}/kotlin") },
+            ),
+        )
+        resources.setSrcDirs(emptyList<String>())
+    }
+    dependencies {
+        add(
+            sourceSet.implementationConfigurationName,
+            platform("io.jmix.bom:jmix-bom:${cell.jmixVersion}"),
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            "io.jmix.core:jmix-core:${cell.jmixVersion}",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            "io.jmix.data:jmix-data:${cell.jmixVersion}",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            "io.jmix.flowui:jmix-flowui:${cell.jmixVersion}",
+        )
+    }
+
+    val compiler = javaToolchains.compilerFor {
+        languageVersion.set(JavaLanguageVersion.of(cell.targetJdk))
+    }
+    val launcher = javaToolchains.launcherFor {
+        languageVersion.set(JavaLanguageVersion.of(cell.targetJdk))
+    }
+    val compileKotlin = tasks.named<KotlinCompile>(sourceSet.getCompileTaskName("kotlin")) {
+        dependsOn(generateCompatibilityFixtures)
+        kotlinJavaToolchain.toolchain.use(launcher)
+        compilerOptions.jvmTarget.set(JvmTarget.fromTarget(cell.targetJdk.toString()))
+    }
+    val compileJava = tasks.named<JavaCompile>(sourceSet.compileJavaTaskName) {
+        dependsOn(generateCompatibilityFixtures)
+        javaCompiler.set(compiler)
+        options.release.set(cell.targetJdk)
+    }
+    listOf(compileKotlin, compileJava)
+}
+
+val certifyGeneratedCodeCompatibility = tasks.register(
+    "certifyGeneratedCodeCompatibility",
+) {
+    description = "Compiles current generated Java/Kotlin code against exact Jmix 2.8/3.0 and JDK cells."
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    dependsOn(targetCompatibilityCompileTasks)
+    inputs.dir(generatedCompatibilitySources)
+    targetCompatibilityCompileTasks.forEach { task ->
+        inputs.files(task.map { it.outputs.files })
+    }
+    outputs.file(compatibilityEvidenceFile)
+    doLast {
+        val generatedRoot = generatedCompatibilitySources.get().asFile
+        val manifest = generatedRoot.resolve("source-manifest.json")
+        check(manifest.isFile) {
+            "Compatibility source manifest was not generated."
+        }
+        val sourceManifest = manifest.readText()
+        check(Regex("\"path\"").findAll(sourceManifest).count() >= 9) {
+            "Compatibility source corpus is unexpectedly small."
+        }
+        targetCompatibilityCompileTasks.forEach { taskProvider ->
+            val task = taskProvider.get()
+            val classFiles = task.outputs.files.files
+                .asSequence()
+                .filter(File::exists)
+                .flatMap { output ->
+                    if (output.isDirectory) output.walkTopDown().asSequence() else sequenceOf(output)
+                }
+                .count { it.isFile && it.extension == "class" }
+            check(classFiles > 0) {
+                "${task.path} produced no class files."
+            }
+        }
+
+        val report = compatibilityEvidenceFile.get().asFile
+        report.parentFile.mkdirs()
+        report.writeText(
+            buildString {
+                append("{\n")
+                append("  \"schemaVersion\": \"generated-code-certification-v1\",\n")
+                append("  \"sourceManifestSha256\": \"").append(sha256(manifest)).append("\",\n")
+                append("  \"cells\": [\n")
+                targetCompatibilityCells.forEachIndexed { index, cell ->
+                    val sourceSetName = "${cell.id}Compatibility"
+                    val capitalizedSourceSetName = sourceSetName.replaceFirstChar(Char::uppercase)
+                    val kotlinTask = tasks.getByName(
+                        "compile${capitalizedSourceSetName}Kotlin",
+                    ) as KotlinCompile
+                    val javaTask = tasks.getByName(
+                        "compile${capitalizedSourceSetName}Java",
+                    ) as JavaCompile
+                    val expectedBytecodeMajor = cell.targetJdk + 44
+                    val languageTasks = listOf(
+                        "java" to javaTask,
+                        "kotlin" to kotlinTask,
+                    )
+                    val classCounts = languageTasks.associate { (language, task) ->
+                        val classFiles = task.outputs.files.files
+                            .asSequence()
+                            .filter(File::exists)
+                            .flatMap { output ->
+                                if (output.isDirectory) {
+                                    output.walkTopDown().asSequence()
+                                } else {
+                                    sequenceOf(output)
+                                }
+                            }
+                            .filter { it.isFile && it.extension == "class" }
+                            .toList()
+                        check(classFiles.isNotEmpty()) {
+                            "${task.path} produced no $language class files."
+                        }
+                        classFiles.forEach { classFile ->
+                            val header = classFile.inputStream().use { input ->
+                                ByteArray(8).also { bytes ->
+                                    check(input.read(bytes) == bytes.size) {
+                                        "Truncated class file: $classFile"
+                                    }
+                                }
+                            }
+                            val magic = header.take(4).joinToString("") {
+                                "%02x".format(it.toInt() and 0xff)
+                            }
+                            val major = ((header[6].toInt() and 0xff) shl 8) or
+                                (header[7].toInt() and 0xff)
+                            check(magic == "cafebabe" && major == expectedBytecodeMajor) {
+                                "$classFile has class major $major; expected $expectedBytecodeMajor."
+                            }
+                        }
+                        language to classFiles.size
+                    }
+                    val compileClasspath = configurations.getByName(
+                        "${sourceSetName}CompileClasspath",
+                    ).files.filter(File::isFile)
+                    val classpathDigest = MessageDigest.getInstance("SHA-256").let { digest ->
+                        compileClasspath
+                            .map { dependency -> dependency.name to sha256(dependency) }
+                            .sortedWith(compareBy<Pair<String, String>>({ it.first }, { it.second }))
+                            .forEach { (name, checksum) ->
+                                digest.update(name.toByteArray(Charsets.UTF_8))
+                                digest.update(0)
+                                digest.update(checksum.toByteArray(Charsets.UTF_8))
+                                digest.update(0)
+                            }
+                        HexFormat.of().formatHex(digest.digest())
+                    }
+                    val compilerMetadata = javaTask.javaCompiler.get().metadata
+                    append("    {\"id\":\"").append(cell.id)
+                        .append("\",\"jmixVersion\":\"").append(cell.jmixVersion)
+                        .append("\",\"targetJdk\":").append(cell.targetJdk)
+                        .append(",\"compilerVendor\":\"")
+                        .append(compilerMetadata.vendor.replace("\"", "\\\""))
+                        .append("\",\"compilerRuntime\":\"")
+                        .append(compilerMetadata.javaRuntimeVersion.replace("\"", "\\\""))
+                        .append("\",\"bytecodeMajor\":").append(expectedBytecodeMajor)
+                        .append(",\"languages\":[\"java\",\"kotlin\"],")
+                        .append("\"artifacts\":[\"entity\",\"repository\",\"flowui-controller\",")
+                        .append("\"aggregate-update-service\"],")
+                        .append("\"classCounts\":{\"java\":").append(classCounts.getValue("java"))
+                        .append(",\"kotlin\":").append(classCounts.getValue("kotlin")).append("},")
+                        .append("\"compileClasspathArtifacts\":").append(compileClasspath.size)
+                        .append(",\"compileClasspathSha256\":\"").append(classpathDigest)
+                        .append("\",\"result\":\"PASSED\"}")
+                    if (index != targetCompatibilityCells.lastIndex) append(',')
+                    append('\n')
+                }
+                append("  ]\n")
+                append("}\n")
+            },
+        )
+    }
 }
 
 val phase2CoreTest = tasks.register<Test>("phase2CoreTest") {
@@ -495,8 +744,18 @@ val verifyDependencyIntegrity = tasks.register("verifyDependencyIntegrity") {
 
         val rootSettings = file("settings.gradle.kts").readText()
         check("gradlePluginPortal()" in rootSettings && "mavenCentral()" in rootSettings)
+        check("org.gradle.toolchains.foojay-resolver-convention" in rootSettings) {
+            "The aggregate build must self-provision target-project JDK toolchains."
+        }
         check(!Regex("""maven\s*\{\s*url""").containsMatchIn(rootSettings)) {
             "Undocumented aggregate repositories are forbidden."
+        }
+        val rootBuild = file("build.gradle.kts").readText()
+        check(
+            "https://global.repo.jmix.io/repository/public" in rootBuild &&
+                """includeGroupByRegex("io\\.jmix(?:\\..*)?")""" in rootBuild
+        ) {
+            "The compatibility matrix requires the group-filtered official Jmix public repository."
         }
         listOf("idea253", "idea262").forEach { lane ->
             val settings = file("hosts/$lane/settings.gradle.kts").readText()
@@ -630,6 +889,8 @@ fun hostGateArguments(host: String): List<String> = nestedGradleArguments(
 tasks.register("phase1FastCheck") {
     description = "Runs the fast Phase 1 build, UI-freshness, and toolchain contract checks."
     dependsOn(
+        certifyGeneratedCodeCompatibility,
+        phase2CoreTest,
         verifyWebBundle,
         "verifyHostBuildDefinitions",
         "verifyHostToolchains",

@@ -18,79 +18,62 @@ object AggregateUpdateServiceGenerator {
     private fun generateJava(model: AggregateUpdateServiceModel): String {
         val entitySimpleName = model.entityQualifiedName.substringAfterLast('.')
         val transaction = transactionalAnnotation(model.transactionManagerBean)
-        val delegateImports = if (model.platformDelegates) {
-            """
-            import io.jmix.core.RemoveDelegate;
-            import io.jmix.core.SaveDelegate;
-            """.trimIndent() + "\n"
-        } else {
-            ""
-        }
         val implementsClause = if (model.platformDelegates) {
             " implements SaveDelegate<$entitySimpleName>, RemoveDelegate<$entitySimpleName>"
         } else {
             ""
         }
-        val delegateMethods = if (model.platformDelegates) {
-            """
-
-                @Override
-                $transaction
-                public $entitySimpleName save(
-                        final $entitySimpleName entity,
-                        final SaveContext saveContext
-                ) {
-                    Objects.requireNonNull(entity, "entity");
-                    Objects.requireNonNull(saveContext, "saveContext");
-                    return dataManager.save(saveContext).get(entity);
-                }
-
-                @Override
-                $transaction
-                public void remove(final $entitySimpleName entity) {
-                    dataManager.remove(Objects.requireNonNull(entity, "entity"));
-                }
-            """.trimIndent().prependIndent("    ")
-        } else {
-            ""
-        }
-        return """
-            package ${model.packageName};
-
-            import ${model.entityQualifiedName};
-            import io.jmix.core.DataManager;
-            import io.jmix.core.SaveContext;
-            $delegateImports import org.springframework.stereotype.Component;
-            import org.springframework.transaction.annotation.Transactional;
-
-            import java.util.Objects;
-            import java.util.Set;
-
-            @Component
-            public class ${model.className}$implementsClause {
-
-                private final DataManager dataManager;
-
-                public ${model.className}(final DataManager dataManager) {
-                    this.dataManager = dataManager;
-                }
-
-                /**
-                 * Persists the complete DataContext change set in one transaction.
-                 * Uses constrained DataManager; never replace it with unconstrained()
-                 * for user-originated aggregate changes.
-                 */
-                $transaction
-                public Set<Object> saveChanges(final SaveContext saveContext) {
-                    return dataManager.save(Objects.requireNonNull(saveContext, "saveContext"));
-                }
-            $delegateMethods
+        return buildString {
+            append("package ").append(model.packageName).append(";\n\n")
+            append("import ").append(model.entityQualifiedName).append(";\n")
+            append("import io.jmix.core.DataManager;\n")
+            if (model.platformDelegates) {
+                append("import io.jmix.core.RemoveDelegate;\n")
             }
-        """.trimIndent()
-            .replace("\n             import", "\nimport")
-            .replace("\n            \n", "\n\n")
-            .replace(Regex("\n{3,}"), "\n\n")
-            .trimEnd() + "\n"
+            append("import io.jmix.core.SaveContext;\n")
+            if (model.platformDelegates) {
+                append("import io.jmix.core.SaveDelegate;\n")
+            }
+            append("import org.springframework.stereotype.Component;\n")
+            append("import org.springframework.transaction.annotation.Transactional;\n\n")
+            append("import java.util.Objects;\n")
+            append("import java.util.Set;\n\n")
+            append("@Component\n")
+            append("public class ").append(model.className).append(implementsClause).append(" {\n\n")
+            append("    private final DataManager dataManager;\n\n")
+            append("    public ").append(model.className)
+                .append("(final DataManager dataManager) {\n")
+            append("        this.dataManager = dataManager;\n")
+            append("    }\n\n")
+            append("    /**\n")
+            append("     * Persists the complete DataContext change set in one transaction.\n")
+            append("     * Uses constrained DataManager; never replace it with unconstrained()\n")
+            append("     * for user-originated aggregate changes.\n")
+            append("     */\n")
+            append("    ").append(transaction).append('\n')
+            append("    public Set<Object> saveChanges(final SaveContext saveContext) {\n")
+            append("        return dataManager.save(Objects.requireNonNull(saveContext, \"saveContext\"));\n")
+            append("    }\n")
+            if (model.platformDelegates) {
+                append("\n")
+                append("    @Override\n")
+                append("    ").append(transaction).append('\n')
+                append("    public ").append(entitySimpleName).append(" save(\n")
+                append("            final ").append(entitySimpleName).append(" entity,\n")
+                append("            final SaveContext saveContext\n")
+                append("    ) {\n")
+                append("        Objects.requireNonNull(entity, \"entity\");\n")
+                append("        Objects.requireNonNull(saveContext, \"saveContext\");\n")
+                append("        return dataManager.save(saveContext).get(entity);\n")
+                append("    }\n\n")
+                append("    @Override\n")
+                append("    ").append(transaction).append('\n')
+                append("    public void remove(final ").append(entitySimpleName).append(" entity) {\n")
+                append("        dataManager.remove(Objects.requireNonNull(entity, \"entity\"));\n")
+                append("    }\n")
+            }
+            append("}\n")
+        }
     }
 
     private fun generateKotlin(model: AggregateUpdateServiceModel): String {
@@ -101,60 +84,46 @@ object AggregateUpdateServiceGenerator {
         } else {
             ""
         }
-        val delegateImports = if (model.platformDelegates) {
-            """
-            import io.jmix.core.RemoveDelegate
-            import io.jmix.core.SaveDelegate
-            """.trimIndent() + "\n"
-        } else {
-            ""
-        }
-        val delegateMethods = if (model.platformDelegates) {
-            """
-
-                $transaction
-                override fun save(
-                    entity: $entitySimpleName,
-                    saveContext: SaveContext,
-                ): $entitySimpleName = dataManager.save(saveContext).get(entity)
-
-                $transaction
-                override fun remove(entity: $entitySimpleName) {
-                    dataManager.remove(entity)
-                }
-            """.trimIndent().prependIndent("    ")
-        } else {
-            ""
-        }
-        return """
-            package ${model.packageName}
-
-            import ${model.entityQualifiedName}
-            import io.jmix.core.DataManager
-            import io.jmix.core.SaveContext
-            $delegateImports import org.springframework.stereotype.Component
-            import org.springframework.transaction.annotation.Transactional
-
-            @Component
-            class ${model.className}(
-                private val dataManager: DataManager,
-            )$interfaces {
-
-                /**
-                 * Persists the complete DataContext change set in one transaction.
-                 * Uses constrained DataManager; never replace it with unconstrained()
-                 * for user-originated aggregate changes.
-                 */
-                $transaction
-                fun saveChanges(saveContext: SaveContext): Set<Any> =
-                    dataManager.save(saveContext)
-            $delegateMethods
+        return buildString {
+            append("package ").append(model.packageName).append("\n\n")
+            append("import ").append(model.entityQualifiedName).append('\n')
+            append("import io.jmix.core.DataManager\n")
+            if (model.platformDelegates) {
+                append("import io.jmix.core.RemoveDelegate\n")
             }
-        """.trimIndent()
-            .replace("\n             import", "\nimport")
-            .replace("\n            \n", "\n\n")
-            .replace(Regex("\n{3,}"), "\n\n")
-            .trimEnd() + "\n"
+            append("import io.jmix.core.SaveContext\n")
+            if (model.platformDelegates) {
+                append("import io.jmix.core.SaveDelegate\n")
+            }
+            append("import org.springframework.stereotype.Component\n")
+            append("import org.springframework.transaction.annotation.Transactional\n\n")
+            append("@Component\n")
+            append("class ").append(model.className).append("(\n")
+            append("    private val dataManager: DataManager,\n")
+            append(")").append(interfaces).append(" {\n\n")
+            append("    /**\n")
+            append("     * Persists the complete DataContext change set in one transaction.\n")
+            append("     * Uses constrained DataManager; never replace it with unconstrained()\n")
+            append("     * for user-originated aggregate changes.\n")
+            append("     */\n")
+            append("    ").append(transaction).append('\n')
+            append("    fun saveChanges(saveContext: SaveContext): Set<Any> =\n")
+            append("        dataManager.save(saveContext)\n")
+            if (model.platformDelegates) {
+                append("\n")
+                append("    ").append(transaction).append('\n')
+                append("    override fun save(\n")
+                append("        entity: ").append(entitySimpleName).append(",\n")
+                append("        saveContext: SaveContext,\n")
+                append("    ): ").append(entitySimpleName)
+                    .append(" = dataManager.save(saveContext).get(entity)\n\n")
+                append("    ").append(transaction).append('\n')
+                append("    override fun remove(entity: ").append(entitySimpleName).append(") {\n")
+                append("        dataManager.remove(entity)\n")
+                append("    }\n")
+            }
+            append("}\n")
+        }
     }
 
     private fun transactionalAnnotation(transactionManagerBean: String?): String =

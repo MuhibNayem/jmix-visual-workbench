@@ -52,6 +52,21 @@ official
 Spring `@Bean` aliases and factory products follow the public
 [Spring bean naming contract](https://docs.spring.io/spring-framework/reference/core/beans/java/bean-annotation.html).
 
+Generated-code compatibility evidence update (2026-07-30): the release gate
+now generates a deterministic enterprise-shaped corpus directly from the
+production Java/Kotlin generators and compiles it against exact Jmix 2.8.2
+under JDK 17/21 and Jmix 3.0.0 under JDK 21/25. The corpus includes entities,
+advanced constrained repositories, FlowUI detail controllers and transactional
+aggregate update services, including the Jmix 3 update-delegate contracts.
+The gate validates class-file majors 61/65/69 and records compiler runtimes,
+class counts, source-manifest digest and dependency-classpath digest. Strict
+dependency verification is mandatory. This work exposed and fixed a missing
+Java UUID import, the nonexistent `PrimaryDetailDialog` annotation (replaced
+with the public `@PrimaryDetailView(Entity.class)` contract), Kotlin collection
+imports and malformed aggregate-service formatting. This is compile
+certification, not yet application-startup, database or full runtime
+certification.
+
 Entity-generation evidence update (2026-07-30): Java and Kotlin generated
 embeddable identifiers now implement `Serializable` with deterministic
 member-based equality/hash semantics, and generated `@Table` mappings retain
@@ -281,9 +296,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 318 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 319 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 318 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 319 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
