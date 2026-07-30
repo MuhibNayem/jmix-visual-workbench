@@ -63,9 +63,15 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   the same treatment for Java and Kotlin: only the literal `@JoinColumn(name)`
   changes, every other handwritten annotation argument is preserved, and
   old-exists/new-absent preconditions plus reverse rollback are generated.
-  Target/cardinality/ownership/cascade/fetch/constraint changes, inferred
-  columns, inverse/collection/join-table/cross-store mappings, collisions,
-  disabled DDL, type/removal and unsafe narrowing fail closed instead of
+  Evidence-backed owning to-one mappings can also change optionality in either
+  direction, including in the same atomic plan as an explicit join-column
+  rename. Complete physical inventory must prove the current non-key column,
+  nullability, uniqueness and one matching foreign key. Contraction checks
+  existing null data under the old column name before rename; constraints are
+  applied under the new name and rollback reverses the order. Physical
+  destination collisions, target/unsupported-cardinality/ownership changes,
+  inferred columns, inverse/collection/join-table/cross-store mappings,
+  disabled DDL, type/removal and unsafe combined changes fail closed instead of
   guessing.
 - Existing scalar and relationship properties with stable explicit physical
   mappings can launch IntelliJ's native rename processor directly from Entity
@@ -180,9 +186,10 @@ blocked until all of the following pass:
    entities. Stable-mapping scalar and relationship property rename delegates
    to IntelliJ usage preview, including native `mappedBy` references, and
    explicit scalar and owning to-one join-column physical rename is atomic
-   with checked Liquibase rollback. Combined property-and-physical mapping
-   changes, relationship shape changes, contraction and final post-retention
-   physical deletion remain. Deployed-data/type/value verification and exact
+   with checked Liquibase rollback. Combined logical-property rename and
+   physical mapping changes, broader relationship shape changes, scalar
+   contraction and final post-retention physical deletion remain.
+   Deployed-data/type/value verification and exact
    Java/Kotlin mapping cutover are implemented with an expiring backend
    capability. The non-destructive expansion stage, Native
    project-wide Java/Kotlin type-migration preview with physical dependency

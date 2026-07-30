@@ -526,6 +526,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             snapshot: SchemaEntitySnapshot,
             attributeName: String,
             mandatory: Boolean,
+            joinColumnName: String? = null,
         ): EntityModel {
             val current = snapshot.attributes.single { it.name == attributeName }
             val relation = requireNotNull(current.associationDetails)
@@ -555,7 +556,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                             relatedIdType = relation.relatedIdType,
                             localIdAttributeName = relation.localIdAttributeName,
                             mappedBy = relation.mappedBy,
-                            joinColumnName = relation.joinColumnName,
+                            joinColumnName = joinColumnName ?: relation.joinColumnName,
                             joinTable = relation.joinTable,
                             cascade = relation.cascade.toMutableList(),
                             fetch = relation.fetch,
@@ -636,7 +637,12 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         val badge = afterRequired.entities.single { it.className == "PersonBadge" }
         val optionalRequest = ExistingEntityAttributeAdditionRequest(
             badge.sourceLocator,
-            model(badge, "person", mandatory = false),
+            model(
+                snapshot = badge,
+                attributeName = "person",
+                mandatory = false,
+                joinColumnName = "BADGE_OWNER_ID",
+            ),
         )
         val optionalPreview = service.previewAttributeAdditions(optionalRequest)
         assertTrue(
@@ -654,11 +660,14 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertFalse(optionalKotlin.contains("optional = false"))
         assertFalse(optionalKotlin.contains("nullable = false, unique = true"))
         assertTrue(optionalKotlin.contains("unique = true"))
+        assertTrue(optionalKotlin.contains("""name = "BADGE_OWNER_ID""""))
         assertTrue(optionalKotlin.contains("referencedColumnName = \"ID\""))
         assertTrue(optionalKotlin.contains("manualBadgeCode"))
         assertTrue(optionalMigration.contains("""<columnExists tableName="PERSON_BADGE" columnName="PERSON_ID""""))
-        assertTrue(optionalMigration.contains("""<dropNotNullConstraint tableName="PERSON_BADGE" columnName="PERSON_ID""""))
-        assertTrue(optionalMigration.contains("""<addNotNullConstraint tableName="PERSON_BADGE" columnName="PERSON_ID""""))
+        assertTrue(optionalMigration.contains("""oldColumnName="PERSON_ID" newColumnName="BADGE_OWNER_ID""""))
+        assertTrue(optionalMigration.contains("""<dropNotNullConstraint tableName="PERSON_BADGE" columnName="BADGE_OWNER_ID""""))
+        assertTrue(optionalMigration.contains("""<addNotNullConstraint tableName="PERSON_BADGE" columnName="BADGE_OWNER_ID""""))
+        assertTrue(optionalMigration.contains("""oldColumnName="BADGE_OWNER_ID" newColumnName="PERSON_ID""""))
         assertTrue(optionalMigration.contains("<rollback>"))
 
         val optionalPrepared = service.prepareAttributeAdditions(
@@ -680,7 +689,12 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(
             afterOptional.physicalSchemas.single { it.storeId == store.id }
                 .tables.single { it.name == "PERSON_BADGE" }
-                .columns.single { it.name == "PERSON_ID" }.nullable,
+                .columns.single { it.name == "BADGE_OWNER_ID" }.nullable,
+        )
+        assertFalse(
+            afterOptional.physicalSchemas.single { it.storeId == store.id }
+                .tables.single { it.name == "PERSON_BADGE" }
+                .columns.any { it.name == "PERSON_ID" },
         )
     }
 
@@ -1608,6 +1622,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             mandatory: Boolean,
             associationType: AssociationType? = null,
             unique: Boolean? = null,
+            joinColumnName: String? = null,
         ): EntityModel {
             val current = snapshot.attributes.single { it.name == "department" }
             val relation = requireNotNull(current.associationDetails)
@@ -1637,7 +1652,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                             relatedIdType = relation.relatedIdType,
                             localIdAttributeName = relation.localIdAttributeName,
                             mappedBy = relation.mappedBy,
-                            joinColumnName = relation.joinColumnName,
+                            joinColumnName = joinColumnName ?: relation.joinColumnName,
                             joinTable = relation.joinTable,
                             cascade = relation.cascade.toMutableList(),
                             fetch = relation.fetch,
@@ -1683,6 +1698,83 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             assertTrue(migration.contains("<rollback>"))
             assertTrue(migration.contains("<dropNotNullConstraint"))
         }
+
+        listOf(
+            "OptionalAssignment" to "PRIMARY_DEPARTMENT_ID",
+            "OptionalApproval" to "APPROVER_DEPARTMENT_ID",
+        ).forEach { (className, renamedColumn) ->
+            val snapshot = workspace.entities.single { it.className == className }
+            val preview = service.previewAttributeAdditions(
+                ExistingEntityAttributeAdditionRequest(
+                    snapshot.sourceLocator,
+                    model(
+                        snapshot = snapshot,
+                        mandatory = true,
+                        joinColumnName = renamedColumn,
+                    ),
+                ),
+            )
+            assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+            val source = preview.files.single {
+                it.relativePath.endsWith(if (className == "OptionalApproval") ".kt" else ".java")
+            }.resultContent
+            assertTrue(source.contains("""name = "$renamedColumn""""))
+            assertTrue(source.contains("optional = false"))
+            assertTrue(source.contains("nullable = false"))
+            assertTrue(source.contains("manual"))
+            val migration = preview.files.single { it.relativePath.endsWith(".xml") }.resultContent
+            assertTrue(migration.contains("""<columnExists tableName="${snapshot.tableName}" columnName="DEPARTMENT_ID""""))
+            assertTrue(
+                Regex(
+                    """<not>\s*<columnExists tableName="${snapshot.tableName}" columnName="$renamedColumn"/>\s*</not>""",
+                ).containsMatchIn(migration),
+            )
+            assertTrue(migration.contains("WHERE DEPARTMENT_ID IS NULL"))
+            assertFalse(migration.contains("WHERE $renamedColumn IS NULL"))
+            assertTrue(
+                migration.contains(
+                    """<renameColumn tableName="${snapshot.tableName}" oldColumnName="DEPARTMENT_ID" newColumnName="$renamedColumn"""",
+                ),
+            )
+            assertTrue(
+                migration.contains(
+                    """<addNotNullConstraint tableName="${snapshot.tableName}" columnName="$renamedColumn"""",
+                ),
+            )
+            assertTrue(
+                migration.contains(
+                    """<dropNotNullConstraint tableName="${snapshot.tableName}" columnName="$renamedColumn"""",
+                ),
+            )
+            val rollbackStart = migration.indexOf("<rollback>")
+            assertTrue(rollbackStart >= 0)
+            val rollback = migration.substring(rollbackStart)
+            assertTrue(
+                rollback.indexOf("<dropNotNullConstraint") <
+                    rollback.indexOf("""oldColumnName="$renamedColumn" newColumnName="DEPARTMENT_ID""""),
+            )
+        }
+
+        val destinationCollisionSource = workspace.entities.single {
+            it.className == "OptionalAssignment"
+        }
+        val destinationCollision = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                destinationCollisionSource.sourceLocator,
+                model(
+                    snapshot = destinationCollisionSource,
+                    mandatory = true,
+                    joinColumnName = "ID",
+                ),
+            ),
+        )
+        assertFalse(destinationCollision.accepted)
+        assertTrue(
+            destinationCollision.issues.any {
+                it.code == "JVW-ENTITY-RELATIONSHIP-NULLABILITY-DESTINATION-COLLISION"
+            },
+            destinationCollision.issues.toString(),
+        )
 
         val required = workspace.entities.single { it.className == "RequiredAssignment" }
         val loosening = service.previewAttributeAdditions(

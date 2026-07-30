@@ -1744,7 +1744,12 @@ class ExistingEntityChangeService(
                     ),
                 )
             }
-            if (change.relationshipColumnRenamed) return@forEach
+            if (
+                change.relationshipColumnRenamed &&
+                desired.mandatory == !current.nullable
+            ) {
+                return@forEach
+            }
             if (desired.mandatory != !current.nullable) {
                 if (!change.columnRenamed) {
                     preConditions += PreCondition(
@@ -1761,7 +1766,7 @@ class ExistingEntityChangeService(
                         params = mutableMapOf(
                             "expectedResult" to "0",
                             "sql" to "SELECT COUNT(*) FROM ${entity.resolvedTableName} " +
-                                "WHERE $columnName IS NULL",
+                                "WHERE ${if (change.columnRenamed) current.columnName else columnName} IS NULL",
                         ),
                     )
                     changes += DbChange.AddNotNullConstraint(
@@ -2207,8 +2212,7 @@ class ExistingEntityChangeService(
             source.collectionType == target.collectionType &&
             source.joinColumnName != null &&
             source.joinColumnName == current.columnName &&
-            target.joinColumnName == current.columnName &&
-            desiredPhysicalColumnName(desired) == current.columnName &&
+            target.joinColumnName == desiredPhysicalColumnName(desired) &&
             desired.unique == current.unique &&
             desired.mandatory != !current.nullable
     }
@@ -2216,6 +2220,7 @@ class ExistingEntityChangeService(
     private fun relationshipNullabilityIssue(
         entity: EntityModel,
         current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
     ): WorkspaceChangeIssue? {
         val relationship = current.associationDetails
             ?: return WorkspaceChangeIssue(
@@ -2305,6 +2310,16 @@ class ExistingEntityChangeService(
             return WorkspaceChangeIssue(
                 "JVW-ENTITY-RELATIONSHIP-NULLABILITY-COLUMN-UNPROVEN",
                 "$tableName.${current.columnName} does not exactly match the indexed non-key relationship column.",
+            )
+        }
+        val desiredColumn = desiredPhysicalColumnName(desired)
+        if (
+            !desiredColumn.equals(current.columnName, ignoreCase = true) &&
+            table.columns.any { it.name.equals(desiredColumn, ignoreCase = true) }
+        ) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-RELATIONSHIP-NULLABILITY-DESTINATION-COLLISION",
+                "$tableName.$desiredColumn already exists in the proven physical schema.",
             )
         }
         val foreignKeys = table.foreignKeys.filter { foreignKey ->
@@ -2795,7 +2810,7 @@ class ExistingEntityChangeService(
             relationshipUniquenessEvidence(entity, current).issue?.let { return it }
         }
         if (owningToOneNullabilityChange) {
-            relationshipNullabilityIssue(entity, current)?.let { return it }
+            relationshipNullabilityIssue(entity, current, desired)?.let { return it }
         }
         if (source.crossDataStore && relationshipSourceMetadataChanged(current, desired)) {
             return WorkspaceChangeIssue(

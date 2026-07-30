@@ -65,7 +65,10 @@ exact unqualified non-key column, its current nullability/uniqueness and one
 matching foreign key. Java/Kotlin annotations and checked forward/rollback
 nullability changes are previewed and applied together; optional-to-required
 halts on existing null references, while required-to-optional rollback fails
-safely if later data introduces nulls.
+safely if later data introduces nulls. An explicit collision-free join-column
+rename can participate in that same ordered change set: data is checked under
+the old name, the column is renamed, its constraint changes under the new name,
+and rollback reverses those operations.
 
 | Requirement area | Status | Implemented evidence | Remaining enterprise gap |
 |---|---|---|---|
@@ -210,9 +213,13 @@ safely if later data introduces nulls.
   `@JoinColumn` arguments while keeping Jakarta `optional` and database
   `nullable` aligned. Liquibase checks column existence and null data before
   contraction, expands only the proven NOT NULL constraint, and generates
-  reverse rollback. Apply-and-refresh contracts prove both source and physical
-  schema re-index to the new state. The responsive control was exercised at
-  1440, 480 and 360 pixels without horizontal overflow or browser diagnostics.
+  reverse rollback. The same preview may rename an explicit join column:
+  destination collisions are rejected from the physical inventory, null data
+  is checked using the old name, forward operations rename before changing the
+  constraint, and rollback changes the constraint before renaming back.
+  Apply-and-refresh contracts prove both source and physical schema re-index to
+  the new state. The responsive two-control workflow was exercised at 1440,
+  480 and 360 pixels without horizontal overflow or browser diagnostics.
 - The Integration Designer was exercised in a real browser. Catalog selection,
   indexed Kafka handler binding, non-blocking retry and dead-letter property
   authoring, and the immutable two-file Java/policy preview completed

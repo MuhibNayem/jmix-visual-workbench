@@ -2420,8 +2420,9 @@ export default function EntityDesigner() {
                         </Field>
                         <div className="min-w-0 rounded border border-emerald-500/20 bg-emerald-500/5 p-2 text-[10px] leading-relaxed text-emerald-200/80">
                           Preview updates only the literal <code>@JoinColumn(name)</code> and creates a guarded
-                          Liquibase rename with reverse rollback. Target, ownership, and nullability remain locked;
-                          checked cardinality narrowing and source-only relationship semantics are edited below.
+                          Liquibase rename with reverse rollback. A proven optional/required transition can travel
+                          in the same atomic plan; target and ownership remain locked unless a dedicated checked
+                          relationship transformation below explicitly unlocks them.
                         </div>
                       </div>
                     )}
@@ -3744,6 +3745,22 @@ function ExistingRelationshipSemanticsEditor({
       candidate => candidate.name.toLowerCase() === sourceAssociation.joinColumnName?.toLowerCase(),
     )
     : undefined
+  const requestedJoinColumn = association.joinColumnName?.trim() ?? ''
+  const joinColumnRenameRequested =
+    requestedJoinColumn.toLowerCase() !== sourceAssociation.joinColumnName?.toLowerCase()
+  const joinColumnRenameEligible = Boolean(
+    requestedJoinColumn &&
+    /^[A-Za-z_][A-Za-z0-9_]*$/.test(requestedJoinColumn) &&
+    !sourceEntity.attributes.some(candidate =>
+      candidate.name !== attribute.name &&
+      candidate.persistent &&
+      candidate.columnName.toLowerCase() === requestedJoinColumn.toLowerCase(),
+    ) &&
+    !physicalTable?.columns.some(candidate =>
+      candidate.name.toLowerCase() !== sourceAssociation.joinColumnName?.toLowerCase() &&
+      candidate.name.toLowerCase() === requestedJoinColumn.toLowerCase(),
+    )
+  )
   const mandatoryForeignKeyCount = sourceAssociation.joinColumnName
     ? (physicalTable?.foreignKeys ?? []).filter(foreignKey =>
       foreignKey.baseColumnNames.split(',').map(value => value.trim()).length === 1 &&
@@ -3772,6 +3789,7 @@ function ExistingRelationshipSemanticsEditor({
     relationshipPhysicalColumn?.nullable === sourceNullable &&
     relationshipPhysicalColumn.primaryKey === false &&
     relationshipPhysicalColumn.unique === sourceUnique &&
+    (!joinColumnRenameRequested || joinColumnRenameEligible) &&
     mandatoryForeignKeyCount === 1
   )
   const ownershipTransferCandidate =
@@ -3983,12 +4001,14 @@ function ExistingRelationshipSemanticsEditor({
                         Make <code>{sourceEntity.className}.{attribute.name}</code> mandatory only after
                         complete Liquibase history proves the exact nullable join column and foreign key.
                         Preview halts when existing rows contain nulls and rollback restores nullability.
+                        An explicit collision-free join-column rename can travel in the same atomic plan.
                       </>
                     ) : (
                       <>
                         Allow <code>{sourceEntity.className}.{attribute.name}</code> to become optional by dropping
                         only the proven foreign-key NOT NULL constraint. Rollback restores it and fails safely if
-                        new null references were introduced.
+                        new null references were introduced. A checked join-column rename can be applied and
+                        reversed in the same change set.
                       </>
                     )}
                   </p>
@@ -4012,7 +4032,8 @@ function ExistingRelationshipSemanticsEditor({
                 <p className="mt-2 text-[9px] leading-relaxed text-amber-200/75">
                   Locked until the original cardinality is retained and a complete, unqualified managed schema
                   proves the exact non-key column nullability plus one foreign key. Partial schemas, drift, missing
-                  constraints, database views, and combined cardinality changes fail closed.
+                  constraints, database views, invalid/colliding destination columns, and combined cardinality
+                  changes fail closed.
                 </p>
               )}
             </div>
