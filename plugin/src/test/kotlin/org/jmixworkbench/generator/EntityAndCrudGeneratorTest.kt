@@ -15,6 +15,7 @@ import org.jmixworkbench.model.TraitType
 import org.jmixworkbench.model.AttributeModel
 import org.jmixworkbench.model.AssociationCollectionType
 import org.jmixworkbench.model.AssociationConfig
+import org.jmixworkbench.model.AssociationJoinColumn
 import org.jmixworkbench.model.AssociationType
 import org.jmixworkbench.model.CascadeType
 import org.jmixworkbench.model.DtoConfig
@@ -565,9 +566,69 @@ class EntityAndCrudGeneratorTest {
     }
 
     @Test
+    fun `composite foreign keys and qualified join tables generate exact Java and Kotlin mappings`() {
+        val entity = EntityModel(
+            className = "LedgerAllocation",
+            packageName = "com.company.ledger.entity",
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "ledgerEntry",
+                    type = org.jmixworkbench.model.AttributeType.ASSOCIATION,
+                    mandatory = true,
+                    association = AssociationConfig(
+                        associationType = AssociationType.MANY_TO_ONE,
+                        relatedEntity = "com.company.ledger.entity.LedgerEntry",
+                        relatedIdType = IdType.EMBEDDED,
+                        joinColumns = mutableListOf(
+                            AssociationJoinColumn("ACCOUNT_CODE", "ACCOUNT_CODE", nullable = false),
+                            AssociationJoinColumn("POSTING_SEQUENCE", "POSTING_SEQUENCE", nullable = false),
+                        ),
+                    ),
+                ),
+                AttributeModel(
+                    name = "tags",
+                    type = org.jmixworkbench.model.AttributeType.ASSOCIATION,
+                    association = AssociationConfig(
+                        associationType = AssociationType.MANY_TO_MANY,
+                        relatedEntity = "com.company.ledger.entity.LedgerTag",
+                        collectionType = AssociationCollectionType.SET,
+                        joinTable = JoinTableConfig(
+                            name = "LEDGER_ENTRY_TAG",
+                            joinColumnName = "ACCOUNT_CODE",
+                            inverseJoinColumnName = "TAG_CODE",
+                            schema = "accounting",
+                            catalog = "bank",
+                            joinColumns = mutableListOf(
+                                AssociationJoinColumn("ACCOUNT_CODE", "ACCOUNT_CODE"),
+                                AssociationJoinColumn("POSTING_SEQUENCE", "POSTING_SEQUENCE"),
+                            ),
+                            inverseJoinColumns = mutableListOf(
+                                AssociationJoinColumn("TAG_TENANT", "TENANT"),
+                                AssociationJoinColumn("TAG_CODE", "CODE"),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val java = EntityGenerator.generate(entity)
+        val kotlin = KotlinEntityGenerator.generate(
+            entity.copy(sourceLanguage = EntitySourceLanguage.KOTLIN),
+        )
+
+        assertTrue(java.contains("@JoinColumns({@JoinColumn(name = \"ACCOUNT_CODE\", referencedColumnName = \"ACCOUNT_CODE\", nullable = false), @JoinColumn(name = \"POSTING_SEQUENCE\", referencedColumnName = \"POSTING_SEQUENCE\", nullable = false)})"))
+        assertTrue(java.contains("@JoinTable(name = \"LEDGER_ENTRY_TAG\", schema = \"accounting\", catalog = \"bank\""))
+        assertTrue(java.contains("inverseJoinColumns = {@JoinColumn(name = \"TAG_TENANT\", referencedColumnName = \"TENANT\"), @JoinColumn(name = \"TAG_CODE\", referencedColumnName = \"CODE\")}"))
+        assertTrue(kotlin.contains("@JoinColumns(value = [JoinColumn(name = \"ACCOUNT_CODE\", referencedColumnName = \"ACCOUNT_CODE\", nullable = false), JoinColumn(name = \"POSTING_SEQUENCE\", referencedColumnName = \"POSTING_SEQUENCE\", nullable = false)])"))
+        assertTrue(kotlin.contains("@JoinTable(name = \"LEDGER_ENTRY_TAG\""))
+        assertTrue(kotlin.contains("schema = \"accounting\", catalog = \"bank\""))
+        assertTrue(kotlin.contains("inverseJoinColumns = [JoinColumn(name = \"TAG_TENANT\", referencedColumnName = \"TENANT\"), JoinColumn(name = \"TAG_CODE\", referencedColumnName = \"CODE\")]"))
+    }
+
+    @Test
     fun `advanced property metadata comments validation groups and read-only fields are generated`() {
-        val source = EntityGenerator.generate(
-            EntityModel(
+        val entity = EntityModel(
                 className = "EmployeeProfile",
                 packageName = "com.company.payroll.entity",
                 comment = "Enterprise employee profile",
@@ -590,7 +651,10 @@ class EntityAndCrudGeneratorTest {
                         ),
                     ),
                 ),
-            ),
+        )
+        val source = EntityGenerator.generate(entity)
+        val kotlin = KotlinEntityGenerator.generate(
+            entity.copy(sourceLanguage = EntitySourceLanguage.KOTLIN),
         )
 
         assertTrue(source.contains("@SystemLevel"))
@@ -600,7 +664,10 @@ class EntityAndCrudGeneratorTest {
         assertTrue(source.contains("@PropertyDatatype(\"employeeName\")"))
         assertTrue(source.contains("@NotBlank(groups = {PayrollChecks.class})"))
         assertTrue(source.contains("import com.company.validation.PayrollChecks;"))
+        assertTrue(source.contains("insertable = false, updatable = false"))
         assertFalse(source.contains("setDisplayName"))
+        assertTrue(kotlin.contains("insertable = false, updatable = false"))
+        assertTrue(kotlin.contains("val displayName: String? = null"))
     }
 
     @Test

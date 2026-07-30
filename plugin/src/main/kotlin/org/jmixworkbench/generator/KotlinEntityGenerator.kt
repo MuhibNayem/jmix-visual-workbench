@@ -572,15 +572,7 @@ object KotlinEntityGenerator {
                     AssociationType.MANY_TO_ONE -> {
                         if (attribute.mandatory) parameters["optional"] = "false"
                         add(annotation("ManyToOne", parameters))
-                        add(
-                            annotation(
-                                "JoinColumn",
-                                linkedMapOf(
-                                    "name" to quote(association.joinColumnName ?: attribute.resolvedColumnName + "_ID"),
-                                    "referencedColumnName" to quote(association.relatedIdColumnName),
-                                ).apply { if (attribute.mandatory) put("nullable", "false") },
-                            ),
-                        )
+                        add(kotlinJoinColumnAnnotation(association, attribute))
                     }
                     AssociationType.ONE_TO_MANY -> {
                         parameters["mappedBy"] = quote(requireNotNull(association.mappedBy))
@@ -591,20 +583,45 @@ object KotlinEntityGenerator {
                         association.mappedBy?.takeIf(String::isNotBlank)?.let { parameters["mappedBy"] = quote(it) }
                         add(annotation("ManyToMany", parameters))
                         association.joinTable?.takeIf { association.mappedBy.isNullOrBlank() }?.let {
+                            val joinColumns = it.joinColumns.ifEmpty {
+                                mutableListOf(
+                                    AssociationJoinColumn(
+                                        it.joinColumnName,
+                                        "",
+                                    ),
+                                )
+                            }
+                            val inverseJoinColumns = it.inverseJoinColumns.ifEmpty {
+                                mutableListOf(
+                                    AssociationJoinColumn(
+                                        it.inverseJoinColumnName,
+                                        "",
+                                    ),
+                                )
+                            }
                             add(
                                 annotation(
                                     "JoinTable",
                                     linkedMapOf(
                                         "name" to quote(it.name),
-                                        "joinColumns" to annotation(
-                                            "JoinColumn",
-                                            mapOf("name" to quote(it.joinColumnName)),
-                                        ).removePrefix("@"),
-                                        "inverseJoinColumns" to annotation(
-                                            "JoinColumn",
-                                            mapOf("name" to quote(it.inverseJoinColumnName)),
-                                        ).removePrefix("@"),
-                                    ),
+                                        "joinColumns" to joinColumns.joinToString(
+                                            prefix = "[",
+                                            postfix = "]",
+                                            transform = ::kotlinJoinColumn,
+                                        ),
+                                        "inverseJoinColumns" to inverseJoinColumns.joinToString(
+                                            prefix = "[",
+                                            postfix = "]",
+                                            transform = ::kotlinJoinColumn,
+                                        ),
+                                    ).apply {
+                                        it.schema?.takeIf(String::isNotBlank)?.let { value ->
+                                            put("schema", quote(value))
+                                        }
+                                        it.catalog?.takeIf(String::isNotBlank)?.let { value ->
+                                            put("catalog", quote(value))
+                                        }
+                                    },
                                 ),
                             )
                         }
@@ -615,15 +632,7 @@ object KotlinEntityGenerator {
                         if (association.orphanRemoval) parameters["orphanRemoval"] = "true"
                         add(annotation("OneToOne", parameters))
                         if (association.mappedBy == null) {
-                            add(
-                                annotation(
-                                    "JoinColumn",
-                                    linkedMapOf(
-                                        "name" to quote(association.joinColumnName ?: attribute.resolvedColumnName + "_ID"),
-                                        "referencedColumnName" to quote(association.relatedIdColumnName),
-                                    ).apply { if (attribute.mandatory) put("nullable", "false") },
-                                ),
-                            )
+                            add(kotlinJoinColumnAnnotation(association, attribute))
                         }
                     }
                 }
@@ -641,6 +650,10 @@ object KotlinEntityGenerator {
                 val parameters = linkedMapOf("name" to quote(attribute.resolvedColumnName))
                 if (attribute.mandatory) parameters["nullable"] = "false"
                 if (attribute.unique) parameters["unique"] = "true"
+                if (attribute.readOnly) {
+                    parameters["insertable"] = "false"
+                    parameters["updatable"] = "false"
+                }
                 if (
                     attribute.length != null &&
                     attribute.type in setOf(AttributeType.STRING, AttributeType.ENUM, AttributeType.URI, AttributeType.FILE_REF)
@@ -654,6 +667,48 @@ object KotlinEntityGenerator {
             }
         }
     }
+
+    private fun kotlinJoinColumnAnnotation(
+        association: AssociationConfig,
+        attribute: AttributeModel,
+    ): String {
+        val columns = association.joinColumns.ifEmpty {
+            mutableListOf(
+                AssociationJoinColumn(
+                    name = association.joinColumnName ?: attribute.resolvedColumnName + "_ID",
+                    referencedColumnName = association.relatedIdColumnName,
+                    nullable = !attribute.mandatory,
+                ),
+            )
+        }
+        return if (columns.size == 1) {
+            "@${kotlinJoinColumn(columns.single())}"
+        } else {
+            annotation(
+                "JoinColumns",
+                mapOf(
+                    "value" to columns.joinToString(
+                        prefix = "[",
+                        postfix = "]",
+                        transform = ::kotlinJoinColumn,
+                    ),
+                ),
+            )
+        }
+    }
+
+    private fun kotlinJoinColumn(column: AssociationJoinColumn): String =
+        annotation(
+            "JoinColumn",
+            linkedMapOf("name" to quote(column.name)).apply {
+                column.referencedColumnName.takeIf(String::isNotBlank)?.let {
+                    put("referencedColumnName", quote(it))
+                }
+                column.nullable?.let { put("nullable", it.toString()) }
+                if (!column.insertable) put("insertable", "false")
+                if (!column.updatable) put("updatable", "false")
+            },
+        ).removePrefix("@")
 
     private fun kotlinAttributeType(attribute: AttributeModel, imports: MutableSet<String>): String = when (attribute.type) {
         AttributeType.CHARACTER -> "Char"

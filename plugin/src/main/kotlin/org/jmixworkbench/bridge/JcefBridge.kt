@@ -53,6 +53,7 @@ import org.jmixworkbench.services.EntityAttributePropagationInspectionResponse
 import org.jmixworkbench.services.EntityAttributePropagationService
 import org.jmixworkbench.services.DatabaseEntityTableInspectionRequest
 import org.jmixworkbench.services.DatabaseEntityTableBrowseRequest
+import org.jmixworkbench.services.DatabaseEntityImportRequest
 import org.jmixworkbench.services.DatabaseReverseEngineeringService
 import org.jmixworkbench.services.ApplicationGraphService
 import org.jmixworkbench.services.FlowUiPropertyChangeRequest
@@ -379,6 +380,18 @@ class JcefBridge(
             }
             if (action == "browseDatabaseEntityTables") {
                 handleBrowseDatabaseEntityTables(action, requestId, payload)
+                return
+            }
+            if (action == "planDatabaseEntityImport") {
+                handlePlanDatabaseEntityImport(action, requestId, payload)
+                return
+            }
+            if (action == "previewDatabaseEntityImport") {
+                handlePreviewDatabaseEntityImport(action, requestId, payload)
+                return
+            }
+            if (action == "applyDatabaseEntityImport") {
+                handleApplyDatabaseEntityImport(action, requestId, payload)
                 return
             }
             if (action == "inspectEntityAttributePropagation") {
@@ -1687,6 +1700,191 @@ class JcefBridge(
                 }
             }, ModalityState.any())
         }
+    }
+
+    private fun handlePlanDatabaseEntityImport(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, DatabaseEntityImportRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    org.jmixworkbench.services.DatabaseEntityImportPlanResponse.failure(
+                        "JVW-DB-IMPORT-REQUEST-INVALID",
+                        error.message ?: "The database import request is malformed.",
+                    ),
+                ),
+            )
+            return
+        }
+        AppExecutorUtil.getAppExecutorService().submit {
+            val response = DatabaseReverseEngineeringService.getInstance(project)
+                .planEntityImport(request)
+            ApplicationManager.getApplication().invokeLater({
+                if (!project.isDisposed) {
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+            }, ModalityState.any())
+        }
+    }
+
+    private fun handlePreviewDatabaseEntityImport(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(
+                payload.getAsJsonObject("request"),
+                DatabaseEntityImportRequest::class.java,
+            )
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        val expectedSnapshotDigest = payload.get("expectedSnapshotDigest")?.asString.orEmpty()
+        AppExecutorUtil.getAppExecutorService().submit {
+            val plan = DatabaseReverseEngineeringService.getInstance(project)
+                .planEntityImport(request)
+            if (
+                !plan.accepted ||
+                !plan.ready ||
+                plan.snapshotDigest.isNullOrBlank() ||
+                plan.snapshotDigest != expectedSnapshotDigest
+            ) {
+                sendDatabaseImportPreviewRejection(action, requestId, plan, expectedSnapshotDigest)
+                return@submit
+            }
+            val config = JmixProjectService.getInstance(project).getConfig()
+            if (config == null) {
+                ApplicationManager.getApplication().invokeLater({
+                    sendGenerationRequestError(
+                        action,
+                        requestId,
+                        IllegalStateException("Not a Jmix project."),
+                    )
+                }, ModalityState.any())
+                return@submit
+            }
+            ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
+                CodeGenerationService.getInstance(project)
+                    .previewDatabaseEntityImport(plan.entities, config)
+            }
+                .inSmartMode(project)
+                .expireWith(project)
+                .finishOnUiThread(ModalityState.any()) { response ->
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+                .submit(AppExecutorUtil.getAppExecutorService())
+        }
+    }
+
+    private fun handleApplyDatabaseEntityImport(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(
+                payload.getAsJsonObject("request"),
+                DatabaseEntityImportRequest::class.java,
+            )
+        }.getOrElse { error ->
+            sendGenerationApplyError(action, requestId, error)
+            return
+        }
+        val expectedSnapshotDigest = payload.get("expectedSnapshotDigest")?.asString.orEmpty()
+        val expectedPlanDigest = payload.get("expectedPlanDigest")?.asString.orEmpty()
+        AppExecutorUtil.getAppExecutorService().submit {
+            val plan = DatabaseReverseEngineeringService.getInstance(project)
+                .planEntityImport(request)
+            if (
+                !plan.accepted ||
+                !plan.ready ||
+                plan.snapshotDigest.isNullOrBlank() ||
+                plan.snapshotDigest != expectedSnapshotDigest
+            ) {
+                ApplicationManager.getApplication().invokeLater({
+                    sendGenerationApplyError(
+                        action,
+                        requestId,
+                        IllegalStateException(
+                            plan.issues.firstOrNull()?.message
+                                ?: "The live database schema changed after review. Refresh the import plan.",
+                        ),
+                    )
+                }, ModalityState.any())
+                return@submit
+            }
+            val config = JmixProjectService.getInstance(project).getConfig()
+            if (config == null) {
+                ApplicationManager.getApplication().invokeLater({
+                    sendGenerationApplyError(
+                        action,
+                        requestId,
+                        IllegalStateException("Not a Jmix project."),
+                    )
+                }, ModalityState.any())
+                return@submit
+            }
+            ReadAction.nonBlocking<PreparedWorkspaceChange> {
+                CodeGenerationService.getInstance(project).prepareDatabaseEntityImport(
+                    plan.entities,
+                    config,
+                    expectedPlanDigest,
+                )
+            }
+                .inSmartMode(project)
+                .expireWith(project)
+                .finishOnUiThread(ModalityState.any()) { prepared ->
+                    val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+                .submit(AppExecutorUtil.getAppExecutorService())
+        }
+    }
+
+    private fun sendDatabaseImportPreviewRejection(
+        action: String,
+        requestId: String?,
+        plan: org.jmixworkbench.services.DatabaseEntityImportPlanResponse,
+        expectedSnapshotDigest: String,
+    ) {
+        val issue = when {
+            plan.issues.isNotEmpty() -> plan.issues.first()
+            plan.snapshotDigest != expectedSnapshotDigest ->
+                org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                    "JVW-DB-IMPORT-SNAPSHOT-STALE",
+                    "The live database schema changed after review. Refresh the import plan.",
+                )
+            else -> org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                "JVW-DB-IMPORT-NOT-READY",
+                "Resolve every blocked table mapping before previewing generation.",
+            )
+        }
+        ApplicationManager.getApplication().invokeLater({
+            if (!project.isDisposed) {
+                sendResponse(
+                    action,
+                    requestId,
+                    gson.toJson(
+                        org.jmixworkbench.services.WorkspaceChangePreviewResponse(
+                            accepted = false,
+                            changeSetId = "database-import:rejected",
+                            label = "Database entity import rejected",
+                            planDigest = null,
+                            files = emptyList(),
+                            issues = listOf(issue),
+                        ),
+                    ),
+                )
+            }
+        }, ModalityState.any())
     }
 
     private fun handleInspectEntityAttributePropagation(

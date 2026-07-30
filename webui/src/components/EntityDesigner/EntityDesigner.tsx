@@ -20,6 +20,8 @@ import type {
   DatabaseEntityTableBrowseResponse,
   DatabaseTableReference,
   DatabaseColumnSnapshot,
+  DatabaseEntityImportRequest,
+  DatabaseEntityImportPlanResponse,
   EntityAttributePropagationChangeRequest,
   EntityAttributePropagationInspectionResponse,
   EntityAttributeTypeSchemaImpact,
@@ -121,6 +123,17 @@ export default function EntityDesigner() {
   const [databaseBrowse, setDatabaseBrowse] =
     useState<DatabaseEntityTableBrowseResponse | null>(null)
   const [databaseBrowseBusy, setDatabaseBrowseBusy] = useState(false)
+  const [databaseImportSelection, setDatabaseImportSelection] =
+    useState<DatabaseTableReference[]>([])
+  const [databaseIdentifierOverrides, setDatabaseIdentifierOverrides] =
+    useState<Record<string, string[]>>({})
+  const [databaseImportRequest, setDatabaseImportRequest] =
+    useState<DatabaseEntityImportRequest | null>(null)
+  const [databaseImportPlan, setDatabaseImportPlan] =
+    useState<DatabaseEntityImportPlanResponse | null>(null)
+  const [databaseImportPreview, setDatabaseImportPreview] =
+    useState<WorkspaceChangePreviewResponse | null>(null)
+  const [databaseImportBusy, setDatabaseImportBusy] = useState(false)
   const [databaseInspectionMergeAllowed, setDatabaseInspectionMergeAllowed] = useState(true)
   const [propagationInspection, setPropagationInspection] =
     useState<EntityAttributePropagationInspectionResponse | null>(null)
@@ -559,8 +572,8 @@ export default function EntityDesigner() {
 
   const browseDatabaseTables = async () => {
     const storeId = entity.generationTarget?.storeId
-    if (!existingEntity || !storeId) {
-      addToast('Select an existing mapped entity and data store first', 'error')
+    if (!storeId) {
+      addToast('Select a target module and data store first', 'error')
       return
     }
     setDatabaseBrowseBusy(true)
@@ -583,6 +596,124 @@ export default function EntityDesigner() {
       addToast(`Database browsing failed: ${error.message}`, 'error')
     } finally {
       setDatabaseBrowseBusy(false)
+    }
+  }
+
+  const buildDatabaseImportRequest = (
+    selection = databaseImportSelection,
+    identifierOverrides = databaseIdentifierOverrides,
+  ): DatabaseEntityImportRequest | null => {
+    const moduleId = entity.generationTarget?.moduleId
+    const storeId = entity.generationTarget?.storeId
+    if (!moduleId || !storeId || !entity.packageName.trim() || !selection.length) return null
+    return {
+      moduleId,
+      storeId,
+      packageName: entity.packageName.trim(),
+      sourceLanguage: entity.sourceLanguage,
+      selectedTables: selection,
+      includeDependencies: true,
+      identifierOverrides,
+    }
+  }
+
+  const planDatabaseEntityImport = async (
+    identifierOverrides = databaseIdentifierOverrides,
+  ) => {
+    const request = buildDatabaseImportRequest(databaseImportSelection, identifierOverrides)
+    if (!request) {
+      addToast('Select at least one table plus a target module, data store, and package', 'error')
+      return
+    }
+    setDatabaseImportBusy(true)
+    setDatabaseImportPlan(null)
+    setDatabaseImportPreview(null)
+    try {
+      const response = await bridge.planDatabaseEntityImport(request)
+      setDatabaseImportRequest(request)
+      setDatabaseImportPlan(response)
+      if (!response.accepted) {
+        addToast(response.issues[0]?.message ?? 'Database entity planning was rejected', 'error')
+      } else if (response.ready) {
+        const generated = response.tables.filter(table => table.generated).length
+        addToast(
+          `Planned ${generated} database-backed entity type${generated === 1 ? '' : 's'} with dependency closure`,
+          'success',
+        )
+      } else {
+        addToast('The import plan needs the highlighted identifier or mapping decisions', 'info')
+      }
+    } catch (error: any) {
+      addToast(`Database entity planning failed: ${error.message}`, 'error')
+    } finally {
+      setDatabaseImportBusy(false)
+    }
+  }
+
+  const previewDatabaseEntityImport = async () => {
+    const snapshotDigest = databaseImportPlan?.snapshotDigest
+    if (!databaseImportRequest || !snapshotDigest || !databaseImportPlan.ready) return
+    setDatabaseImportBusy(true)
+    try {
+      const response = await bridge.previewDatabaseEntityImport(
+        databaseImportRequest,
+        snapshotDigest,
+      )
+      setDatabaseImportPreview(response)
+      if (!response.accepted) {
+        addToast(response.issues[0]?.message ?? 'Atomic import preview was rejected', 'error')
+      }
+    } catch (error: any) {
+      addToast(`Database entity preview failed: ${error.message}`, 'error')
+    } finally {
+      setDatabaseImportBusy(false)
+    }
+  }
+
+  const applyDatabaseEntityImport = async () => {
+    const snapshotDigest = databaseImportPlan?.snapshotDigest
+    const planDigest = databaseImportPreview?.planDigest
+    if (!databaseImportRequest || !snapshotDigest || !planDigest) return
+    setDatabaseImportBusy(true)
+    try {
+      const response = await bridge.applyDatabaseEntityImport(
+        databaseImportRequest,
+        snapshotDigest,
+        planDigest,
+      )
+      if (!response.success) {
+        addToast(response.issues[0]?.message ?? 'Atomic database import was rejected', 'error')
+        return
+      }
+      const generatedNames = new Set(
+        databaseImportPlan?.tables
+          .map(table => table.entityQualifiedName)
+          .filter((value): value is string => Boolean(value)),
+      )
+      const refreshed = await bridge.getSchemaWorkspace(true)
+      setSchemaWorkspace(refreshed)
+      const generated = refreshed.entities.find(candidate => generatedNames.has(candidate.qualifiedName))
+      if (generated) {
+        const store = refreshed.stores.find(
+          candidate => candidate.moduleId === generated.moduleId && candidate.name === generated.storeName,
+        )
+        setExistingEntity(generated)
+        setEntity(existingEntityModel(generated, store?.id))
+      }
+      setDatabaseBrowse(null)
+      setDatabaseImportSelection([])
+      setDatabaseIdentifierOverrides({})
+      setDatabaseImportRequest(null)
+      setDatabaseImportPlan(null)
+      setDatabaseImportPreview(null)
+      addToast(
+        `Imported ${response.filesChanged.length} source and message file${response.filesChanged.length === 1 ? '' : 's'} atomically`,
+        'success',
+      )
+    } catch (error: any) {
+      addToast(`Database entity import failed: ${error.message}`, 'error')
+    } finally {
+      setDatabaseImportBusy(false)
     }
   }
 
@@ -908,6 +1039,12 @@ export default function EntityDesigner() {
     setDatabaseInspection(null)
     setDatabaseColumnDrafts({})
     setDatabaseSchemaName('')
+    setDatabaseBrowse(null)
+    setDatabaseImportSelection([])
+    setDatabaseIdentifierOverrides({})
+    setDatabaseImportRequest(null)
+    setDatabaseImportPlan(null)
+    setDatabaseImportPreview(null)
     setPropagationInspection(null)
     setPropagationSelection([])
     setPropagationPreview(null)
@@ -930,6 +1067,12 @@ export default function EntityDesigner() {
     setDatabaseInspection(null)
     setDatabaseColumnDrafts({})
     setDatabaseSchemaName('')
+    setDatabaseBrowse(null)
+    setDatabaseImportSelection([])
+    setDatabaseIdentifierOverrides({})
+    setDatabaseImportRequest(null)
+    setDatabaseImportPlan(null)
+    setDatabaseImportPreview(null)
     setPropagationInspection(null)
     setPropagationSelection([])
     setPropagationPreview(null)
@@ -1563,16 +1706,22 @@ export default function EntityDesigner() {
             </h3>
             {entity.entityType !== 'enum' && (
               <div className="flex flex-wrap justify-end gap-2">
+                {entity.entityType === 'entity' && (
+                  <button
+                    type="button"
+                    onClick={browseDatabaseTables}
+                    disabled={databaseBrowseBusy || databaseInspectBusy || !entity.generationTarget?.storeId}
+                    className="rounded border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200 transition-colors hover:bg-cyan-500/20 disabled:opacity-50"
+                  >
+                    {databaseBrowseBusy
+                      ? 'Browsing database…'
+                      : existingEntity
+                        ? '⌕ Browse live database'
+                        : '⌕ Import database model'}
+                  </button>
+                )}
                 {existingEntity && (
                   <>
-                    <button
-                      type="button"
-                      onClick={browseDatabaseTables}
-                      disabled={databaseBrowseBusy || databaseInspectBusy || !entity.generationTarget?.storeId}
-                      className="rounded border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200 transition-colors hover:bg-cyan-500/20 disabled:opacity-50"
-                    >
-                      {databaseBrowseBusy ? 'Browsing database…' : '⌕ Browse live database'}
-                    </button>
                     <button
                       type="button"
                       onClick={() => inspectDatabaseTable()}
@@ -1628,7 +1777,52 @@ export default function EntityDesigner() {
               onIncludeViewsChange={setDatabaseIncludeViews}
               onRefresh={browseDatabaseTables}
               onInspect={inspectDatabaseTable}
-              onClose={() => setDatabaseBrowse(null)}
+              importMode={!existingEntity}
+              selectedTables={databaseImportSelection}
+              planning={databaseImportBusy}
+              onToggleTable={(table) => {
+                const key = databaseTableKey(table)
+                setDatabaseImportSelection(current => current.some(candidate =>
+                  databaseTableKey(candidate) === key)
+                  ? current.filter(candidate => databaseTableKey(candidate) !== key)
+                  : [...current, table])
+                setDatabaseImportPlan(null)
+                setDatabaseImportPreview(null)
+              }}
+              onPlan={() => planDatabaseEntityImport()}
+              onClose={() => {
+                setDatabaseBrowse(null)
+                if (!existingEntity) {
+                  setDatabaseImportSelection([])
+                  setDatabaseImportPlan(null)
+                  setDatabaseImportPreview(null)
+                }
+              }}
+            />
+          )}
+
+          {(databaseImportBusy || databaseImportPlan) && !existingEntity && (
+            <DatabaseEntityImportPanel
+              busy={databaseImportBusy}
+              plan={databaseImportPlan}
+              preview={databaseImportPreview}
+              identifierOverrides={databaseIdentifierOverrides}
+              onIdentifierToggle={(table, column) => {
+                const key = databaseTableKey(table)
+                const current = databaseIdentifierOverrides[key] ?? []
+                const next = current.includes(column)
+                  ? current.filter(candidate => candidate !== column)
+                  : [...current, column]
+                setDatabaseIdentifierOverrides(overrides => ({ ...overrides, [key]: next }))
+                setDatabaseImportPreview(null)
+              }}
+              onReplan={() => planDatabaseEntityImport(databaseIdentifierOverrides)}
+              onPreview={previewDatabaseEntityImport}
+              onApply={applyDatabaseEntityImport}
+              onClose={() => {
+                setDatabaseImportPlan(null)
+                setDatabaseImportPreview(null)
+              }}
             />
           )}
 
@@ -3080,6 +3274,11 @@ function DatabaseBrowsePanel({
   onIncludeViewsChange,
   onRefresh,
   onInspect,
+  importMode,
+  selectedTables,
+  planning,
+  onToggleTable,
+  onPlan,
   onClose,
 }: {
   busy: boolean
@@ -3097,6 +3296,11 @@ function DatabaseBrowsePanel({
   onIncludeViewsChange: (value: boolean) => void
   onRefresh: () => void
   onInspect: (table: DatabaseTableReference) => void
+  importMode: boolean
+  selectedTables: DatabaseTableReference[]
+  planning: boolean
+  onToggleTable: (table: DatabaseTableReference) => void
+  onPlan: () => void
   onClose: () => void
 }) {
   if (busy && !browse) {
@@ -3146,7 +3350,9 @@ function DatabaseBrowsePanel({
       <div className="relative min-w-0 border-b border-cyan-500/15 p-3 pr-10 sm:p-4 sm:pr-12">
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold text-cyan-100">Live database browser</span>
+            <span className="text-xs font-semibold text-cyan-100">
+              {importMode ? 'Database-first entity model' : 'Live database browser'}
+            </span>
             <span className="max-w-full truncate rounded bg-surface-lighter px-2 py-0.5 text-[9px] text-gray-400">
               {browse.database?.name} {browse.database?.version}
             </span>
@@ -3155,8 +3361,9 @@ function DatabaseBrowsePanel({
             </span>
           </div>
           <p className="mt-2 max-w-4xl text-[10px] leading-relaxed text-gray-500">
-            Inspect any table safely. Attribute import unlocks only when the backend proves that the selected
-            catalog, schema, store, table, and entity mapping are the same target.
+            {importMode
+              ? 'Select root tables or views. The backend follows foreign keys, reuses already mapped entities, recognizes strict join tables, and plans the complete source change atomically.'
+              : 'Inspect any table safely. Attribute import unlocks only when the backend proves that the selected catalog, schema, store, table, and entity mapping are the same target.'}
           </p>
         </div>
         <button
@@ -3242,18 +3449,23 @@ function DatabaseBrowsePanel({
       {browse.tables.length ? (
         <div className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 sm:p-4 2xl:grid-cols-3">
           {browse.tables.map(table => {
+            const selected = selectedTables.some(candidate =>
+              databaseTableKey(candidate) === databaseTableKey(table))
             const nameMatches = table.name.toLowerCase() === mappedName
             const explicitSchemaMatches = !mappedTableSchema ||
               table.schema?.toLowerCase() === mappedTableSchema.toLowerCase()
             const explicitCatalogMatches = !mappedTableCatalog ||
               table.catalog?.toLowerCase() === mappedTableCatalog.toLowerCase()
-            const mappedCandidate = nameMatches && explicitSchemaMatches && explicitCatalogMatches
+            const mappedCandidate = !importMode &&
+              nameMatches && explicitSchemaMatches && explicitCatalogMatches
             const qualifiedName = [table.catalog, table.schema, table.name].filter(Boolean).join('.')
             return (
               <article
                 key={`${table.catalog ?? ''}:${table.schema ?? ''}:${table.name}:${table.type}`}
                 className={`min-w-0 rounded-lg border p-3 ${
-                  mappedCandidate
+                  selected
+                    ? 'border-jmix-400/50 bg-jmix-500/[0.1]'
+                    : mappedCandidate
                     ? 'border-cyan-400/35 bg-cyan-500/[0.08]'
                     : 'border-surface-border bg-surface/75'
                 }`}
@@ -3268,6 +3480,7 @@ function DatabaseBrowsePanel({
                         label={table.type.toUpperCase() === 'VIEW' ? 'view' : 'table'}
                         tone={table.type.toUpperCase() === 'VIEW' ? 'warning' : 'neutral'}
                       />
+                      {selected && <DatabaseStatus label="selected" tone="cyan" />}
                       {mappedCandidate && <DatabaseStatus label="mapping candidate" tone="cyan" />}
                     </div>
                     <div className="mt-1 break-all font-mono text-[9px] text-gray-600">
@@ -3282,11 +3495,18 @@ function DatabaseBrowsePanel({
                 )}
                 <button
                   type="button"
-                  onClick={() => onInspect(table)}
+                  onClick={() => importMode ? onToggleTable(table) : onInspect(table)}
                   disabled={busy}
-                  className="mt-3 w-full rounded border border-cyan-500/25 bg-cyan-500/10 px-2 py-1.5 text-[10px] text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-50"
+                  aria-pressed={importMode ? selected : undefined}
+                  className={`mt-3 w-full rounded border px-2 py-1.5 text-[10px] disabled:opacity-50 ${
+                    selected
+                      ? 'border-jmix-400/40 bg-jmix-500/20 text-jmix-100 hover:bg-jmix-500/30'
+                      : 'border-cyan-500/25 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/20'
+                  }`}
                 >
-                  {mappedCandidate ? 'Compare and import safely' : 'Inspect metadata'}
+                  {importMode
+                    ? selected ? '✓ Included as import root' : '+ Include in entity model'
+                    : mappedCandidate ? 'Compare and import safely' : 'Inspect metadata'}
                 </button>
               </article>
             )
@@ -3303,7 +3523,258 @@ function DatabaseBrowsePanel({
         <span className="min-w-0 break-all">
           Active catalog {browse.activeCatalog || 'driver default'} · URL fingerprint {browse.database?.urlFingerprint}
         </span>
-        <span>{browse.schemas.length} schemas discovered</span>
+        {importMode ? (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <span>{selectedTables.length} import root{selectedTables.length === 1 ? '' : 's'}</span>
+            <button
+              type="button"
+              onClick={onPlan}
+              disabled={planning || selectedTables.length === 0}
+              className="rounded bg-jmix-500 px-3 py-1.5 text-[10px] font-medium text-white hover:bg-jmix-600 disabled:opacity-50"
+            >
+              {planning ? 'Resolving dependencies…' : 'Plan complete entity model →'}
+            </button>
+          </div>
+        ) : (
+          <span>{browse.schemas.length} schemas discovered</span>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function DatabaseEntityImportPanel({
+  busy,
+  plan,
+  preview,
+  identifierOverrides,
+  onIdentifierToggle,
+  onReplan,
+  onPreview,
+  onApply,
+  onClose,
+}: {
+  busy: boolean
+  plan: DatabaseEntityImportPlanResponse | null
+  preview: WorkspaceChangePreviewResponse | null
+  identifierOverrides: Record<string, string[]>
+  onIdentifierToggle: (table: DatabaseTableReference, column: string) => void
+  onReplan: () => void
+  onPreview: () => void
+  onApply: () => void
+  onClose: () => void
+}) {
+  if (busy && !plan) {
+    return (
+      <section className="mb-4 min-w-0 rounded-xl border border-jmix-500/25 bg-jmix-500/[0.06] p-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-jmix-300" />
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-jmix-100">Resolving the database entity graph</div>
+            <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+              Reading primary keys, ordered composite foreign keys, dependency closure, views, and pure join tables.
+            </p>
+          </div>
+        </div>
+      </section>
+    )
+  }
+  if (!plan) return null
+  const generatedEntities = plan.tables.filter(table => table.generated).length
+  const existingEntities = plan.tables.filter(table => table.status === 'EXISTING_ENTITY').length
+  const joinTables = plan.tables.filter(table => table.status === 'JOIN_TABLE').length
+  const blocked = plan.tables.filter(table => table.status === 'BLOCKED').length
+  return (
+    <section className="mb-4 min-w-0 overflow-hidden rounded-xl border border-jmix-500/30 bg-gradient-to-br from-jmix-500/[0.09] to-surface">
+      <div className="relative min-w-0 border-b border-jmix-500/20 p-3 pr-10 sm:p-4 sm:pr-12">
+        <div className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-jmix-100">Reviewed database entity plan</span>
+            <DatabaseStatus
+              label={plan.ready ? 'ready for atomic preview' : `${blocked} blocked`}
+              tone={plan.ready ? 'cyan' : 'warning'}
+            />
+            <span className="rounded bg-surface-lighter px-2 py-0.5 text-[9px] text-gray-400">
+              {generatedEntities} generated · {existingEntities} reused · {joinTables} join tables
+            </span>
+          </div>
+          <p className="mt-2 max-w-4xl text-[10px] leading-relaxed text-gray-500">
+            Every generated type is DDL-disabled because these tables already exist. Preview and apply re-read the
+            live schema and reject stale metadata, source collisions, or a changed destination.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close database entity plan"
+          className="absolute right-3 top-3 rounded p-1 text-xs text-gray-500 hover:bg-white/5 hover:text-gray-200 sm:right-4 sm:top-4"
+        >
+          ✕
+        </button>
+      </div>
+
+      {!plan.accepted && (
+        <div className="border-b border-red-500/20 bg-red-500/[0.07] px-3 py-3 sm:px-4">
+          {plan.issues.map(issue => (
+            <div key={`${issue.code}-${issue.message}`} className="break-words text-[10px] text-red-200/80">
+              {issue.message}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 sm:p-4 2xl:grid-cols-3">
+        {plan.tables.map(tablePlan => {
+          const table = tablePlan.table
+          const tableKey = databaseTableKey(table)
+          const selectedIdentifiers = identifierOverrides[tableKey] ?? []
+          const needsViewIdentifier = table.type.toUpperCase() === 'VIEW' &&
+            tablePlan.issues.some(issue => issue.code === 'JVW-DB-IMPORT-IDENTIFIER-MISSING')
+          return (
+            <article
+              key={tableKey}
+              className={`min-w-0 rounded-lg border p-3 ${
+                tablePlan.status === 'BLOCKED'
+                  ? 'border-amber-500/30 bg-amber-500/[0.06]'
+                  : 'border-surface-border bg-surface/75'
+              }`}
+            >
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span className="max-w-full break-all font-mono text-[10px] text-gray-200">
+                  {table.name}
+                </span>
+                <DatabaseStatus
+                  label={databaseImportStatusLabel(tablePlan.status)}
+                  tone={tablePlan.status === 'BLOCKED'
+                    ? 'warning'
+                    : tablePlan.status === 'EXISTING_ENTITY'
+                      ? 'neutral'
+                      : 'cyan'}
+                />
+                {tablePlan.selectedByUser && <DatabaseStatus label="root" tone="neutral" />}
+              </div>
+              <div className="mt-1 break-all font-mono text-[9px] text-gray-600">
+                {[table.catalog, table.schema].filter(Boolean).join('.') || 'connection default'}
+              </div>
+              {tablePlan.entityQualifiedName && (
+                <div className="mt-2 break-all font-mono text-[9px] text-jmix-200/75">
+                  {tablePlan.entityQualifiedName}
+                </div>
+              )}
+              {tablePlan.compositeIdClassName && (
+                <div className="mt-1 break-all text-[9px] text-violet-300/75">
+                  Composite identity · {tablePlan.compositeIdClassName}
+                </div>
+              )}
+              {tablePlan.requiredBy.length > 0 && (
+                <div className="mt-2 break-words text-[9px] text-gray-500">
+                  Required by {tablePlan.requiredBy.join(', ')}
+                </div>
+              )}
+              {tablePlan.issues.map(issue => (
+                <div
+                  key={`${issue.code}-${issue.message}`}
+                  className="mt-2 break-words rounded border border-amber-500/15 bg-amber-500/5 p-2 text-[9px] leading-relaxed text-amber-200/75"
+                >
+                  {issue.message}
+                </div>
+              ))}
+              {needsViewIdentifier && (
+                <div className="mt-3">
+                  <div className="text-[9px] font-medium uppercase tracking-wider text-amber-200/80">
+                    Stable unique identifier columns
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {table.columns.map(column => {
+                      const selected = selectedIdentifiers.includes(column.name)
+                      return (
+                        <button
+                          key={column.name}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => onIdentifierToggle(table, column.name)}
+                          className={`rounded border px-2 py-1 font-mono text-[9px] ${
+                            selected
+                              ? 'border-amber-300/45 bg-amber-500/15 text-amber-100'
+                              : 'border-surface-border text-gray-500 hover:text-gray-300'
+                          }`}
+                        >
+                          {selected ? '✓ ' : ''}{column.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </article>
+          )
+        })}
+      </div>
+
+      {preview && (
+        <div className={`border-t px-3 py-3 sm:px-4 ${
+          preview.accepted
+            ? 'border-emerald-500/20 bg-emerald-500/[0.05]'
+            : 'border-red-500/20 bg-red-500/[0.05]'
+        }`}>
+          <div className="text-[10px] font-medium text-gray-200">{preview.label}</div>
+          {preview.files.length > 0 && (
+            <div className="mt-2 grid min-w-0 gap-1 sm:grid-cols-2 2xl:grid-cols-3">
+              {preview.files.map(file => (
+                <div
+                  key={file.relativePath}
+                  title={file.relativePath}
+                  className="min-w-0 truncate rounded border border-emerald-500/15 bg-black/15 px-2 py-1.5 font-mono text-[9px] text-emerald-100/70"
+                >
+                  {file.mode} · {file.relativePath}
+                </div>
+              ))}
+            </div>
+          )}
+          {preview.issues.map(issue => (
+            <div key={`${issue.code}-${issue.message}`} className="mt-2 break-words text-[9px] text-red-200/80">
+              {issue.message}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-jmix-500/20 bg-black/10 px-3 py-2.5 sm:px-4">
+        <span className="min-w-0 break-all font-mono text-[9px] text-gray-600">
+          Live snapshot {plan.snapshotDigest?.slice(0, 16) ?? 'unavailable'}
+        </span>
+        <div className="flex flex-wrap justify-end gap-2">
+          {!plan.ready && (
+            <button
+              type="button"
+              onClick={onReplan}
+              disabled={busy}
+              className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[10px] text-amber-100 hover:bg-amber-500/20 disabled:opacity-50"
+            >
+              {busy ? 'Re-reading schema…' : 'Replan reviewed decisions'}
+            </button>
+          )}
+          {plan.ready && !preview?.accepted && (
+            <button
+              type="button"
+              onClick={onPreview}
+              disabled={busy}
+              className="rounded bg-jmix-500 px-3 py-1.5 text-[10px] font-medium text-white hover:bg-jmix-600 disabled:opacity-50"
+            >
+              {busy ? 'Building preview…' : 'Preview all generated files'}
+            </button>
+          )}
+          {plan.ready && preview?.accepted && (
+            <button
+              type="button"
+              onClick={onApply}
+              disabled={busy || !preview.planDigest}
+              className="rounded bg-emerald-600 px-3 py-1.5 text-[10px] font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+            >
+              {busy ? 'Applying atomically…' : 'Apply complete entity model'}
+            </button>
+          )}
+        </div>
       </div>
     </section>
   )
@@ -3544,6 +4015,23 @@ function DatabaseStatus({
       ? 'bg-cyan-500/10 text-cyan-200/70'
       : 'bg-surface-lighter text-gray-500'
   return <span className={`rounded px-1.5 py-0.5 text-[8px] ${color}`}>{label}</span>
+}
+
+function databaseTableKey(table: DatabaseTableReference): string {
+  return [table.catalog, table.schema, table.name].filter(Boolean).join('.')
+}
+
+function databaseImportStatusLabel(
+  status: DatabaseEntityImportPlanResponse['tables'][number]['status'],
+): string {
+  switch (status) {
+    case 'COMPOSITE_KEY': return 'composite identity'
+    case 'JOIN_TABLE': return 'many-to-many join'
+    case 'EXISTING_ENTITY': return 'existing entity'
+    case 'VIEW': return 'database view'
+    case 'BLOCKED': return 'decision required'
+    default: return 'new entity'
+  }
 }
 
 function databaseColumnCanBeStaged(column: DatabaseColumnSnapshot): boolean {

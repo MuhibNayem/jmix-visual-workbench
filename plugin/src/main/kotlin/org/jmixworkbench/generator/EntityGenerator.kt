@@ -507,6 +507,59 @@ object EntityGenerator {
         }
     }
 
+    private fun JavaClassBuilder.FieldBuilder.addJoinColumnAnnotations(
+        association: AssociationConfig,
+        attribute: AttributeModel,
+    ) {
+        val columns = association.joinColumns.ifEmpty {
+            mutableListOf(
+                AssociationJoinColumn(
+                    name = association.joinColumnName ?: attribute.resolvedColumnName + "_ID",
+                    referencedColumnName = association.relatedIdColumnName,
+                    nullable = !attribute.mandatory,
+                ),
+            )
+        }
+        if (columns.size == 1) {
+            val column = columns.single()
+            annotation {
+                name = "JoinColumn"
+                importPath = "jakarta.persistence.JoinColumn"
+                param("name", "\"${escapeJavaString(column.name)}\"")
+                if (column.referencedColumnName.isNotBlank()) {
+                    param(
+                        "referencedColumnName",
+                        "\"${escapeJavaString(column.referencedColumnName)}\"",
+                    )
+                }
+                column.nullable?.let { param("nullable", it.toString()) }
+                if (!column.insertable) param("insertable", "false")
+                if (!column.updatable) param("updatable", "false")
+            }
+        } else {
+            annotation {
+                name = "JoinColumns"
+                importPath = "jakarta.persistence.JoinColumns"
+                value(columns.joinToString(prefix = "{", postfix = "}", transform = ::javaJoinColumn))
+            }
+        }
+    }
+
+    private fun javaJoinColumn(column: AssociationJoinColumn): String = buildString {
+        append("@JoinColumn(name = \"")
+            .append(escapeJavaString(column.name))
+            .append('"')
+        if (column.referencedColumnName.isNotBlank()) {
+            append(", referencedColumnName = \"")
+                .append(escapeJavaString(column.referencedColumnName))
+                .append('"')
+        }
+        column.nullable?.let { append(", nullable = ").append(it) }
+        if (!column.insertable) append(", insertable = false")
+        if (!column.updatable) append(", updatable = false")
+        append(')')
+    }
+
     private val JAVA_IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")
 
     private fun generateIdField(b: JavaClassBuilder, entity: EntityModel) {
@@ -735,13 +788,7 @@ object EntityGenerator {
                                 if (attr.mandatory) param("optional", "false")
                                 cascadeParameter(assoc.cascade)
                             }
-                            annotation {
-                                name = "JoinColumn"
-                                importPath = "jakarta.persistence.JoinColumn"
-                                param("name", "\"${assoc.joinColumnName ?: attr.resolvedColumnName + "_ID"}\"")
-                                param("referencedColumnName", "\"${assoc.relatedIdColumnName}\"")
-                                if (attr.mandatory) param("nullable", "false")
-                            }
+                            addJoinColumnAnnotations(assoc, attr)
                         }
                         AssociationType.ONE_TO_MANY -> {
                             annotation {
@@ -771,9 +818,41 @@ object EntityGenerator {
                                 annotation {
                                     name = "JoinTable"
                                     importPath = "jakarta.persistence.JoinTable"
-                                    param("name", "\"${jt.name}\"")
-                                    param("joinColumns", "@JoinColumn(name = \"${jt.joinColumnName}\")")
-                                    param("inverseJoinColumns", "@JoinColumn(name = \"${jt.inverseJoinColumnName}\")")
+                                    param("name", "\"${escapeJavaString(jt.name)}\"")
+                                    jt.schema?.takeIf(String::isNotBlank)?.let {
+                                        param("schema", "\"${escapeJavaString(it)}\"")
+                                    }
+                                    jt.catalog?.takeIf(String::isNotBlank)?.let {
+                                        param("catalog", "\"${escapeJavaString(it)}\"")
+                                    }
+                                    val joinColumns = jt.joinColumns.ifEmpty {
+                                        mutableListOf(
+                                            AssociationJoinColumn(
+                                                jt.joinColumnName,
+                                                "",
+                                            ),
+                                        )
+                                    }
+                                    val inverseJoinColumns = jt.inverseJoinColumns.ifEmpty {
+                                        mutableListOf(
+                                            AssociationJoinColumn(
+                                                jt.inverseJoinColumnName,
+                                                "",
+                                            ),
+                                        )
+                                    }
+                                    param(
+                                        "joinColumns",
+                                        joinColumns.joinToString(prefix = "{", postfix = "}", transform = ::javaJoinColumn),
+                                    )
+                                    param(
+                                        "inverseJoinColumns",
+                                        inverseJoinColumns.joinToString(
+                                            prefix = "{",
+                                            postfix = "}",
+                                            transform = ::javaJoinColumn,
+                                        ),
+                                    )
                                 }
                             }
                         }
@@ -790,13 +869,7 @@ object EntityGenerator {
                                 if (assoc.orphanRemoval) param("orphanRemoval", "true")
                             }
                             if (assoc.mappedBy == null) {
-                                annotation {
-                                    name = "JoinColumn"
-                                    importPath = "jakarta.persistence.JoinColumn"
-                                    param("name", "\"${assoc.joinColumnName ?: attr.resolvedColumnName + "_ID"}\"")
-                                    param("referencedColumnName", "\"${assoc.relatedIdColumnName}\"")
-                                    if (attr.mandatory) param("nullable", "false")
-                                }
+                                addJoinColumnAnnotations(assoc, attr)
                             }
                         }
                     }
@@ -853,6 +926,10 @@ object EntityGenerator {
                 param("name", "\"${attr.resolvedColumnName}\"")
                 if (attr.mandatory) param("nullable", "false")
                 if (attr.unique) param("unique", "true")
+                if (attr.readOnly) {
+                    param("insertable", "false")
+                    param("updatable", "false")
+                }
                 if (
                     attr.length != null &&
                     attr.type in setOf(

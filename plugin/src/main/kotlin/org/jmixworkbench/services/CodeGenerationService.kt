@@ -63,6 +63,22 @@ class CodeGenerationService(private val project: Project) {
     ): PreparedWorkspaceChange =
         prepareGeneratedPlan(entityGenerationPlan(entity, config), expectedPlanDigest)
 
+    fun previewDatabaseEntityImport(
+        entities: List<EntityModel>,
+        config: ProjectConfig,
+    ): WorkspaceChangePreviewResponse =
+        previewGeneratedPlan(databaseEntityImportPlan(entities, config))
+
+    fun prepareDatabaseEntityImport(
+        entities: List<EntityModel>,
+        config: ProjectConfig,
+        expectedPlanDigest: String,
+    ): PreparedWorkspaceChange =
+        prepareGeneratedPlan(
+            databaseEntityImportPlan(entities, config),
+            expectedPlanDigest,
+        )
+
     // ─── Full CRUD Generation ────────────────────────────────────────────────
 
     fun generateCrud(
@@ -813,6 +829,68 @@ class CodeGenerationService(private val project: Project) {
         )
     }
 
+    private fun databaseEntityImportPlan(
+        entities: List<EntityModel>,
+        config: ProjectConfig,
+    ): GeneratedPlan {
+        require(entities.isNotEmpty() && entities.size <= MAX_DATABASE_IMPORT_TYPES) {
+            "JVW-DB-IMPORT-TYPE-COUNT: select between 1 and $MAX_DATABASE_IMPORT_TYPES generated entity types."
+        }
+        require(entities.map(EntityModel::fullName).distinct().size == entities.size) {
+            "JVW-DB-IMPORT-ENTITY-DUPLICATE: generated entity class names must be unique."
+        }
+        require(entities.all {
+            it.entityType in setOf(EntityType.ENTITY, EntityType.EMBEDDABLE) &&
+                it.ddlGeneration.effectiveMode == DdlGenerationMode.DISABLED &&
+                it.dataRepository?.enabled != true
+        }) {
+            "JVW-DB-IMPORT-SOURCE-BOUNDARY: database import creates only DDL-disabled entities and composite-id embeddables."
+        }
+        val requestedTargets = entities.map {
+            it.generationTarget?.moduleId.orEmpty() to it.generationTarget?.storeId.orEmpty()
+        }.distinct()
+        require(requestedTargets.size == 1) {
+            "JVW-DB-IMPORT-TARGET-MISMATCH: one import batch must target one module and data store."
+        }
+        val plans = entities.map { entityGenerationPlan(it, config) }
+        val effectiveConfig = plans.first().config
+        require(plans.all {
+            normalizePath(it.config.projectRoot) == normalizePath(effectiveConfig.projectRoot) &&
+                it.config.sourceRoot == effectiveConfig.sourceRoot &&
+                it.config.resourceRoot == effectiveConfig.resourceRoot
+        }) {
+            "JVW-DB-IMPORT-TARGET-MISMATCH: resolved source destinations changed during planning."
+        }
+        val files = plans.flatMap(GeneratedPlan::files)
+            .groupBy(GeneratedSource::relativePath)
+            .map { (path, sources) ->
+                if (sources.size == 1) return@map sources.single()
+                require(sources.all { it.mergeStrategy == MergeStrategy.PROPERTIES }) {
+                    "JVW-DB-IMPORT-FILE-COLLISION: multiple generated types target $path."
+                }
+                sources.first().copy(
+                    content = sources.asSequence()
+                        .flatMap { it.content.lineSequence() }
+                        .filter(String::isNotBlank)
+                        .distinct()
+                        .joinToString(separator = "\n", postfix = "\n"),
+                )
+            }
+            .sortedBy(GeneratedSource::relativePath)
+        val additionalChanges = plans.flatMap(GeneratedPlan::additionalChanges)
+        require(additionalChanges.isEmpty()) {
+            "JVW-DB-IMPORT-DDL-UNEXPECTED: existing database tables must never receive generated create-table migrations."
+        }
+        val entityCount = entities.count { it.entityType == EntityType.ENTITY }
+        val idCount = entities.size - entityCount
+        return GeneratedPlan(
+            label = "Import $entityCount Jmix database ${if (entityCount == 1) "entity" else "entities"}" +
+                if (idCount == 0) "" else " with $idCount composite ID ${if (idCount == 1) "class" else "classes"}",
+            config = effectiveConfig,
+            files = files,
+        )
+    }
+
     private fun crudGenerationPlan(
         entity: EntityModel,
         config: ProjectConfig,
@@ -1324,6 +1402,7 @@ class CodeGenerationService(private val project: Project) {
 
     companion object {
         private const val MAX_REPOSITORY_SCAN_FILE_SIZE = 2L * 1024L * 1024L
+        private const val MAX_DATABASE_IMPORT_TYPES = 200
 
         fun getInstance(project: Project): CodeGenerationService =
             project.getService(CodeGenerationService::class.java)

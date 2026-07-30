@@ -65,13 +65,30 @@ export interface AssociationConfig {
   localIdAttributeName?: string
   mappedBy?: string
   joinColumnName?: string
-  joinTable?: { name: string; joinColumnName: string; inverseJoinColumnName: string }
+  joinColumns?: AssociationJoinColumn[]
+  joinTable?: {
+    name: string
+    joinColumnName: string
+    inverseJoinColumnName: string
+    schema?: string
+    catalog?: string
+    joinColumns?: AssociationJoinColumn[]
+    inverseJoinColumns?: AssociationJoinColumn[]
+  }
   cascade: CascadeType[]
   fetch: FetchType
   collectionType: AssociationCollectionType
   crossDataStore: boolean
   orphanRemoval: boolean
   onDelete?: string
+}
+
+export interface AssociationJoinColumn {
+  name: string
+  referencedColumnName: string
+  nullable?: boolean
+  insertable?: boolean
+  updatable?: boolean
 }
 
 export interface ValidationModel {
@@ -579,6 +596,50 @@ export interface DatabaseTableReference {
   name: string
   type: string
   remarks?: string
+}
+
+export interface DatabaseEntityImportRequest {
+  storeId: string
+  moduleId: string
+  packageName: string
+  sourceLanguage: EntitySourceLanguage
+  selectedTables: DatabaseTableReference[]
+  includeDependencies: boolean
+  identifierOverrides?: Record<string, string[]>
+  classNameOverrides?: Record<string, string>
+  connectTimeoutSeconds?: number
+  networkTimeoutSeconds?: number
+}
+
+export type DatabaseEntityImportStatus =
+  | 'READY'
+  | 'VIEW'
+  | 'COMPOSITE_KEY'
+  | 'JOIN_TABLE'
+  | 'EXISTING_ENTITY'
+  | 'BLOCKED'
+
+export interface DatabaseEntityImportTablePlan {
+  table: DatabaseTableSnapshot
+  selectedByUser: boolean
+  requiredBy: string[]
+  status: DatabaseEntityImportStatus
+  entityClassName?: string
+  entityQualifiedName?: string
+  compositeIdClassName?: string
+  generated: boolean
+  issues: WorkspaceChangeIssue[]
+}
+
+export interface DatabaseEntityImportPlanResponse {
+  accepted: boolean
+  ready: boolean
+  snapshotDigest?: string
+  storeId?: string
+  database?: DatabaseProductSnapshot
+  tables: DatabaseEntityImportTablePlan[]
+  entities: EntityModel[]
+  issues: WorkspaceChangeIssue[]
 }
 
 export interface DatabaseEntityTableInspectionResponse {

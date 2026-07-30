@@ -293,6 +293,7 @@ data class AssociationConfig(
     val localIdAttributeName: String? = null,
     val mappedBy: String? = null,
     val joinColumnName: String? = null,
+    val joinColumns: MutableList<AssociationJoinColumn> = mutableListOf(),
     val joinTable: JoinTableConfig? = null,
     val cascade: MutableList<CascadeType> = mutableListOf(),
     val fetch: FetchType = FetchType.LAZY,
@@ -300,6 +301,14 @@ data class AssociationConfig(
     val crossDataStore: Boolean = false,
     val orphanRemoval: Boolean = false,
     val onDelete: String? = null
+)
+
+data class AssociationJoinColumn(
+    val name: String,
+    val referencedColumnName: String,
+    val nullable: Boolean? = null,
+    val insertable: Boolean = true,
+    val updatable: Boolean = true,
 )
 
 enum class AssociationCollectionType(val javaType: String, val importPath: String) {
@@ -317,7 +326,11 @@ enum class AssociationType {
 data class JoinTableConfig(
     val name: String,
     val joinColumnName: String,
-    val inverseJoinColumnName: String
+    val inverseJoinColumnName: String,
+    val schema: String? = null,
+    val catalog: String? = null,
+    val joinColumns: MutableList<AssociationJoinColumn> = mutableListOf(),
+    val inverseJoinColumns: MutableList<AssociationJoinColumn> = mutableListOf(),
 )
 
 enum class CascadeType {

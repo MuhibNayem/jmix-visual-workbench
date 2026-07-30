@@ -14,6 +14,9 @@ import type {
   DatabaseEntityTableInspectionResponse,
   DatabaseEntityTableBrowseRequest,
   DatabaseEntityTableBrowseResponse,
+  DatabaseTableReference,
+  DatabaseEntityImportRequest,
+  DatabaseEntityImportPlanResponse,
   DatabaseColumnSnapshot,
   EntityAttributePropagationChangeRequest,
   EntityAttributePropagationInspectionRequest,
@@ -1075,6 +1078,134 @@ class ${scenario.className} {
                   truncated: false,
                   issues: [],
                 }
+              case 'planDatabaseEntityImport': {
+                const selected = (payload.selectedTables ?? []) as DatabaseTableReference[]
+                const root = selected[0] ?? {
+                  catalog: 'payroll',
+                  schema: 'public',
+                  name: 'LOAN_ACCT',
+                  type: 'TABLE',
+                }
+                const rootTable = {
+                  ...root,
+                  remarks: root.remarks ?? 'Database-first import root',
+                  columns: [
+                    developmentDatabaseColumn('BANK_CODE', 'VARCHAR', 'string', true, false, 12),
+                    developmentDatabaseColumn('ACCOUNT_NO', 'VARCHAR', 'string', true, false, 32),
+                    developmentDatabaseColumn('EMPLOYEE_ID', 'UUID', 'association', false, false),
+                    developmentDatabaseColumn('BALANCE', 'NUMERIC', 'bigDecimal', false, false, 19, {
+                      precision: 19,
+                      scale: 2,
+                    }),
+                  ],
+                  primaryKeyColumns: ['BANK_CODE', 'ACCOUNT_NO'],
+                  foreignKeys: [{
+                    name: 'FK_LOAN_ACCT_EMPLOYEE',
+                    columnName: 'EMPLOYEE_ID',
+                    referencedCatalog: 'payroll',
+                    referencedSchema: 'public',
+                    referencedTableName: 'EMPLOYEE',
+                    referencedColumnName: 'ID',
+                    updateRule: 3,
+                    deleteRule: 3,
+                    sequence: 1,
+                  }],
+                  indexes: [],
+                  dependencyTables: ['EMPLOYEE'],
+                }
+                return {
+                  accepted: true,
+                  ready: true,
+                  snapshotDigest: 'development-database-entity-graph',
+                  storeId: payload.storeId,
+                  database: {
+                    name: 'PostgreSQL',
+                    version: '17',
+                    driverName: 'PostgreSQL JDBC Driver',
+                    driverVersion: '42.7',
+                    urlFingerprint: 'development-db',
+                  },
+                  tables: [
+                    {
+                      table: rootTable,
+                      selectedByUser: true,
+                      requiredBy: [],
+                      status: 'COMPOSITE_KEY',
+                      entityClassName: 'LoanAcct',
+                      entityQualifiedName: `${payload.packageName}.LoanAcct`,
+                      compositeIdClassName: `${payload.packageName}.LoanAcctId`,
+                      generated: true,
+                      issues: [],
+                    },
+                    {
+                      table: {
+                        catalog: 'payroll',
+                        schema: 'public',
+                        name: 'EMPLOYEE',
+                        type: 'TABLE',
+                        remarks: 'Already mapped HR entity',
+                        columns: [developmentDatabaseColumn('ID', 'UUID', 'uuid', true, true)],
+                        primaryKeyColumns: ['ID'],
+                        foreignKeys: [],
+                        indexes: [],
+                        dependencyTables: [],
+                      },
+                      selectedByUser: false,
+                      requiredBy: [[root.catalog, root.schema, root.name].filter(Boolean).join('.')],
+                      status: 'EXISTING_ENTITY',
+                      entityClassName: 'Employee',
+                      entityQualifiedName: 'com.company.hr.entity.Employee',
+                      generated: false,
+                      issues: [],
+                    },
+                  ],
+                  entities: [],
+                  issues: [],
+                } satisfies DatabaseEntityImportPlanResponse
+              }
+              case 'previewDatabaseEntityImport': {
+                const packagePath = String(payload.request?.packageName ?? 'com.company.loan.entity')
+                  .replace(/\./g, '/')
+                const moduleId = payload.request?.moduleId ?? 'loan'
+                const paths = [
+                  `${moduleId}/src/main/java/${packagePath}/LoanAcctId.java`,
+                  `${moduleId}/src/main/java/${packagePath}/LoanAcct.java`,
+                  `${moduleId}/src/main/resources/${packagePath}/messages.properties`,
+                ]
+                return {
+                  accepted: true,
+                  changeSetId: 'database-import:development',
+                  label: 'Import 1 Jmix database entity with 1 composite ID class',
+                  planDigest: 'development-database-entity-plan',
+                  files: paths.map(relativePath => ({
+                    relativePath,
+                    mode: relativePath.endsWith('.properties') ? 'MODIFY' : 'CREATE',
+                    afterFingerprint: `development-${relativePath}`,
+                    resultContent: '// database-first source preview',
+                    appliedEditCount: relativePath.endsWith('.properties') ? 1 : 0,
+                  })),
+                  issues: [],
+                }
+              }
+              case 'applyDatabaseEntityImport':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: 'Import database entity model',
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'database-import:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    'loan/src/main/java/com/company/loan/entity/LoanAcctId.java',
+                    'loan/src/main/java/com/company/loan/entity/LoanAcct.java',
+                    'loan/src/main/resources/com/company/loan/entity/messages.properties',
+                  ],
+                  issues: [],
+                }
               case 'previewCrudGeneration': {
                 const entity = payload.entity as any
                 const moduleId = entity.generationTarget?.moduleId ?? 'loan'
@@ -1799,6 +1930,34 @@ class ${scenario.className} {
     return this.request<DatabaseEntityTableBrowseResponse>(
       'browseDatabaseEntityTables',
       request,
+    )
+  }
+
+  planDatabaseEntityImport(request: DatabaseEntityImportRequest) {
+    return this.request<DatabaseEntityImportPlanResponse>(
+      'planDatabaseEntityImport',
+      request,
+    )
+  }
+
+  previewDatabaseEntityImport(
+    request: DatabaseEntityImportRequest,
+    expectedSnapshotDigest: string,
+  ) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewDatabaseEntityImport',
+      { request, expectedSnapshotDigest },
+    )
+  }
+
+  applyDatabaseEntityImport(
+    request: DatabaseEntityImportRequest,
+    expectedSnapshotDigest: string,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyDatabaseEntityImport',
+      { request, expectedSnapshotDigest, expectedPlanDigest },
     )
   }
 

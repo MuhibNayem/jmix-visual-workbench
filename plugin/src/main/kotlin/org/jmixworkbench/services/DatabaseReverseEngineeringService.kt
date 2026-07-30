@@ -98,6 +98,49 @@ class DatabaseReverseEngineeringService(
         )
     }
 
+    fun planEntityImport(
+        request: DatabaseEntityImportRequest,
+    ): DatabaseEntityImportPlanResponse {
+        if (
+            request.moduleId.isBlank() ||
+            !QUALIFIED_JVM_NAME.matches(request.packageName) ||
+            request.selectedTables.isEmpty() ||
+            request.selectedTables.size > MAX_IMPORT_SELECTION ||
+            request.selectedTables.any {
+                invalidMetadataName(it.name) ||
+                    it.catalog?.let(::invalidMetadataName) == true ||
+                    it.schema?.let(::invalidMetadataName) == true
+            } ||
+            request.identifierOverrides.values.any { columns ->
+                columns.isEmpty() || columns.size > MAX_COMPOSITE_IDENTIFIER_COLUMNS ||
+                    columns.any(::invalidMetadataName)
+            } ||
+            request.identifierOverrides.size > MAX_IMPORT_TABLES ||
+            request.identifierOverrides.keys.any(::invalidQualifiedMetadataName) ||
+            request.classNameOverrides.size > MAX_IMPORT_TABLES ||
+            request.classNameOverrides.keys.any(::invalidQualifiedMetadataName) ||
+            request.classNameOverrides.values.any {
+                it.length > MAX_IDENTIFIER_LENGTH || !JVM_IDENTIFIER.matches(it)
+            }
+        ) {
+            return DatabaseEntityImportPlanResponse.failure(
+                "JVW-DB-IMPORT-REQUEST-INVALID",
+                "Select valid tables, one indexed module/data store, and a valid target package.",
+            )
+        }
+        val result = withReadOnlyConnection(
+            storeId = request.storeId,
+            connectTimeoutSeconds = request.connectTimeoutSeconds,
+            networkTimeoutSeconds = request.networkTimeoutSeconds,
+        ) { connection, context ->
+            planConnectedEntityImport(connection, context, request)
+        }
+        return result.value ?: DatabaseEntityImportPlanResponse.failure(
+            result.issue?.code ?: "JVW-DB-IMPORT-FAILED",
+            result.issue?.message ?: "Database entity import planning failed.",
+        )
+    }
+
     fun verifyEntityTypeExpansion(
         descriptor: EntityAttributeTypeExpansionDescriptor,
         connectTimeoutSeconds: Int = 10,
@@ -376,6 +419,131 @@ class DatabaseReverseEngineeringService(
         )
     }
 
+    private fun planConnectedEntityImport(
+        connection: Connection,
+        context: DatabaseReadOnlyContext,
+        request: DatabaseEntityImportRequest,
+    ): DatabaseEntityImportPlanResponse {
+        val store = context.store
+        if (store.moduleId != request.moduleId) {
+            return DatabaseEntityImportPlanResponse.failure(
+                "JVW-DB-IMPORT-MODULE-STORE-MISMATCH",
+                "The selected data store belongs to ${store.moduleId}, not ${request.moduleId}.",
+            )
+        }
+        val metadata = connection.metaData
+        val queue = ArrayDeque<DatabaseImportQueueEntry>()
+        request.selectedTables.distinctBy {
+            listOf(it.catalog.orEmpty(), it.schema.orEmpty(), it.name)
+                .joinToString("\u0000").uppercase(Locale.ROOT)
+        }.forEach {
+            queue += DatabaseImportQueueEntry(
+                reference = it,
+                selectedByUser = true,
+                requiredBy = emptySet(),
+            )
+        }
+        val loaded = linkedMapOf<DatabaseObjectKey, DatabaseImportMutableTable>()
+        while (queue.isNotEmpty()) {
+            val entry = queue.removeFirst()
+            val matches = findTables(
+                metadata,
+                entry.reference.catalog ?: connection.catalog,
+                entry.reference.schema,
+                entry.reference.name,
+            )
+            if (matches.isEmpty()) {
+                return DatabaseEntityImportPlanResponse.failure(
+                    "JVW-DB-IMPORT-TABLE-MISSING",
+                    "${entry.reference.qualifiedName()} is no longer visible in the connected database.",
+                )
+            }
+            if (matches.size != 1) {
+                return DatabaseEntityImportPlanResponse.failure(
+                    "JVW-DB-IMPORT-TABLE-AMBIGUOUS",
+                    "${entry.reference.name} resolves to multiple database objects. Select an exact catalog and schema.",
+                )
+            }
+            val raw = matches.single()
+            val key = DatabaseObjectKey.of(raw)
+            val previous = loaded[key]
+            if (previous != null) {
+                previous.selectedByUser = previous.selectedByUser || entry.selectedByUser
+                previous.requiredBy += entry.requiredBy
+                continue
+            }
+            if (loaded.size >= MAX_IMPORT_TABLES) {
+                return DatabaseEntityImportPlanResponse.failure(
+                    "JVW-DB-IMPORT-DEPENDENCY-LIMIT",
+                    "The selected dependency closure exceeds $MAX_IMPORT_TABLES tables. Split the import into bounded modules.",
+                )
+            }
+            val primaryKeys = readOrderedPrimaryKeys(metadata, raw)
+            val foreignKeys = readForeignKeys(metadata, raw)
+            val table = raw.copy(
+                columns = readColumns(metadata, raw),
+                primaryKeyColumns = primaryKeys,
+                foreignKeys = foreignKeys,
+                indexes = readIndexes(metadata, raw),
+                dependencyTables = foreignKeys
+                    .map(DatabaseForeignKeySnapshot::referencedTableName)
+                    .distinctBy { it.uppercase(Locale.ROOT) }
+                    .sorted(),
+            )
+            val mappedEntities = mappedEntityCandidates(
+                workspace = context.workspace,
+                store = store,
+                table = table,
+                defaultCatalog = connection.catalog,
+                defaultSchema = runCatching { connection.schema }.getOrNull(),
+                expectedQualifiedName = null,
+            )
+            if (mappedEntities.size > 1) {
+                return DatabaseEntityImportPlanResponse.failure(
+                    "JVW-DB-IMPORT-ENTITY-MAPPING-AMBIGUOUS",
+                    "${key.externalName} is mapped by multiple indexed entities: " +
+                        mappedEntities.joinToString { it.qualifiedName } +
+                        ". Resolve the mapping ambiguity before database-first generation.",
+                )
+            }
+            val existing = mappedEntities.singleOrNull()
+            loaded[key] = DatabaseImportMutableTable(
+                table = table,
+                selectedByUser = entry.selectedByUser,
+                requiredBy = entry.requiredBy.toMutableSet(),
+                existingEntity = existing,
+            )
+            if (!request.includeDependencies || existing != null) continue
+            DatabaseEntityImportPlanner.groupForeignKeys(foreignKeys).forEach { foreignKey ->
+                val targetReference = DatabaseTableReference(
+                    catalog = foreignKey.referencedCatalog ?: table.catalog,
+                    schema = foreignKey.referencedSchema ?: table.schema,
+                    name = foreignKey.referencedTableName,
+                    type = "TABLE",
+                    remarks = null,
+                )
+                queue += DatabaseImportQueueEntry(
+                    reference = targetReference,
+                    selectedByUser = false,
+                    requiredBy = setOf(key.externalName),
+                )
+            }
+        }
+        return DatabaseEntityImportPlanner.plan(
+            request = request,
+            store = store,
+            database = databaseProduct(metadata, context.configuration),
+            importedTables = loaded.values.map {
+                DatabaseImportedTable(
+                    table = it.table,
+                    selectedByUser = it.selectedByUser,
+                    requiredBy = it.requiredBy,
+                    existingEntity = it.existingEntity,
+                )
+            },
+        )
+    }
+
     private fun resolveMappedEntity(
         workspace: SchemaWorkspaceResponse,
         store: SchemaDataStoreSnapshot,
@@ -383,8 +551,24 @@ class DatabaseReverseEngineeringService(
         defaultCatalog: String?,
         defaultSchema: String?,
         expectedQualifiedName: String?,
-    ): SchemaEntitySnapshot? {
-        val candidates = workspace.entities.asSequence()
+    ): SchemaEntitySnapshot? = mappedEntityCandidates(
+        workspace,
+        store,
+        table,
+        defaultCatalog,
+        defaultSchema,
+        expectedQualifiedName,
+    ).singleOrNull()
+
+    private fun mappedEntityCandidates(
+        workspace: SchemaWorkspaceResponse,
+        store: SchemaDataStoreSnapshot,
+        table: DatabaseTableSnapshot,
+        defaultCatalog: String?,
+        defaultSchema: String?,
+        expectedQualifiedName: String?,
+    ): List<SchemaEntitySnapshot> =
+        workspace.entities.asSequence()
             .filter { it.storeName == store.name }
             .filter {
                 expectedQualifiedName.isNullOrBlank() ||
@@ -396,8 +580,6 @@ class DatabaseReverseEngineeringService(
                     databaseQualifierMatches(entity.tableCatalog, table.catalog, defaultCatalog)
             }
             .toList()
-        return candidates.singleOrNull()
-    }
 
     private fun verifyConnectedExpansion(
         connection: Connection,
@@ -815,6 +997,23 @@ class DatabaseReverseEngineeringService(
         return keys
     }
 
+    private fun readOrderedPrimaryKeys(
+        metadata: DatabaseMetaData,
+        table: DatabaseTableSnapshot,
+    ): List<String> {
+        val keys = mutableListOf<Pair<Int, String>>()
+        metadata.getPrimaryKeys(table.catalog, table.schema, table.name).use { rows ->
+            var fallbackSequence = 0
+            while (rows.next()) {
+                val sequence = rows.getShort("KEY_SEQ").toInt()
+                    .takeIf { !rows.wasNull() && it > 0 }
+                    ?: ++fallbackSequence
+                keys += sequence to rows.string("COLUMN_NAME")
+            }
+        }
+        return keys.sortedBy(Pair<Int, String>::first).map(Pair<Int, String>::second)
+    }
+
     private fun readForeignKeys(
         metadata: DatabaseMetaData,
         table: DatabaseTableSnapshot,
@@ -923,14 +1122,19 @@ class DatabaseReverseEngineeringService(
 
     companion object {
         private const val MAX_IDENTIFIER_LENGTH = 256
+        private const val MAX_QUALIFIED_DATABASE_NAME_LENGTH = MAX_IDENTIFIER_LENGTH * 3 + 2
         private const val MAX_QUALIFIED_NAME_LENGTH = 1_024
         private const val MAX_SEARCH_LENGTH = 120
         private const val MAX_METADATA_NAMES = 500
         private const val MAX_BROWSE_TABLES = 1_000
+        private const val MAX_IMPORT_SELECTION = 50
+        private const val MAX_IMPORT_TABLES = 100
+        private const val MAX_COMPOSITE_IDENTIFIER_COLUMNS = 32
         private const val MAX_PLACEHOLDER_DEPTH = 12
         private val PORTABLE_IDENTIFIER = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
         private val QUALIFIED_JVM_NAME =
             Regex("""[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
+        private val JVM_IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")
         private val PROFILE_FILE =
             Regex("""^application-([A-Za-z0-9_.-]+)\.(?:properties|ya?ml)$""")
         private val PLACEHOLDER = Regex("""\$\{([^{}]+)}""")
@@ -940,6 +1144,11 @@ class DatabaseReverseEngineeringService(
         private fun invalidMetadataName(value: String): Boolean =
             value.isBlank() ||
                 value.length > MAX_IDENTIFIER_LENGTH ||
+                value.any { it.isISOControl() }
+
+        private fun invalidQualifiedMetadataName(value: String): Boolean =
+            value.isBlank() ||
+                value.length > MAX_QUALIFIED_DATABASE_NAME_LENGTH ||
                 value.any { it.isISOControl() }
     }
 }
@@ -1243,6 +1452,19 @@ private data class DatabaseReadOnlyResult<T>(
     }
 }
 
+private data class DatabaseImportQueueEntry(
+    val reference: DatabaseTableReference,
+    val selectedByUser: Boolean,
+    val requiredBy: Set<String>,
+)
+
+private data class DatabaseImportMutableTable(
+    val table: DatabaseTableSnapshot,
+    var selectedByUser: Boolean,
+    val requiredBy: MutableSet<String>,
+    val existingEntity: SchemaEntitySnapshot?,
+)
+
 internal object DatabaseSqlTypeCompatibility {
     fun accepts(expectedSqlType: String, live: DatabaseColumnSnapshot): Boolean {
         val expected = expectedSqlType.uppercase(Locale.ROOT)
@@ -1324,3 +1546,6 @@ private fun ResultSet.string(column: String): String =
 
 private fun ResultSet.stringOrNull(column: String): String? =
     runCatching { getString(column) }.getOrNull()?.takeIf(String::isNotBlank)
+
+private fun DatabaseTableReference.qualifiedName(): String =
+    listOfNotNull(catalog, schema, name).joinToString(".")
