@@ -52,6 +52,9 @@ import org.jmixworkbench.services.EntityAttributePropagationChangeRequest
 import org.jmixworkbench.services.EntityAttributePropagationInspectionRequest
 import org.jmixworkbench.services.EntityAttributePropagationInspectionResponse
 import org.jmixworkbench.services.EntityAttributePropagationService
+import org.jmixworkbench.services.EntityEventListenerApplyRequest
+import org.jmixworkbench.services.EntityEventListenerRequest
+import org.jmixworkbench.services.EntityEventListenerService
 import org.jmixworkbench.services.DatabaseEntityTableInspectionRequest
 import org.jmixworkbench.services.DatabaseEntityTableBrowseRequest
 import org.jmixworkbench.services.DatabaseEntityImportRequest
@@ -420,6 +423,14 @@ class JcefBridge(
             }
             if (action == "applyEntityAttributePropagation") {
                 handleApplyEntityAttributePropagation(action, requestId, payload)
+                return
+            }
+            if (action == "previewEntityEventListener") {
+                handlePreviewEntityEventListener(action, requestId, payload)
+                return
+            }
+            if (action == "applyEntityEventListener") {
+                handleApplyEntityEventListener(action, requestId, payload)
                 return
             }
             if (action == "previewCrudGeneration") {
@@ -2022,6 +2033,51 @@ class JcefBridge(
         }
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             EntityAttributePropagationService.getInstance(project).prepareApply(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewEntityEventListener(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityEventListenerRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
+            EntityEventListenerService.getInstance(project).preview(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { response ->
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyEntityEventListener(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityEventListenerApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationApplyError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            EntityEventListenerService.getInstance(project).prepareApply(request)
         }
             .inSmartMode(project)
             .expireWith(project)

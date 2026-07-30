@@ -25,7 +25,7 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 267 tests and three packaged-host
+  descriptors were inspected after assembly, 272 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
@@ -41,11 +41,24 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   validation/annotation collections, cleared uniqueness expansion and no
   inherited ownership choreography. Handwritten declarations remain
   order-locked; newly staged drafts can be reordered without claiming that
-  source declarations moved. New-entity lifecycle callbacks and listener
-  classes are visually authored, while existing callbacks/listeners remain
-  source-derived and protected. Browser interaction verified copy, safe column
+  source declarations moved. New-entity lifecycle callbacks and JPA
+  `@EntityListeners` classes are visually authored, while existing declarations
+  remain source-derived and protected. Browser interaction verified copy, safe column
   regeneration, draft reorder, inherited evidence expansion and zero shell
   overflow at a 360-pixel embedded width.
+- Existing persistent entities now expose a separate Jmix data-event listener
+  workflow. It creates current Spring `EntitySavingEvent`,
+  `EntityLoadingEvent`, and before/after-commit `EntityChangedEvent` handlers
+  in Java or Kotlin, derives the target module and source root from the exact
+  indexed entity revision, previews one create-only atomic change, and rejects
+  stale entities, source collisions, unsupported model kinds and incoherent
+  transaction choices. After-commit data access is an explicit
+  `REQUIRES_NEW` option rather than a hidden assumption. Indexed listener
+  methods appear beside the entity, navigate to source, and every generated
+  handler is linked back through `LISTENS_TO`. The service is registered in all
+  three plugin descriptors. Five focused contracts pass on both IntelliJ hosts;
+  real-browser preview/apply and the complete creator passed at desktop and
+  360-pixel widths with no overflow or diagnostics.
 - Indexed entities now open a dedicated list/detail-view workflow directly
   from both the normal workbench and the native IntelliJ entity editor. The
   launch crosses surfaces only with an exact revision-bound entity locator;

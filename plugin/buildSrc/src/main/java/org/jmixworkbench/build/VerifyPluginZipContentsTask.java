@@ -164,6 +164,11 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         requireEntry(contents, "icons/workbench.svg", archive);
         requireEntry(contents, "LICENSE", archive);
         requireEntry(contents, "NOTICE", archive);
+        requireEntry(
+                contents,
+                "org/jmixworkbench/services/EntityEventListenerService.class",
+                archive
+        );
 
         String descriptor = text(contents.get("META-INF/plugin.xml"));
         requireContains(descriptor, "<id>org.jmixworkbench</id>", archive);
@@ -180,6 +185,13 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 "projectService",
                 "serviceImplementation",
                 "org.jmixworkbench.toolwindow.WorkbenchNavigationService",
+                archive
+        );
+        requireExtensionRegistration(
+                descriptor,
+                "projectService",
+                "serviceImplementation",
+                "org.jmixworkbench.services.EntityEventListenerService",
                 archive
         );
         if ("idea253".equals(lane)) {

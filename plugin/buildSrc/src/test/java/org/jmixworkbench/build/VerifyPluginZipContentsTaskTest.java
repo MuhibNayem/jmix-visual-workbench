@@ -129,6 +129,7 @@ class VerifyPluginZipContentsTaskTest {
                         + "<extensions>"
                         + "<fileEditorProvider implementation=\"org.jmixworkbench.editor.JmixEntityFileEditorProvider\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.toolwindow.WorkbenchNavigationService\" />"
+                        + "<projectService serviceImplementation=\"org.jmixworkbench.services.EntityEventListenerService\" />"
                         + "</extensions>"
                         + "<idea-version since-build=\"253\" until-build=\"253.*\"/></idea-plugin>"
         ));
@@ -142,6 +143,10 @@ class VerifyPluginZipContentsTaskTest {
         entries.put("icons/workbench.svg", bytes("<svg/>"));
         entries.put("LICENSE", bytes("license"));
         entries.put("NOTICE", bytes("notice"));
+        entries.put(
+                "org/jmixworkbench/services/EntityEventListenerService.class",
+                new byte[]{0, 1, 2}
+        );
         return nestedArchive(entries);
     }
 

@@ -44,6 +44,7 @@ import {
   InheritedAttributeEvidence,
 } from './EntitySourceEvidence'
 import { existingEntityModel } from './entityModelAdapter'
+import EntityEventListenerPanel from './EntityEventListenerPanel'
 
 const ATTRIBUTE_TYPES: AttributeType[] = [
   'string', 'character', 'integer', 'long', 'double', 'bigDecimal', 'boolean',
@@ -414,6 +415,10 @@ export default function EntityDesigner({
       .sort((left, right) =>
         left.kind.localeCompare(right.kind) || left.displayName.localeCompare(right.displayName))
   }, [applicationGraph, entity.className, entity.packageName, existingEntity])
+  const entityEventListeners = useMemo(
+    () => entityImpact.filter(artifact => artifact.kind === 'EVENT_LISTENER'),
+    [entityImpact],
+  )
 
   const existingViewContractHasDraftChanges = useMemo(() => {
     if (!existingEntity) return false
@@ -461,6 +466,18 @@ export default function EntityDesigner({
   const openImpactSource = async (artifact: GraphArtifact) => {
     const response = await bridge.navigateToSource(artifact.sourceLocator)
     if (!response.success) addToast(response.message, 'error')
+  }
+
+  const refreshAndOpenCreatedListener = async (createdPath: string) => {
+    const graph = await bridge.getApplicationGraph(true)
+    setApplicationGraph(graph)
+    const created = graph.artifacts.find(artifact =>
+      artifact.kind === 'EVENT_LISTENER' &&
+      artifact.sourceLocator.relativePath === createdPath,
+    )
+    if (created) {
+      await openImpactSource(created)
+    }
   }
 
   const designImpactView = async (artifact: GraphArtifact) => {
@@ -2107,7 +2124,7 @@ export default function EntityDesigner({
                   )
                 })}
               </div>
-              <Field label="Entity listener classes">
+              <Field label="JPA @EntityListeners classes">
                 <textarea
                   rows={3}
                   value={entity.entityListeners.join(', ')}
@@ -3487,6 +3504,16 @@ export default function EntityDesigner({
                 })}
               />
             </div>
+          )}
+
+          {existingEntity?.entityType === 'entity' && (
+            <EntityEventListenerPanel
+              entity={existingEntity}
+              listeners={entityEventListeners}
+              onOpenSource={openImpactSource}
+              onApplied={refreshAndOpenCreatedListener}
+              addToast={addToast}
+            />
           )}
 
           {(existingEntity || entity.className) && (

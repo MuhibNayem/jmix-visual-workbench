@@ -26,6 +26,7 @@ import type {
   EntityAttributeRenameLaunchResponse,
   EntityAttributeSafeDeleteRequest,
   EntityAttributeSafeDeleteLaunchResponse,
+  EntityEventListenerRequest,
   EntityAttributeTypeMigrationRequest,
   EntityAttributeTypeMigrationLaunchResponse,
   EntityAttributeTypeExpansionPreviewResponse,
@@ -715,6 +716,113 @@ class ${scenario.className} {
                   ],
                   issues: [],
                 }
+              case 'previewEntityEventListener': {
+                const listener = payload as EntityEventListenerRequest
+                const entity = developmentSchemaWorkspace.entities.find(
+                  candidate =>
+                    candidate.sourceLocator.relativePath === listener.entitySource.relativePath,
+                ) ?? developmentSchemaWorkspace.entities[0]
+                const modulePrefix = entity?.moduleId ? `${entity.moduleId}/` : ''
+                const root = listener.sourceLanguage === 'kotlin'
+                  ? 'src/main/kotlin'
+                  : 'src/main/java'
+                const extension = listener.sourceLanguage === 'kotlin' ? 'kt' : 'java'
+                const relativePath =
+                  `${modulePrefix}${root}/${listener.packageName.replace(/\./g, '/')}/${listener.className}.${extension}`
+                const entityClass = entity?.className ?? 'Entity'
+                const javaMethods = listener.events.map(event => {
+                  switch (event) {
+                    case 'ENTITY_SAVING':
+                      return `    @org.springframework.context.event.EventListener
+    public void on${entityClass}Saving(io.jmix.core.event.EntitySavingEvent<${entityClass}> event) {
+    }`
+                    case 'ENTITY_LOADING':
+                      return `    @org.springframework.context.event.EventListener
+    public void on${entityClass}Loading(io.jmix.core.event.EntityLoadingEvent<${entityClass}> event) {
+    }`
+                    case 'ENTITY_CHANGED_BEFORE_COMMIT':
+                      return `    @org.springframework.context.event.EventListener
+    public void on${entityClass}ChangedBeforeCommit(EntityChangedEvent<${entityClass}> event) {
+    }`
+                    case 'ENTITY_CHANGED_AFTER_COMMIT':
+                      return `    @TransactionalEventListener(phase = org.springframework.transaction.event.TransactionPhase.AFTER_COMMIT)
+${listener.afterCommitRequiresNewTransaction
+    ? '    @org.springframework.transaction.annotation.Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)\n'
+    : ''}    public void on${entityClass}ChangedAfterCommit(EntityChangedEvent<${entityClass}> event) {
+    }`
+                  }
+                }).join('\n\n')
+                const kotlinMethods = listener.events.map(event => {
+                  switch (event) {
+                    case 'ENTITY_SAVING':
+                      return `    @org.springframework.context.event.EventListener
+    fun on${entityClass}Saving(event: io.jmix.core.event.EntitySavingEvent<${entityClass}>) {
+    }`
+                    case 'ENTITY_LOADING':
+                      return `    @org.springframework.context.event.EventListener
+    fun on${entityClass}Loading(event: io.jmix.core.event.EntityLoadingEvent<${entityClass}>) {
+    }`
+                    case 'ENTITY_CHANGED_BEFORE_COMMIT':
+                      return `    @org.springframework.context.event.EventListener
+    fun on${entityClass}ChangedBeforeCommit(event: EntityChangedEvent<${entityClass}>) {
+    }`
+                    case 'ENTITY_CHANGED_AFTER_COMMIT':
+                      return `    @TransactionalEventListener(phase = org.springframework.transaction.event.TransactionPhase.AFTER_COMMIT)
+${listener.afterCommitRequiresNewTransaction
+    ? '    @org.springframework.transaction.annotation.Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)\n'
+    : ''}    fun on${entityClass}ChangedAfterCommit(event: EntityChangedEvent<${entityClass}>) {
+    }`
+                  }
+                }).join('\n\n')
+                const source = listener.sourceLanguage === 'kotlin'
+                  ? `package ${listener.packageName}
+
+import io.jmix.core.event.EntityChangedEvent
+import org.springframework.transaction.event.TransactionalEventListener
+
+class ${listener.className} {
+${kotlinMethods}
+}
+`
+                  : `package ${listener.packageName};
+
+import io.jmix.core.event.EntityChangedEvent;
+import org.springframework.transaction.event.TransactionalEventListener;
+
+public class ${listener.className} {
+${javaMethods}
+}
+`
+                return {
+                  accepted: true,
+                  changeSetId: 'entity-listener:development',
+                  label: `Create ${listener.className} for ${entity?.className ?? 'entity'}`,
+                  planDigest: 'development-entity-listener',
+                  files: [{
+                    relativePath,
+                    mode: 'CREATE',
+                    afterFingerprint: 'development-entity-listener-after',
+                    resultContent: source,
+                    appliedEditCount: 0,
+                  }],
+                  issues: [],
+                } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'applyEntityEventListener':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Create ${payload.listener?.className ?? 'entity listener'}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'entity-listener:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [`${payload.listener?.className ?? 'EntityEventListener'}.java`],
+                  issues: [],
+                } satisfies WorkspaceChangeApplyResponse
               case 'previewExistingEntityAttributeAdditions': {
                 const change = payload as any
                 const entity = change.entity ?? {}
@@ -2086,6 +2194,23 @@ class ${scenario.className} {
       entity,
       expectedPlanDigest,
     })
+  }
+
+  previewEntityEventListener(listener: EntityEventListenerRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewEntityEventListener',
+      listener,
+    )
+  }
+
+  applyEntityEventListener(
+    listener: EntityEventListenerRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyEntityEventListener',
+      { listener, expectedPlanDigest },
+    )
   }
 
   previewExistingEntityAttributeAdditions(change: ExistingEntityAttributeAdditionRequest) {

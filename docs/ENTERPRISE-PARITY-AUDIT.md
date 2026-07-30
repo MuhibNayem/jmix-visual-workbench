@@ -112,6 +112,17 @@ inspection control rather than relying on a hard-to-hit table-row target.
 ## Verified in this audit
 
 - The production web application builds and is packaged into the plugin.
+- The Entity Designer Jmix data-listener workflow was exercised in the real
+  browser from event and transaction-phase selection through immutable preview
+  and atomic apply. The creator distinguishes JPA `@EntityListeners` from
+  Spring Jmix entity events, exposes `REQUIRES_NEW` only for an after-commit
+  handler, and derives the target module from the indexed entity rather than
+  trusting a client path. At 1440 and 360 pixels the document and body widths
+  exactly matched the viewport and the browser reported no warnings or errors.
+  Five focused contracts pass on both IntelliJ hosts and prove Java/Kotlin
+  syntax, stale/collision rejection, explicit transaction semantics, atomic
+  create-only output, application-graph discovery and `LISTENS_TO` links for
+  every generated handler.
 - The Entity Designer live-database slice was exercised end to end in a real
   browser: an existing multi-module `LoanApp` mapped its `EMPLOYEE_ID` foreign
   key to the indexed `Employee` entity, proposed two scalar columns, staged all
@@ -270,9 +281,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 267 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 272 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 267 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 272 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -453,12 +464,12 @@ inspection control rather than relying on a hard-to-hit table-row target.
 
 ## Recommended next execution order
 
-1. Complete the remaining high-frequency entity workflows: listener class
-   creation/navigation, discriminator fields, embedded overrides,
+1. Complete the remaining high-frequency entity workflows: discriminator fields, embedded overrides,
    mature repository methods, localized-caption workflows and safe enum-usage
    migration. Copy/reorder, inherited/trait visibility, callback authoring and
-   listener discovery are now implemented with source-protected existing
-   declarations. Exact-revision existing-entity view creation plus connected
+   current Java/Kotlin Jmix listener creation/navigation are now implemented
+   with source-protected existing declarations. Exact-revision existing-entity
+   view creation plus connected
    source/visual navigation now work from both tool-window and native editor
    surfaces without regenerating entity/table source or silently granting a
    full-access role.

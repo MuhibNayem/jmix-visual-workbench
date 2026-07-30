@@ -61,13 +61,12 @@ The safety engine is not the current limiting factor. The shortest path from
 the present substantial implementation to a superior daily developer product
 is:
 
-1. remaining high-frequency entity actions: listener class creation/navigation,
-   complete discriminator and embedded-override
+1. remaining high-frequency entity actions: complete discriminator and embedded-override
    editing, mature repository methods, localized-caption workflows and safe
    enum-usage migration. Copy/reorder, inherited/trait visibility, callback
-   authoring, listener discovery and exact-revision entity-to-view creation/
-   source/design navigation are implemented with handwritten-source
-   protection;
+   authoring, current Java/Kotlin Jmix listener creation/navigation and
+   exact-revision entity-to-view creation/source/design navigation are
+   implemented with handwritten-source protection;
 2. decomposition of the 6,051-line central React designer plus component, interaction,
    responsive and accessibility regression tests;
 3. representative arbitrary-source, database-first, installed-IDE dual-host,

@@ -524,6 +524,21 @@ export interface EntityAttributeSafeDeleteLaunchResponse {
   retainedColumnName?: string
 }
 
+export type EntityEventListenerEvent =
+  | 'ENTITY_SAVING'
+  | 'ENTITY_LOADING'
+  | 'ENTITY_CHANGED_BEFORE_COMMIT'
+  | 'ENTITY_CHANGED_AFTER_COMMIT'
+
+export interface EntityEventListenerRequest {
+  entitySource: GraphSourceLocator
+  className: string
+  packageName: string
+  sourceLanguage: EntitySourceLanguage
+  events: EntityEventListenerEvent[]
+  afterCommitRequiresNewTransaction: boolean
+}
+
 export interface EntityAttributeTypeMigrationRequest {
   sourceLocator: GraphSourceLocator
   entityClassName: string
