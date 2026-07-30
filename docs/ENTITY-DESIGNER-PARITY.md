@@ -83,7 +83,7 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   and portable, old-exists/new-absent preconditions and reverse rollback are
   mandatory, and explicit `@DdlGeneration(unmappedColumns=...)` protection
   disables the suggestion. Final deletion remains a retention-policy decision.
-- Existing handwritten scalar attributes can launch IntelliJ's project-wide
+- Existing handwritten scalar attributes can request IntelliJ's project-wide
   Type Migration from Entity Designer with a selected target type. The backend
   resolves the exact current Java field or Kotlin light field, rejects stale,
   inferred-column, identifier, relationship, custom and ambiguous declarations,
@@ -92,10 +92,12 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   externally managed or incomplete evidence; reports the real Liquibase column
   type plus primary-key, uniqueness, index and incoming/outgoing foreign-key
   dependencies; and states when conversion is not automatically reversible.
-  Source-only changes such as compatible persisted representations proceed
-  without inventing a schema rewrite. SQL type changes remain a separately
-  reviewed conversion because Liquibase `modifyDataType` has no automatic
-  rollback and reversing the declaration cannot restore truncated data.
+  Source-only changes such as compatible persisted representations open the
+  real refactoring preview without inventing a schema rewrite. Expand/contract,
+  externally managed and incomplete-evidence outcomes fail closed before the
+  source refactor opens. SQL type changes remain a separately reviewed
+  conversion because Liquibase `modifyDataType` has no automatic rollback and
+  reversing the declaration cannot restore truncated data.
 - Existing entities can inspect their live mapped table through the
   project-owned JDBC driver and the active profile configuration. The backend
   supports datasource-only stores with Liquibase intentionally disabled,

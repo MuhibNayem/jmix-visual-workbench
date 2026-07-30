@@ -40,6 +40,7 @@ import org.jmixworkbench.services.PreparedEntityAttributeSafeDelete
 import org.jmixworkbench.services.EntityAttributeTypeMigrationLaunchResponse
 import org.jmixworkbench.services.EntityAttributeTypeMigrationRequest
 import org.jmixworkbench.services.PreparedEntityAttributeTypeMigration
+import org.jmixworkbench.services.EntityAttributeTypeSchemaStrategy
 import org.jmixworkbench.services.EntityAttributePropagationApplyRequest
 import org.jmixworkbench.services.EntityAttributePropagationChangeRequest
 import org.jmixworkbench.services.EntityAttributePropagationInspectionRequest
@@ -1412,6 +1413,23 @@ class JcefBridge(
                                 success = false,
                                 code = prepared.code,
                                 message = prepared.message,
+                                sourceLanguage = prepared.sourceLanguage,
+                                schemaImpact = prepared.schemaImpact,
+                            ),
+                        ),
+                    )
+                    return@finishOnUiThread
+                }
+                if (prepared.schemaImpact?.strategy != EntityAttributeTypeSchemaStrategy.SOURCE_ONLY) {
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(
+                            EntityAttributeTypeMigrationLaunchResponse(
+                                success = false,
+                                code = "JVW-ENTITY-TYPE-MIGRATION-SCHEMA-STAGE-REQUIRED",
+                                message = prepared.message +
+                                    " The source refactor was not opened because its schema stage must be completed first.",
                                 sourceLanguage = prepared.sourceLanguage,
                                 schemaImpact = prepared.schemaImpact,
                             ),
