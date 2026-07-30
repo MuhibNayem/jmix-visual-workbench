@@ -304,6 +304,12 @@ class JmixProjectTemplateRuntimeTest {
                                         "Generated from the signed runtime certification catalog.\n"
                                     ).toByteArray(StandardCharsets.UTF_8),
                             ),
+                            JmixOrganizationTemplateChangeDraft(
+                                relativePath = "src/main/resources/branding/runtime-logo.bin",
+                                action = JmixOrganizationTemplateChangeAction.ADD,
+                                content = byteArrayOf(0x00, 0x10, 0x20, 0x7f),
+                                payloadKind = JmixOrganizationTemplatePayloadKind.BINARY,
+                            ),
                         ),
                     ),
                 ),
@@ -325,6 +331,11 @@ class JmixProjectTemplateRuntimeTest {
         assertTrue(
             generated.files.single { it.relativePath == "README.md" }
                 .content.startsWith("# Certified Payroll"),
+        )
+        assertTrue(
+            generated.binaryFiles.single {
+                it.relativePath == "src/main/resources/branding/runtime-logo.bin"
+            }.content.contentEquals(byteArrayOf(0x00, 0x10, 0x20, 0x7f)),
         )
         return generated
     }

@@ -65,9 +65,37 @@ data class GeneratedProjectResource(
     val executable: Boolean = false,
 )
 
+class GeneratedProjectBinaryFile(
+    val relativePath: String,
+    content: ByteArray,
+    val executable: Boolean = false,
+) {
+    private val bytes: ByteArray = content.copyOf()
+
+    val content: ByteArray
+        get() = bytes.copyOf()
+
+    override fun equals(other: Any?): Boolean =
+        other is GeneratedProjectBinaryFile &&
+            relativePath == other.relativePath &&
+            executable == other.executable &&
+            bytes.contentEquals(other.bytes)
+
+    override fun hashCode(): Int {
+        var result = relativePath.hashCode()
+        result = 31 * result + bytes.contentHashCode()
+        result = 31 * result + executable.hashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "GeneratedProjectBinaryFile(relativePath=$relativePath, bytes=${bytes.size}, executable=$executable)"
+}
+
 data class GeneratedJmixProject(
     val files: List<GeneratedProjectFile>,
     val resources: List<GeneratedProjectResource>,
+    val binaryFiles: List<GeneratedProjectBinaryFile> = emptyList(),
 )
 
 class JmixProjectTemplateValidationException(

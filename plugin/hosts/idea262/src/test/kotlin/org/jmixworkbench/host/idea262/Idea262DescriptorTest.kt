@@ -22,6 +22,7 @@ class Idea262DescriptorTest {
             ).containsMatchIn(descriptor),
         )
         assertTrue(descriptor.contains("org.jmixworkbench.project.JmixTemplateCatalogConfigurable"))
+        assertTrue(descriptor.contains("org.jmixworkbench.project.JmixTemplateCatalogSigningProvider"))
         assertTrue(
             Regex(
                 """<fileEditorProvider\s+implementation="org\.jmixworkbench\.editor\.JmixFlowUiFileEditorProvider"\s*/>""",

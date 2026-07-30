@@ -47,6 +47,12 @@ class JmixOrganizationTemplateCatalogTest {
                         "ADD",
                         "/src/main/ @acme/payroll\n",
                     ),
+                    change(
+                        "src/main/frontend/themes/payroll/logo.png",
+                        "ADD",
+                        byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x00),
+                        payloadKind = "BINARY",
+                    ),
                 ),
             ),
             policy,
@@ -60,11 +66,31 @@ class JmixOrganizationTemplateCatalogTest {
         assertContains(generated.text("README.md"), "# Payroll enterprise baseline")
         assertContains(generated.text("README.md"), "com.acme:payroll")
         assertEquals("/src/main/ @acme/payroll\n", generated.text(".github/CODEOWNERS"))
+        assertTrue(
+            generated.binaryFiles.single {
+                it.relativePath == "src/main/frontend/themes/payroll/logo.png"
+            }.content.contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x00)),
+        )
         assertEquals(
             generated.files.map { it.relativePath }.sorted(),
             generated.files.map { it.relativePath },
         )
         assertTrue(generated.resources.any { it.relativePath == "gradle/wrapper/gradle-wrapper.jar" })
+    }
+
+    @Test
+    fun `continues to verify legacy schema one text catalogs`() {
+        val legacy = bundle(
+            schemaVersion = 1,
+            changes = listOf(change("README.md", "REPLACE", "legacy approved\n")),
+        )
+
+        val verified = JmixTemplateCatalogVerifier.verify(legacy, policy(), clock)
+
+        assertEquals(
+            "legacy approved\n",
+            verified.apply("acme-flowui", request()).text("README.md"),
+        )
     }
 
     @Test
@@ -257,6 +283,7 @@ class JmixOrganizationTemplateCatalogTest {
                     addProperty("path", "README.md")
                     addProperty("action", "DELETE")
                     addProperty("sha256", "0".repeat(64))
+                    add("payloadKind", null)
                     addProperty("executable", false)
                 },
             ),
@@ -356,6 +383,12 @@ class JmixOrganizationTemplateCatalogTest {
                             action = JmixOrganizationTemplateChangeAction.REPLACE,
                             content = "# ${'$'}{JMIX_PROJECT_NAME}\n".toByteArray(),
                         ),
+                        JmixOrganizationTemplateChangeDraft(
+                            relativePath = "src/main/resources/branding/logo.bin",
+                            action = JmixOrganizationTemplateChangeAction.ADD,
+                            content = byteArrayOf(0x00, 0x10, 0x20),
+                            payloadKind = JmixOrganizationTemplatePayloadKind.BINARY,
+                        ),
                     ),
                 ),
             ),
@@ -365,10 +398,54 @@ class JmixOrganizationTemplateCatalogTest {
         val second = JmixTemplateCatalogAuthoring.createSignedBundle(draft, signer, clock)
         assertTrue(first.contentEquals(second))
         val verified = JmixTemplateCatalogVerifier.verify(first, policy(), clock)
-        assertEquals("# Payroll\n", verified.apply("acme-flowui", request()).text("README.md"))
+        val generated = verified.apply("acme-flowui", request())
+        assertEquals("# Payroll\n", generated.text("README.md"))
+        assertTrue(
+            generated.binaryFiles.single {
+                it.relativePath == "src/main/resources/branding/logo.bin"
+            }.content.contentEquals(byteArrayOf(0x00, 0x10, 0x20)),
+        )
+
+        val provider = object : JmixTemplateCatalogSigningIdentity {
+            override val keyId: String = "acme-release"
+            override val publicKeyX509Base64: String = publicKey()
+
+            override fun sign(manifestBytes: ByteArray): ByteArray =
+                Signature.getInstance("Ed25519").run {
+                    initSign(keyPair.private)
+                    update(manifestBytes)
+                    sign()
+                }
+        }
+        assertTrue(
+            first.contentEquals(
+                JmixTemplateCatalogAuthoring.createSignedBundle(draft, provider, clock),
+            ),
+        )
 
         val directory = createTempDirectory("jmix-template-authoring")
         try {
+            val privatePem = directory.resolve("release-private.pem")
+            val publicDer = directory.resolve("release-public.der")
+            Files.writeString(
+                privatePem,
+                "-----BEGIN PRIVATE KEY-----\n" +
+                    Base64.getMimeEncoder(64, "\n".toByteArray())
+                        .encodeToString(keyPair.private.encoded) +
+                    "\n-----END PRIVATE KEY-----\n",
+            )
+            Files.write(publicDer, keyPair.public.encoded)
+            val fileSigner = JmixTemplateCatalogSigner.fromFiles(
+                keyId = "acme-release",
+                privateKeyPkcs8 = privatePem,
+                publicKeyX509 = publicDer,
+            )
+            assertTrue(
+                first.contentEquals(
+                    JmixTemplateCatalogAuthoring.createSignedBundle(draft, fileSigner, clock),
+                ),
+            )
+
             val output = directory.resolve("acme.jmix-template-catalog")
             JmixTemplateCatalogAuthoring.writeCreateOnly(output, first)
             assertTrue(Files.readAllBytes(output).contentEquals(first))
@@ -395,6 +472,7 @@ class JmixOrganizationTemplateCatalogTest {
         val path: String,
         val action: String,
         val content: ByteArray?,
+        val payloadKind: String?,
         val executable: Boolean = false,
     )
 
@@ -402,17 +480,20 @@ class JmixOrganizationTemplateCatalogTest {
         path: String,
         action: String,
         content: String,
+        payloadKind: String = "TEXT",
         executable: Boolean = false,
-    ): TestChange = change(path, action, content.toByteArray(), executable)
+    ): TestChange = change(path, action, content.toByteArray(), payloadKind, executable)
 
     private fun change(
         path: String,
         action: String,
         content: ByteArray,
+        payloadKind: String = "TEXT",
         executable: Boolean = false,
-    ): TestChange = TestChange(path, action, content, executable)
+    ): TestChange = TestChange(path, action, content, payloadKind, executable)
 
     private fun bundle(
+        schemaVersion: Int = 2,
         catalogVersion: String = "1.4.0",
         expiresAt: String? = "2027-07-31T00:00:00Z",
         changes: List<TestChange> = listOf(change("README.md", "REPLACE", "approved\n")),
@@ -420,7 +501,7 @@ class JmixOrganizationTemplateCatalogTest {
         rootMutation: JsonObject.() -> Unit = {},
     ): ByteArray {
         val root = JsonObject().apply {
-            addProperty("schemaVersion", 1)
+            addProperty("schemaVersion", schemaVersion)
             addProperty("catalogId", "acme.enterprise")
             addProperty("catalogVersion", catalogVersion)
             addProperty("displayName", "Acme enterprise templates")
@@ -451,11 +532,17 @@ class JmixOrganizationTemplateCatalogTest {
                                             addProperty("action", testChange.action)
                                             if (testChange.action == "DELETE") {
                                                 add("sha256", null)
+                                                if (schemaVersion >= 2) {
+                                                    add("payloadKind", null)
+                                                }
                                             } else {
                                                 addProperty(
                                                     "sha256",
                                                     sha256(requireNotNull(testChange.content)),
                                                 )
+                                                if (schemaVersion >= 2) {
+                                                    addProperty("payloadKind", testChange.payloadKind)
+                                                }
                                             }
                                             addProperty("executable", testChange.executable)
                                         }

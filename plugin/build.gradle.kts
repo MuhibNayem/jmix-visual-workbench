@@ -486,6 +486,9 @@ tasks.register("verifyHostBuildDefinitions") {
         "src/main/kotlin/org/jmixworkbench/project/JmixOrganizationTemplateCatalog.kt",
         "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogSettings.kt",
         "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogConfigurable.kt",
+        "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogAuthoringDialog.kt",
+        "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogSigningProvider.kt",
+        "src/main/kotlin/org/jmixworkbench/project/JmixTemplateOverlayPlanner.kt",
     )
     doLast {
         val idea253Build = file("hosts/idea253/build.gradle.kts").readText()
@@ -508,6 +511,7 @@ tasks.register("verifyHostBuildDefinitions") {
         check("<depends>com.intellij.gradle</depends>" in idea253Descriptor)
         check("org.jmixworkbench.project.JmixNewProjectWizard" in idea253Descriptor)
         check("org.jmixworkbench.project.JmixTemplateCatalogConfigurable" in idea253Descriptor)
+        check("org.jmixworkbench.project.JmixTemplateCatalogSigningProvider" in idea253Descriptor)
         check("<depends>com.intellij.modules.jcef</depends>" !in idea253Descriptor)
 
         check("JavaLanguageVersion.of(25)" in idea262Build)
@@ -523,6 +527,7 @@ tasks.register("verifyHostBuildDefinitions") {
         check("<depends>com.intellij.gradle</depends>" in idea262Descriptor)
         check("org.jmixworkbench.project.JmixNewProjectWizard" in idea262Descriptor)
         check("org.jmixworkbench.project.JmixTemplateCatalogConfigurable" in idea262Descriptor)
+        check("org.jmixworkbench.project.JmixTemplateCatalogSigningProvider" in idea262Descriptor)
         check("bundledModule(\"intellij.libraries.jcef\")" in idea262Build)
         check("bundledModule(\"intellij.platform.ui.jcef\")" in idea262Build)
         check("<depends>com.intellij.modules.jcef</depends>" in idea262Descriptor)
@@ -600,6 +605,9 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
             }
             check("org.jmixworkbench.project.JmixTemplateCatalogConfigurable" in descriptorText) {
                 "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register organization template settings."
+            }
+            check("org.jmixworkbench.project.JmixTemplateCatalogSigningProvider" in descriptorText) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register enterprise template signing."
             }
             check(
                 """<projectService serviceImplementation="org.jmixworkbench.toolwindow.WorkbenchNavigationService"/>""" in
@@ -711,6 +719,7 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
             "Files.isSymbolicLink(",
             "Refusing to overwrite existing project path",
             "stageTextFiles(",
+            "stageBinaryFiles(",
             "stageResources(",
             "verifyWrapper(",
             "installedFiles.asReversed()",
@@ -741,6 +750,7 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
         ).readText()
         listOf(
             "JmixTemplateCatalogVerifier.verify(",
+            "addProperty(\"schemaVersion\", 2)",
             "StandardOpenOption.CREATE_NEW",
             "Refusing to replace existing catalog bundle",
             "StandardCopyOption.ATOMIC_MOVE",

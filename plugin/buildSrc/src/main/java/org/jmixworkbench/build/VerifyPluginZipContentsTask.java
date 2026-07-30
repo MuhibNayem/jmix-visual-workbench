@@ -199,6 +199,21 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         );
         requireEntry(
                 contents,
+                "org/jmixworkbench/project/JmixTemplateCatalogAuthoringDialog.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/project/JmixTemplateOverlayPlanner.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/project/JmixTemplateCatalogSigningProvider.class",
+                archive
+        );
+        requireEntry(
+                contents,
                 "org/jmixworkbench/services/EntityEventListenerService.class",
                 archive
         );
@@ -239,6 +254,13 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 "applicationConfigurable",
                 "instance",
                 "org.jmixworkbench.project.JmixTemplateCatalogConfigurable",
+                archive
+        );
+        requireExtensionRegistration(
+                descriptor,
+                "extensionPoint",
+                "interface",
+                "org.jmixworkbench.project.JmixTemplateCatalogSigningProvider",
                 archive
         );
         requireExtensionRegistration(

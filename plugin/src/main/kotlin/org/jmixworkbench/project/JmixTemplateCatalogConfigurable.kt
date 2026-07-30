@@ -23,7 +23,9 @@ import java.awt.FlowLayout
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.net.URI
+import java.security.MessageDigest
 import java.util.Base64
+import java.util.HexFormat
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
@@ -61,6 +63,11 @@ class JmixTemplateCatalogConfigurable : Configurable {
                 add(JButton("Refresh Selected").also {
                     it.toolTipText = "Download the exact SHA-256-pinned HTTPS bundle and verify its signature"
                     it.addActionListener { refreshSelected() }
+                })
+                add(JButton("Create Signed Bundle…").also {
+                    it.toolTipText =
+                        "Compare a customized project to a certified base, review every change, then sign and export"
+                    it.addActionListener { createSignedBundle() }
                 })
             }
             component = JPanel(BorderLayout(0, 10)).apply {
@@ -178,11 +185,78 @@ class JmixTemplateCatalogConfigurable : Configurable {
         }
     }
 
-    private fun runCatalogOperation(
+    private fun createSignedBundle() {
+        val dialog = runCatching { JmixTemplateCatalogAuthoringDialog() }.getOrElse { failure ->
+            Messages.showErrorDialog(
+                failure.message ?: "Installed enterprise signing providers could not be loaded safely.",
+                "Cannot Author Project Template",
+            )
+            return
+        }
+        val input = dialog.showAndGetInput() ?: return
+        val planResult = runProgress("Comparing customized project with certified Jmix base") {
+            JmixTemplateOverlayPlanner.plan(
+                customizedProjectRoot = input.sourceRoot,
+                request = input.baseRequest,
+                progress = JmixTemplateOverlayProgress {
+                    ProgressManager.checkCanceled()
+                },
+            )
+        } ?: return
+        val plan = planResult.getOrElse { failure ->
+            Messages.showErrorDialog(
+                failure.message ?: "The customized project could not be compared safely.",
+                "Cannot Author Project Template",
+            )
+            return
+        }
+        if (!JmixTemplateOverlayPreviewDialog(plan).showAndGet()) return
+        val exportResult = runProgress("Signing and self-verifying Jmix template catalog") {
+            val currentPlan = JmixTemplateOverlayPlanner.plan(
+                customizedProjectRoot = input.sourceRoot,
+                request = input.baseRequest,
+                progress = JmixTemplateOverlayProgress {
+                    ProgressManager.checkCanceled()
+                },
+            )
+            require(
+                plan.matchesReviewedSource(currentPlan)
+            ) {
+                "The customized project changed after review. Review a fresh diff before signing."
+            }
+            val signer = dialog.resolveSigner(input)
+            val bundle = JmixTemplateCatalogAuthoring.createSignedBundle(
+                draft = input.draft(currentPlan),
+                signer = signer,
+            )
+            JmixTemplateCatalogAuthoring.writeCreateOnly(input.output, bundle)
+            HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(bundle),
+            )
+        } ?: return
+        exportResult.fold(
+            onSuccess = { digest ->
+                LocalFileSystem.getInstance().refreshAndFindFileByNioFile(input.output)
+                Messages.showInfoMessage(
+                    "Signed, self-verified catalog created without storing the private key.\n\n" +
+                        "${input.output}\nSHA-256: $digest",
+                    "Jmix Project Template Catalog Created",
+                )
+            },
+            onFailure = { failure ->
+                Messages.showErrorDialog(
+                    failure.message ?: "Catalog signing or export failed.",
+                    "Cannot Export Signed Project Template",
+                )
+            },
+        )
+    }
+
+    private fun <T> runProgress(
         title: String,
-        operation: () -> JmixCachedTemplateCatalog,
-    ) {
-        var result: Result<JmixCachedTemplateCatalog>? = null
+        operation: () -> T,
+    ): Result<T>? {
+        var result: Result<T>? = null
         ProgressManager.getInstance().runProcessWithProgressSynchronously(
             {
                 result = try {
@@ -197,6 +271,14 @@ class JmixTemplateCatalogConfigurable : Configurable {
             true,
             null,
         )
+        return result
+    }
+
+    private fun runCatalogOperation(
+        title: String,
+        operation: () -> JmixCachedTemplateCatalog,
+    ) {
+        val result = runProgress(title, operation)
         result?.fold(
             onSuccess = { cached ->
                 LocalFileSystem.getInstance().refreshAndFindFileByNioFile(cached.bundlePath)

@@ -84,10 +84,16 @@ enum class JmixOrganizationTemplateChangeAction {
     DELETE,
 }
 
+enum class JmixOrganizationTemplatePayloadKind {
+    TEXT,
+    BINARY,
+}
+
 data class JmixOrganizationTemplateChange(
     val relativePath: String,
     val action: JmixOrganizationTemplateChangeAction,
     val sha256: String?,
+    val payloadKind: JmixOrganizationTemplatePayloadKind?,
     val executable: Boolean = false,
 )
 
@@ -113,6 +119,10 @@ data class JmixVerifiedTemplateCatalog(
         }
 
         val files = generatedBase.files.associateByTo(linkedMapOf(), GeneratedProjectFile::relativePath)
+        val binaryFiles = generatedBase.binaryFiles.associateByTo(
+            linkedMapOf(),
+            GeneratedProjectBinaryFile::relativePath,
+        )
         val resourcePaths = generatedBase.resources.mapTo(hashSetOf(), GeneratedProjectResource::relativePath)
         template.changes.forEach { change ->
             require(change.relativePath !in resourcePaths) {
@@ -120,21 +130,25 @@ data class JmixVerifiedTemplateCatalog(
             }
             when (change.action) {
                 JmixOrganizationTemplateChangeAction.ADD -> {
-                    require(change.relativePath !in files) {
+                    require(change.relativePath !in files && change.relativePath !in binaryFiles) {
                         "Template ADD target already exists: '${change.relativePath}'."
                     }
-                    files[change.relativePath] = payloadFile(template, change, request)
+                    addPayload(template, change, request, files, binaryFiles)
                 }
 
                 JmixOrganizationTemplateChangeAction.REPLACE -> {
-                    require(change.relativePath in files) {
+                    require(change.relativePath in files || change.relativePath in binaryFiles) {
                         "Template REPLACE target does not exist: '${change.relativePath}'."
                     }
-                    files[change.relativePath] = payloadFile(template, change, request)
+                    files.remove(change.relativePath)
+                    binaryFiles.remove(change.relativePath)
+                    addPayload(template, change, request, files, binaryFiles)
                 }
 
                 JmixOrganizationTemplateChangeAction.DELETE -> {
-                    require(files.remove(change.relativePath) != null) {
+                    val removedText = files.remove(change.relativePath)
+                    val removedBinary = binaryFiles.remove(change.relativePath)
+                    require(removedText != null || removedBinary != null) {
                         "Template DELETE target does not exist: '${change.relativePath}'."
                     }
                 }
@@ -143,35 +157,52 @@ data class JmixVerifiedTemplateCatalog(
         return GeneratedJmixProject(
             files = files.values.sortedBy(GeneratedProjectFile::relativePath),
             resources = generatedBase.resources,
+            binaryFiles = binaryFiles.values.sortedBy(GeneratedProjectBinaryFile::relativePath),
         )
     }
 
-    private fun payloadFile(
+    private fun addPayload(
         template: JmixOrganizationProjectTemplate,
         change: JmixOrganizationTemplateChange,
         request: JmixProjectTemplateRequest,
-    ): GeneratedProjectFile {
+        files: MutableMap<String, GeneratedProjectFile>,
+        binaryFiles: MutableMap<String, GeneratedProjectBinaryFile>,
+    ) {
         val payloadPath = "templates/${template.id}/${change.relativePath}"
         val content = payloads[payloadPath]
             ?: throw JmixTemplateCatalogException("Verified payload '$payloadPath' is unavailable.")
-        val decoded = runCatching {
-            StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(content))
-                .toString()
-        }.getOrElse {
-            throw JmixTemplateCatalogException("Template payload '$payloadPath' is not valid UTF-8 text.")
+        when (requireNotNull(change.payloadKind)) {
+            JmixOrganizationTemplatePayloadKind.TEXT -> {
+                val decoded = runCatching {
+                    StandardCharsets.UTF_8.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(content))
+                        .toString()
+                }.getOrElse {
+                    throw JmixTemplateCatalogException(
+                        "Template payload '$payloadPath' is not valid UTF-8 text.",
+                    )
+                }
+                val expanded = JmixOrganizationTemplateVariables.expand(decoded, request)
+                require(expanded.toByteArray(StandardCharsets.UTF_8).size <= MAX_EXPANDED_FILE_BYTES) {
+                    "Expanded template payload '$payloadPath' exceeds the 8 MiB safety limit."
+                }
+                files[change.relativePath] = GeneratedProjectFile(
+                    relativePath = change.relativePath,
+                    content = expanded,
+                    executable = change.executable,
+                )
+            }
+
+            JmixOrganizationTemplatePayloadKind.BINARY -> {
+                binaryFiles[change.relativePath] = GeneratedProjectBinaryFile(
+                    relativePath = change.relativePath,
+                    content = content,
+                    executable = change.executable,
+                )
+            }
         }
-        val expanded = JmixOrganizationTemplateVariables.expand(decoded, request)
-        require(expanded.toByteArray(StandardCharsets.UTF_8).size <= MAX_EXPANDED_FILE_BYTES) {
-            "Expanded template payload '$payloadPath' exceeds the 8 MiB safety limit."
-        }
-        return GeneratedProjectFile(
-            relativePath = change.relativePath,
-            content = expanded,
-            executable = change.executable,
-        )
     }
 }
 
@@ -179,6 +210,62 @@ class JmixTemplateCatalogException(
     message: String,
     cause: Throwable? = null,
 ) : IllegalArgumentException(message, cause)
+
+internal object JmixOrganizationTemplatePathPolicy {
+    private val safePathSegment = Regex("[A-Za-z0-9._@+ -]+")
+    private val windowsReservedNames = buildSet {
+        addAll(listOf("CON", "PRN", "AUX", "NUL"))
+        (1..9).forEach { index ->
+            add("COM$index")
+            add("LPT$index")
+        }
+    }
+    private val blockedDirectoryNames = setOf(
+        ".git",
+        ".gradle",
+        ".idea",
+        ".jmix-workbench",
+        "build",
+        "node_modules",
+        "out",
+    )
+
+    fun validate(path: String): String {
+        require(path.isNotBlank() && '\\' !in path && !path.startsWith("/") && !path.contains('\u0000')) {
+            "Unsafe organization template target path '$path'."
+        }
+        val segments = path.split('/')
+        require(segments.none { it.isBlank() || it == "." || it == ".." }) {
+            "Unsafe organization template target path '$path'."
+        }
+        require(segments.all(safePathSegment::matches)) {
+            "Organization template target path uses unsupported characters: '$path'."
+        }
+        require(segments.all(::isPortablePathSegment)) {
+            "Organization template target path is not portable across supported operating systems: '$path'."
+        }
+        require(segments.none { it.lowercase(Locale.ROOT) in blockedDirectoryNames }) {
+            "Organization templates cannot write IDE, VCS, build, or dependency-cache internals: '$path'."
+        }
+        require(path.length <= 1_024) { "Organization template target path is too long." }
+        return path
+    }
+
+    fun isReservedIdentifier(value: String): Boolean =
+        value.substringBefore('.').uppercase(Locale.ROOT) in windowsReservedNames
+
+    private fun isPortablePathSegment(segment: String): Boolean {
+        if (
+            segment.length > 255 ||
+            segment.startsWith(' ') ||
+            segment.endsWith(' ') ||
+            segment.endsWith('.')
+        ) {
+            return false
+        }
+        return !isReservedIdentifier(segment)
+    }
+}
 
 object JmixOrganizationTemplateVariables {
     private val unresolvedVariable = Regex("""\$\{JMIX_[A-Z0-9_]+}""")
@@ -223,7 +310,7 @@ object JmixTemplateCatalogVerifier {
     private val sha256Pattern = Regex("[0-9a-f]{64}")
     private val identifierPattern = Regex("[a-z][a-z0-9.-]{0,95}")
     private val versionPattern = Regex("[0-9]+(?:\\.[0-9]+){1,3}(?:[-+][A-Za-z0-9.-]+)?")
-    private val safePathSegment = Regex("[A-Za-z0-9._@+ -]+")
+    private val archivePathSegment = Regex("[A-Za-z0-9._@+ -]+")
 
     fun verify(
         bundle: Path,
@@ -323,7 +410,7 @@ object JmixTemplateCatalogVerifier {
         require(segments.isNotEmpty() && segments.none { it == "." || it == ".." }) {
             "Unsafe template catalog entry path '$path'."
         }
-        require(segments.all(safePathSegment::matches)) {
+        require(segments.all(archivePathSegment::matches)) {
             "Template catalog entry path uses unsupported characters: '$path'."
         }
         return segments.joinToString("/")
@@ -347,8 +434,9 @@ object JmixTemplateCatalogVerifier {
             "signingKeyId",
             "templates",
         )
-        require(root.requiredInt("schemaVersion") == 1) {
-            "Unsupported template catalog schema; expected version 1."
+        val schemaVersion = root.requiredInt("schemaVersion")
+        require(schemaVersion in 1..2) {
+            "Unsupported template catalog schema; expected version 1 or 2."
         }
         val catalogId = root.requiredString("catalogId").also(::requireIdentifier)
         val catalogVersion = root.requiredString("catalogVersion").also(::requireVersion)
@@ -359,7 +447,7 @@ object JmixTemplateCatalogVerifier {
         val expiresAt = root.optionalInstant("expiresAt")
         val signingKeyId = root.requiredString("signingKeyId").also(::requireIdentifier)
         val templates = root.requiredArray("templates").mapIndexed { index, element ->
-            parseTemplate(element.asObject("templates[$index]"))
+            parseTemplate(element.asObject("templates[$index]"), schemaVersion)
         }
         require(templates.isNotEmpty() && templates.size <= 500) {
             "Template catalog must contain 1-500 templates."
@@ -384,7 +472,10 @@ object JmixTemplateCatalogVerifier {
         )
     }
 
-    private fun parseTemplate(json: JsonObject): JmixOrganizationProjectTemplate {
+    private fun parseTemplate(
+        json: JsonObject,
+        schemaVersion: Int,
+    ): JmixOrganizationProjectTemplate {
         json.requireOnly(
             "id",
             "version",
@@ -421,7 +512,7 @@ object JmixTemplateCatalogVerifier {
             }
         }
         val changes = json.requiredArray("changes").mapIndexed { index, element ->
-            parseChange(element.asObject("changes[$index]"))
+            parseChange(element.asObject("changes[$index]"), schemaVersion)
         }
         require(changes.isNotEmpty() && changes.size <= 5_000) {
             "Organization template '$id' must contain 1-5,000 changes."
@@ -449,22 +540,45 @@ object JmixTemplateCatalogVerifier {
         )
     }
 
-    private fun parseChange(json: JsonObject): JmixOrganizationTemplateChange {
-        json.requireOnly("path", "action", "sha256", "executable")
-        val path = validateGeneratedPath(json.requiredString("path"))
+    private fun parseChange(
+        json: JsonObject,
+        schemaVersion: Int,
+    ): JmixOrganizationTemplateChange {
+        json.requireOnly("path", "action", "sha256", "payloadKind", "executable")
+        val path = JmixOrganizationTemplatePathPolicy.validate(json.requiredString("path"))
         val action = json.requiredEnum<JmixOrganizationTemplateChangeAction>("action")
         val sha256 = json.optionalString("sha256")
+        if (schemaVersion == 1) {
+            require(!json.has("payloadKind")) {
+                "Schema version 1 change '$path' cannot declare payloadKind."
+            }
+        } else if (action != JmixOrganizationTemplateChangeAction.DELETE) {
+            require(json.has("payloadKind")) {
+                "Schema version 2 $action change '$path' must declare payloadKind."
+            }
+        }
+        val payloadKind = if (
+            schemaVersion == 1 &&
+            action != JmixOrganizationTemplateChangeAction.DELETE
+        ) {
+            JmixOrganizationTemplatePayloadKind.TEXT
+        } else {
+            json.optionalEnum<JmixOrganizationTemplatePayloadKind>("payloadKind")
+        }
         val executable = json.optionalBoolean("executable") ?: false
         if (action == JmixOrganizationTemplateChangeAction.DELETE) {
-            require(sha256 == null && !executable) {
-                "DELETE change '$path' cannot declare sha256 or executable."
+            require(sha256 == null && payloadKind == null && !executable) {
+                "DELETE change '$path' cannot declare sha256, payloadKind or executable."
             }
         } else {
             require(sha256 != null && sha256Pattern.matches(sha256)) {
                 "$action change '$path' must declare a lowercase SHA-256 digest."
             }
+            require(payloadKind != null) {
+                "$action change '$path' must declare TEXT or BINARY payloadKind."
+            }
         }
-        return JmixOrganizationTemplateChange(path, action, sha256, executable)
+        return JmixOrganizationTemplateChange(path, action, sha256, payloadKind, executable)
     }
 
     private fun enforcePolicy(
@@ -566,44 +680,11 @@ object JmixTemplateCatalogVerifier {
         throw JmixTemplateCatalogException("$label is not valid Base64.")
     }
 
-    private fun validateGeneratedPath(path: String): String {
-        require(path.isNotBlank() && '\\' !in path && !path.startsWith("/") && !path.contains('\u0000')) {
-            "Unsafe organization template target path '$path'."
-        }
-        val segments = path.split('/')
-        require(segments.none { it.isBlank() || it == "." || it == ".." }) {
-            "Unsafe organization template target path '$path'."
-        }
-        require(segments.all(safePathSegment::matches)) {
-            "Organization template target path uses unsupported characters: '$path'."
-        }
-        require(segments.all(::isPortablePathSegment)) {
-            "Organization template target path is not portable across supported operating systems: '$path'."
-        }
-        require(segments.first().lowercase(Locale.ROOT) !in BLOCKED_TOP_LEVEL_PATHS) {
-            "Organization templates cannot write IDE, VCS, or Gradle cache internals: '$path'."
-        }
-        require(path.length <= 1_024) { "Organization template target path is too long." }
-        return path
-    }
-
-    private fun isPortablePathSegment(segment: String): Boolean {
-        if (
-            segment.length > 255 ||
-            segment.startsWith(' ') ||
-            segment.endsWith(' ') ||
-            segment.endsWith('.')
-        ) {
-            return false
-        }
-        return segment.substringBefore('.').uppercase(Locale.ROOT) !in WINDOWS_RESERVED_NAMES
-    }
-
     private fun requireIdentifier(value: String) {
         require(identifierPattern.matches(value)) {
             "Catalog and template identifiers must be lowercase DNS-style identifiers."
         }
-        require(value.substringBefore('.').uppercase(Locale.ROOT) !in WINDOWS_RESERVED_NAMES) {
+        require(!JmixOrganizationTemplatePathPolicy.isReservedIdentifier(value)) {
             "Catalog and template identifiers must be portable across supported operating systems."
         }
     }
@@ -784,6 +865,14 @@ object JmixTemplateCatalogVerifier {
             )
     }
 
+    private inline fun <reified T : Enum<T>> JsonObject.optionalEnum(name: String): T? {
+        val value = optionalString(name) ?: return null
+        return enumValues<T>().singleOrNull { it.name == value }
+            ?: throw JmixTemplateCatalogException(
+                "Manifest property '$name' must be one of ${enumValues<T>().joinToString { it.name }}.",
+            )
+    }
+
     private inline fun <reified T : Enum<T>> JsonObject.requiredEnumSet(name: String): Set<T> {
         val parsed = requiredArray(name).mapIndexed { index, element ->
             require(element.isJsonPrimitive && element.asJsonPrimitive.isString) {
@@ -852,14 +941,6 @@ object JmixTemplateCatalogVerifier {
             }
         }
 
-    private val WINDOWS_RESERVED_NAMES = buildSet {
-        addAll(listOf("CON", "PRN", "AUX", "NUL"))
-        (1..9).forEach { index ->
-            add("COM$index")
-            add("LPT$index")
-        }
-    }
-    private val BLOCKED_TOP_LEVEL_PATHS = setOf(".git", ".idea", ".gradle")
 }
 
 data class JmixCachedTemplateCatalog(

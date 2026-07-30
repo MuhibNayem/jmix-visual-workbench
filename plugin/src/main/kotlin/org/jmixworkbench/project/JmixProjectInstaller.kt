@@ -65,9 +65,15 @@ object JmixProjectInstaller {
         require(!Files.isSymbolicLink(root)) {
             "Project root cannot be a symbolic link: $root"
         }
-        val targets = (project.files.map { it.relativePath } + project.resources.map { it.relativePath })
+        val targets = (
+            project.files.map { it.relativePath } +
+                project.binaryFiles.map { it.relativePath } +
+                project.resources.map { it.relativePath }
+            )
             .associateWith { relativePath -> resolveTarget(root, relativePath) }
-        require(targets.size == project.files.size + project.resources.size) {
+        require(
+            targets.size == project.files.size + project.binaryFiles.size + project.resources.size
+        ) {
             "Generated project contains duplicate paths."
         }
         targets.forEach { (relativePath, target) ->
@@ -85,11 +91,14 @@ object JmixProjectInstaller {
         val createdDirectories = mutableListOf<Path>()
         return try {
             stageTextFiles(staging, project.files)
+            stageBinaryFiles(staging, project.binaryFiles)
             stageResources(staging, project.resources, resourceLoader)
             verifyWrapper(staging.resolve("gradle/wrapper/gradle-wrapper.jar"))
 
             val executablePaths = (
                 project.files.filter(GeneratedProjectFile::executable).map(GeneratedProjectFile::relativePath) +
+                    project.binaryFiles.filter(GeneratedProjectBinaryFile::executable)
+                        .map(GeneratedProjectBinaryFile::relativePath) +
                     project.resources.filter(GeneratedProjectResource::executable)
                         .map(GeneratedProjectResource::relativePath)
                 ).toSet()
@@ -154,6 +163,19 @@ object JmixProjectInstaller {
             }
             input.use { source ->
                 Files.newOutputStream(target).use(source::copyTo)
+            }
+        }
+    }
+
+    private fun stageBinaryFiles(
+        staging: Path,
+        files: List<GeneratedProjectBinaryFile>,
+    ) {
+        files.forEach { generated ->
+            val target = resolveTarget(staging, generated.relativePath)
+            Files.createDirectories(target.parent)
+            Files.newOutputStream(target).use { output ->
+                output.write(generated.content)
             }
         }
     }

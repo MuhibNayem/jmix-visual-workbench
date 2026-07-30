@@ -28,7 +28,10 @@ credential-free HTTPS repository URLs.
 
 Organization baselines are managed natively under **Settings → Tools → Jmix
 Organization Templates**. Exact bundle SHA-256, signer, catalog/version and
-anti-rollback policy are reverified before generation. See
+anti-rollback policy are reverified before generation. The same page now
+authors schema-v2 text/binary overlays through a reviewed side-by-side diff
+and transient key files or pluggable enterprise HSM/PKCS#11 signing providers.
+See
 `ORGANIZATION-TEMPLATE-CATALOGS.md`.
 
 ## Safety and reproducibility
@@ -43,6 +46,10 @@ anti-rollback policy are reverified before generation. See
 - Generation is deterministic and rejects invalid Java packages, unsafe
   coordinates, credentials in repository URLs, non-HTTPS external
   repositories, traversal, duplicate paths and symlinked parents.
+- Guided template authoring ignores generated/IDE/VCS content, refuses
+  symbolic links, path collisions and protected wrapper changes, bounds every
+  scan, detects concurrent file replacement, and repeats the source digest and
+  typed-change comparison after review before signing.
 - Installation is create-only. Existing files are never replaced.
 - Every file is staged before the first mutation. A mid-install failure removes
   only wizard-created files/directories and preserves pre-existing `.idea`
@@ -86,10 +93,12 @@ templates use the Java 25 toolchain while `--release 21` and Kotlin JVM target
 21 retain framework-compatible bytecode.
 
 A separate eight-variant organization-template matrix covers Java/Kotlin
-FlowUI projects in all four cells. Each cell authors and signs a catalog,
-verifies and applies its overlay, builds the production frontend, runs
-Liquibase and starts Jmix on the selected runtime. The final post-hardening run
-passed in 4 minutes 41 seconds on 2026-07-31.
+FlowUI projects in all four cells. Each cell authors and signs a strict
+schema-v2 catalog containing source text and an exact binary resource, verifies
+and applies its overlay, builds the production frontend, runs Liquibase and
+starts Jmix on the selected runtime. Legacy schema-v1 text catalogs have a
+separate compatibility contract. The current eight-cell run passed in
+4 minutes 49 seconds on 2026-07-31.
 
 ## Packaging gates
 
@@ -98,6 +107,7 @@ Both installable ZIPs must contain:
 - `JmixNewProjectWizard`, `JmixProjectTemplateGenerator` and
   `JmixProjectInstaller`;
 - the catalog verifier, manager and native organization-template configurable;
+- the native authoring/review dialogs and signing-provider extension point;
 - `project-template/gradlew` and `gradlew.bat`;
 - `project-template/gradle/wrapper/gradle-wrapper.jar`;
 - the `newProjectWizard.generator` registration; and
@@ -108,13 +118,13 @@ nested ZIP verifier enforce these requirements.
 
 ## Release evidence
 
-The final clean `phase1Check` release gate passed in 7 minutes 56 seconds on
+The final clean `phase1Check` release gate passed in 8 minutes 25 seconds on
 2026-07-31:
 
 | Host | Regression + smoke tests | Plugin Verifier | Installable ZIP SHA-256 |
 |---|---:|---|---|
-| IntelliJ IDEA 2025.3 | 350 passed (347 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `86894620a6947cdcf2945676ade22a753ff4dda4c891c76f9b750e4b01441da2` |
-| IntelliJ IDEA 2026.2 | 350 passed (347 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `ef2787bd7c520641ad5a0fd02f7acb9eb4f74d63f79ac06dc15941cb8e65b5ee` |
+| IntelliJ IDEA 2025.3 | 357 passed (354 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `a08b172417c0e930f03fb6cc04aadfaa3d4606600ec027e3ec06437eb84d5610` |
+| IntelliJ IDEA 2026.2 | 357 passed (354 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `0600d17a2697de3c191f7f436306c7363cceb468f86174dc340315b2c1c5e482` |
 
 The same gate passed strict dependency verification, generated-code
 compatibility for all four Jmix/JDK cells, mutation/index architecture checks,

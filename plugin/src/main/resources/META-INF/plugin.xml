@@ -16,6 +16,12 @@
     <depends>com.intellij.gradle</depends>
     <depends optional="true" config-file="jmix-kotlin.xml">org.jetbrains.kotlin</depends>
 
+    <extensionPoints>
+        <extensionPoint name="templateCatalogSigningProvider"
+                        interface="org.jmixworkbench.project.JmixTemplateCatalogSigningProvider"
+                        dynamic="true"/>
+    </extensionPoints>
+
     <extensions defaultExtensionNs="com.intellij">
         <newProjectWizard.generator implementation="org.jmixworkbench.project.JmixNewProjectWizard"/>
         <applicationConfigurable parentId="tools"

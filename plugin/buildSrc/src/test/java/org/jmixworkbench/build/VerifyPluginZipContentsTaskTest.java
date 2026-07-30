@@ -195,6 +195,9 @@ class VerifyPluginZipContentsTaskTest {
         entries.put("META-INF/plugin.xml", bytes(
                 "<idea-plugin><id>org.jmixworkbench</id><name>Jmix Visual Workbench</name>"
                         + "<depends>com.intellij.gradle</depends>"
+                        + "<extensionPoints><extensionPoint "
+                        + "interface=\"org.jmixworkbench.project.JmixTemplateCatalogSigningProvider\" />"
+                        + "</extensionPoints>"
                         + "<extensions>"
                         + "<newProjectWizard.generator implementation=\"org.jmixworkbench.project.JmixNewProjectWizard\" />"
                         + "<applicationConfigurable instance=\"org.jmixworkbench.project.JmixTemplateCatalogConfigurable\" />"
@@ -244,6 +247,18 @@ class VerifyPluginZipContentsTaskTest {
         );
         entries.put(
                 "org/jmixworkbench/project/JmixTemplateCatalogConfigurable.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/project/JmixTemplateCatalogAuthoringDialog.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/project/JmixTemplateOverlayPlanner.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/project/JmixTemplateCatalogSigningProvider.class",
                 new byte[]{0, 1, 2}
         );
         entries.put(

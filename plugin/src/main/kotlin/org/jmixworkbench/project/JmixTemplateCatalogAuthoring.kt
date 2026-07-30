@@ -16,6 +16,7 @@ import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.Signature
 import java.security.spec.PKCS8EncodedKeySpec
+import java.security.spec.X509EncodedKeySpec
 import java.time.Clock
 import java.time.Instant
 import java.util.Base64
@@ -47,18 +48,68 @@ data class JmixOrganizationProjectTemplateDraft(
     val changes: List<JmixOrganizationTemplateChangeDraft>,
 )
 
-data class JmixOrganizationTemplateChangeDraft(
+class JmixOrganizationTemplateChangeDraft(
     val relativePath: String,
     val action: JmixOrganizationTemplateChangeAction,
-    val content: ByteArray? = null,
+    content: ByteArray? = null,
+    val payloadKind: JmixOrganizationTemplatePayloadKind? =
+        if (action == JmixOrganizationTemplateChangeAction.DELETE) {
+            null
+        } else {
+            JmixOrganizationTemplatePayloadKind.TEXT
+    },
     val executable: Boolean = false,
-)
-
-data class JmixTemplateCatalogSigner(
-    val keyId: String,
-    val privateKey: PrivateKey,
-    val publicKeyX509Base64: String,
 ) {
+    private val bytes: ByteArray? = content?.copyOf()
+
+    val content: ByteArray?
+        get() = bytes?.copyOf()
+
+    val contentSize: Int
+        get() = bytes?.size ?: -1
+
+    override fun equals(other: Any?): Boolean =
+        other is JmixOrganizationTemplateChangeDraft &&
+            relativePath == other.relativePath &&
+            action == other.action &&
+            payloadKind == other.payloadKind &&
+            executable == other.executable &&
+            when {
+                bytes == null -> other.bytes == null
+                other.bytes == null -> false
+                else -> bytes.contentEquals(other.bytes)
+            }
+
+    override fun hashCode(): Int {
+        var result = relativePath.hashCode()
+        result = 31 * result + action.hashCode()
+        result = 31 * result + (bytes?.contentHashCode() ?: 0)
+        result = 31 * result + (payloadKind?.hashCode() ?: 0)
+        result = 31 * result + executable.hashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "JmixOrganizationTemplateChangeDraft(" +
+            "relativePath=$relativePath, action=$action, bytes=${bytes?.size}, " +
+            "payloadKind=$payloadKind, executable=$executable)"
+}
+
+class JmixTemplateCatalogSigner(
+    override val keyId: String,
+    val privateKey: PrivateKey,
+    override val publicKeyX509Base64: String,
+) : JmixTemplateCatalogSigningIdentity {
+    override fun toString(): String =
+        "JmixTemplateCatalogSigner(keyId=$keyId, privateKey=<redacted>)"
+
+    override fun sign(manifestBytes: ByteArray): ByteArray =
+        Signature.getInstance("Ed25519").run {
+            initSign(privateKey)
+            update(manifestBytes)
+            sign()
+        }
+
     companion object {
         fun fromPkcs8Base64(
             keyId: String,
@@ -84,13 +135,112 @@ data class JmixTemplateCatalogSigner(
                 encoded.fill(0)
             }
         }
+
+        fun fromFiles(
+            keyId: String,
+            privateKeyPkcs8: Path,
+            publicKeyX509: Path,
+        ): JmixTemplateCatalogSigner {
+            val privateEncoded = readKeyFile(privateKeyPkcs8, "PRIVATE KEY")
+            val publicEncoded = readKeyFile(publicKeyX509, "PUBLIC KEY")
+            return try {
+                val privateKey = KeyFactory.getInstance("Ed25519")
+                    .generatePrivate(PKCS8EncodedKeySpec(privateEncoded))
+                KeyFactory.getInstance("Ed25519")
+                    .generatePublic(X509EncodedKeySpec(publicEncoded))
+                JmixTemplateCatalogSigner(
+                    keyId = keyId.trim(),
+                    privateKey = privateKey,
+                    publicKeyX509Base64 = Base64.getEncoder().encodeToString(publicEncoded),
+                )
+            } catch (failure: Exception) {
+                throw JmixTemplateCatalogException(
+                    "Ed25519 signing key files are not valid PKCS#8 private/X.509 public keys.",
+                    failure,
+                )
+            } finally {
+                privateEncoded.fill(0)
+                publicEncoded.fill(0)
+            }
+        }
+
+        private fun readKeyFile(
+            path: Path,
+            pemLabel: String,
+        ): ByteArray {
+            val absolute = path.toAbsolutePath().normalize()
+            require(Files.isRegularFile(absolute, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(absolute)) {
+                "$pemLabel file must be a real regular file."
+            }
+            require(Files.size(absolute) in 1..64L * 1024L) {
+                "$pemLabel file must be between 1 byte and 64 KiB."
+            }
+            val raw = Files.readAllBytes(absolute)
+            val begin = "-----BEGIN $pemLabel-----".toByteArray(Charsets.US_ASCII)
+            val end = "-----END $pemLabel-----".toByteArray(Charsets.US_ASCII)
+            val beginIndex = raw.indexOf(begin)
+            val endIndex = raw.indexOf(end)
+            if (beginIndex >= 0 || endIndex >= 0) {
+                require(beginIndex >= 0 && endIndex > beginIndex + begin.size) {
+                    "$pemLabel PEM boundary is incomplete."
+                }
+                val compact = ByteArrayOutputStream()
+                for (index in beginIndex + begin.size until endIndex) {
+                    val byte = raw[index]
+                    if (
+                        byte != ' '.code.toByte() &&
+                        byte != '\t'.code.toByte() &&
+                        byte != '\r'.code.toByte() &&
+                        byte != '\n'.code.toByte()
+                    ) {
+                        compact.write(byte.toInt())
+                    }
+                }
+                val base64 = compact.toByteArray()
+                return try {
+                    Base64.getDecoder().decode(base64)
+                } catch (failure: IllegalArgumentException) {
+                    throw JmixTemplateCatalogException("$pemLabel PEM body is not valid Base64.", failure)
+                } finally {
+                    base64.fill(0)
+                    raw.fill(0)
+                }
+            }
+            return raw
+        }
+
+        private fun ByteArray.indexOf(needle: ByteArray): Int {
+            if (needle.isEmpty() || needle.size > size) return -1
+            for (start in 0..size - needle.size) {
+                var matches = true
+                for (offset in needle.indices) {
+                    if (this[start + offset] != needle[offset]) {
+                        matches = false
+                        break
+                    }
+                }
+                if (matches) return start
+            }
+            return -1
+        }
     }
+}
+
+interface JmixTemplateCatalogSigningIdentity {
+    val keyId: String
+    val publicKeyX509Base64: String
+
+    /**
+     * Signs the exact canonical manifest bytes. Implementations may delegate to PKCS#11,
+     * a hardware-backed key, or a remote enterprise signing service.
+     */
+    fun sign(manifestBytes: ByteArray): ByteArray
 }
 
 /**
  * Deterministic catalog publisher intended for an organization's reviewed build or release job.
  *
- * It accepts only declarative text overlays and never executes template content. The completed
+ * It accepts only declarative text/binary overlays and never executes template content. The completed
  * archive is passed through the production verifier before it can be returned or installed.
  */
 object JmixTemplateCatalogAuthoring {
@@ -98,11 +248,19 @@ object JmixTemplateCatalogAuthoring {
         draft: JmixTemplateCatalogDraft,
         signer: JmixTemplateCatalogSigner,
         clock: Clock = Clock.systemUTC(),
+    ): ByteArray = createSignedBundle(draft, signer as JmixTemplateCatalogSigningIdentity, clock)
+
+    fun createSignedBundle(
+        draft: JmixTemplateCatalogDraft,
+        signer: JmixTemplateCatalogSigningIdentity,
+        clock: Clock = Clock.systemUTC(),
     ): ByteArray {
+        val signerKeyId = signer.keyId
+        val signerPublicKey = signer.publicKeyX509Base64
         val templates = draft.templates.sortedBy(JmixOrganizationProjectTemplateDraft::id)
         val payloads = linkedMapOf<String, ByteArray>()
         val manifest = JsonObject().apply {
-            addProperty("schemaVersion", 1)
+            addProperty("schemaVersion", 2)
             addProperty("catalogId", draft.catalogId)
             addProperty("catalogVersion", draft.catalogVersion)
             addProperty("displayName", draft.displayName)
@@ -113,7 +271,7 @@ object JmixTemplateCatalogAuthoring {
                     com.google.gson.JsonPrimitive(expiration.toString())
                 } ?: JsonNull.INSTANCE,
             )
-            addProperty("signingKeyId", signer.keyId)
+            addProperty("signingKeyId", signerKeyId)
             add(
                 "templates",
                 JsonArray().apply {
@@ -124,10 +282,9 @@ object JmixTemplateCatalogAuthoring {
             )
         }
         val manifestBytes = GSON.toJson(manifest).toByteArray(Charsets.UTF_8)
-        val signature = Signature.getInstance("Ed25519").run {
-            initSign(signer.privateKey)
-            update(manifestBytes)
-            sign()
+        val signature = signer.sign(manifestBytes.copyOf())
+        require(signature.size == 64) {
+            "Ed25519 signing provider '$signerKeyId' returned ${signature.size} bytes; expected 64."
         }
         val entries = linkedMapOf(
             JmixTemplateCatalogVerifier.MANIFEST_PATH to manifestBytes,
@@ -140,7 +297,7 @@ object JmixTemplateCatalogAuthoring {
         JmixTemplateCatalogVerifier.verify(
             bundleBytes = bundle,
             policy = JmixTemplateTrustPolicy(
-                trustedKeys = mapOf(signer.keyId to signer.publicKeyX509Base64),
+                trustedKeys = mapOf(signerKeyId to signerPublicKey),
                 allowedCatalogIds = setOf(draft.catalogId),
                 requiredCatalogVersions = mapOf(draft.catalogId to draft.catalogVersion),
                 minimumCatalogVersions = mapOf(draft.catalogId to draft.catalogVersion),
@@ -205,18 +362,28 @@ object JmixTemplateCatalogAuthoring {
                             addProperty("path", change.relativePath)
                             addProperty("action", change.action.name)
                             if (change.action == JmixOrganizationTemplateChangeAction.DELETE) {
-                                require(content == null && !change.executable) {
-                                    "DELETE change '${change.relativePath}' cannot contain content or be executable."
+                                require(
+                                    content == null &&
+                                        change.payloadKind == null &&
+                                        !change.executable
+                                ) {
+                                    "DELETE change '${change.relativePath}' cannot contain content, " +
+                                        "payloadKind or be executable."
                                 }
                                 add("sha256", JsonNull.INSTANCE)
+                                add("payloadKind", JsonNull.INSTANCE)
                             } else {
                                 require(content != null) {
                                     "${change.action} change '${change.relativePath}' requires content."
+                                }
+                                require(change.payloadKind != null) {
+                                    "${change.action} change '${change.relativePath}' requires payloadKind."
                                 }
                                 require(payloads.put(payloadPath, content.copyOf()) == null) {
                                     "Duplicate template payload path '$payloadPath'."
                                 }
                                 addProperty("sha256", sha256(content))
+                                addProperty("payloadKind", change.payloadKind.name)
                             }
                             addProperty("executable", change.executable)
                         },

@@ -19,12 +19,23 @@ class JmixProjectInstallerTest {
     fun `installs text and integrity-checked wrapper resources`() {
         val root = createTempDirectory("jmix-project-install-")
         try {
-            val generated = JmixProjectTemplateGenerator.generate(request())
+            val generated = JmixProjectTemplateGenerator.generate(request()).copy(
+                binaryFiles = listOf(
+                    GeneratedProjectBinaryFile(
+                        "src/main/resources/branding/logo.bin",
+                        byteArrayOf(0x00, 0x7f, 0x01),
+                    ),
+                ),
+            )
 
             val result = JmixProjectInstaller.install(root, generated)
 
             assertTrue("build.gradle.kts" in result.installedFiles)
             assertTrue(root.resolve("gradle/wrapper/gradle-wrapper.jar").exists())
+            assertTrue(
+                Files.readAllBytes(root.resolve("src/main/resources/branding/logo.bin"))
+                    .contentEquals(byteArrayOf(0x00, 0x7f, 0x01)),
+            )
             assertContainsText(root.resolve("settings.gradle.kts"), """rootProject.name = "Payroll"""")
             assertTrue(Files.size(root.resolve("gradle/wrapper/gradle-wrapper.jar")) > 10_000)
         } finally {

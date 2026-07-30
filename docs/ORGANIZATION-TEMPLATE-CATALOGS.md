@@ -15,7 +15,7 @@ The implementation deliberately exceeds a plain Maven-template override:
 - every declared payload has an independent SHA-256 digest;
 - catalog ID, exact version, minimum accepted version, signer and expiry are
   revalidated every time a cached bundle is opened;
-- only declarative UTF-8 add, replace and delete operations are supported;
+- only declarative text/binary add, replace and delete operations are supported;
 - bundle content is never executed by the importer or verifier;
 - cached coordinates are immutable and content addressed;
 - the New Project wizard performs no hidden network request;
@@ -46,7 +46,32 @@ The settings page supports:
 - add, edit and remove;
 - explicit signed-bundle import;
 - explicit pinned HTTPS refresh; and
-- global deterministic offline mode.
+- global deterministic offline mode; and
+- guided signed-bundle authoring from a customized certified project.
+
+### Author a catalog natively
+
+Select **Create Signed Bundle…** on the same settings page:
+
+1. choose the customized project and enter the exact certified Jmix base that
+   originally produced it;
+2. enter catalog/template identity, version, compatibility and expiry;
+3. choose transient Ed25519 PKCS#8/X.509 key files or an installed enterprise
+   signing provider;
+4. review every add, replace and delete in a sortable table with a side-by-side
+   certified-base/customized-content inspector; and
+5. sign and export a new `.jmix-template-catalog` file.
+
+The scan never follows symbolic links. It ignores VCS, IDE, Gradle, build,
+`node_modules`, `out` and operating-system metadata, rejects case collisions
+and non-portable paths, bounds individual/total files and propagates
+cancellation. Gradle wrapper resources must still match the bundled,
+integrity-checked originals byte-for-byte, including executable state.
+
+Immediately before signing, the plugin repeats the complete scan. If any
+content, path or executable state differs from the reviewed source digest and
+typed changes, export stops and requires a fresh review. The output write is
+create-only and refuses an existing destination.
 
 After a bundle is verified and cached, open **File → New → Project → Jmix**.
 The **Project baseline** field shows only signed cached templates compatible
@@ -77,10 +102,17 @@ templates/
 `catalog.json` bytes. Each non-delete change in the manifest contains the
 SHA-256 digest of its payload.
 
-Schema version 1 rejects unknown properties. It also rejects duplicate JSON
+Current publishers emit schema version 2. Version 2 declares every non-delete
+payload as `TEXT` or `BINARY`; text is strict UTF-8 and may expand the safe
+variables below, while binary bytes are preserved exactly and never expanded.
+Legacy schema version 1 catalogs remain accepted as text-only catalogs so
+existing immutable offline cache coordinates do not break during upgrade.
+
+Both schemas reject unknown properties. They also reject duplicate JSON
 properties, duplicate or case-colliding paths and IDs, traversal, absolute
 paths, symbolic-link bundles, non-portable Windows names, IDE/VCS/cache
-internals, undeclared archive entries, invalid UTF-8, oversized entries,
+internals at any project depth, undeclared archive entries, invalid text
+payload UTF-8, oversized entries,
 excessive entry counts and excessive compressed or expanded sizes.
 
 Supported declarative operations are:
@@ -91,8 +123,9 @@ Supported declarative operations are:
 | `REPLACE` | Target must already exist |
 | `DELETE` | Target must already exist and has no payload |
 
-Bundled binary resources such as the integrity-checked Gradle wrapper JAR
-cannot be replaced by an organization overlay.
+Organization overlays may add or replace normal binary application assets.
+Bundled plugin resources such as the integrity-checked Gradle wrapper scripts
+and JAR remain protected and cannot be replaced or deleted.
 
 ## Safe variables
 
@@ -118,18 +151,28 @@ keys and environment secrets are intentionally unavailable to templates.
 `JmixTemplateCatalogAuthoring` is the source-first publishing boundary for
 organization build and release tooling. It:
 
-1. accepts typed catalog, template, compatibility and file-change models;
-2. computes payload digests;
+1. accepts typed catalog, template, compatibility and text/binary file-change
+   models;
+2. copies mutable byte inputs and computes payload digests;
 3. emits canonical ordered manifest content;
 4. signs it with an in-memory PKCS#8 Ed25519 key;
 5. writes a deterministic archive;
 6. passes the result through the production verifier; and
 7. offers create-only output that refuses replacement.
 
-The private signing key is never persisted in plugin settings. Organizations
-can supply it transiently from their CI secret manager, hardware-backed signing
-adapter or reviewed local release process. The public verification key is not a
-secret but must be distributed through an authenticated organization channel.
+The local workflow reads PEM or DER PKCS#8/X.509 key files only for the signing
+operation. The private key path and key are never persisted in plugin settings,
+and signer objects redact private-key identity from their string rendering.
+Organizations can instead register
+`org.jmixworkbench.templateCatalogSigningProvider`. A provider receives only a
+copy of the canonical manifest bytes and may delegate to PKCS#11, an HSM,
+secure enclave or approved remote signing service. Duplicate provider IDs,
+invalid identity metadata and invalid Ed25519 public keys fail closed. The
+returned signature is immediately verified against the captured provider
+identity through the production verifier.
+
+The public verification key is not a secret but must be distributed through an
+authenticated organization channel.
 
 ## Runtime evidence
 
@@ -143,25 +186,25 @@ organization-template matrix adds eight real FlowUI applications:
 | 3.0.0 | 21 | Java, Kotlin | PASS |
 | 3.0.0 | 25 | Java, Kotlin | PASS |
 
-For each cell, the production authoring boundary creates and signs a catalog;
-the production verifier validates it; the compatible template is applied to
-the certified FlowUI base; the normal create-only installer materializes the
-project; Gradle compiles and tests it; Vaadin builds the production frontend;
-Liquibase runs; and the Jmix application starts on the exact selected runtime.
+For each cell, the production authoring boundary creates and signs a schema-v2
+catalog containing Java/Kotlin text plus an exact binary asset; the production
+verifier validates it; the compatible template is applied to the certified
+FlowUI base; the normal create-only installer materializes the project; Gradle
+compiles and tests it; Vaadin builds the production frontend; Liquibase runs;
+and the Jmix application starts on the exact selected runtime.
 
-The final post-hardening eight-cell run passed on 2026-07-31 in 4 minutes 41
-seconds.
+The current schema-v2 text/binary eight-cell run passed on 2026-07-31 in
+4 minutes 49 seconds.
 
 ## Remaining certification
 
-The backend, native consumption workflow, offline behavior and generated
-runtime matrix are complete. Before claiming the complete custom-template
-authoring row `STRONG`, the product still needs:
-
-- a guided native authoring/diff/export interface over the typed publisher;
-- pluggable enterprise key-provider/HSM integration; and
-- installed-IDE keyboard and screen-reader journeys for the settings and
-  authoring dialogs.
+The backend, guided native authoring/consumption workflows, offline behavior,
+binary round trip and enterprise signing extension are implemented. Direct
+dual-host component tests cover keyboard-discoverable actions, accessible
+region names, sortable change inventory and the side-by-side review structure.
+Before claiming the complete custom-template authoring row `STRONG`, installed
+IDE keyboard, screen-reader, validation, cancellation and recovery journeys
+still need certification under `CERT-ACCESS-001` and `CERT-IDE-001`.
 
 ## Research baseline
 
