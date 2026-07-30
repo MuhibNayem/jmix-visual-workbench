@@ -13,10 +13,12 @@
     <depends>com.intellij.modules.java</depends>
     <depends>com.intellij.modules.xml</depends>
     <depends>com.intellij.properties</depends>
+    <depends>com.intellij.gradle</depends>
     <depends optional="true" config-file="jmix-kotlin.xml">org.jetbrains.kotlin</depends>
     <depends>com.intellij.modules.jcef</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <newProjectWizard.generator implementation="org.jmixworkbench.project.JmixNewProjectWizard"/>
         <fileEditorProvider implementation="org.jmixworkbench.editor.JmixFlowUiFileEditorProvider"/>
         <fileEditorProvider implementation="org.jmixworkbench.editor.JmixEntityFileEditorProvider"/>
         <toolWindow id="Jmix Visual Workbench"

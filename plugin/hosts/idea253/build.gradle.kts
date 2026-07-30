@@ -141,6 +141,7 @@ dependencies {
         bundledModule("intellij.java.psi")
         bundledPlugin("org.jetbrains.kotlin")
         bundledPlugin("com.intellij.properties")
+        bundledPlugin("com.intellij.gradle")
         testFramework(TestFrameworkType.Platform)
         testFramework(TestFrameworkType.Plugin.Java)
         pluginVerifier()
@@ -160,6 +161,10 @@ tasks.withType<Test>().configureEach {
         "jvw.live.db.schema",
         "jvw.live.db.hostLane",
         "jvw.live.db.evidenceFile",
+        "jvw.project.template.runtime.cells",
+        "jvw.project.template.java17Home",
+        "jvw.project.template.java21Home",
+        "jvw.project.template.java25Home",
     ).forEach { name ->
         providers.systemProperty(name).orNull?.let { systemProperty(name, it) }
     }
@@ -263,6 +268,15 @@ tasks.named<ProcessResources>("processResources") {
     from(layout.projectDirectory.dir("../../build/generated-resources"))
     from(layout.projectDirectory.file("../../../LICENSE"))
     from(layout.projectDirectory.file("../../../NOTICE"))
+    from(layout.projectDirectory.file("../../gradle/wrapper/gradle-wrapper.jar")) {
+        into("project-template/gradle/wrapper")
+    }
+    from(files(
+        layout.projectDirectory.file("../../gradlew"),
+        layout.projectDirectory.file("../../gradlew.bat"),
+    )) {
+        into("project-template")
+    }
 }
 
 tasks.named("buildPlugin") {

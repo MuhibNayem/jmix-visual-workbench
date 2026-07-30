@@ -482,12 +482,15 @@ tasks.register("verifyHostBuildDefinitions") {
         "hosts/idea262/settings.gradle.kts",
         "hosts/idea262/build.gradle.kts",
         "hosts/idea262/src/main/resources/META-INF/plugin.xml",
+        "src/main/kotlin/org/jmixworkbench/project/JmixNewProjectWizard.kt",
     )
     doLast {
         val idea253Build = file("hosts/idea253/build.gradle.kts").readText()
         val idea253Descriptor = file("hosts/idea253/src/main/resources/META-INF/plugin.xml").readText()
         val idea262Build = file("hosts/idea262/build.gradle.kts").readText()
         val idea262Descriptor = file("hosts/idea262/src/main/resources/META-INF/plugin.xml").readText()
+        val projectWizard =
+            file("src/main/kotlin/org/jmixworkbench/project/JmixNewProjectWizard.kt").readText()
 
         check("JavaLanguageVersion.of(21)" in idea253Build)
         check("KotlinVersion.KOTLIN_2_2" in idea253Build)
@@ -496,8 +499,11 @@ tasks.register("verifyHostBuildDefinitions") {
         check("buildNumber.startsWith(\"IU-253.\")" in idea253Build)
         check("pluginVerifier()" in idea253Build)
         check("current()" in idea253Build)
+        check("""bundledPlugin("com.intellij.gradle")""" in idea253Build)
         check("sinceBuild.set(\"253\")" in idea253Build)
         check("untilBuild.set(\"253.*\")" in idea253Build)
+        check("<depends>com.intellij.gradle</depends>" in idea253Descriptor)
+        check("org.jmixworkbench.project.JmixNewProjectWizard" in idea253Descriptor)
         check("<depends>com.intellij.modules.jcef</depends>" !in idea253Descriptor)
 
         check("JavaLanguageVersion.of(25)" in idea262Build)
@@ -507,11 +513,21 @@ tasks.register("verifyHostBuildDefinitions") {
         check("buildNumber.startsWith(\"IU-262.\")" in idea262Build)
         check("pluginVerifier()" in idea262Build)
         check("current()" in idea262Build)
+        check("""bundledPlugin("com.intellij.gradle")""" in idea262Build)
         check("sinceBuild.set(\"262\")" in idea262Build)
         check("untilBuild.set(\"262.*\")" in idea262Build)
+        check("<depends>com.intellij.gradle</depends>" in idea262Descriptor)
+        check("org.jmixworkbench.project.JmixNewProjectWizard" in idea262Descriptor)
         check("bundledModule(\"intellij.libraries.jcef\")" in idea262Build)
         check("bundledModule(\"intellij.platform.ui.jcef\")" in idea262Build)
         check("<depends>com.intellij.modules.jcef</depends>" in idea262Descriptor)
+
+        check("GradleSettings.getInstance(project)" in projectWizard)
+        check("GradleProjectSettings()" in projectWizard)
+        check("DistributionType.WRAPPED" in projectWizard)
+        check("ExternalSystemUtil.requestImport" !in projectWizard) {
+            "The Jmix project wizard must not use IntelliJ's internal Gradle import API."
+        }
     }
 }
 
@@ -572,6 +588,12 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
                 "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register the native entity editor."
             }
             check(
+                """<newProjectWizard.generator implementation="org.jmixworkbench.project.JmixNewProjectWizard"/>""" in
+                    descriptorText,
+            ) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register the native Jmix project wizard."
+            }
+            check(
                 """<projectService serviceImplementation="org.jmixworkbench.toolwindow.WorkbenchNavigationService"/>""" in
                     descriptorText,
             ) {
@@ -618,6 +640,9 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
             "src/main/kotlin/org/jmixworkbench/services/WorkspaceChangeService.kt",
             "src/main/kotlin/org/jmixworkbench/services/WorkspaceHistoryService.kt",
         )
+        val projectTemplateBoundary = setOf(
+            "src/main/kotlin/org/jmixworkbench/project/JmixProjectInstaller.kt",
+        )
         val allowedByMarker = linkedMapOf(
             "WriteCommandAction" to
                 sharedBoundary + "src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt",
@@ -630,6 +655,10 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
                 "src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt",
             ),
             ".delete(this)" to sharedBoundary,
+            "Files.newOutputStream(" to projectTemplateBoundary,
+            "Files.move(" to projectTemplateBoundary,
+            "Files.createDirectory(" to projectTemplateBoundary,
+            "Files.deleteIfExists(" to projectTemplateBoundary,
         )
         productionSources.files.sorted().forEach { source ->
             val relativePath = source.relativeTo(projectDirectoryRoot).invariantSeparatorsPath
@@ -651,6 +680,23 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
             check("WorkspaceMutationProbe" !in bridge.readText()) {
                 "The JCEF bridge must never expose mutation fault injection: " +
                     bridge.relativeTo(projectDirectoryRoot)
+            }
+        }
+        val projectInstaller = file(
+            "src/main/kotlin/org/jmixworkbench/project/JmixProjectInstaller.kt",
+        ).readText()
+        listOf(
+            "LinkOption.NOFOLLOW_LINKS",
+            "Files.isSymbolicLink(",
+            "Refusing to overwrite existing project path",
+            "stageTextFiles(",
+            "stageResources(",
+            "verifyWrapper(",
+            "installedFiles.asReversed()",
+            "createdDirectories.asReversed()",
+        ).forEach { requiredSafetyControl ->
+            check(requiredSafetyControl in projectInstaller) {
+                "Native project installation boundary lost safety control '$requiredSafetyControl'."
             }
         }
     }
@@ -836,8 +882,8 @@ val verifyDependencyIntegrity = tasks.register("verifyDependencyIntegrity") {
                             .containsMatchIn(text),
                     ) {
                         "CI must not bypass strict dependency verification: $workflow"
-                    }
                 }
+            }
         }
     }
 }

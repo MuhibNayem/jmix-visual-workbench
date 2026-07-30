@@ -194,7 +194,9 @@ class VerifyPluginZipContentsTaskTest {
         Map<String, byte[]> entries = new LinkedHashMap<>();
         entries.put("META-INF/plugin.xml", bytes(
                 "<idea-plugin><id>org.jmixworkbench</id><name>Jmix Visual Workbench</name>"
+                        + "<depends>com.intellij.gradle</depends>"
                         + "<extensions>"
+                        + "<newProjectWizard.generator implementation=\"org.jmixworkbench.project.JmixNewProjectWizard\" />"
                         + "<fileEditorProvider implementation=\"org.jmixworkbench.editor.JmixEntityFileEditorProvider\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.toolwindow.WorkbenchNavigationService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.EntityEventListenerService\" />"
@@ -216,6 +218,21 @@ class VerifyPluginZipContentsTaskTest {
         entries.put("icons/workbench.svg", bytes("<svg/>"));
         entries.put("LICENSE", bytes("license"));
         entries.put("NOTICE", bytes("notice"));
+        entries.put("project-template/gradle/wrapper/gradle-wrapper.jar", new byte[]{0, 1, 2});
+        entries.put("project-template/gradlew", bytes("#!/bin/sh"));
+        entries.put("project-template/gradlew.bat", bytes("@echo off"));
+        entries.put(
+                "org/jmixworkbench/project/JmixNewProjectWizard.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/project/JmixProjectTemplateGenerator.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/project/JmixProjectInstaller.class",
+                new byte[]{0, 1, 2}
+        );
         entries.put(
                 "org/jmixworkbench/services/EntityEventListenerService.class",
                 new byte[]{0, 1, 2}

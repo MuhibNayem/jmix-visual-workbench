@@ -15,6 +15,12 @@ class Idea262DescriptorTest {
         assertTrue(Regex("""<idea-version[^>]+since-build="262"[^>]+until-build="262\.\*"""").containsMatchIn(descriptor))
         assertTrue(descriptor.contains("<depends>com.intellij.modules.platform</depends>"))
         assertTrue(descriptor.contains("<depends>com.intellij.modules.java</depends>"))
+        assertTrue(descriptor.contains("<depends>com.intellij.gradle</depends>"))
+        assertTrue(
+            Regex(
+                """<newProjectWizard\.generator\s+implementation="org\.jmixworkbench\.project\.JmixNewProjectWizard"\s*/>""",
+            ).containsMatchIn(descriptor),
+        )
         assertTrue(
             Regex(
                 """<fileEditorProvider\s+implementation="org\.jmixworkbench\.editor\.JmixFlowUiFileEditorProvider"\s*/>""",

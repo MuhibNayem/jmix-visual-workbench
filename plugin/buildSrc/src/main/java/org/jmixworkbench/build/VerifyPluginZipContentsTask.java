@@ -164,6 +164,24 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         requireEntry(contents, "icons/workbench.svg", archive);
         requireEntry(contents, "LICENSE", archive);
         requireEntry(contents, "NOTICE", archive);
+        requireEntry(contents, "project-template/gradle/wrapper/gradle-wrapper.jar", archive);
+        requireEntry(contents, "project-template/gradlew", archive);
+        requireEntry(contents, "project-template/gradlew.bat", archive);
+        requireEntry(
+                contents,
+                "org/jmixworkbench/project/JmixNewProjectWizard.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/project/JmixProjectTemplateGenerator.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/project/JmixProjectInstaller.class",
+                archive
+        );
         requireEntry(
                 contents,
                 "org/jmixworkbench/services/EntityEventListenerService.class",
@@ -193,6 +211,14 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         String descriptor = text(contents.get("META-INF/plugin.xml"));
         requireContains(descriptor, "<id>org.jmixworkbench</id>", archive);
         requireContains(descriptor, "<name>Jmix Visual Workbench</name>", archive);
+        requireContains(descriptor, "<depends>com.intellij.gradle</depends>", archive);
+        requireExtensionRegistration(
+                descriptor,
+                "newProjectWizard.generator",
+                "implementation",
+                "org.jmixworkbench.project.JmixNewProjectWizard",
+                archive
+        );
         requireExtensionRegistration(
                 descriptor,
                 "fileEditorProvider",
