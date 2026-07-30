@@ -33,6 +33,9 @@ import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.IdConfig
 import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.LifecycleCallback
+import org.jmixworkbench.model.MethodParameter
+import org.jmixworkbench.model.RepositoryMethod
+import org.jmixworkbench.model.RepositoryParameterRole
 import org.jmixworkbench.model.InheritanceRole
 import org.jmixworkbench.model.InheritanceStrategy
 import org.jmixworkbench.model.TraitType
@@ -44,6 +47,76 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
+    fun testExistingRepositoryIsIndexedAndReceivesOnlyAdditiveTypedMethods() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/LoanAppRepository.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.repository.JmixDataRepository;
+                import java.util.List;
+                import java.util.UUID;
+
+                public interface LoanAppRepository extends JmixDataRepository<LoanApp, UUID> {
+                    // manual repository contract must survive
+                    List<LoanApp> findByApplicationNo(String applicationNo);
+                }
+                """.trimIndent(),
+            )
+        }
+
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val entity = workspace.entities.single { it.className == "LoanApp" }
+        val repository = workspace.repositories.single()
+        assertEquals(entity.qualifiedName, repository.entityQualifiedName)
+        assertEquals("LoanAppRepository", repository.interfaceName)
+        assertEquals(repository.methodEvidence.toString(), 1, repository.config.methods.size)
+
+        val change = DataRepositoryChangeRequest(
+            entitySource = entity.sourceLocator,
+            repositorySource = repository.sourceLocator,
+            config = repository.config.copy(
+                methods = (
+                    repository.config.methods +
+                        RepositoryMethod(
+                            name = "findRecent",
+                            returnType = "Page<LoanApp>",
+                            parameters = mutableListOf(
+                                MethodParameter(
+                                    name = "pageable",
+                                    type = "Pageable",
+                                    role = RepositoryParameterRole.PAGEABLE,
+                                ),
+                            ),
+                        )
+                    ).toMutableList(),
+            ),
+        )
+        val preview = DataRepositoryChangeService.getInstance(project).preview(change)
+
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        val source = preview.files.single().resultContent
+        assertTrue(source.contains("// manual repository contract must survive"))
+        assertTrue(source.contains("List<LoanApp> findByApplicationNo(String applicationNo);"))
+        assertTrue(source.contains("Page<LoanApp> findRecent(Pageable pageable);"))
+        assertTrue(source.contains("import org.springframework.data.domain.Page;"))
+        assertTrue(source.contains("import org.springframework.data.domain.Pageable;"))
+
+        val rejected = DataRepositoryChangeService.getInstance(project).preview(
+            change.copy(
+                config = change.config.copy(
+                    methods = repository.config.methods.toMutableList(),
+                ),
+            ),
+        )
+        assertFalse(rejected.accepted)
+        assertTrue(rejected.issues.any { it.code == "JVW-REPOSITORY-NOOP" })
+    }
+
     fun testInheritanceAndEmbeddedOverridesRoundTripForJavaAndKotlin() {
         val root = getOrCreateProjectBaseDir()
         WriteAction.run<RuntimeException> {

@@ -30,12 +30,18 @@ import org.jmixworkbench.model.InheritanceConfig
 import org.jmixworkbench.model.InheritanceRole
 import org.jmixworkbench.model.InheritanceStrategy
 import org.jmixworkbench.model.JoinTableConfig
+import org.jmixworkbench.model.MethodParameter
+import org.jmixworkbench.model.QueryType
+import org.jmixworkbench.model.RepositoryMethod
+import org.jmixworkbench.model.RepositoryParameterRole
+import org.jmixworkbench.model.RepositoryQueryHint
 import org.jmixworkbench.model.UniqueConstraintModel
 import org.jmixworkbench.model.ValidationModel
 import org.jmixworkbench.model.ValidationType
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class EntityAndCrudGeneratorTest {
@@ -436,6 +442,140 @@ class EntityAndCrudGeneratorTest {
         assertTrue(repository.contains("extends JmixDataRepository<PayrollRun, Long>"))
         assertTrue(repository.contains("import io.jmix.core.repository.JmixDataRepository;"))
         assertFalse(repository.contains("JpaRepository"))
+    }
+
+    @Test
+    fun `Java and Kotlin repositories generate advanced secure Jmix query contracts`() {
+        val methods = mutableListOf(
+            RepositoryMethod(
+                name = "findByEmployeeNumberContainingIgnoreCase",
+                returnType = "Page<Employee>",
+                parameters = mutableListOf(
+                    MethodParameter("employeeNumber", "String"),
+                    MethodParameter(
+                        name = "pageable",
+                        type = "Pageable",
+                        role = RepositoryParameterRole.PAGEABLE,
+                    ),
+                    MethodParameter(
+                        name = "fetchPlan",
+                        type = "FetchPlan",
+                        nullable = true,
+                        role = RepositoryParameterRole.FETCH_PLAN,
+                    ),
+                ),
+                fetchPlan = "employee-summary",
+                description = "Searches employees without bypassing row-level constraints.",
+            ),
+            RepositoryMethod(
+                name = "countByDepartment",
+                returnType = "List<KeyValueEntity>",
+                parameters = mutableListOf(
+                    MethodParameter(
+                        name = "department",
+                        type = "String",
+                        bindingName = "departmentCode",
+                    ),
+                ),
+                query = """
+                    select e.department, count(e)
+                    from payroll_Employee e
+                    where e.department = :departmentCode
+                    group by e.department
+                """.trimIndent(),
+                queryType = QueryType.JPQL,
+                queryProperties = mutableListOf("department", "count"),
+                applyConstraints = true,
+                queryHints = mutableListOf(
+                    RepositoryQueryHint("jmix.query.cacheable", "true"),
+                ),
+            ),
+        )
+        val javaEntity = EntityModel(
+            className = "Employee",
+            packageName = "com.company.payroll.entity",
+            entityName = "payroll_Employee",
+            dataRepository = DataRepositoryConfig(
+                enabled = true,
+                interfaceName = "EmployeeReadRepository",
+                applyConstraints = false,
+                methods = methods,
+            ),
+        )
+        val kotlinEntity = javaEntity.copy(sourceLanguage = EntitySourceLanguage.KOTLIN)
+
+        val java = DataRepositoryGenerator.generate(javaEntity)
+        val kotlin = KotlinDataRepositoryGenerator.generate(kotlinEntity)
+
+        assertTrue(java.contains("@ApplyConstraints(false)\npublic interface EmployeeReadRepository"))
+        assertTrue(java.contains("@FetchPlan(\"employee-summary\")"))
+        assertTrue(java.contains("Page<Employee> findByEmployeeNumberContainingIgnoreCase("))
+        assertTrue(java.contains("@Nullable FetchPlan fetchPlan"))
+        assertTrue(java.contains("properties = {\"department\", \"count\"}"))
+        assertTrue(java.contains("@Param(\"departmentCode\") String department"))
+        assertTrue(java.contains("@QueryHints({@QueryHint(name = \"jmix.query.cacheable\", value = \"true\")})"))
+        assertTrue(kotlin.contains("@ApplyConstraints(false)\ninterface EmployeeReadRepository"))
+        assertTrue(kotlin.contains("Page<Employee>"))
+        assertTrue(kotlin.contains("fetchPlan: FetchPlan?"))
+        assertTrue(kotlin.contains("properties = [\"department\", \"count\"]"))
+        assertTrue(kotlin.contains("@Param(\"departmentCode\") department: String"))
+        assertTrue(kotlin.contains("@QueryHints(value = [QueryHint("))
+    }
+
+    @Test
+    fun `Jmix repositories fail closed on native mutation and parameter drift`() {
+        fun entity(method: RepositoryMethod) = EntityModel(
+            className = "Payment",
+            packageName = "com.company.payment.entity",
+            entityName = "payment_Payment",
+            dataRepository = DataRepositoryConfig(
+                enabled = true,
+                methods = mutableListOf(method),
+            ),
+        )
+
+        val native = assertFailsWith<IllegalStateException> {
+            DataRepositoryGenerator.generate(
+                entity(
+                    RepositoryMethod(
+                        name = "findNative",
+                        returnType = "List<Payment>",
+                        query = "select * from PAYMENT",
+                        queryType = QueryType.NATIVE,
+                    ),
+                ),
+            )
+        }
+        assertTrue(native.message.orEmpty().contains("NATIVE-UNSUPPORTED"))
+
+        val drift = assertFailsWith<IllegalArgumentException> {
+            DataRepositoryGenerator.generate(
+                entity(
+                    RepositoryMethod(
+                        name = "findByStatus",
+                        returnType = "List<Payment>",
+                        parameters = mutableListOf(MethodParameter("status", "String")),
+                        query = "select p from payment_Payment p where p.status = :state",
+                        queryType = QueryType.JPQL,
+                    ),
+                ),
+            )
+        }
+        assertTrue(drift.message.orEmpty().contains("JPQL-PARAMETERS"))
+
+        val mutation = assertFailsWith<IllegalArgumentException> {
+            DataRepositoryGenerator.generate(
+                entity(
+                    RepositoryMethod(
+                        name = "deleteEverything",
+                        returnType = "Long",
+                        query = "delete from payment_Payment",
+                        queryType = QueryType.JPQL,
+                    ),
+                ),
+            )
+        }
+        assertTrue(mutation.message.orEmpty().contains("JPQL-READ-ONLY"))
     }
 
     @Test

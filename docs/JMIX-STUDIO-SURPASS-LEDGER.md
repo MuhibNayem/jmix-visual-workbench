@@ -61,14 +61,17 @@ The safety engine is not the current limiting factor. The shortest path from
 the present substantial implementation to a superior daily developer product
 is:
 
-1. remaining high-frequency entity actions: mature repository methods,
-   localized-caption workflows and safe enum-usage migration, plus
+1. remaining high-frequency entity actions: localized-caption workflows and
+   safe enum-usage migration, plus
    evidence-complete shape migration for existing inheritance hierarchies and
    embedded overrides. Root/subtype discriminator authoring, explicit nested
    scalar/association overrides, copy/reorder, inherited/trait visibility, callback
    authoring, current Java/Kotlin Jmix listener creation/navigation and
    exact-revision entity-to-view creation/source/design navigation are
-   implemented with handwritten-source protection;
+   implemented with handwritten-source protection. Typed Java/Kotlin Jmix
+   repository creation, existing-source reconstruction and revision-bound
+   additive method authoring are implemented; injection/delegate integration
+   and native existing-method refactoring remain;
 2. decomposition of the 6,051-line central React designer plus component, interaction,
    responsive and accessibility regression tests;
 3. representative arbitrary-source, database-first, installed-IDE dual-host,
@@ -116,7 +119,7 @@ justify an overall Entity Designer superiority claim.
 | ID | Mandatory capability | Current status | Completion evidence required |
 |---|---|---|---|
 | STUDIO-ADV-001 | OpenAPI-first client generation with authentication, configuration, model customization, regeneration safety and contract testing | MISSING | Multiple OpenAPI-version fixtures and generated-client compilation |
-| STUDIO-ADV-002 | Data-repository creation, method/query design, injection, view delegate integration and refactoring | PARTIAL | Java/Kotlin repository fixtures and runtime integration tests |
+| STUDIO-ADV-002 | Data-repository creation, method/query design, injection, view delegate integration and refactoring | SUBSTANTIAL | A shared typed Java/Kotlin generator and responsive editor cover derived/JPQL methods, value/page/sort/fetch-plan/context parameters, nullability, named or positional binding, aggregate `KeyValueEntity` projections, fetch plans, query hints, documentation and visible repository/method `@ApplyConstraints` behavior. Existing Java/Kotlin repository interfaces are indexed conservatively; custom/default/native members remain source-owned, while new methods are inserted through exact-revision additive edits that preserve manual source and reject rename/delete/reorder/security drift. Unsupported native JPA queries fail closed instead of implying Jmix DataManager safety. Complete IntelliJ injection/refactoring assistance, view delegate integration, runtime application fixtures and installed-IDE interaction certification |
 | STUDIO-ADV-003 | Custom project-template creation, validation, versioning, organization catalog and offline use | MISSING | Signed template bundles and generated-project matrix |
 | STUDIO-ADV-004 | Docker and cloud deployment designer with environment configuration, secrets, health checks, migrations, rollback and portable output | MISSING | Local container plus supported-provider deployment rehearsals |
 | STUDIO-ADV-005 | Jmix REST/OpenAPI service authoring, saved invocation, authorization, transactions, contract evolution and client generation | PARTIAL | Provider/consumer contract and compatibility suites |

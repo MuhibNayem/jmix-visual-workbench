@@ -55,6 +55,9 @@ import org.jmixworkbench.services.EntityAttributePropagationService
 import org.jmixworkbench.services.EntityEventListenerApplyRequest
 import org.jmixworkbench.services.EntityEventListenerRequest
 import org.jmixworkbench.services.EntityEventListenerService
+import org.jmixworkbench.services.DataRepositoryApplyRequest
+import org.jmixworkbench.services.DataRepositoryChangeRequest
+import org.jmixworkbench.services.DataRepositoryChangeService
 import org.jmixworkbench.services.DatabaseEntityTableInspectionRequest
 import org.jmixworkbench.services.DatabaseEntityTableBrowseRequest
 import org.jmixworkbench.services.DatabaseEntityImportRequest
@@ -431,6 +434,14 @@ class JcefBridge(
             }
             if (action == "applyEntityEventListener") {
                 handleApplyEntityEventListener(action, requestId, payload)
+                return
+            }
+            if (action == "previewDataRepositoryChange") {
+                handlePreviewDataRepositoryChange(action, requestId, payload)
+                return
+            }
+            if (action == "applyDataRepositoryChange") {
+                handleApplyDataRepositoryChange(action, requestId, payload)
                 return
             }
             if (action == "previewCrudGeneration") {
@@ -2078,6 +2089,51 @@ class JcefBridge(
         }
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             EntityEventListenerService.getInstance(project).prepareApply(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewDataRepositoryChange(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, DataRepositoryChangeRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
+            DataRepositoryChangeService.getInstance(project).preview(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { response ->
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyDataRepositoryChange(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, DataRepositoryApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationApplyError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            DataRepositoryChangeService.getInstance(project).prepareApply(request)
         }
             .inSmartMode(project)
             .expireWith(project)

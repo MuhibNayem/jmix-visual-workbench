@@ -1286,6 +1286,41 @@ export const developmentSchemaWorkspace: SchemaWorkspaceResponse = {
     migrationCoverage: 'DISABLED',
     migrationArtifactIds: [],
   }],
+  repositories: [{
+    artifactId: 'repository-loan-app',
+    moduleId: 'loan',
+    interfaceName: 'LoanAppRepository',
+    qualifiedName: 'com.company.loan.repository.LoanAppRepository',
+    entityQualifiedName: 'com.company.loan.entity.LoanApp',
+    idType: 'UUID',
+    sourceLanguage: 'java',
+    sourceLocator: locator(
+      'loan/src/main/java/com/company/loan/repository/LoanAppRepository.java',
+    ),
+    config: {
+      enabled: true,
+      interfaceName: 'LoanAppRepository',
+      applyConstraints: true,
+      useNamedParameters: true,
+      methods: [{
+        name: 'findByProcessState',
+        returnType: 'List<LoanApp>',
+        parameters: [{
+          name: 'processState',
+          type: 'String',
+          nullable: false,
+          role: 'value',
+        }],
+        queryType: 'derived',
+        queryProperties: [],
+        queryHints: [],
+      }],
+    },
+    methodEvidence: [{
+      sourceSignature: 'findByProcessState(String)',
+      editable: true,
+    }],
+  }],
   changelogs: [{
     artifactId: 'liquibase-loan-root',
     moduleId: 'loan',

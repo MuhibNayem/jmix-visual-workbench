@@ -9,9 +9,44 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
 [enumeration model](https://docs.jmix.io/jmix/2.8/data-model/enumerations.html),
 [datatype model](https://docs.jmix.io/jmix/data-model/datatype.html), and
 [reverse-engineering workflow](https://docs.jmix.io/jmix/2.7/studio/reverse-engineering.html).
+Repository behavior follows the official
+[Data Repository](https://docs.jmix.io/jmix/data-access/data-repositories.html)
+contract and
+[Data Repository Wizard](https://docs.jmix.io/jmix/studio/data-repository-wizard.html).
 
 ## Implemented in the current entity milestone
 
+- The designer now indexes existing Java and Kotlin
+  `JmixDataRepository<Entity, Id>` interfaces and reconstructs derived and
+  explicit JPQL methods, typed value/page/sort/fetch-plan/repository-context
+  parameters, nullable contracts, named bindings, fetch plans,
+  `@ApplyConstraints`, aggregate `KeyValueEntity` properties, query hints and
+  developer documentation. Handwritten/custom/default/native-query members
+  remain visible source-owned evidence instead of being silently rewritten.
+  New repositories and additive methods share one responsive visual editor;
+  existing methods are locked while additions remain editable.
+- Java and Kotlin generation now validates duplicate JVM signatures, result and
+  parameter types, paging contracts, exact named/positional JPQL bindings,
+  aggregate projections and read-only single-entity SELECT semantics.
+  Repository- and method-level constraint bypass is conspicuous in the UI and
+  emits only explicit `@ApplyConstraints(false)`. Unsupported native Spring
+  Data JPA queries fail closed because their execution and Jmix DataManager
+  security semantics cannot be guaranteed.
+- Existing handwritten repositories receive only revision-bound additive
+  imports and method declarations before their exact interface closing brace.
+  Comments, formatting, custom annotations, default methods and existing
+  declarations remain byte-for-byte outside those insertion ranges; rename,
+  delete, reorder, security-policy mutation, stale revisions and signature
+  collisions are rejected with a native-refactoring/source workflow. Creation
+  also emits module/language-correct repository activation when the indexed
+  project has none. The project service is registered in the shared descriptor
+  and both independently packaged IntelliJ host descriptors.
+- Entity Designer pane selection now responds to its actual IntelliJ/JCEF
+  container width rather than the outer browser viewport. At 360 and 768
+  pixels, configuration, attributes and preview are keyboard-selectable full
+  panes; at 1,280 pixels the complete three-pane workspace returns. Real
+  browser checks prove equal shell client/scroll widths and an unoverflowed
+  repository panel at every breakpoint.
 - Real Jmix entity Java and Kotlin files now open with a native IntelliJ
   **Design** editor beside the normal source editor. Eligibility is
   project-contained and annotation-aware; the editor passes only a
@@ -25,7 +60,7 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 275 tests and three packaged-host
+  descriptors were inspected after assembly, 280 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
@@ -324,6 +359,11 @@ blocked until all of the following pass:
    and migration fixtures.
 6. Installed-IDE interaction, undo, accessibility, large-project latency,
    memory and leak evidence.
+
+Repository creation and additive Java/Kotlin method authoring are implemented.
+Remaining repository work is IntelliJ-native injection/refactoring assistance,
+view delegate integration, safe mutation of existing source-owned methods and
+runtime integration certification against representative Jmix applications.
 
 No release or marketing claim may describe complete Studio Entity Designer
 parity until those gates are closed.

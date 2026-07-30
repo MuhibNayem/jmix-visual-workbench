@@ -1,5 +1,6 @@
 import type {
   AttributeType,
+  DataRepositoryConfig,
   EntityModel,
   SchemaEntitySnapshot,
 } from '../../types'
@@ -13,6 +14,7 @@ import type {
 export function existingEntityModel(
   snapshot: SchemaEntitySnapshot,
   storeId?: string,
+  dataRepository?: DataRepositoryConfig,
 ): Partial<EntityModel> {
   const packageName = snapshot.qualifiedName.split('.').slice(0, -1).join('.')
   return {
@@ -110,6 +112,7 @@ export function existingEntityModel(
       unmappedColumns: [],
       unmappedConstraints: [],
     },
+    dataRepository,
     lifecycleCallbacks: [...snapshot.lifecycleCallbacks],
     entityListeners: [...snapshot.entityListeners],
     extendsClass: snapshot.extendsClass,

@@ -496,6 +496,8 @@ data class MultitenancyConfig(
 data class DataRepositoryConfig(
     val enabled: Boolean = true,
     val interfaceName: String? = null,
+    val applyConstraints: Boolean = true,
+    val useNamedParameters: Boolean = true,
     val methods: MutableList<RepositoryMethod> = mutableListOf()
 )
 
@@ -504,12 +506,20 @@ data class RepositoryMethod(
     val returnType: String,
     val parameters: MutableList<MethodParameter> = mutableListOf(),
     val query: String? = null,
-    val queryType: QueryType = QueryType.JPQL
+    val queryType: QueryType = QueryType.DERIVED,
+    val queryProperties: MutableList<String> = mutableListOf(),
+    val fetchPlan: String? = null,
+    val applyConstraints: Boolean? = null,
+    val queryHints: MutableList<RepositoryQueryHint> = mutableListOf(),
+    val description: String? = null,
 )
 
 data class MethodParameter(
     val name: String,
-    val type: String
+    val type: String,
+    val bindingName: String? = null,
+    val nullable: Boolean = false,
+    val role: RepositoryParameterRole = RepositoryParameterRole.VALUE,
 )
 
 enum class QueryType {
@@ -517,6 +527,19 @@ enum class QueryType {
     @SerializedName("native") NATIVE,
     @SerializedName("derived") DERIVED
 }
+
+enum class RepositoryParameterRole {
+    @SerializedName("value") VALUE,
+    @SerializedName("pageable") PAGEABLE,
+    @SerializedName("sort") SORT,
+    @SerializedName("fetchPlan") FETCH_PLAN,
+    @SerializedName("context") CONTEXT,
+}
+
+data class RepositoryQueryHint(
+    val name: String,
+    val value: String,
+)
 
 // ─── Lifecycle ───────────────────────────────────────────────────────────────
 

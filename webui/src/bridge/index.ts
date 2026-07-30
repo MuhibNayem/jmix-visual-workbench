@@ -27,6 +27,7 @@ import type {
   EntityAttributeSafeDeleteRequest,
   EntityAttributeSafeDeleteLaunchResponse,
   EntityEventListenerRequest,
+  DataRepositoryChangeRequest,
   EntityAttributeTypeMigrationRequest,
   EntityAttributeTypeMigrationLaunchResponse,
   EntityAttributeTypeExpansionPreviewResponse,
@@ -821,6 +822,45 @@ ${javaMethods}
                   changeSetId: 'entity-listener:development',
                   planDigest: payload.expectedPlanDigest,
                   filesChanged: [`${payload.listener?.className ?? 'EntityEventListener'}.java`],
+                  issues: [],
+                } satisfies WorkspaceChangeApplyResponse
+              case 'previewDataRepositoryChange': {
+                const change = payload as DataRepositoryChangeRequest
+                const repositoryName = change.config.interfaceName || 'EntityRepository'
+                const extension = change.entitySource.relativePath.endsWith('.kt') ? 'kt' : 'java'
+                const relativePath = change.repositorySource?.relativePath ??
+                  `${change.entitySource.relativePath.substring(0, change.entitySource.relativePath.lastIndexOf('/') + 1)}${repositoryName}.${extension}`
+                return {
+                  accepted: true,
+                  changeSetId: 'data-repository:development',
+                  label: `${change.repositorySource ? 'Update' : 'Create'} ${repositoryName}`,
+                  planDigest: 'development-data-repository',
+                  files: [{
+                    relativePath,
+                    mode: change.repositorySource ? 'MODIFY' : 'CREATE',
+                    afterFingerprint: 'development-data-repository-after',
+                    resultContent: `// Source-safe ${repositoryName} preview\n`,
+                    appliedEditCount: change.repositorySource ? 1 : 0,
+                  }],
+                  issues: [],
+                } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'applyDataRepositoryChange':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: 'Update data repository',
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'data-repository:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    payload.change?.repositorySource?.relativePath ??
+                      `${payload.change?.config?.interfaceName ?? 'EntityRepository'}.java`,
+                  ],
                   issues: [],
                 } satisfies WorkspaceChangeApplyResponse
               case 'previewExistingEntityAttributeAdditions': {
@@ -2210,6 +2250,23 @@ ${javaMethods}
     return this.request<WorkspaceChangeApplyResponse>(
       'applyEntityEventListener',
       { listener, expectedPlanDigest },
+    )
+  }
+
+  previewDataRepositoryChange(change: DataRepositoryChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewDataRepositoryChange',
+      change,
+    )
+  }
+
+  applyDataRepositoryChange(
+    change: DataRepositoryChangeRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyDataRepositoryChange',
+      { change, expectedPlanDigest },
     )
   }
 

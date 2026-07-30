@@ -195,7 +195,7 @@ export interface EntityModel {
   }
   softDelete?: { enabled: boolean }
   multitenancy?: { enabled: boolean }
-  dataRepository?: { enabled: boolean; interfaceName?: string }
+  dataRepository?: DataRepositoryConfig
   lifecycleCallbacks: LifecycleCallback[]
   entityListeners: string[]
   enumConfig?: { idType: 'string' | 'integer'; values: { name: string; storedValue: string; caption?: string }[] }
@@ -203,6 +203,48 @@ export interface EntityModel {
   extendsClass?: string
   implementsInterfaces: string[]
   annotations: CustomAnnotation[]
+}
+
+export type RepositoryQueryType = 'jpql' | 'native' | 'derived'
+export type RepositoryParameterRole =
+  | 'value'
+  | 'pageable'
+  | 'sort'
+  | 'fetchPlan'
+  | 'context'
+
+export interface RepositoryMethodParameter {
+  name: string
+  type: string
+  bindingName?: string
+  nullable: boolean
+  role: RepositoryParameterRole
+}
+
+export interface RepositoryQueryHint {
+  name: string
+  value: string
+}
+
+export interface RepositoryMethod {
+  name: string
+  returnType: string
+  parameters: RepositoryMethodParameter[]
+  query?: string
+  queryType: RepositoryQueryType
+  queryProperties: string[]
+  fetchPlan?: string
+  applyConstraints?: boolean
+  queryHints: RepositoryQueryHint[]
+  description?: string
+}
+
+export interface DataRepositoryConfig {
+  enabled: boolean
+  interfaceName?: string
+  applyConstraints: boolean
+  useNamedParameters: boolean
+  methods: RepositoryMethod[]
 }
 
 // ─── View Types ──────────────────────────────────────────────────────────────
@@ -419,11 +461,31 @@ export interface SchemaWorkspaceResponse {
   modules: SchemaModuleSnapshot[]
   stores: SchemaDataStoreSnapshot[]
   entities: SchemaEntitySnapshot[]
+  repositories: SchemaRepositorySnapshot[]
   changelogs: SchemaChangelogSnapshot[]
   physicalSchemas: SchemaPhysicalStoreSnapshot[]
   drifts: SchemaDriftSnapshot[]
   findings: SchemaFinding[]
   issues: WorkspaceChangeIssue[]
+}
+
+export interface SchemaRepositorySnapshot {
+  artifactId: string
+  moduleId: string
+  interfaceName: string
+  qualifiedName: string
+  entityQualifiedName: string
+  idType: string
+  sourceLanguage: EntitySourceLanguage
+  sourceLocator: GraphSourceLocator
+  config: DataRepositoryConfig
+  methodEvidence: SchemaRepositoryMethodEvidence[]
+}
+
+export interface SchemaRepositoryMethodEvidence {
+  sourceSignature: string
+  editable: boolean
+  issue?: string
 }
 
 export interface SchemaModuleSnapshot {
@@ -574,6 +636,12 @@ export interface EntityEventListenerRequest {
   sourceLanguage: EntitySourceLanguage
   events: EntityEventListenerEvent[]
   afterCommitRequiresNewTransaction: boolean
+}
+
+export interface DataRepositoryChangeRequest {
+  entitySource: GraphSourceLocator
+  repositorySource?: GraphSourceLocator
+  config: DataRepositoryConfig
 }
 
 export interface EntityAttributeTypeMigrationRequest {

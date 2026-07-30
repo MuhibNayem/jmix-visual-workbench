@@ -16,6 +16,7 @@ import type {
   EntityModel,
   SchemaEntityAttributeSnapshot,
   SchemaEntitySnapshot,
+  SchemaRepositorySnapshot,
   ValidationType,
   SchemaWorkspaceResponse,
   WorkspaceChangePreviewResponse,
@@ -47,6 +48,7 @@ import { existingEntityModel } from './entityModelAdapter'
 import EntityEventListenerPanel from './EntityEventListenerPanel'
 import EntityInheritancePanel from './EntityInheritancePanel'
 import EmbeddedOverrideEditor from './EmbeddedOverrideEditor'
+import RepositoryDesignerPanel from './RepositoryDesignerPanel'
 
 const ATTRIBUTE_TYPES: AttributeType[] = [
   'string', 'character', 'integer', 'long', 'double', 'bigDecimal', 'boolean',
@@ -150,6 +152,11 @@ export default function EntityDesigner({
   const [showTraitAttributes, setShowTraitAttributes] = useState(false)
   const [generationPreview, setGenerationPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
   const [existingEntity, setExistingEntity] = useState<SchemaEntitySnapshot | null>(null)
+  const [entityRepositories, setEntityRepositories] = useState<SchemaRepositorySnapshot[]>([])
+  const [selectedRepositoryArtifactId, setSelectedRepositoryArtifactId] = useState('')
+  const [repositoryPreview, setRepositoryPreview] =
+    useState<WorkspaceChangePreviewResponse | null>(null)
+  const [repositoryBusy, setRepositoryBusy] = useState(false)
   const [applicationGraph, setApplicationGraph] = useState<ApplicationGraphResponse | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [renameBusy, setRenameBusy] = useState(false)
@@ -242,15 +249,26 @@ export default function EntityDesigner({
         const store = workspace.stores.find(candidate =>
           candidate.moduleId === selected.moduleId && candidate.name === selected.storeName,
         )
+        const repositories = workspace.repositories.filter(repository =>
+          repository.entityQualifiedName === selected.qualifiedName)
+        const selectedRepository = repositories[0]
         setNativeSourceIssue(null)
         setExistingEntity(selected)
+        setEntityRepositories(repositories)
+        setSelectedRepositoryArtifactId(selectedRepository?.artifactId ?? '')
+        setRepositoryPreview(null)
         setGenerationPreview(null)
         setSelectedAttr(null)
         setShowTraitAttributes(false)
         setRenameDraft('')
         setRenameLaunched(false)
         setCoordinatedRename(null)
-        setEntity(existingEntityModel(selected, store?.id))
+        setEntity(existingEntityModel(selected, store?.id, selectedRepository?.config ?? {
+          enabled: false,
+          applyConstraints: true,
+          useNamedParameters: true,
+          methods: [],
+        }))
         setActivePane('attributes')
         return
       }
@@ -300,6 +318,28 @@ export default function EntityDesigner({
       active = false
     }
   }, [])
+
+  function synchronizeExistingEntity(
+    snapshot: SchemaEntitySnapshot,
+    workspace: SchemaWorkspaceResponse,
+  ) {
+    const store = workspace.stores.find(candidate =>
+      candidate.moduleId === snapshot.moduleId && candidate.name === snapshot.storeName)
+    const repositories = workspace.repositories.filter(repository =>
+      repository.entityQualifiedName === snapshot.qualifiedName)
+    const repository = repositories.find(candidate =>
+      candidate.artifactId === selectedRepositoryArtifactId) ?? repositories[0]
+    setExistingEntity(snapshot)
+    setEntityRepositories(repositories)
+    setSelectedRepositoryArtifactId(repository?.artifactId ?? '')
+    setRepositoryPreview(null)
+    setEntity(existingEntityModel(snapshot, store?.id, repository?.config ?? {
+      enabled: false,
+      applyConstraints: true,
+      useNamedParameters: true,
+      methods: [],
+    }))
+  }
 
   useEffect(() => {
     const selected = selectedAttr === null ? undefined : entity.attributes[selectedAttr]
@@ -420,6 +460,11 @@ export default function EntityDesigner({
   const entityEventListeners = useMemo(
     () => entityImpact.filter(artifact => artifact.kind === 'EVENT_LISTENER'),
     [entityImpact],
+  )
+  const existingRepository = useMemo(
+    () => entityRepositories.find(repository =>
+      repository.artifactId === selectedRepositoryArtifactId) ?? null,
+    [entityRepositories, selectedRepositoryArtifactId],
   )
 
   const existingViewContractHasDraftChanges = useMemo(() => {
@@ -826,11 +871,7 @@ export default function EntityDesigner({
         candidate => candidate.qualifiedName === existingEntity?.qualifiedName,
       )
       if (updated) {
-        const store = refreshed.stores.find(
-          candidate => candidate.moduleId === updated.moduleId && candidate.name === updated.storeName,
-        )
-        setExistingEntity(updated)
-        setEntity(existingEntityModel(updated, store?.id))
+        synchronizeExistingEntity(updated, refreshed)
         setSelectedAttr(updated.attributes.findIndex(attribute => attribute.name === attributeName))
       }
     } catch (error: any) {
@@ -1065,11 +1106,7 @@ export default function EntityDesigner({
       setDatabaseProfileWorkspace(await bridge.getDatabaseEntityImportProfiles())
       const generated = refreshed.entities.find(candidate => generatedNames.has(candidate.qualifiedName))
       if (generated) {
-        const store = refreshed.stores.find(
-          candidate => candidate.moduleId === generated.moduleId && candidate.name === generated.storeName,
-        )
-        setExistingEntity(generated)
-        setEntity(existingEntityModel(generated, store?.id))
+        synchronizeExistingEntity(generated, refreshed)
       }
       setDatabaseBrowse(null)
       setDatabaseImportSelection([])
@@ -1166,11 +1203,7 @@ export default function EntityDesigner({
         candidate => candidate.qualifiedName === existingEntity.qualifiedName,
       )
       if (updated) {
-        const store = refreshed.stores.find(
-          candidate => candidate.moduleId === updated.moduleId && candidate.name === updated.storeName,
-        )
-        setExistingEntity(updated)
-        setEntity(existingEntityModel(updated, store?.id))
+        synchronizeExistingEntity(updated, refreshed)
         const cutoverAttributeIndex = typeCutoverSession
           ? updated.attributes.findIndex(attribute =>
               attribute.name === typeCutoverSession.attributeName)
@@ -1245,11 +1278,7 @@ export default function EntityDesigner({
             (candidate) => candidate.qualifiedName === existingEntity.qualifiedName,
           )
           if (updated) {
-            const store = refreshed.stores.find(
-              (candidate) => candidate.moduleId === updated.moduleId && candidate.name === updated.storeName,
-            )
-            setExistingEntity(updated)
-            setEntity(existingEntityModel(updated, store?.id))
+            synchronizeExistingEntity(updated, refreshed)
             if (coordinatedMappingApply) {
               const renamedAttributeIndex = updated.attributes.findIndex(
                 attribute => attribute.name === coordinatedMappingApply.attributeName,
@@ -1403,11 +1432,7 @@ export default function EntityDesigner({
             candidate => candidate.qualifiedName === change.inspection.entityQualifiedName,
           )
           if (updated) {
-            const store = refreshed.stores.find(
-              candidate => candidate.moduleId === updated.moduleId && candidate.name === updated.storeName,
-            )
-            setExistingEntity(updated)
-            setEntity(existingEntityModel(updated, store?.id))
+            synchronizeExistingEntity(updated, refreshed)
             setSelectedAttr(null)
             setGenerationPreview(null)
           }
@@ -1482,8 +1507,116 @@ export default function EntityDesigner({
     })
   }
 
+  const selectRepository = (artifactId: string) => {
+    setRepositoryPreview(null)
+    if (artifactId === 'new') {
+      setSelectedRepositoryArtifactId('')
+      setEntity({
+        dataRepository: {
+          enabled: true,
+          interfaceName: `${entity.className}Repository`,
+          applyConstraints: true,
+          useNamedParameters: true,
+          methods: [],
+        },
+      })
+      return
+    }
+    const repository = entityRepositories.find(candidate => candidate.artifactId === artifactId)
+    if (!repository) return
+    setSelectedRepositoryArtifactId(repository.artifactId)
+    setEntity({ dataRepository: repository.config })
+  }
+
+  const previewRepositoryChange = async () => {
+    if (!existingEntity || !entity.dataRepository) return
+    setRepositoryBusy(true)
+    setRepositoryPreview(null)
+    try {
+      const response = await bridge.previewDataRepositoryChange({
+        entitySource: existingEntity.sourceLocator,
+        repositorySource: existingRepository?.sourceLocator,
+        config: entity.dataRepository,
+      })
+      setRepositoryPreview(response)
+      if (!response.accepted) {
+        addToast(
+          response.issues.map(issue => issue.message).join(' ') || 'Repository preview was rejected.',
+          'error',
+        )
+      }
+    } catch (error: any) {
+      addToast(`Cannot preview repository change: ${error.message}`, 'error')
+    } finally {
+      setRepositoryBusy(false)
+    }
+  }
+
+  const applyRepositoryChange = async () => {
+    if (
+      !existingEntity ||
+      !entity.dataRepository ||
+      !repositoryPreview?.accepted ||
+      !repositoryPreview.planDigest
+    ) return
+    const change = {
+      entitySource: existingEntity.sourceLocator,
+      repositorySource: existingRepository?.sourceLocator,
+      config: entity.dataRepository,
+    }
+    setRepositoryBusy(true)
+    try {
+      const response = await bridge.applyDataRepositoryChange(
+        change,
+        repositoryPreview.planDigest,
+      )
+      if (!response.success) {
+        addToast(
+          response.issues.map(issue => issue.message).join(' ') || 'Repository apply was rejected.',
+          'error',
+        )
+        return
+      }
+      addToast(
+        `${existingRepository ? 'Updated' : 'Created'} repository atomically: ${response.filesChanged.length} file(s)`,
+        'success',
+      )
+      const refreshed = await bridge.getSchemaWorkspace(true)
+      setSchemaWorkspace(refreshed)
+      const updatedEntity = refreshed.entities.find(candidate =>
+        candidate.qualifiedName === existingEntity.qualifiedName)
+      const repositories = refreshed.repositories.filter(repository =>
+        repository.entityQualifiedName === existingEntity.qualifiedName)
+      const requestedName = entity.dataRepository.interfaceName || `${entity.className}Repository`
+      const updatedRepository = repositories.find(repository =>
+        repository.qualifiedName === existingRepository?.qualifiedName ||
+        repository.interfaceName === requestedName) ?? repositories[0]
+      setEntityRepositories(repositories)
+      setSelectedRepositoryArtifactId(updatedRepository?.artifactId ?? '')
+      setRepositoryPreview(null)
+      if (updatedEntity) {
+        const store = refreshed.stores.find(candidate =>
+          candidate.moduleId === updatedEntity.moduleId &&
+          candidate.name === updatedEntity.storeName)
+        setExistingEntity(updatedEntity)
+        setEntity(existingEntityModel(
+          updatedEntity,
+          store?.id,
+          updatedRepository?.config ?? entity.dataRepository,
+        ))
+      }
+    } catch (error: any) {
+      addToast(`Cannot apply repository change: ${error.message}`, 'error')
+    } finally {
+      setRepositoryBusy(false)
+    }
+  }
+
   const handleReset = () => {
     setExistingEntity(null)
+    setEntityRepositories([])
+    setSelectedRepositoryArtifactId('')
+    setRepositoryPreview(null)
     setGenerationPreview(null)
     setSelectedAttr(null)
     setRenameDraft('')
@@ -1519,7 +1652,13 @@ export default function EntityDesigner({
     const store = schemaWorkspace?.stores.find(
       (candidate) => candidate.moduleId === snapshot.moduleId && candidate.name === snapshot.storeName,
     )
+    const repositories = schemaWorkspace?.repositories.filter(repository =>
+      repository.entityQualifiedName === snapshot.qualifiedName) ?? []
+    const selectedRepository = repositories[0]
     setExistingEntity(snapshot)
+    setEntityRepositories(repositories)
+    setSelectedRepositoryArtifactId(selectedRepository?.artifactId ?? '')
+    setRepositoryPreview(null)
     setGenerationPreview(null)
     setSelectedAttr(null)
     setShowTraitAttributes(false)
@@ -1543,11 +1682,16 @@ export default function EntityDesigner({
     setPropagationRequest(null)
     setPropagationSelection([])
     setPropagationPreview(null)
-    setEntity(existingEntityModel(snapshot, store?.id))
+    setEntity(existingEntityModel(snapshot, store?.id, selectedRepository?.config ?? {
+      enabled: false,
+      applyConstraints: true,
+      useNamedParameters: true,
+      methods: [],
+    }))
   }
 
   return (
-    <div className="flex h-full min-w-0 flex-col">
+    <div className="entity-designer-shell flex h-full min-w-0 flex-col">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-surface-light px-3 py-2.5 sm:px-4">
         <h2 className="min-w-0 truncate text-sm font-semibold text-gray-200">
@@ -1658,11 +1802,12 @@ export default function EntityDesigner({
           { id: 'attributes', label: 'Attributes', badge: entity.attributes.length },
           { id: 'preview', label: 'Code preview' },
         ]}
+        className="entity-designer-pane-switcher"
       />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Left: Entity Config */}
-        <div className={`${activePane === 'config' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 space-y-4 overflow-y-auto p-4 lg:block lg:w-80 lg:border-r lg:border-surface-border`}>
+        <div className={`entity-designer-config ${activePane === 'config' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 space-y-4 overflow-y-auto p-4`}>
           <Section title="Project Ownership">
             <Field label="Entity Source">
               <select
@@ -2213,21 +2358,110 @@ export default function EntityDesigner({
                 </Field>
               </>
             )}
-            {entity.entityType === 'entity' && <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer mt-1.5">
-              <input
-                type="checkbox"
-                checked={entity.dataRepository?.enabled || false}
-                onChange={e => setEntity({ dataRepository: { enabled: e.target.checked } })}
-                className="rounded border-surface-border"
+            {!existingEntity && entity.entityType === 'entity' && (
+              <RepositoryDesignerPanel
+                entity={entity}
+                onChange={dataRepository => setEntity({ dataRepository })}
               />
-              Generate Data Repository
-            </label>}
+            )}
           </Section>
           </fieldset>
+          {existingEntity?.entityType === 'entity' && (
+            <div className="mt-4 space-y-2">
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="min-w-0 flex-1 text-[10px] text-gray-500">
+                  Repository source
+                  <select
+                    value={selectedRepositoryArtifactId || 'new'}
+                    onChange={event => selectRepository(event.target.value)}
+                    className="mt-1 w-full min-w-0"
+                  >
+                    {entityRepositories.map(repository => (
+                      <option key={repository.artifactId} value={repository.artifactId}>
+                        {repository.qualifiedName}
+                      </option>
+                    ))}
+                    <option value="new">Create another repository…</option>
+                  </select>
+                </label>
+                {existingRepository && (
+                  <button
+                    type="button"
+                    onClick={() => void bridge.navigateToSource(existingRepository.sourceLocator)}
+                    className="rounded border border-surface-border px-2.5 py-1.5 text-[10px] text-gray-300"
+                  >
+                    Open source
+                  </button>
+                )}
+              </div>
+              <RepositoryDesignerPanel
+                entity={entity}
+                sourceLocked={Boolean(existingRepository)}
+                lockedMethodCount={existingRepository?.config.methods.length ?? 0}
+                onChange={dataRepository => {
+                  setRepositoryPreview(null)
+                  setEntity({ dataRepository })
+                }}
+                footer={(
+                  <div className="space-y-2 border-t border-surface-border pt-3">
+                    {existingRepository?.methodEvidence.some(evidence => !evidence.editable) && (
+                      <div className="rounded border border-amber-500/25 bg-amber-500/5 p-2 text-[9px] leading-relaxed text-amber-100">
+                        {existingRepository.methodEvidence
+                          .filter(evidence => !evidence.editable)
+                          .map(evidence => evidence.issue || `${evidence.sourceSignature} is source-owned.`)
+                          .join(' ')}
+                      </div>
+                    )}
+                    {repositoryPreview && (
+                      <div className={`rounded border p-2 text-[9px] ${
+                        repositoryPreview.accepted
+                          ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100'
+                          : 'border-red-500/25 bg-red-500/5 text-red-100'
+                      }`}>
+                        <strong className="block">{repositoryPreview.label}</strong>
+                        {repositoryPreview.files.map(file => (
+                          <span key={file.relativePath} className="mt-1 block truncate font-mono">
+                            {file.mode} · {file.relativePath}
+                          </span>
+                        ))}
+                        {repositoryPreview.issues.map(issue => (
+                          <span key={`${issue.code}-${issue.message}`} className="mt-1 block">
+                            {issue.message}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void previewRepositoryChange()}
+                        disabled={repositoryBusy || !entity.dataRepository?.enabled}
+                        className="rounded border border-jmix-500/35 bg-jmix-500/10 px-3 py-1.5 text-[10px] text-jmix-100 disabled:opacity-40"
+                      >
+                        {repositoryBusy ? 'Checking…' : existingRepository
+                          ? 'Preview additive methods'
+                          : 'Preview repository creation'}
+                      </button>
+                      {repositoryPreview?.accepted && (
+                        <button
+                          type="button"
+                          onClick={() => void applyRepositoryChange()}
+                          disabled={repositoryBusy}
+                          className="rounded bg-emerald-600 px-3 py-1.5 text-[10px] font-medium text-white disabled:opacity-40"
+                        >
+                          Apply atomically
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              />
+            </div>
+          )}
         </div>
 
         {/* Center: Attributes Table */}
-        <div className={`${activePane === 'attributes' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto p-3 sm:p-4 lg:block`}>
+        <div className={`entity-designer-attributes ${activePane === 'attributes' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto p-3 sm:p-4`}>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider">
               {entity.entityType === 'enum' ? 'Enumeration' : 'Attributes'}
@@ -3574,7 +3808,7 @@ export default function EntityDesigner({
 
         {/* Right: Preview */}
         {showPreview && (
-          <div className={`${activePane === 'preview' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 overflow-y-auto p-4 lg:block lg:w-96 lg:border-l lg:border-surface-border`}>
+          <div className={`entity-designer-preview ${activePane === 'preview' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 overflow-y-auto p-4`}>
             <h3 className="text-xs font-semibold text-gray-300 uppercase tracking-wider mb-3">
               {existingEntity ? 'Safe Round-trip Preview' : 'Generated Code Preview'}
             </h3>

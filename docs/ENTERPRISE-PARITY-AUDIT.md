@@ -464,8 +464,8 @@ inspection control rather than relying on a hard-to-hit table-row target.
 
 ## Recommended next execution order
 
-1. Complete the remaining high-frequency entity workflows: mature repository
-   methods, localized-caption workflows, safe enum-usage migration, and
+1. Complete the remaining high-frequency entity workflows: localized-caption
+   workflows, safe enum-usage migration, and
    evidence-complete shape migration for existing hierarchies/embedded mappings.
    Root/subtype discriminator authoring and explicit nested scalar/association
    overrides now round-trip through Java/Kotlin generation and parsing.
@@ -476,6 +476,10 @@ inspection control rather than relying on a hard-to-hit table-row target.
    source/visual navigation now work from both tool-window and native editor
    surfaces without regenerating entity/table source or silently granting a
    full-access role.
+   Typed secure Java/Kotlin repository creation, existing-source
+   reconstruction, and revision-bound additive method authoring are now
+   implemented. Complete repository injection/view-delegate integration,
+   native existing-method refactoring and runtime application certification.
 2. Continue splitting the 6,067-line central Entity Designer into bounded
    feature modules. Inheritance and embedded-override controls are now isolated;
    add component, interaction, responsive and accessibility regression tests.

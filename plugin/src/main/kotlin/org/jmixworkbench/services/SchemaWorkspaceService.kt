@@ -18,6 +18,7 @@ import org.jmixworkbench.model.AssociationJoinColumn
 import org.jmixworkbench.model.AssociationType
 import org.jmixworkbench.model.AttributeType
 import org.jmixworkbench.model.CascadeType
+import org.jmixworkbench.model.DataRepositoryConfig
 import org.jmixworkbench.model.DbChange
 import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.IdType
@@ -27,6 +28,7 @@ import org.jmixworkbench.model.InheritanceStrategy
 import org.jmixworkbench.model.JoinTableConfig
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.EntityType
+import org.jmixworkbench.model.EntitySourceLanguage
 import org.jmixworkbench.model.EmbeddedAssociationOverride
 import org.jmixworkbench.model.EmbeddedAttributeOverride
 import org.jmixworkbench.model.LifecycleCallback
@@ -344,6 +346,70 @@ class SchemaWorkspaceService(
                 inheritedTraits = inheritance.traits,
             )
         }
+        val repositories = graph.artifacts
+            .filter { it.kind == ArtifactKind.REPOSITORY }
+            .distinctBy { it.sourceLocator.relativePath }
+            .mapNotNull { artifact ->
+                val source = content(artifact.sourceLocator.relativePath).orEmpty()
+                val kotlin = artifact.sourceLocator.relativePath.endsWith(".kt")
+                val parsed = RepositorySourceParser.parse(source, kotlin) ?: return@mapNotNull null
+                val entitySimpleName = parsed.entityType
+                    .removeSuffix("?")
+                    .substringAfterLast('.')
+                    .substringBefore('<')
+                    .trim()
+                val importedEntity = IMPORT_DECLARATION.findAll(source)
+                    .map { it.groupValues[1] }
+                    .singleOrNull { it.substringAfterLast('.') == entitySimpleName }
+                val packageEntity = PACKAGE_DECLARATION.find(source)
+                    ?.groupValues?.get(1)
+                    ?.let { "$it.$entitySimpleName" }
+                val candidates = entities.filter { entity ->
+                    entity.className == entitySimpleName &&
+                        (
+                            entity.qualifiedName == importedEntity ||
+                                entity.qualifiedName == packageEntity ||
+                                entity.moduleId == artifact.owner.moduleId
+                            )
+                }
+                val entity = when {
+                    importedEntity != null -> candidates.singleOrNull {
+                        it.qualifiedName == importedEntity
+                    }
+                    packageEntity != null -> candidates.singleOrNull {
+                        it.qualifiedName == packageEntity
+                    } ?: candidates.singleOrNull()
+                    else -> candidates.singleOrNull()
+                } ?: return@mapNotNull null
+                val packageName = PACKAGE_DECLARATION.find(source)?.groupValues?.get(1).orEmpty()
+                SchemaRepositorySnapshot(
+                    artifactId = artifact.id,
+                    moduleId = artifact.owner.moduleId,
+                    interfaceName = parsed.interfaceName,
+                    qualifiedName = if (packageName.isBlank()) {
+                        parsed.interfaceName
+                    } else {
+                        "$packageName.${parsed.interfaceName}"
+                    },
+                    entityQualifiedName = entity.qualifiedName,
+                    idType = parsed.idType,
+                    sourceLanguage = if (kotlin) {
+                        EntitySourceLanguage.KOTLIN
+                    } else {
+                        EntitySourceLanguage.JAVA
+                    },
+                    sourceLocator = artifact.sourceLocator,
+                    config = parsed.config,
+                    methodEvidence = parsed.methods.map { method ->
+                        SchemaRepositoryMethodEvidence(
+                            sourceSignature = method.sourceSignature,
+                            editable = method.editable,
+                            issue = method.issue,
+                        )
+                    },
+                )
+            }
+            .sortedWith(compareBy(SchemaRepositorySnapshot::moduleId, SchemaRepositorySnapshot::qualifiedName))
 
         val physicalSchemas = buildPhysicalSchemas(stores, changelogs, ::content)
         val drifts = buildSchemaDrifts(entities, stores, physicalSchemas)
@@ -390,6 +456,7 @@ class SchemaWorkspaceService(
             modules = modules,
             stores = stores,
             entities = entities,
+            repositories = repositories,
             changelogs = changelogs,
             physicalSchemas = physicalSchemas,
             drifts = drifts,
@@ -2245,6 +2312,9 @@ class SchemaWorkspaceService(
         private const val MAX_INHERITANCE_DEPTH = 32
         private val SAFE_FILE_NAME = Regex("""[A-Za-z0-9][A-Za-z0-9._-]*""")
         private val PACKAGE_DECLARATION = Regex("""(?m)^\s*package\s+([\w.]+)\s*;?""")
+        private val IMPORT_DECLARATION = Regex(
+            """(?m)^\s*import\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*;?""",
+        )
         private val ENTITY_LISTENERS = Regex(
             """(?s)@\s*(?:[\w.]+\.)?EntityListeners\s*\((.*?)\)""",
         )
@@ -2317,7 +2387,6 @@ class SchemaWorkspaceService(
         private val DEPENDS_ON_PROPERTIES = Regex(
             """(?s)@\s*(?:[\w.]+\.)?DependsOnProperties\s*\(\s*(?:value\s*=\s*)?(?:\{\s*)?"([^"]+)"""",
         )
-        private val IMPORT_DECLARATION = Regex("""(?m)^\s*import\s+([\w.]+)\s*;?""")
         private val CASCADE_VALUE = Regex("""CascadeType\.([A-Za-z_]+)""")
         private val FETCH_EAGER = Regex("""FetchType\.EAGER\b""")
         private val FETCH_LAZY = Regex("""FetchType\.LAZY\b""")
@@ -2444,11 +2513,31 @@ data class SchemaWorkspaceResponse(
     val modules: List<SchemaModuleSnapshot>,
     val stores: List<SchemaDataStoreSnapshot>,
     val entities: List<SchemaEntitySnapshot>,
+    val repositories: List<SchemaRepositorySnapshot>,
     val changelogs: List<SchemaChangelogSnapshot>,
     val physicalSchemas: List<SchemaPhysicalStoreSnapshot>,
     val drifts: List<SchemaDriftSnapshot>,
     val findings: List<SchemaFinding>,
     val issues: List<WorkspaceChangeIssue>,
+)
+
+data class SchemaRepositorySnapshot(
+    val artifactId: String,
+    val moduleId: String,
+    val interfaceName: String,
+    val qualifiedName: String,
+    val entityQualifiedName: String,
+    val idType: String,
+    val sourceLanguage: EntitySourceLanguage,
+    val sourceLocator: SourceLocator,
+    val config: DataRepositoryConfig,
+    val methodEvidence: List<SchemaRepositoryMethodEvidence>,
+)
+
+data class SchemaRepositoryMethodEvidence(
+    val sourceSignature: String,
+    val editable: Boolean,
+    val issue: String? = null,
 )
 
 data class SchemaModuleSnapshot(

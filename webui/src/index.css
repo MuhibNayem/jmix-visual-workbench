@@ -58,6 +58,37 @@ body {
   container-type: inline-size;
 }
 
+.entity-designer-shell {
+  container-name: entity-designer;
+  container-type: inline-size;
+}
+
+.entity-designer-pane-switcher {
+  display: flex !important;
+}
+
+@container entity-designer (min-width: 1024px) {
+  .entity-designer-pane-switcher {
+    display: none !important;
+  }
+
+  .entity-designer-config {
+    display: block !important;
+    width: 20rem;
+    border-right: 1px solid rgb(69 69 90);
+  }
+
+  .entity-designer-attributes {
+    display: block !important;
+  }
+
+  .entity-designer-preview {
+    display: block !important;
+    width: 24rem;
+    border-left: 1px solid rgb(69 69 90);
+  }
+}
+
 .rule-designer-workspace {
   display: grid !important;
   grid-template-columns: minmax(190px, 22%) minmax(360px, 1fr) minmax(250px, 28%);

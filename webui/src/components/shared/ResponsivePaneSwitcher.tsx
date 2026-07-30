@@ -13,16 +13,18 @@ export default function ResponsivePaneSwitcher<T extends string>({
   options,
   label = 'Workspace panels',
   id = 'responsive-workspace-panel',
+  className = '',
 }: {
   value: T
   onChange: (value: T) => void
   options: ResponsivePaneOption<T>[]
   label?: string
   id?: string
+  className?: string
 }) {
   return (
     <div
-      className="flex min-w-0 shrink-0 items-center gap-2 border-b border-surface-border bg-surface-light/70 px-3 py-2 lg:hidden"
+      className={`flex min-w-0 shrink-0 items-center gap-2 border-b border-surface-border bg-surface-light/70 px-3 py-2 lg:hidden ${className}`}
     >
       <label htmlFor={id} className="shrink-0 text-[10px] font-semibold uppercase tracking-widest text-gray-500">
         Panel
