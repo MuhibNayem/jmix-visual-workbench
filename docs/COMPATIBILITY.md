@@ -77,3 +77,21 @@ ownership, revisions and operation-specific invariants. Earlier Jmix 2.x, Jmix
 profiles remain diagnostic/read-only unless an operation has its own stronger
 evidence. Exact generated-code certification will not be used to imply blanket
 write authorization.
+
+The shared write pipeline also rechecks every revision after it owns IntelliJ's
+write lock, snapshots document-aware source values and absent parent
+directories, verifies the complete approved result, and records undo only
+after verification. Any injected partial write, cancellation or undo/redo
+failure restores and verifies the entire prior file and directory topology.
+Concurrent edits between outer preflight and write-lock acquisition are
+preserved and reject the whole plan. Native repository injection uses its
+language PSI but shares the locked-document and exact-restoration contract.
+`verifyMutationArchitecture` release-blocks any newly introduced direct write
+primitive outside those reviewed boundaries and ensures failure injection
+cannot cross the JCEF bridge.
+
+This evidence covers deterministic one-shot failures. It does not claim that a
+persistent operating-system or hardware failure which also prevents restoration
+can be made atomically reversible across multiple physical files. Crash/power
+loss recovery, installed-IDE filesystem fault testing, and IDE-owned refactor
+certification remain separate release gates.

@@ -11,6 +11,7 @@ import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.module.ModuleUtilCore
 import com.intellij.openapi.progress.ProcessCanceledException
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectFileIndex
@@ -41,6 +42,10 @@ import com.intellij.util.ui.JBUI
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import org.jmixworkbench.services.JmixProjectService
+import org.jmixworkbench.services.WorkspaceMutationEvent
+import org.jmixworkbench.services.WorkspaceMutationOperation
+import org.jmixworkbench.services.WorkspaceMutationPhase
+import org.jmixworkbench.services.WorkspaceMutationProbe
 import org.jetbrains.kotlin.lexer.KtTokens
 import org.jetbrains.kotlin.psi.KtClass
 import org.jetbrains.kotlin.psi.KtClassOrObject
@@ -264,6 +269,7 @@ internal class NativeRepositoryInjectionService(
     fun inject(
         target: NativeInjectionTarget,
         candidate: NativeRepositoryCandidate,
+        mutationProbe: WorkspaceMutationProbe = WorkspaceMutationProbe.NONE,
     ): NativeInjectionResult {
         val targetElement = target.pointer.element
             ?: return NativeInjectionResult(false, "The target class changed. Invoke the action again.")
@@ -275,21 +281,61 @@ internal class NativeRepositoryInjectionService(
         val document = documentManager.getDocument(targetFile)
             ?: return NativeInjectionResult(false, "The target source document is unavailable.")
         val originalSource = document.text
+        mutationProbe.observe(
+            WorkspaceMutationEvent(
+                operation = WorkspaceMutationOperation.NATIVE_REPOSITORY_INJECTION,
+                phase = WorkspaceMutationPhase.AFTER_OUTER_PREFLIGHT,
+                relativePath = targetFile.virtualFile?.path,
+            ),
+        )
         WriteCommandAction.writeCommandAction(project, targetFile)
             .withName("Inject Jmix data repository")
             .run<RuntimeException> {
+                if (document.text != originalSource) {
+                    result = NativeInjectionResult(
+                        false,
+                        "The target source changed before IntelliJ obtained write access. Invoke the action again.",
+                    )
+                    return@run
+                }
                 try {
+                    mutationProbe.observe(
+                        WorkspaceMutationEvent(
+                            operation = WorkspaceMutationOperation.NATIVE_REPOSITORY_INJECTION,
+                            phase = WorkspaceMutationPhase.AFTER_LOCKED_PREFLIGHT,
+                            relativePath = targetFile.virtualFile?.path,
+                        ),
+                    )
+                    ProgressManager.checkCanceled()
+                    mutationProbe.observe(
+                        WorkspaceMutationEvent(
+                            operation = WorkspaceMutationOperation.NATIVE_REPOSITORY_INJECTION,
+                            phase = WorkspaceMutationPhase.BEFORE_FILE_MUTATION,
+                            relativePath = targetFile.virtualFile?.path,
+                            fileIndex = 0,
+                        ),
+                    )
                     result = when (target.language) {
                         NativeInjectionLanguage.JAVA ->
                             injectJava(targetElement as? PsiClass, repositoryClass)
                         NativeInjectionLanguage.KOTLIN ->
                             injectKotlin(targetElement as? KtClassOrObject, candidate.qualifiedName)
                     }
+                    documentManager.doPostponedOperationsAndUnblockDocument(document)
+                    documentManager.commitDocument(document)
+                    mutationProbe.observe(
+                        WorkspaceMutationEvent(
+                            operation = WorkspaceMutationOperation.NATIVE_REPOSITORY_INJECTION,
+                            phase = WorkspaceMutationPhase.AFTER_FILE_MUTATION,
+                            relativePath = targetFile.virtualFile?.path,
+                            fileIndex = 0,
+                        ),
+                    )
                 } catch (canceled: ProcessCanceledException) {
-                    restoreSource(documentManager, document, originalSource)
+                    restoreSourceExactly(documentManager, document, originalSource)
                     throw canceled
                 } catch (failure: RuntimeException) {
-                    restoreSource(documentManager, document, originalSource)
+                    restoreSourceExactly(documentManager, document, originalSource)
                     result = NativeInjectionResult(
                         false,
                         "Repository injection failed without changing the source: " +
@@ -479,13 +525,17 @@ internal class NativeRepositoryInjectionService(
             annotation.qualifiedName == NO_REPOSITORY_BEAN
         }
 
-    private fun restoreSource(
+    private fun restoreSourceExactly(
         documentManager: PsiDocumentManager,
         document: com.intellij.openapi.editor.Document,
         originalSource: String,
     ) {
+        documentManager.doPostponedOperationsAndUnblockDocument(document)
         document.setText(originalSource)
         documentManager.commitDocument(document)
+        check(document.text == originalSource) {
+            "Exact repository-injection rollback could not be proven."
+        }
     }
 
     private fun javaTargetSupported(target: PsiClass): Boolean =

@@ -1,6 +1,9 @@
 package org.jmixworkbench.actions
 
+import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.testFramework.fixtures.LightJavaCodeInsightFixtureTestCase
+import org.jmixworkbench.services.WorkspaceMutationPhase
+import org.jmixworkbench.services.WorkspaceMutationProbe
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -231,6 +234,57 @@ class InjectJmixRepositoryActionTest : LightJavaCodeInsightFixtureTestCase() {
                 "com.company.payroll.repository.UnprovenRepository",
             ).constraintsApplied,
         )
+    }
+
+    fun testInjectionFailureRestoresExactSourceAndLockedRecheckPreservesConcurrentEdit() {
+        addEntityAndGenericRepository()
+        myFixture.configureByText(
+            "FailureSafeController.java",
+            """
+            package com.company.payroll.view;
+
+            public class FailureSafeController {
+                // Preserve this handwritten controller exactly.
+                <caret>
+            }
+            """.trimIndent(),
+        )
+        val service = NativeRepositoryInjectionService(project)
+        val target = requireNotNull(service.target(myFixture.file, myFixture.caretOffset))
+        val candidate = service.candidates(target).single()
+        val original = myFixture.file.text
+
+        val failed = service.inject(
+            target,
+            candidate,
+            WorkspaceMutationProbe { event ->
+                if (event.phase == WorkspaceMutationPhase.AFTER_FILE_MUTATION) {
+                    throw IllegalStateException("Injected PSI mutation failure")
+                }
+            },
+        )
+        assertFalse(failed.accepted)
+        assertEquals(original, myFixture.file.text)
+
+        val manualSuffix = "\n// Concurrent developer edit\n"
+        val stale = service.inject(
+            target,
+            candidate,
+            WorkspaceMutationProbe { event ->
+                if (event.phase == WorkspaceMutationPhase.AFTER_OUTER_PREFLIGHT) {
+                    WriteCommandAction.runWriteCommandAction(project) {
+                        myFixture.editor.document.insertString(
+                            myFixture.editor.document.textLength,
+                            manualSuffix,
+                        )
+                    }
+                }
+            },
+        )
+        assertFalse(stale.accepted)
+        assertTrue(stale.message.contains("changed before IntelliJ obtained write access"))
+        assertEquals(original + manualSuffix, myFixture.editor.document.text)
+        assertFalse(myFixture.file.text.contains("@Autowired"))
     }
 
     fun testActionIsPackagedInSharedAndBothHostDescriptors() {

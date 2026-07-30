@@ -2,6 +2,8 @@ package org.jmixworkbench.services
 
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.progress.ProcessCanceledException
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VfsUtilCore
@@ -28,12 +30,18 @@ class WorkspaceHistoryService(
     private var retainedBytes = 0L
 
     @Synchronized
-    fun record(plan: WorkspaceChangePlan) {
+    fun record(
+        plan: WorkspaceChangePlan,
+        createdParentPaths: Map<String, List<String>> = emptyMap(),
+    ) {
         if (!plan.accepted || plan.files.isEmpty()) return
         val entry = HistoryEntry(
             changeSetId = plan.changeSetId,
             label = plan.label,
             files = plan.files,
+            createdParentPaths = createdParentPaths
+                .filterKeys { path -> plan.files.any { it.relativePath == path } }
+                .mapValues { (_, paths) -> paths.distinct() },
             retainedBytes = plan.files.sumOf { file ->
                 (file.originalContent?.toByteArray(Charsets.UTF_8)?.size ?: 0).toLong() +
                     file.resultContent.toByteArray(Charsets.UTF_8).size
@@ -50,10 +58,13 @@ class WorkspaceHistoryService(
     fun snapshot(): WorkspaceHistorySnapshot = snapshotUnsafe()
 
     @Synchronized
-    fun undo(): WorkspaceHistoryMutationResponse {
+    fun undo(): WorkspaceHistoryMutationResponse =
+        undo(WorkspaceMutationProbe.NONE)
+
+    internal fun undo(mutationProbe: WorkspaceMutationProbe): WorkspaceHistoryMutationResponse {
         val entry = undoEntries.peekLast()
             ?: return noChange("Nothing to undo.")
-        val response = mutate(entry, Direction.UNDO)
+        val response = mutate(entry, Direction.UNDO, mutationProbe)
         if (response.success) {
             undoEntries.removeLast()
             redoEntries.addLast(entry)
@@ -62,10 +73,13 @@ class WorkspaceHistoryService(
     }
 
     @Synchronized
-    fun redo(): WorkspaceHistoryMutationResponse {
+    fun redo(): WorkspaceHistoryMutationResponse =
+        redo(WorkspaceMutationProbe.NONE)
+
+    internal fun redo(mutationProbe: WorkspaceMutationProbe): WorkspaceHistoryMutationResponse {
         val entry = redoEntries.peekLast()
             ?: return noChange("Nothing to redo.")
-        val response = mutate(entry, Direction.REDO)
+        val response = mutate(entry, Direction.REDO, mutationProbe)
         if (response.success) {
             redoEntries.removeLast()
             undoEntries.addLast(entry)
@@ -73,7 +87,11 @@ class WorkspaceHistoryService(
         return response.copy(history = snapshotUnsafe())
     }
 
-    private fun mutate(entry: HistoryEntry, direction: Direction): WorkspaceHistoryMutationResponse {
+    private fun mutate(
+        entry: HistoryEntry,
+        direction: Direction,
+        mutationProbe: WorkspaceMutationProbe,
+    ): WorkspaceHistoryMutationResponse {
         val resolver = ProjectFileResolver.getInstance(project)
         val targets = linkedMapOf<String, ResolvedProjectTarget>()
         entry.files.forEach { planned ->
@@ -95,24 +113,78 @@ class WorkspaceHistoryService(
             )
         }
 
-        val beforeMutation = entry.files.associate { planned ->
-            val target = requireNotNull(targets[planned.relativePath])
-            val file = target.root.findFileByRelativePath(target.relativePath)
-            planned.relativePath to file?.let(ProjectSourceText::read)
-        }
         return try {
+            mutationProbe.observe(
+                WorkspaceMutationEvent(
+                    operation = direction.operation,
+                    phase = WorkspaceMutationPhase.AFTER_OUTER_PREFLIGHT,
+                ),
+            )
             WriteCommandAction.runWriteCommandAction(
                 project,
                 "${direction.label} ${entry.label}",
                 "jmix-workbench-history:${direction.name.lowercase()}:${entry.changeSetId}",
                 Runnable {
+                    var snapshots: Map<String, HistoryTargetSnapshot>? = null
                     try {
-                        val files = if (direction == Direction.UNDO) entry.files.asReversed() else entry.files
-                        files.forEach { planned ->
-                            applyFile(requireNotNull(targets[planned.relativePath]), planned, direction)
+                        val lockedPreflight = preflight(targets, entry, direction)
+                        if (lockedPreflight != null) {
+                            throw LockedHistoryPreflightFailure(lockedPreflight)
                         }
+                        snapshots = captureSnapshots(targets, entry)
+                        mutationProbe.observe(
+                            WorkspaceMutationEvent(
+                                operation = direction.operation,
+                                phase = WorkspaceMutationPhase.AFTER_LOCKED_PREFLIGHT,
+                            ),
+                        )
+                        val files = if (direction == Direction.UNDO) entry.files.asReversed() else entry.files
+                        files.forEachIndexed { index, planned ->
+                            ProgressManager.checkCanceled()
+                            mutationProbe.observe(
+                                WorkspaceMutationEvent(
+                                    operation = direction.operation,
+                                    phase = WorkspaceMutationPhase.BEFORE_FILE_MUTATION,
+                                    relativePath = planned.relativePath,
+                                    fileIndex = index,
+                                ),
+                            )
+                            applyFile(requireNotNull(targets[planned.relativePath]), planned, direction)
+                            mutationProbe.observe(
+                                WorkspaceMutationEvent(
+                                    operation = direction.operation,
+                                    phase = WorkspaceMutationPhase.AFTER_FILE_MUTATION,
+                                    relativePath = planned.relativePath,
+                                    fileIndex = index,
+                                ),
+                            )
+                        }
+                        if (direction == Direction.UNDO) {
+                            cleanupCreatedParents(targets, entry.createdParentPaths)
+                        }
+                        verifyDirection(targets, entry, direction)
                     } catch (failure: Throwable) {
-                        restore(targets, beforeMutation)
+                        val captured = snapshots
+                        if (captured != null) {
+                            try {
+                                mutationProbe.observe(
+                                    WorkspaceMutationEvent(
+                                        operation = direction.operation,
+                                        phase = WorkspaceMutationPhase.BEFORE_ROLLBACK,
+                                    ),
+                                )
+                                restore(targets, captured)
+                                mutationProbe.observe(
+                                    WorkspaceMutationEvent(
+                                        operation = direction.operation,
+                                        phase = WorkspaceMutationPhase.AFTER_ROLLBACK,
+                                    ),
+                                )
+                            } catch (rollbackFailure: Throwable) {
+                                failure.addSuppressed(rollbackFailure)
+                                throw HistoryRollbackFailure(failure, rollbackFailure)
+                            }
+                        }
                         throw failure
                     }
                 },
@@ -134,11 +206,100 @@ class WorkspaceHistoryService(
                 history = snapshotUnsafe(),
                 issues = emptyList(),
             )
+        } catch (canceled: ProcessCanceledException) {
+            throw canceled
+        } catch (failure: LockedHistoryPreflightFailure) {
+            WorkspaceHistoryMutationResponse(
+                success = false,
+                message = failure.issue.message,
+                changedFiles = emptyList(),
+                revisions = emptyMap(),
+                history = snapshotUnsafe(),
+                issues = listOf(failure.issue),
+            )
+        } catch (failure: HistoryRollbackFailure) {
+            rejected(
+                "JVW-HISTORY-${direction.name}-ROLLBACK-FAILED",
+                failure.message ?: "${direction.label} failed and exact restoration could not be proven.",
+            )
         } catch (failure: Throwable) {
             rejected(
                 "JVW-HISTORY-${direction.name}-FAILED",
                 failure.message ?: "${direction.label} failed and the workspace was restored.",
             )
+        }
+    }
+
+    private fun captureSnapshots(
+        targets: Map<String, ResolvedProjectTarget>,
+        entry: HistoryEntry,
+    ): Map<String, HistoryTargetSnapshot> =
+        entry.files.associate { planned ->
+            val target = requireNotNull(targets[planned.relativePath])
+            val file = target.root.findFileByRelativePath(target.relativePath)
+            planned.relativePath to HistoryTargetSnapshot(
+                content = file?.let(ProjectSourceText::read),
+                missingParentPaths = missingParentPaths(target),
+            )
+        }
+
+    private fun missingParentPaths(target: ResolvedProjectTarget): List<String> {
+        val parentPath = target.relativePath.substringBeforeLast('/', "")
+        if (parentPath.isBlank()) return emptyList()
+        val missing = mutableListOf<String>()
+        var current = ""
+        parentPath.split('/').filter(String::isNotBlank).forEach { segment ->
+            current = if (current.isBlank()) segment else "$current/$segment"
+            if (target.root.findFileByRelativePath(current) == null) {
+                missing += current
+            }
+        }
+        return missing
+    }
+
+    private fun cleanupCreatedParents(
+        targets: Map<String, ResolvedProjectTarget>,
+        createdParentPaths: Map<String, List<String>>,
+    ) {
+        createdParentPaths.forEach { (relativePath, directories) ->
+            val target = requireNotNull(targets[relativePath])
+            directories
+                .sortedByDescending { it.count { character -> character == '/' } }
+                .forEach { directoryPath ->
+                    val directory = target.root.findFileByRelativePath(directoryPath)
+                    if (directory != null && directory.isDirectory && directory.children.isEmpty()) {
+                        directory.delete(this)
+                    }
+                }
+        }
+    }
+
+    private fun verifyDirection(
+        targets: Map<String, ResolvedProjectTarget>,
+        entry: HistoryEntry,
+        direction: Direction,
+    ) {
+        entry.files.forEach { planned ->
+            val target = requireNotNull(targets[planned.relativePath])
+            val file = target.root.findFileByRelativePath(target.relativePath)
+            val expected = when {
+                direction == Direction.UNDO && planned.mode == WorkspaceFileChangeMode.CREATE -> null
+                direction == Direction.UNDO -> planned.originalContent
+                else -> planned.resultContent
+            }
+            when (expected) {
+                null -> check(file == null) {
+                    "History verification failed: ${planned.relativePath} still exists."
+                }
+                else -> {
+                    check(file != null && !file.isDirectory) {
+                        "History verification failed: ${planned.relativePath} is unavailable."
+                    }
+                    check(ProjectSourceText.read(requireNotNull(file)) == expected) {
+                        "History verification failed: ${planned.relativePath} differs from the expected revision."
+                    }
+                }
+            }
         }
     }
 
@@ -242,16 +403,59 @@ class WorkspaceHistoryService(
 
     private fun restore(
         targets: Map<String, ResolvedProjectTarget>,
-        contents: Map<String, String?>,
+        snapshots: Map<String, HistoryTargetSnapshot>,
     ) {
-        contents.forEach { (path, content) ->
-            val target = targets[path] ?: return@forEach
-            val file = target.root.findFileByRelativePath(target.relativePath)
-            when {
-                content == null && file != null -> runCatching { file.delete(this) }
-                content != null && file == null -> runCatching { createFile(target, path, content) }
-                content != null && file != null -> runCatching { ProjectSourceText.write(project, file, content) }
-            }
+        val restorationFailures = mutableListOf<Throwable>()
+        snapshots.entries.toList().asReversed().forEach { (path, snapshot) ->
+            val target = requireNotNull(targets[path])
+            runCatching {
+                val file = target.root.findFileByRelativePath(target.relativePath)
+                when {
+                    snapshot.content == null && file != null -> file.delete(this)
+                    snapshot.content != null && file == null -> createFile(target, path, snapshot.content)
+                    snapshot.content != null && file != null ->
+                        ProjectSourceText.write(project, file, snapshot.content)
+                }
+            }.exceptionOrNull()?.let(restorationFailures::add)
+        }
+        snapshots.forEach { (path, snapshot) ->
+            val target = requireNotNull(targets[path])
+            snapshot.missingParentPaths
+                .sortedByDescending { it.count { character -> character == '/' } }
+                .forEach { directoryPath ->
+                    runCatching {
+                        val directory = target.root.findFileByRelativePath(directoryPath)
+                        if (directory != null && directory.isDirectory && directory.children.isEmpty()) {
+                            directory.delete(this)
+                        }
+                    }.exceptionOrNull()?.let(restorationFailures::add)
+                }
+        }
+        snapshots.forEach { (path, snapshot) ->
+            val target = requireNotNull(targets[path])
+            runCatching {
+                val file = target.root.findFileByRelativePath(target.relativePath)
+                when (val content = snapshot.content) {
+                    null -> check(file == null) {
+                        "History rollback verification failed: $path still exists."
+                    }
+                    else -> {
+                        check(file != null && !file.isDirectory) {
+                            "History rollback verification failed: $path is unavailable."
+                        }
+                        check(ProjectSourceText.read(requireNotNull(file)) == content) {
+                            "History rollback verification failed: $path differs from its original revision."
+                        }
+                    }
+                }
+            }.exceptionOrNull()?.let(restorationFailures::add)
+        }
+        if (restorationFailures.isNotEmpty()) {
+            val failure = IllegalStateException(
+                "Exact history rollback failed for ${restorationFailures.size} workspace operation(s).",
+            )
+            restorationFailures.forEach(failure::addSuppressed)
+            throw failure
         }
     }
 
@@ -313,15 +517,35 @@ class WorkspaceHistoryService(
         val changeSetId: String,
         val label: String,
         val files: List<PlannedWorkspaceFile>,
+        val createdParentPaths: Map<String, List<String>>,
         val retainedBytes: Long,
+    )
+
+    private data class HistoryTargetSnapshot(
+        val content: String?,
+        val missingParentPaths: List<String>,
+    )
+
+    private class LockedHistoryPreflightFailure(
+        val issue: WorkspaceChangeIssue,
+    ) : IllegalStateException(issue.message)
+
+    private class HistoryRollbackFailure(
+        mutationFailure: Throwable,
+        rollbackFailure: Throwable,
+    ) : IllegalStateException(
+        "The history mutation failed (${mutationFailure.message ?: mutationFailure::class.java.simpleName}) " +
+            "and exact rollback also failed (${rollbackFailure.message ?: rollbackFailure::class.java.simpleName}).",
+        mutationFailure,
     )
 
     private enum class Direction(
         val label: String,
         val pastTense: String,
+        val operation: WorkspaceMutationOperation,
     ) {
-        UNDO("Undo", "Undid"),
-        REDO("Redo", "Redid"),
+        UNDO("Undo", "Undid", WorkspaceMutationOperation.UNDO),
+        REDO("Redo", "Redid", WorkspaceMutationOperation.REDO),
     }
 
     companion object {

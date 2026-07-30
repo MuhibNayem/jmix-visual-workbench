@@ -598,6 +598,64 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
     }
 }
 
+val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
+    description = "Rejects new project-write primitives outside the certified mutation boundaries."
+    val projectDirectoryRoot = layout.projectDirectory.asFile
+    val productionSources = fileTree(layout.projectDirectory.dir("src/main/kotlin")) {
+        include("**/*.kt")
+    }
+    val probeSourceFile = layout.projectDirectory.file(
+        "src/main/kotlin/org/jmixworkbench/services/WorkspaceMutationProbe.kt",
+    ).asFile
+    val bridgeSources = fileTree(
+        layout.projectDirectory.dir("src/main/kotlin/org/jmixworkbench/bridge"),
+    ) {
+        include("**/*.kt")
+    }
+    inputs.files(productionSources, probeSourceFile, bridgeSources)
+    doLast {
+        val sharedBoundary = setOf(
+            "src/main/kotlin/org/jmixworkbench/services/WorkspaceChangeService.kt",
+            "src/main/kotlin/org/jmixworkbench/services/WorkspaceHistoryService.kt",
+        )
+        val allowedByMarker = linkedMapOf(
+            "WriteCommandAction" to
+                sharedBoundary + "src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt",
+            "runWriteAction" to emptySet(),
+            "VfsUtil.saveText" to
+                sharedBoundary + "src/main/kotlin/org/jmixworkbench/services/ProjectSourceText.kt",
+            ".createChildData(" to sharedBoundary,
+            ".setText(" to setOf(
+                "src/main/kotlin/org/jmixworkbench/services/ProjectSourceText.kt",
+                "src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt",
+            ),
+            ".delete(this)" to sharedBoundary,
+        )
+        productionSources.files.sorted().forEach { source ->
+            val relativePath = source.relativeTo(projectDirectoryRoot).invariantSeparatorsPath
+            val text = source.readText()
+            allowedByMarker.forEach { (marker, allowedFiles) ->
+                if (marker in text) {
+                    check(relativePath in allowedFiles) {
+                        "$relativePath uses project-write primitive '$marker' outside the certified " +
+                            "WorkspaceChange/WorkspaceHistory/native-PSI mutation boundaries."
+                    }
+                }
+            }
+        }
+        val probeSource = probeSourceFile.readText()
+        check("internal fun interface WorkspaceMutationProbe" in probeSource) {
+            "Failure injection must remain internal to the plugin implementation."
+        }
+        bridgeSources.files.forEach { bridge ->
+            check("WorkspaceMutationProbe" !in bridge.readText()) {
+                "The JCEF bridge must never expose mutation fault injection: " +
+                    bridge.relativeTo(projectDirectoryRoot)
+            }
+        }
+    }
+}
+
 val snapshotLockHashes = tasks.register("snapshotLockHashes") {
     description = "Records SHA-256 values for the two reviewed host dependency lock files."
     inputs.files(dependencyLockFiles)
@@ -895,6 +953,7 @@ tasks.register("phase1FastCheck") {
         "verifyHostBuildDefinitions",
         "verifyHostToolchains",
         verifyNativeIndexArchitecture,
+        verifyMutationArchitecture,
         verifyDependencyIntegrity,
     )
 }

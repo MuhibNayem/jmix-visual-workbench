@@ -2,6 +2,8 @@ package org.jmixworkbench.services
 
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.progress.ProcessCanceledException
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtil
@@ -50,7 +52,13 @@ class WorkspaceChangeService(
         return prepared
     }
 
-    fun applyPrepared(prepared: PreparedWorkspaceChange): WorkspaceChangeApplyResponse {
+    fun applyPrepared(prepared: PreparedWorkspaceChange): WorkspaceChangeApplyResponse =
+        applyPrepared(prepared, WorkspaceMutationProbe.NONE)
+
+    internal fun applyPrepared(
+        prepared: PreparedWorkspaceChange,
+        mutationProbe: WorkspaceMutationProbe,
+    ): WorkspaceChangeApplyResponse {
         val plan = prepared.plan
         if (
             !plan.accepted ||
@@ -85,56 +93,124 @@ class WorkspaceChangeService(
             )
         }
 
-        val modifiedFiles = mutableListOf<PlannedWorkspaceFile>()
-        val createdFiles = mutableListOf<VirtualFile>()
         return try {
+            mutationProbe.observe(
+                WorkspaceMutationEvent(
+                    operation = WorkspaceMutationOperation.APPLY,
+                    phase = WorkspaceMutationPhase.AFTER_OUTER_PREFLIGHT,
+                ),
+            )
             WriteCommandAction.runWriteCommandAction(
                 project,
                 plan.label,
                 plan.changeSetId,
                 Runnable {
+                    var snapshots: Map<String, WorkspaceTargetSnapshot>? = null
                     try {
-                        plan.files.forEach { planned ->
+                        val lockedPreflightIssue = preflight(plan, prepared.targets)
+                        if (lockedPreflightIssue != null) {
+                            throw LockedWorkspacePreflightFailure(lockedPreflightIssue)
+                        }
+                        snapshots = captureSnapshots(plan, prepared.targets)
+                        mutationProbe.observe(
+                            WorkspaceMutationEvent(
+                                operation = WorkspaceMutationOperation.APPLY,
+                                phase = WorkspaceMutationPhase.AFTER_LOCKED_PREFLIGHT,
+                            ),
+                        )
+                        plan.files.forEachIndexed { index, planned ->
+                            ProgressManager.checkCanceled()
+                            mutationProbe.observe(
+                                WorkspaceMutationEvent(
+                                    operation = WorkspaceMutationOperation.APPLY,
+                                    phase = WorkspaceMutationPhase.BEFORE_FILE_MUTATION,
+                                    relativePath = planned.relativePath,
+                                    fileIndex = index,
+                                ),
+                            )
                             when (planned.mode) {
                                 WorkspaceFileChangeMode.CREATE -> {
                                     val target = requireNotNull(prepared.targets[planned.relativePath])
-                                    val created = createFile(target, planned)
-                                    createdFiles += created
+                                    createFile(target, planned)
                                 }
                                 WorkspaceFileChangeMode.MODIFY -> {
                                     val target = requireNotNull(prepared.targets[planned.relativePath])
                                     val file = target.root.findFileByRelativePath(target.relativePath)
                                         ?: error("Source disappeared during write: ${planned.relativePath}")
                                     ProjectSourceText.write(project, file, planned.resultContent)
-                                    modifiedFiles += planned
                                 }
                             }
+                            mutationProbe.observe(
+                                WorkspaceMutationEvent(
+                                    operation = WorkspaceMutationOperation.APPLY,
+                                    phase = WorkspaceMutationPhase.AFTER_FILE_MUTATION,
+                                    relativePath = planned.relativePath,
+                                    fileIndex = index,
+                                ),
+                            )
                         }
+                        verifyApplied(plan, prepared.targets)
+                        WorkspaceHistoryService.getInstance(project).record(
+                            plan = plan,
+                            createdParentPaths = requireNotNull(snapshots).mapValues { it.value.missingParentPaths },
+                        )
                     } catch (failure: Throwable) {
-                        modifiedFiles.asReversed().forEach { planned ->
-                            val target = prepared.targets[planned.relativePath]
-                            val file = target?.root?.findFileByRelativePath(target.relativePath)
-                            if (file != null && planned.originalContent != null) {
-                                runCatching { ProjectSourceText.write(project, file, planned.originalContent) }
-                            }
-                        }
-                        createdFiles.asReversed().forEach { file ->
-                            if (file.isValid) {
-                                runCatching { file.delete(this) }
+                        val captured = snapshots
+                        if (captured != null) {
+                            try {
+                                mutationProbe.observe(
+                                    WorkspaceMutationEvent(
+                                        operation = WorkspaceMutationOperation.APPLY,
+                                        phase = WorkspaceMutationPhase.BEFORE_ROLLBACK,
+                                    ),
+                                )
+                                restoreSnapshots(plan, prepared.targets, captured)
+                                mutationProbe.observe(
+                                    WorkspaceMutationEvent(
+                                        operation = WorkspaceMutationOperation.APPLY,
+                                        phase = WorkspaceMutationPhase.AFTER_ROLLBACK,
+                                    ),
+                                )
+                            } catch (rollbackFailure: Throwable) {
+                                failure.addSuppressed(rollbackFailure)
+                                throw WorkspaceRollbackFailure(failure, rollbackFailure)
                             }
                         }
                         throw failure
                     }
                 },
             )
-            ApplicationGraphService.getInstance(project).invalidate()
-            WorkspaceHistoryService.getInstance(project).record(plan)
+            runCatching { ApplicationGraphService.getInstance(project).invalidate() }
             WorkspaceChangeApplyResponse(
                 success = true,
                 changeSetId = plan.changeSetId,
                 planDigest = plan.planDigest,
                 filesChanged = plan.files.map(PlannedWorkspaceFile::relativePath),
                 issues = emptyList(),
+            )
+        } catch (canceled: ProcessCanceledException) {
+            throw canceled
+        } catch (failure: LockedWorkspacePreflightFailure) {
+            WorkspaceChangeApplyResponse(
+                success = false,
+                changeSetId = plan.changeSetId,
+                planDigest = plan.planDigest,
+                filesChanged = emptyList(),
+                issues = listOf(failure.issue),
+            )
+        } catch (failure: WorkspaceRollbackFailure) {
+            WorkspaceChangeApplyResponse(
+                success = false,
+                changeSetId = plan.changeSetId,
+                planDigest = plan.planDigest,
+                filesChanged = emptyList(),
+                issues = listOf(
+                    WorkspaceChangeIssue(
+                        code = "JVW-CHANGE-ROLLBACK-FAILED",
+                        message = failure.message
+                            ?: "The workspace change failed and exact restoration could not be proven.",
+                    ),
+                ),
             )
         } catch (failure: Throwable) {
             WorkspaceChangeApplyResponse(
@@ -149,6 +225,112 @@ class WorkspaceChangeService(
                     ),
                 ),
             )
+        }
+    }
+
+    private fun captureSnapshots(
+        plan: WorkspaceChangePlan,
+        targets: Map<String, ResolvedProjectTarget>,
+    ): Map<String, WorkspaceTargetSnapshot> =
+        plan.files.associate { planned ->
+            val target = requireNotNull(targets[planned.relativePath])
+            val file = target.root.findFileByRelativePath(target.relativePath)
+            planned.relativePath to WorkspaceTargetSnapshot(
+                content = file?.let(ProjectSourceText::read),
+                missingParentPaths = missingParentPaths(target),
+            )
+        }
+
+    private fun missingParentPaths(target: ResolvedProjectTarget): List<String> {
+        val parentPath = target.relativePath.substringBeforeLast('/', "")
+        if (parentPath.isBlank()) return emptyList()
+        val missing = mutableListOf<String>()
+        var current = ""
+        parentPath.split('/').filter(String::isNotBlank).forEach { segment ->
+            current = if (current.isBlank()) segment else "$current/$segment"
+            if (target.root.findFileByRelativePath(current) == null) {
+                missing += current
+            }
+        }
+        return missing
+    }
+
+    private fun verifyApplied(
+        plan: WorkspaceChangePlan,
+        targets: Map<String, ResolvedProjectTarget>,
+    ) {
+        plan.files.forEach { planned ->
+            val target = requireNotNull(targets[planned.relativePath])
+            val file = target.root.findFileByRelativePath(target.relativePath)
+                ?: error("Mutation verification failed: ${planned.relativePath} is missing.")
+            check(!file.isDirectory) {
+                "Mutation verification failed: ${planned.relativePath} is a directory."
+            }
+            check(ProjectSourceText.read(file) == planned.resultContent) {
+                "Mutation verification failed: ${planned.relativePath} does not match the approved result."
+            }
+        }
+    }
+
+    private fun restoreSnapshots(
+        plan: WorkspaceChangePlan,
+        targets: Map<String, ResolvedProjectTarget>,
+        snapshots: Map<String, WorkspaceTargetSnapshot>,
+    ) {
+        val restorationFailures = mutableListOf<Throwable>()
+        plan.files.asReversed().forEach { planned ->
+            val target = requireNotNull(targets[planned.relativePath])
+            val snapshot = requireNotNull(snapshots[planned.relativePath])
+            runCatching {
+                val file = target.root.findFileByRelativePath(target.relativePath)
+                when {
+                    snapshot.content == null && file != null -> file.delete(this)
+                    snapshot.content != null && file == null ->
+                        createFile(target, planned.relativePath, snapshot.content)
+                    snapshot.content != null && file != null ->
+                        ProjectSourceText.write(project, file, snapshot.content)
+                }
+            }.exceptionOrNull()?.let(restorationFailures::add)
+        }
+        snapshots.forEach { (relativePath, snapshot) ->
+            val target = requireNotNull(targets[relativePath])
+            snapshot.missingParentPaths
+                .sortedByDescending { it.count { character -> character == '/' } }
+                .forEach { directoryPath ->
+                    runCatching {
+                        val directory = target.root.findFileByRelativePath(directoryPath)
+                        if (directory != null && directory.isDirectory && directory.children.isEmpty()) {
+                            directory.delete(this)
+                        }
+                    }.exceptionOrNull()?.let(restorationFailures::add)
+                }
+        }
+        plan.files.forEach { planned ->
+            val target = requireNotNull(targets[planned.relativePath])
+            val snapshot = requireNotNull(snapshots[planned.relativePath])
+            runCatching {
+                val file = target.root.findFileByRelativePath(target.relativePath)
+                when (val content = snapshot.content) {
+                    null -> check(file == null) {
+                        "Rollback verification failed: ${planned.relativePath} still exists."
+                    }
+                    else -> {
+                        check(file != null && !file.isDirectory) {
+                            "Rollback verification failed: ${planned.relativePath} is unavailable."
+                        }
+                        check(ProjectSourceText.read(requireNotNull(file)) == content) {
+                            "Rollback verification failed: ${planned.relativePath} differs from its original bytes."
+                        }
+                    }
+                }
+            }.exceptionOrNull()?.let(restorationFailures::add)
+        }
+        if (restorationFailures.isNotEmpty()) {
+            val failure = IllegalStateException(
+                "Exact rollback failed for ${restorationFailures.size} workspace operation(s).",
+            )
+            restorationFailures.forEach(failure::addSuppressed)
+            throw failure
         }
     }
 
@@ -269,6 +451,12 @@ class WorkspaceChangeService(
     private fun createFile(
         target: ResolvedProjectTarget,
         planned: PlannedWorkspaceFile,
+    ): VirtualFile = createFile(target, planned.relativePath, planned.resultContent)
+
+    private fun createFile(
+        target: ResolvedProjectTarget,
+        displayPath: String,
+        content: String,
     ): VirtualFile {
         val parentPath = target.relativePath.substringBeforeLast('/', "")
         val parent = if (parentPath.isBlank()) {
@@ -278,8 +466,8 @@ class WorkspaceChangeService(
                 ?: error("Cannot create source directory: $parentPath")
         }
         val fileName = target.relativePath.substringAfterLast('/')
-        check(parent.findChild(fileName) == null) { "Target already exists: ${planned.relativePath}" }
-        return parent.createChildData(this, fileName).also { VfsUtil.saveText(it, planned.resultContent) }
+        check(parent.findChild(fileName) == null) { "Target already exists: $displayPath" }
+        return parent.createChildData(this, fileName).also { VfsUtil.saveText(it, content) }
     }
 
     private fun validPath(path: String): Boolean =
@@ -310,6 +498,24 @@ class WorkspaceChangeService(
         fun getInstance(project: Project): WorkspaceChangeService =
             project.getService(WorkspaceChangeService::class.java)
     }
+
+    private data class WorkspaceTargetSnapshot(
+        val content: String?,
+        val missingParentPaths: List<String>,
+    )
+
+    private class LockedWorkspacePreflightFailure(
+        val issue: WorkspaceChangeIssue,
+    ) : IllegalStateException(issue.message)
+
+    private class WorkspaceRollbackFailure(
+        mutationFailure: Throwable,
+        rollbackFailure: Throwable,
+    ) : IllegalStateException(
+        "The workspace mutation failed (${mutationFailure.message ?: mutationFailure::class.java.simpleName}) " +
+            "and exact rollback also failed (${rollbackFailure.message ?: rollbackFailure::class.java.simpleName}).",
+        mutationFailure,
+    )
 }
 
 data class WorkspaceChangeApplyRequest(

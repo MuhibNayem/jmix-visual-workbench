@@ -296,9 +296,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 319 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 325 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 319 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 325 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -463,10 +463,26 @@ inspection control rather than relying on a hard-to-hit table-row target.
   through inheritor indexes and module dependency scope, including custom
   generic repository hierarchies. It injects Java fields or Kotlin properties
   with PSI, recognizes existing field/constructor injection, applies one
-  undoable command, restores the original document on mutation failure and
+  undoable command, rechecks the exact document after obtaining write access,
+  flushes postponed PSI formatting safely, restores and verifies the original
+  document on mutation failure, and
   warns natively when inherited `@ApplyConstraints` is disabled or cannot be
   proven. `@NoRepositoryBean` fragments are excluded, dumb mode is disabled,
   and shared plus both host descriptors register the action.
+- The central project-write pipeline is now failure-certified rather than only
+  command-grouped. It repeats stale-source preflight under IntelliJ's write
+  lock, snapshots every document/VFS value plus directories proven absent,
+  verifies every approved result, and records history only after verification.
+  One-shot failure after a partial multi-file apply, cancellation, a concurrent
+  edit between preflight and lock acquisition, injected undo failure and full
+  undo/redo were exercised on both host lanes. Every failed operation restored
+  the exact prior sources and removed only directories created by that
+  operation; cancellation propagated as IntelliJ cancellation and a concurrent
+  developer edit was preserved. A release-blocking mutation inventory now
+  rejects direct write primitives outside the shared apply/history services and
+  the separately certified native repository PSI action, while the internal
+  fault probe is prohibited from the JCEF bridge. Persistent disk failure,
+  crash/power-loss recovery and installed-IDE fault injection remain open.
 - Existing indexed Java and Kotlin repository methods now expose source
   navigation, Rename, Change Signature and Safe Delete directly in Entity
   Designer. Every launch is bound to the exact project-contained source
