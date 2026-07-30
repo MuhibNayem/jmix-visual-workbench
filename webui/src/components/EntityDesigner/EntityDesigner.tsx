@@ -22,6 +22,7 @@ import type {
   DatabaseColumnSnapshot,
   DatabaseEntityImportRequest,
   DatabaseEntityImportPlanResponse,
+  DatabaseEntityImportProfileWorkspaceResponse,
   EntityAttributePropagationChangeRequest,
   EntityAttributePropagationInspectionResponse,
   EntityAttributeTypeSchemaImpact,
@@ -134,6 +135,12 @@ export default function EntityDesigner() {
   const [databaseImportPreview, setDatabaseImportPreview] =
     useState<WorkspaceChangePreviewResponse | null>(null)
   const [databaseImportBusy, setDatabaseImportBusy] = useState(false)
+  const [databaseProfileWorkspace, setDatabaseProfileWorkspace] =
+    useState<DatabaseEntityImportProfileWorkspaceResponse | null>(null)
+  const [databaseProfileEnabled, setDatabaseProfileEnabled] = useState(true)
+  const [databaseProfileId, setDatabaseProfileId] = useState('')
+  const [databaseProfileLabel, setDatabaseProfileLabel] = useState('')
+  const [selectedDatabaseProfileId, setSelectedDatabaseProfileId] = useState('')
   const [databaseInspectionMergeAllowed, setDatabaseInspectionMergeAllowed] = useState(true)
   const [propagationInspection, setPropagationInspection] =
     useState<EntityAttributePropagationInspectionResponse | null>(null)
@@ -172,6 +179,18 @@ export default function EntityDesigner() {
       if (active) setApplicationGraph(graph)
     }).catch((error) => {
       if (active) addToast(`Cannot load entity impact graph: ${error.message}`, 'error')
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    bridge.getDatabaseEntityImportProfiles().then((workspace) => {
+      if (active) setDatabaseProfileWorkspace(workspace)
+    }).catch(() => {
+      if (active) setDatabaseProfileWorkspace({ profiles: [], issues: [] })
     })
     return () => {
       active = false
@@ -614,17 +633,16 @@ export default function EntityDesigner() {
       selectedTables: selection,
       includeDependencies: true,
       identifierOverrides,
+      ...(databaseProfileEnabled && databaseProfileId && databaseProfileLabel
+        ? {
+            profileId: databaseProfileId,
+            profileLabel: databaseProfileLabel,
+          }
+        : {}),
     }
   }
 
-  const planDatabaseEntityImport = async (
-    identifierOverrides = databaseIdentifierOverrides,
-  ) => {
-    const request = buildDatabaseImportRequest(databaseImportSelection, identifierOverrides)
-    if (!request) {
-      addToast('Select at least one table plus a target module, data store, and package', 'error')
-      return
-    }
+  const executeDatabaseEntityImportPlan = async (request: DatabaseEntityImportRequest) => {
     setDatabaseImportBusy(true)
     setDatabaseImportPlan(null)
     setDatabaseImportPreview(null)
@@ -648,6 +666,50 @@ export default function EntityDesigner() {
     } finally {
       setDatabaseImportBusy(false)
     }
+  }
+
+  const planDatabaseEntityImport = async (
+    identifierOverrides = databaseIdentifierOverrides,
+  ) => {
+    const request = buildDatabaseImportRequest(databaseImportSelection, identifierOverrides)
+    if (!request) {
+      addToast('Select at least one table plus a target module, data store, and package', 'error')
+      return
+    }
+    await executeDatabaseEntityImportPlan(request)
+  }
+
+  const loadDatabaseImportProfile = async () => {
+    const document = databaseProfileWorkspace?.profiles.find(
+      candidate => candidate.profile.id === selectedDatabaseProfileId,
+    )
+    if (!document) {
+      addToast('Select a saved database mapping first', 'error')
+      return
+    }
+    const request = document.profile.request
+    const store = schemaWorkspace?.stores.find(candidate => candidate.id === request.storeId)
+    if (!store || store.moduleId !== request.moduleId) {
+      addToast('The saved mapping target module or data store is not indexed in this project', 'error')
+      return
+    }
+    setExistingEntity(null)
+    setEntity({
+      packageName: request.packageName,
+      sourceLanguage: request.sourceLanguage,
+      dataStore: store.name,
+      generationTarget: {
+        moduleId: request.moduleId,
+        storeId: request.storeId,
+      },
+    })
+    setDatabaseImportSelection(request.selectedTables)
+    setDatabaseIdentifierOverrides(request.identifierOverrides ?? {})
+    setDatabaseProfileEnabled(true)
+    setDatabaseProfileId(document.profile.id)
+    setDatabaseProfileLabel(document.profile.label)
+    setDatabaseImportPreview(null)
+    await executeDatabaseEntityImportPlan(request)
   }
 
   const previewDatabaseEntityImport = async () => {
@@ -692,6 +754,7 @@ export default function EntityDesigner() {
       )
       const refreshed = await bridge.getSchemaWorkspace(true)
       setSchemaWorkspace(refreshed)
+      setDatabaseProfileWorkspace(await bridge.getDatabaseEntityImportProfiles())
       const generated = refreshed.entities.find(candidate => generatedNames.has(candidate.qualifiedName))
       if (generated) {
         const store = refreshed.stores.find(
@@ -1045,6 +1108,10 @@ export default function EntityDesigner() {
     setDatabaseImportRequest(null)
     setDatabaseImportPlan(null)
     setDatabaseImportPreview(null)
+    setDatabaseProfileEnabled(true)
+    setDatabaseProfileId('')
+    setDatabaseProfileLabel('')
+    setSelectedDatabaseProfileId('')
     setPropagationInspection(null)
     setPropagationSelection([])
     setPropagationPreview(null)
@@ -1073,6 +1140,10 @@ export default function EntityDesigner() {
     setDatabaseImportRequest(null)
     setDatabaseImportPlan(null)
     setDatabaseImportPreview(null)
+    setDatabaseProfileEnabled(true)
+    setDatabaseProfileId('')
+    setDatabaseProfileLabel('')
+    setSelectedDatabaseProfileId('')
     setPropagationInspection(null)
     setPropagationSelection([])
     setPropagationPreview(null)
@@ -1706,6 +1777,32 @@ export default function EntityDesigner() {
             </h3>
             {entity.entityType !== 'enum' && (
               <div className="flex flex-wrap justify-end gap-2">
+                {!existingEntity && entity.entityType === 'entity' &&
+                  Boolean(databaseProfileWorkspace?.profiles.length) && (
+                    <div className="flex min-w-0 max-w-full items-center gap-1 rounded border border-violet-500/25 bg-violet-500/[0.07] p-1">
+                      <select
+                        aria-label="Saved database mappings"
+                        value={selectedDatabaseProfileId}
+                        onChange={event => setSelectedDatabaseProfileId(event.target.value)}
+                        className="min-w-0 max-w-48 border-0 bg-transparent py-0.5 text-[10px] text-violet-100"
+                      >
+                        <option value="">Saved database mappings…</option>
+                        {databaseProfileWorkspace?.profiles.map(document => (
+                          <option key={document.profile.id} value={document.profile.id}>
+                            {document.profile.label}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={loadDatabaseImportProfile}
+                        disabled={!selectedDatabaseProfileId || databaseImportBusy}
+                        className="shrink-0 rounded bg-violet-500/20 px-2 py-1 text-[10px] text-violet-100 hover:bg-violet-500/30 disabled:opacity-50"
+                      >
+                        Review live drift
+                      </button>
+                    </div>
+                  )}
                 {entity.entityType === 'entity' && (
                   <button
                     type="button"
@@ -1780,12 +1877,35 @@ export default function EntityDesigner() {
               importMode={!existingEntity}
               selectedTables={databaseImportSelection}
               planning={databaseImportBusy}
+              profileEnabled={databaseProfileEnabled}
+              profileId={databaseProfileId}
+              profileLabel={databaseProfileLabel}
+              onProfileEnabledChange={value => {
+                setDatabaseProfileEnabled(value)
+                setDatabaseImportPlan(null)
+                setDatabaseImportPreview(null)
+              }}
+              onProfileIdChange={value => {
+                setDatabaseProfileId(value)
+                setDatabaseImportPlan(null)
+                setDatabaseImportPreview(null)
+              }}
+              onProfileLabelChange={value => {
+                setDatabaseProfileLabel(value)
+                setDatabaseImportPlan(null)
+                setDatabaseImportPreview(null)
+              }}
               onToggleTable={(table) => {
                 const key = databaseTableKey(table)
-                setDatabaseImportSelection(current => current.some(candidate =>
+                const alreadySelected = databaseImportSelection.some(candidate =>
                   databaseTableKey(candidate) === key)
+                setDatabaseImportSelection(current => alreadySelected
                   ? current.filter(candidate => databaseTableKey(candidate) !== key)
                   : [...current, table])
+                if (!alreadySelected && !databaseProfileId) {
+                  setDatabaseProfileId(databaseProfileSlug(table.name))
+                  setDatabaseProfileLabel(`${databaseProfileTitle(table.name)} database model`)
+                }
                 setDatabaseImportPlan(null)
                 setDatabaseImportPreview(null)
               }}
@@ -3277,6 +3397,12 @@ function DatabaseBrowsePanel({
   importMode,
   selectedTables,
   planning,
+  profileEnabled,
+  profileId,
+  profileLabel,
+  onProfileEnabledChange,
+  onProfileIdChange,
+  onProfileLabelChange,
   onToggleTable,
   onPlan,
   onClose,
@@ -3299,6 +3425,12 @@ function DatabaseBrowsePanel({
   importMode: boolean
   selectedTables: DatabaseTableReference[]
   planning: boolean
+  profileEnabled: boolean
+  profileId: string
+  profileLabel: string
+  onProfileEnabledChange: (value: boolean) => void
+  onProfileIdChange: (value: string) => void
+  onProfileLabelChange: (value: string) => void
   onToggleTable: (table: DatabaseTableReference) => void
   onPlan: () => void
   onClose: () => void
@@ -3519,6 +3651,41 @@ function DatabaseBrowsePanel({
         </div>
       )}
 
+      {importMode && (
+        <div className="grid min-w-0 gap-2 border-t border-cyan-500/15 bg-violet-500/[0.035] px-3 py-3 sm:grid-cols-2 sm:px-4 2xl:grid-cols-[auto_minmax(10rem,0.8fr)_minmax(14rem,1.4fr)]">
+          <label className="flex min-w-0 items-center gap-2 self-end rounded border border-violet-500/20 px-3 py-2 text-[10px] text-violet-100/80">
+            <input
+              type="checkbox"
+              checked={profileEnabled}
+              onChange={event => onProfileEnabledChange(event.target.checked)}
+            />
+            Track as repeatable mapping
+          </label>
+          <label className="min-w-0 text-[9px] uppercase tracking-wider text-gray-600">
+            Mapping ID
+            <input
+              value={profileId}
+              disabled={!profileEnabled}
+              onChange={event => onProfileIdChange(
+                event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 64),
+              )}
+              placeholder="loan-accounts"
+              className="mt-1 w-full min-w-0 font-mono"
+            />
+          </label>
+          <label className="min-w-0 text-[9px] uppercase tracking-wider text-gray-600 sm:col-span-2 2xl:col-span-1">
+            Team-facing label
+            <input
+              value={profileLabel}
+              disabled={!profileEnabled}
+              onChange={event => onProfileLabelChange(event.target.value.slice(0, 120))}
+              placeholder="Loan accounts database model"
+              className="mt-1 w-full min-w-0"
+            />
+          </label>
+        </div>
+      )}
+
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-cyan-500/15 bg-black/10 px-3 py-2 text-[9px] text-gray-600 sm:px-4">
         <span className="min-w-0 break-all">
           Active catalog {browse.activeCatalog || 'driver default'} · URL fingerprint {browse.database?.urlFingerprint}
@@ -3529,7 +3696,11 @@ function DatabaseBrowsePanel({
             <button
               type="button"
               onClick={onPlan}
-              disabled={planning || selectedTables.length === 0}
+              disabled={
+                planning ||
+                selectedTables.length === 0 ||
+                (profileEnabled && (!/^[a-z][a-z0-9-]{2,63}$/.test(profileId) || !profileLabel.trim()))
+              }
               className="rounded bg-jmix-500 px-3 py-1.5 text-[10px] font-medium text-white hover:bg-jmix-600 disabled:opacity-50"
             >
               {planning ? 'Resolving dependencies…' : 'Plan complete entity model →'}
@@ -3612,6 +3783,35 @@ function DatabaseEntityImportPanel({
           ✕
         </button>
       </div>
+
+      {plan.profileDrift && (
+        <div className={`border-b px-3 py-3 sm:px-4 ${
+          plan.profileDrift.matchesBaseline
+            ? 'border-emerald-500/20 bg-emerald-500/[0.05]'
+            : 'border-amber-500/20 bg-amber-500/[0.06]'
+        }`}>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className={`text-[10px] font-medium ${
+              plan.profileDrift.matchesBaseline ? 'text-emerald-100' : 'text-amber-100'
+            }`}>
+              {plan.profileDrift.matchesBaseline
+                ? 'Saved mapping matches the live schema'
+                : 'Live schema or mapping decisions drifted from the saved baseline'}
+            </span>
+            <span className="rounded bg-black/15 px-2 py-0.5 font-mono text-[8px] text-gray-500">
+              {plan.profileDrift.profileId}
+            </span>
+          </div>
+          {!plan.profileDrift.matchesBaseline && (
+            <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-[9px] text-amber-200/70">
+              {plan.profileDrift.requestChanged && <span>mapping request changed</span>}
+              {plan.profileDrift.addedTables.map(table => <span key={`added-${table}`}>+ {table}</span>)}
+              {plan.profileDrift.removedTables.map(table => <span key={`removed-${table}`}>− {table}</span>)}
+              {plan.profileDrift.changedTables.map(table => <span key={`changed-${table}`}>∆ {table}</span>)}
+            </div>
+          )}
+        </div>
+      )}
 
       {!plan.accepted && (
         <div className="border-b border-red-500/20 bg-red-500/[0.07] px-3 py-3 sm:px-4">
@@ -4019,6 +4219,25 @@ function DatabaseStatus({
 
 function databaseTableKey(table: DatabaseTableReference): string {
   return [table.catalog, table.schema, table.name].filter(Boolean).join('.')
+}
+
+function databaseProfileSlug(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+  if (/^[a-z][a-z0-9-]{2,63}$/.test(slug)) return slug
+  return `db-${slug || 'model'}`.slice(0, 64)
+}
+
+function databaseProfileTitle(value: string): string {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || 'Database'
 }
 
 function databaseImportStatusLabel(

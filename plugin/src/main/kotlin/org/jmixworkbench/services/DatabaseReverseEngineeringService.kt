@@ -121,7 +121,12 @@ class DatabaseReverseEngineeringService(
             request.classNameOverrides.keys.any(::invalidQualifiedMetadataName) ||
             request.classNameOverrides.values.any {
                 it.length > MAX_IDENTIFIER_LENGTH || !JVM_IDENTIFIER.matches(it)
-            }
+            } ||
+            (request.profileId == null) != (request.profileLabel == null) ||
+            request.profileId?.let { !DATABASE_IMPORT_PROFILE_ID.matches(it) } == true ||
+            request.profileLabel?.let {
+                it.isBlank() || it.length > MAX_PROFILE_LABEL_LENGTH || it.any(Char::isISOControl)
+            } == true
         ) {
             return DatabaseEntityImportPlanResponse.failure(
                 "JVW-DB-IMPORT-REQUEST-INVALID",
@@ -1130,11 +1135,13 @@ class DatabaseReverseEngineeringService(
         private const val MAX_IMPORT_SELECTION = 50
         private const val MAX_IMPORT_TABLES = 100
         private const val MAX_COMPOSITE_IDENTIFIER_COLUMNS = 32
+        private const val MAX_PROFILE_LABEL_LENGTH = 120
         private const val MAX_PLACEHOLDER_DEPTH = 12
         private val PORTABLE_IDENTIFIER = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
         private val QUALIFIED_JVM_NAME =
             Regex("""[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
         private val JVM_IDENTIFIER = Regex("""[A-Za-z_$][A-Za-z0-9_$]*""")
+        private val DATABASE_IMPORT_PROFILE_ID = Regex("""[a-z][a-z0-9-]{2,63}""")
         private val PROFILE_FILE =
             Regex("""^application-([A-Za-z0-9_.-]+)\.(?:properties|ya?ml)$""")
         private val PLACEHOLDER = Regex("""\$\{([^{}]+)}""")

@@ -54,6 +54,8 @@ import org.jmixworkbench.services.EntityAttributePropagationService
 import org.jmixworkbench.services.DatabaseEntityTableInspectionRequest
 import org.jmixworkbench.services.DatabaseEntityTableBrowseRequest
 import org.jmixworkbench.services.DatabaseEntityImportRequest
+import org.jmixworkbench.services.DatabaseEntityImportProfileService
+import org.jmixworkbench.services.DatabaseEntityImportProfileWorkspaceResponse
 import org.jmixworkbench.services.DatabaseReverseEngineeringService
 import org.jmixworkbench.services.ApplicationGraphService
 import org.jmixworkbench.services.FlowUiPropertyChangeRequest
@@ -292,6 +294,10 @@ class JcefBridge(
             }
             if (action == "getSchemaWorkspace") {
                 handleGetSchemaWorkspace(action, requestId, payload)
+                return
+            }
+            if (action == "getDatabaseEntityImportProfiles") {
+                handleGetDatabaseEntityImportProfiles(action, requestId)
                 return
             }
             if (action == "getRestApiWorkspace") {
@@ -856,6 +862,18 @@ class JcefBridge(
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
         ReadAction.nonBlocking<SchemaWorkspaceResponse> {
             SchemaWorkspaceService.getInstance(project).load(forceRefresh)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { result ->
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleGetDatabaseEntityImportProfiles(action: String, requestId: String?) {
+        ReadAction.nonBlocking<DatabaseEntityImportProfileWorkspaceResponse> {
+            DatabaseEntityImportProfileService.getInstance(project).workspace()
         }
             .inSmartMode(project)
             .expireWith(project)
@@ -1723,8 +1741,14 @@ class JcefBridge(
             return
         }
         AppExecutorUtil.getAppExecutorService().submit {
-            val response = DatabaseReverseEngineeringService.getInstance(project)
+            val live = DatabaseReverseEngineeringService.getInstance(project)
                 .planEntityImport(request)
+            val response = request.profileId?.let { profileId ->
+                live.copy(
+                    profileDrift = DatabaseEntityImportProfileService.getInstance(project)
+                        .drift(profileId, request, live),
+                )
+            } ?: live
             ApplicationManager.getApplication().invokeLater({
                 if (!project.isDisposed) {
                     sendResponse(action, requestId, gson.toJson(response))
@@ -1772,8 +1796,9 @@ class JcefBridge(
                 return@submit
             }
             ReadAction.nonBlocking<org.jmixworkbench.services.WorkspaceChangePreviewResponse> {
+                val profile = DatabaseEntityImportProfileService.fromPlan(request, plan)
                 CodeGenerationService.getInstance(project)
-                    .previewDatabaseEntityImport(plan.entities, config)
+                    .previewDatabaseEntityImport(plan.entities, config, profile)
             }
                 .inSmartMode(project)
                 .expireWith(project)
@@ -1833,10 +1858,12 @@ class JcefBridge(
                 return@submit
             }
             ReadAction.nonBlocking<PreparedWorkspaceChange> {
+                val profile = DatabaseEntityImportProfileService.fromPlan(request, plan)
                 CodeGenerationService.getInstance(project).prepareDatabaseEntityImport(
                     plan.entities,
                     config,
                     expectedPlanDigest,
+                    profile,
                 )
             }
                 .inSmartMode(project)

@@ -572,6 +572,8 @@ internal object DatabaseEntityImportPlanner {
             append(request.packageName).append('\u0000')
             append(request.sourceLanguage.name).append('\u0000')
             append(request.includeDependencies).append('\u0000')
+            append(request.profileId.orEmpty()).append('\u0000')
+            append(request.profileLabel.orEmpty()).append('\u0000')
             request.selectedTables
                 .map { DatabaseObjectKey(it.catalog, it.schema, it.name).externalName }
                 .sortedWith(String.CASE_INSENSITIVE_ORDER)
@@ -708,6 +710,8 @@ data class DatabaseEntityImportRequest(
     val includeDependencies: Boolean = true,
     val identifierOverrides: Map<String, List<String>> = emptyMap(),
     val classNameOverrides: Map<String, String> = emptyMap(),
+    val profileId: String? = null,
+    val profileLabel: String? = null,
     val connectTimeoutSeconds: Int = 10,
     val networkTimeoutSeconds: Int = 30,
 )
@@ -721,6 +725,7 @@ data class DatabaseEntityImportPlanResponse(
     val tables: List<DatabaseEntityImportTablePlan>,
     val entities: List<EntityModel>,
     val issues: List<WorkspaceChangeIssue>,
+    val profileDrift: DatabaseEntityImportProfileDrift? = null,
 ) {
     companion object {
         fun failure(code: String, message: String) = DatabaseEntityImportPlanResponse(

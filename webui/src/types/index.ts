@@ -607,6 +607,8 @@ export interface DatabaseEntityImportRequest {
   includeDependencies: boolean
   identifierOverrides?: Record<string, string[]>
   classNameOverrides?: Record<string, string>
+  profileId?: string
+  profileLabel?: string
   connectTimeoutSeconds?: number
   networkTimeoutSeconds?: number
 }
@@ -640,6 +642,38 @@ export interface DatabaseEntityImportPlanResponse {
   tables: DatabaseEntityImportTablePlan[]
   entities: EntityModel[]
   issues: WorkspaceChangeIssue[]
+  profileDrift?: DatabaseEntityImportProfileDrift
+}
+
+export interface DatabaseEntityImportProfile {
+  schemaVersion: number
+  id: string
+  label: string
+  request: DatabaseEntityImportRequest
+  baselineSnapshotDigest: string
+  database: DatabaseProductSnapshot
+  tables: DatabaseEntityImportTablePlan[]
+}
+
+export interface DatabaseEntityImportProfileDocument {
+  profile: DatabaseEntityImportProfile
+  sourceLocator: GraphSourceLocator
+}
+
+export interface DatabaseEntityImportProfileWorkspaceResponse {
+  profiles: DatabaseEntityImportProfileDocument[]
+  issues: WorkspaceChangeIssue[]
+}
+
+export interface DatabaseEntityImportProfileDrift {
+  profileId: string
+  baselineSnapshotDigest: string
+  liveSnapshotDigest?: string
+  matchesBaseline: boolean
+  requestChanged: boolean
+  addedTables: string[]
+  removedTables: string[]
+  changedTables: string[]
 }
 
 export interface DatabaseEntityTableInspectionResponse {

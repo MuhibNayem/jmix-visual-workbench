@@ -22,6 +22,8 @@ import org.jmixworkbench.model.CascadeType
 import org.jmixworkbench.model.EntityGenerationTarget
 import org.jmixworkbench.model.EntityModel
 import org.jmixworkbench.model.EntitySourceLanguage
+import org.jmixworkbench.model.DdlGenerationConfig
+import org.jmixworkbench.model.DdlGenerationMode
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.ProjectConfig
 import org.jmixworkbench.model.IdType
@@ -347,6 +349,96 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         }
         assertTrue(activation.resultContent.contains("basePackages = [\"com.acme.entity\"]"))
         assertFalse(preview.files.any { it.relativePath.endsWith(".java") })
+    }
+
+    fun testDatabaseEntityImportAtomicallyReplacesItsSourceControlledProfile() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val store = workspace.stores.single()
+        val table = DatabaseTableSnapshot(
+            catalog = "payroll",
+            schema = "public",
+            name = "ACCOUNT",
+            type = "TABLE",
+            remarks = "Accounts",
+            primaryKeyColumns = listOf("ID"),
+        )
+        val entity = EntityModel(
+            className = "Account",
+            packageName = "com.acme.entity",
+            sourceLanguage = EntitySourceLanguage.KOTLIN,
+            dataStore = store.name,
+            generationTarget = EntityGenerationTarget(store.moduleId, store.id),
+            tableName = table.name,
+            tableSchema = table.schema,
+            tableCatalog = table.catalog,
+            ddlGeneration = DdlGenerationConfig(
+                enabled = false,
+                mode = DdlGenerationMode.DISABLED,
+            ),
+        )
+        val oldRequest = databaseProfileRequest(store, "Old account mapping")
+        val newRequest = databaseProfileRequest(store, "Reviewed account mapping")
+        val plan = DatabaseEntityImportPlanResponse(
+            accepted = true,
+            ready = true,
+            snapshotDigest = "c".repeat(64),
+            storeId = store.id,
+            database = DatabaseProductSnapshot(
+                "PostgreSQL",
+                "17",
+                "PostgreSQL JDBC Driver",
+                "42",
+                "fingerprint",
+            ),
+            tables = listOf(
+                DatabaseEntityImportTablePlan(
+                    table,
+                    selectedByUser = true,
+                    requiredBy = emptyList(),
+                    status = DatabaseEntityImportStatus.READY,
+                    entityClassName = entity.className,
+                    entityQualifiedName = entity.fullName,
+                    compositeIdClassName = null,
+                    generated = true,
+                    issues = emptyList(),
+                ),
+            ),
+            entities = listOf(entity),
+            issues = emptyList(),
+        )
+        val oldProfile = requireNotNull(DatabaseEntityImportProfileService.fromPlan(oldRequest, plan))
+        val newProfile = requireNotNull(DatabaseEntityImportProfileService.fromPlan(newRequest, plan))
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                DatabaseEntityImportProfileService.path(oldProfile),
+                DatabaseEntityImportProfileService.serialize(oldProfile),
+            )
+        }
+
+        val preview = CodeGenerationService.getInstance(project).previewDatabaseEntityImport(
+            listOf(entity),
+            ProjectConfig(
+                projectRoot = requireNotNull(project.basePath),
+                basePackage = "com.acme",
+            ),
+            newProfile,
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        val profileFile = preview.files.single {
+            it.relativePath == ".jmix-workbench/database-imports/account-model.json"
+        }
+        assertEquals(
+            org.jmixworkbench.discovery.change.WorkspaceFileChangeMode.MODIFY,
+            profileFile.mode,
+        )
+        assertTrue(profileFile.originalContent?.contains("Old account mapping") == true)
+        assertTrue(profileFile.resultContent.contains("Reviewed account mapping"))
+        assertTrue(preview.files.any { it.relativePath.endsWith("/Account.kt") })
+        assertFalse(preview.files.any { it.relativePath.contains("liquibase") })
     }
 
     fun testExistingEntityAttributeAdditionPreservesSourceAndAddsRollbackMigration() {
@@ -1506,6 +1598,21 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             write(root, "src/main/resources/com/acme/liquibase/changelog/010-init.xml", initial)
         }
     }
+
+    private fun databaseProfileRequest(
+        store: SchemaDataStoreSnapshot,
+        label: String,
+    ) = DatabaseEntityImportRequest(
+        storeId = store.id,
+        moduleId = store.moduleId,
+        packageName = "com.acme.entity",
+        sourceLanguage = EntitySourceLanguage.KOTLIN,
+        selectedTables = listOf(
+            DatabaseTableReference("payroll", "public", "ACCOUNT", "TABLE", null),
+        ),
+        profileId = "account-model",
+        profileLabel = label,
+    )
 
     private fun createRelationshipFixture() {
         val root = getOrCreateProjectBaseDir()

@@ -66,16 +66,18 @@ class CodeGenerationService(private val project: Project) {
     fun previewDatabaseEntityImport(
         entities: List<EntityModel>,
         config: ProjectConfig,
+        profile: DatabaseEntityImportProfile? = null,
     ): WorkspaceChangePreviewResponse =
-        previewGeneratedPlan(databaseEntityImportPlan(entities, config))
+        previewGeneratedPlan(databaseEntityImportPlan(entities, config, profile))
 
     fun prepareDatabaseEntityImport(
         entities: List<EntityModel>,
         config: ProjectConfig,
         expectedPlanDigest: String,
+        profile: DatabaseEntityImportProfile? = null,
     ): PreparedWorkspaceChange =
         prepareGeneratedPlan(
-            databaseEntityImportPlan(entities, config),
+            databaseEntityImportPlan(entities, config, profile),
             expectedPlanDigest,
         )
 
@@ -832,6 +834,7 @@ class CodeGenerationService(private val project: Project) {
     private fun databaseEntityImportPlan(
         entities: List<EntityModel>,
         config: ProjectConfig,
+        profile: DatabaseEntityImportProfile?,
     ): GeneratedPlan {
         require(entities.isNotEmpty() && entities.size <= MAX_DATABASE_IMPORT_TYPES) {
             "JVW-DB-IMPORT-TYPE-COUNT: select between 1 and $MAX_DATABASE_IMPORT_TYPES generated entity types."
@@ -861,7 +864,18 @@ class CodeGenerationService(private val project: Project) {
         }) {
             "JVW-DB-IMPORT-TARGET-MISMATCH: resolved source destinations changed during planning."
         }
-        val files = plans.flatMap(GeneratedPlan::files)
+        val files = (
+            plans.flatMap(GeneratedPlan::files) +
+                listOfNotNull(
+                    profile?.let {
+                        GeneratedSource(
+                            relativePath = DatabaseEntityImportProfileService.path(it),
+                            content = DatabaseEntityImportProfileService.serialize(it),
+                            mergeStrategy = MergeStrategy.REPLACE,
+                        )
+                    },
+                )
+            )
             .groupBy(GeneratedSource::relativePath)
             .map { (path, sources) ->
                 if (sources.size == 1) return@map sources.single()
@@ -1149,8 +1163,12 @@ class CodeGenerationService(private val project: Project) {
                 "JVW-MENU-SOURCE-STALE: the selected menu changed after it was indexed; refresh before applying."
             }
         }
-        if (source.mergeStrategy == MergeStrategy.MENU_REPLACE) {
-            val replacement = MenuSourcePatcher.patch(current, source.content)
+        if (source.mergeStrategy in setOf(MergeStrategy.MENU_REPLACE, MergeStrategy.REPLACE)) {
+            val replacement = if (source.mergeStrategy == MergeStrategy.MENU_REPLACE) {
+                MenuSourcePatcher.patch(current, source.content)
+            } else {
+                source.content
+            }
             if (replacement == current) return null
             return WorkspaceFileChange(
                 relativePath = source.relativePath,
@@ -1170,6 +1188,7 @@ class CodeGenerationService(private val project: Project) {
             MergeStrategy.PROPERTIES -> mergeInsertion(SourcePreservingMerge.properties(current, source.content))
             MergeStrategy.MENU -> mergeInsertion(SourcePreservingMerge.menu(current, source.content))
             MergeStrategy.MENU_REPLACE -> error("Handled above")
+            MergeStrategy.REPLACE -> error("Handled above")
             MergeStrategy.CREATE_ONLY -> error("Handled above")
         } ?: return null
         return WorkspaceFileChange(
@@ -1381,6 +1400,7 @@ class CodeGenerationService(private val project: Project) {
         PROPERTIES,
         MENU,
         MENU_REPLACE,
+        REPLACE,
     }
 
     private data class TextAddition(

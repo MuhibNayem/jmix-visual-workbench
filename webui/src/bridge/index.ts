@@ -17,6 +17,7 @@ import type {
   DatabaseTableReference,
   DatabaseEntityImportRequest,
   DatabaseEntityImportPlanResponse,
+  DatabaseEntityImportProfileWorkspaceResponse,
   DatabaseColumnSnapshot,
   EntityAttributePropagationChangeRequest,
   EntityAttributePropagationInspectionRequest,
@@ -490,6 +491,48 @@ class ${scenario.className} {
                 }
               case 'getSchemaWorkspace':
                 return developmentSchemaWorkspace
+              case 'getDatabaseEntityImportProfiles':
+                return {
+                  profiles: [{
+                    profile: {
+                      schemaVersion: 1,
+                      id: 'loan-accounts',
+                      label: 'Loan accounts database model',
+                      request: {
+                        storeId: 'loan:main',
+                        moduleId: 'loan',
+                        packageName: 'com.company.loan.entity',
+                        sourceLanguage: 'java',
+                        selectedTables: [{
+                          catalog: 'payroll',
+                          schema: 'public',
+                          name: 'LOAN_ACCT',
+                          type: 'TABLE',
+                          remarks: 'Loan accounts',
+                        }],
+                        includeDependencies: true,
+                        identifierOverrides: {},
+                        classNameOverrides: {},
+                        profileId: 'loan-accounts',
+                        profileLabel: 'Loan accounts database model',
+                      },
+                      baselineSnapshotDigest: 'development-database-entity-graph',
+                      database: {
+                        name: 'PostgreSQL',
+                        version: '17',
+                        driverName: 'PostgreSQL JDBC Driver',
+                        driverVersion: '42.7',
+                        urlFingerprint: 'development-db',
+                      },
+                      tables: [],
+                    },
+                    sourceLocator: {
+                      relativePath: '.jmix-workbench/database-imports/loan-accounts.json',
+                      revisionFingerprint: 'development-profile-revision',
+                    },
+                  }],
+                  issues: [],
+                } satisfies DatabaseEntityImportProfileWorkspaceResponse
               case 'getRestApiWorkspace':
                 return developmentRestApiWorkspace
               case 'invokeRestApi':
@@ -1161,6 +1204,18 @@ class ${scenario.className} {
                   ],
                   entities: [],
                   issues: [],
+                  profileDrift: payload.profileId === 'loan-accounts'
+                    ? {
+                        profileId: 'loan-accounts',
+                        baselineSnapshotDigest: 'development-database-entity-graph',
+                        liveSnapshotDigest: 'development-database-entity-graph',
+                        matchesBaseline: true,
+                        requestChanged: false,
+                        addedTables: [],
+                        removedTables: [],
+                        changedTables: [],
+                      }
+                    : undefined,
                 } satisfies DatabaseEntityImportPlanResponse
               }
               case 'previewDatabaseEntityImport': {
@@ -1172,6 +1227,9 @@ class ${scenario.className} {
                   `${moduleId}/src/main/java/${packagePath}/LoanAcct.java`,
                   `${moduleId}/src/main/resources/${packagePath}/messages.properties`,
                 ]
+                if (payload.request?.profileId) {
+                  paths.push(`.jmix-workbench/database-imports/${payload.request.profileId}.json`)
+                }
                 return {
                   accepted: true,
                   changeSetId: 'database-import:development',
@@ -1203,6 +1261,9 @@ class ${scenario.className} {
                     'loan/src/main/java/com/company/loan/entity/LoanAcctId.java',
                     'loan/src/main/java/com/company/loan/entity/LoanAcct.java',
                     'loan/src/main/resources/com/company/loan/entity/messages.properties',
+                    ...(payload.request?.profileId
+                      ? [`.jmix-workbench/database-imports/${payload.request.profileId}.json`]
+                      : []),
                   ],
                   issues: [],
                 }
@@ -2011,6 +2072,13 @@ class ${scenario.className} {
 
   getSchemaWorkspace(forceRefresh: boolean = false) {
     return this.request<SchemaWorkspaceResponse>('getSchemaWorkspace', { forceRefresh })
+  }
+
+  getDatabaseEntityImportProfiles() {
+    return this.request<DatabaseEntityImportProfileWorkspaceResponse>(
+      'getDatabaseEntityImportProfiles',
+      {},
+    )
   }
 
   getRestApiWorkspace(forceRefresh: boolean = false) {
