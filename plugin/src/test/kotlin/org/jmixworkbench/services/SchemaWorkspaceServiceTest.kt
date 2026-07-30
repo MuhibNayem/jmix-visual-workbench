@@ -751,6 +751,8 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                         @ManyToOne
                         @JoinColumn(name = "DEPARTMENT_ID")
                         private Department department;
+                        @Column(name = "AGE")
+                        private Integer age;
                     }
                 """.trimIndent(),
             )
@@ -767,6 +769,7 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                         private java.util.UUID id;
                         @ManyToOne
                         private Department department;
+                        private Integer age;
                     }
                 """.trimIndent(),
             )
@@ -788,6 +791,8 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                         @ManyToOne
                         @JoinColumn(name = "DEPARTMENT_ID")
                         var department: Department? = null
+                        @Column(name = "AGE")
+                        var age: Int? = null
                     }
                 """.trimIndent(),
             )
@@ -817,6 +822,24 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             "${javaSafeDelete.code}: ${javaSafeDelete.message}",
         )
         assertEquals("DEPARTMENT_ID", javaSafeDelete.retainedColumnName)
+        val javaTypeMigration = refactors.prepareTypeMigration(
+            EntityAttributeTypeMigrationRequest(
+                employee.sourceLocator,
+                employee.className,
+                "age",
+                AttributeType.LONG,
+            ),
+        )
+        assertTrue(
+            javaTypeMigration.accepted,
+            "${javaTypeMigration.code}: ${javaTypeMigration.message}",
+        )
+        assertTrue(javaTypeMigration.element is com.intellij.psi.PsiField)
+        assertNotNull(javaTypeMigration.targetPsiType)
+        assertEquals(
+            EntityAttributeTypeSchemaStrategy.SCHEMA_EVIDENCE_INCOMPLETE,
+            javaTypeMigration.schemaImpact?.strategy,
+        )
 
         val kotlinEmployee = workspace.entities.single { it.className == "KotlinEmployee" }
         val kotlinRename = refactors.prepareRename(
@@ -841,6 +864,20 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             "${kotlinSafeDelete.code}: ${kotlinSafeDelete.message}",
         )
         assertEquals("DEPARTMENT_ID", kotlinSafeDelete.retainedColumnName)
+        val kotlinTypeMigration = refactors.prepareTypeMigration(
+            EntityAttributeTypeMigrationRequest(
+                kotlinEmployee.sourceLocator,
+                kotlinEmployee.className,
+                "age",
+                AttributeType.LONG,
+            ),
+        )
+        assertTrue(
+            kotlinTypeMigration.accepted,
+            "${kotlinTypeMigration.code}: ${kotlinTypeMigration.message}",
+        )
+        assertTrue(kotlinTypeMigration.element is com.intellij.psi.PsiField)
+        assertNotNull(kotlinTypeMigration.targetPsiType)
 
         val unsafe = workspace.entities.single { it.className == "UnsafeEmployee" }
         val rejected = refactors.prepareRename(
@@ -865,6 +902,82 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             "JVW-ENTITY-SAFE-DELETE-INFERRED-RELATIONSHIP-MAPPING",
             unsafeSafeDelete.code,
         )
+        val unsafeTypeMigration = refactors.prepareTypeMigration(
+            EntityAttributeTypeMigrationRequest(
+                unsafe.sourceLocator,
+                unsafe.className,
+                "age",
+                AttributeType.LONG,
+            ),
+        )
+        assertFalse(unsafeTypeMigration.accepted)
+        assertEquals(
+            "JVW-ENTITY-TYPE-MIGRATION-INFERRED-COLUMN",
+            unsafeTypeMigration.code,
+        )
+    }
+
+    fun testEntityTypeMigrationReportsPhysicalConversionAndIndexDependencies() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/resources/com/acme/liquibase/changelog/020-entity-types.xml",
+                """
+                    <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+                        <changeSet id="entity-types" author="team">
+                            <addColumn tableName="LOAN_APP">
+                                <column name="APPLICATION_NO" type="VARCHAR(255)"/>
+                                <column name="LOAN_AMOUNT" type="DECIMAL(19, 2)"/>
+                            </addColumn>
+                            <createIndex tableName="LOAN_APP" indexName="IDX_LOAN_APP_AMOUNT">
+                                <column name="LOAN_AMOUNT"/>
+                            </createIndex>
+                        </changeSet>
+                    </databaseChangeLog>
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val loanApp = workspace.entities.single { it.className == "LoanApp" }
+        val refactors = EntityAttributeRefactorService.getInstance(project)
+
+        val sourceOnly = refactors.prepareTypeMigration(
+            EntityAttributeTypeMigrationRequest(
+                loanApp.sourceLocator,
+                loanApp.className,
+                "applicationNo",
+                AttributeType.URI,
+            ),
+        )
+        assertTrue(sourceOnly.accepted, "${sourceOnly.code}: ${sourceOnly.message}")
+        assertEquals(
+            EntityAttributeTypeSchemaStrategy.SOURCE_ONLY,
+            sourceOnly.schemaImpact?.strategy,
+        )
+        assertEquals("VARCHAR(255)", sourceOnly.schemaImpact?.currentSqlType)
+        assertEquals("VARCHAR(255)", sourceOnly.schemaImpact?.targetSqlType)
+
+        val conversion = refactors.prepareTypeMigration(
+            EntityAttributeTypeMigrationRequest(
+                loanApp.sourceLocator,
+                loanApp.className,
+                "loanAmount",
+                AttributeType.DOUBLE,
+            ),
+        )
+        assertTrue(conversion.accepted, "${conversion.code}: ${conversion.message}")
+        assertEquals(
+            EntityAttributeTypeSchemaStrategy.EXPAND_CONTRACT_REQUIRED,
+            conversion.schemaImpact?.strategy,
+        )
+        assertEquals("DECIMAL(19, 2)", conversion.schemaImpact?.currentSqlType)
+        assertEquals("DOUBLE", conversion.schemaImpact?.targetSqlType)
+        assertTrue(
+            conversion.schemaImpact?.dependencies?.contains("index IDX_LOAN_APP_AMOUNT") == true,
+        )
+        assertTrue(conversion.schemaImpact?.summary?.contains("not automatically reversible") == true)
     }
 
     fun testExistingJavaAndKotlinOwningJoinColumnRenameIsSourceSafeAndRollbackChecked() {

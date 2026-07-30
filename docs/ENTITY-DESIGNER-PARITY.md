@@ -83,6 +83,19 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   and portable, old-exists/new-absent preconditions and reverse rollback are
   mandatory, and explicit `@DdlGeneration(unmappedColumns=...)` protection
   disables the suggestion. Final deletion remains a retention-policy decision.
+- Existing handwritten scalar attributes can launch IntelliJ's project-wide
+  Type Migration from Entity Designer with a selected target type. The backend
+  resolves the exact current Java field or Kotlin light field, rejects stale,
+  inferred-column, identifier, relationship, custom and ambiguous declarations,
+  binds the refactoring to project scope and always opens usage preview. Before
+  launch it classifies the persistence impact as source-only, expand/contract,
+  externally managed or incomplete evidence; reports the real Liquibase column
+  type plus primary-key, uniqueness, index and incoming/outgoing foreign-key
+  dependencies; and states when conversion is not automatically reversible.
+  Source-only changes such as compatible persisted representations proceed
+  without inventing a schema rewrite. SQL type changes remain a separately
+  reviewed conversion because Liquibase `modifyDataType` has no automatic
+  rollback and reversing the declaration cannot restore truncated data.
 - Existing entities can inspect their live mapped table through the
   project-owned JDBC driver and the active profile configuration. The backend
   supports datasource-only stores with Liquibase intentionally disabled,
@@ -130,9 +143,10 @@ blocked until all of the following pass:
    to IntelliJ usage preview, including native `mappedBy` references, and
    explicit scalar and owning to-one join-column physical rename is atomic
    with checked Liquibase rollback. Combined property-and-physical mapping
-   changes, relationship shape changes, type change and final post-retention
-   physical deletion remain. Native Safe Delete plus reversible quarantine is
-   implemented.
+   changes, relationship shape changes, data-preserving expand/contract
+   execution and final post-retention physical deletion remain. Native
+   project-wide Java/Kotlin type-migration preview with physical dependency
+   classification, Native Safe Delete and reversible quarantine are implemented.
    Additive and managed-mapping Java/Kotlin round trip is implemented.
 2. The first partial live-database merge is implemented for a selected
    existing entity/table and missing columns. Complete table/view selection,

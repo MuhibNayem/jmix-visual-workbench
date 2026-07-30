@@ -465,6 +465,38 @@ export interface EntityAttributeSafeDeleteLaunchResponse {
   retainedColumnName?: string
 }
 
+export interface EntityAttributeTypeMigrationRequest {
+  sourceLocator: GraphSourceLocator
+  entityClassName: string
+  attributeName: string
+  targetType: AttributeType
+}
+
+export type EntityAttributeTypeSchemaStrategy =
+  | 'SOURCE_ONLY'
+  | 'EXPAND_CONTRACT_REQUIRED'
+  | 'EXTERNAL_SCHEMA_REQUIRED'
+  | 'SCHEMA_EVIDENCE_INCOMPLETE'
+
+export interface EntityAttributeTypeSchemaImpact {
+  strategy: EntityAttributeTypeSchemaStrategy
+  storeId?: string
+  tableName?: string
+  columnName?: string
+  currentSqlType?: string
+  targetSqlType?: string
+  dependencies: string[]
+  summary: string
+}
+
+export interface EntityAttributeTypeMigrationLaunchResponse {
+  success: boolean
+  code?: string
+  message: string
+  sourceLanguage?: string
+  schemaImpact?: EntityAttributeTypeSchemaImpact
+}
+
 export interface DatabaseEntityTableInspectionRequest {
   storeId: string
   tableName: string

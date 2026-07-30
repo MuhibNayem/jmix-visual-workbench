@@ -11,6 +11,9 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.refactoring.rename.RenameProcessor
 import com.intellij.refactoring.safeDelete.SafeDeleteProcessor
+import com.intellij.refactoring.typeMigration.TypeMigrationProcessor
+import com.intellij.refactoring.typeMigration.TypeMigrationRules
+import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
@@ -34,6 +37,9 @@ import org.jmixworkbench.services.PreparedEntityAttributeRename
 import org.jmixworkbench.services.EntityAttributeSafeDeleteLaunchResponse
 import org.jmixworkbench.services.EntityAttributeSafeDeleteRequest
 import org.jmixworkbench.services.PreparedEntityAttributeSafeDelete
+import org.jmixworkbench.services.EntityAttributeTypeMigrationLaunchResponse
+import org.jmixworkbench.services.EntityAttributeTypeMigrationRequest
+import org.jmixworkbench.services.PreparedEntityAttributeTypeMigration
 import org.jmixworkbench.services.EntityAttributePropagationApplyRequest
 import org.jmixworkbench.services.EntityAttributePropagationChangeRequest
 import org.jmixworkbench.services.EntityAttributePropagationInspectionRequest
@@ -334,6 +340,10 @@ class JcefBridge(
             }
             if (action == "launchEntityAttributeSafeDelete") {
                 handleLaunchEntityAttributeSafeDelete(action, requestId, payload)
+                return
+            }
+            if (action == "launchEntityAttributeTypeMigration") {
+                handleLaunchEntityAttributeTypeMigration(action, requestId, payload)
                 return
             }
             if (action == "inspectDatabaseEntityTable") {
@@ -1369,6 +1379,71 @@ class JcefBridge(
                         true,
                         true,
                     ).run()
+                }, ModalityState.nonModal())
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleLaunchEntityAttributeTypeMigration(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeTypeMigrationRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedEntityAttributeTypeMigration> {
+            EntityAttributeRefactorService.getInstance(project).prepareTypeMigration(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val element = prepared.element
+                val targetType = prepared.targetPsiType
+                if (!prepared.accepted || element == null || targetType == null) {
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(
+                            EntityAttributeTypeMigrationLaunchResponse(
+                                success = false,
+                                code = prepared.code,
+                                message = prepared.message,
+                                sourceLanguage = prepared.sourceLanguage,
+                                schemaImpact = prepared.schemaImpact,
+                            ),
+                        ),
+                    )
+                    return@finishOnUiThread
+                }
+                sendResponse(
+                    action,
+                    requestId,
+                    gson.toJson(
+                        EntityAttributeTypeMigrationLaunchResponse(
+                            success = true,
+                            message = prepared.message,
+                            sourceLanguage = prepared.sourceLanguage,
+                            schemaImpact = prepared.schemaImpact,
+                        ),
+                    ),
+                )
+                ApplicationManager.getApplication().invokeLater({
+                    val rules = TypeMigrationRules(project).apply {
+                        setBoundScope(GlobalSearchScope.projectScope(project))
+                    }
+                    TypeMigrationProcessor(
+                        project,
+                        arrayOf(element),
+                        { targetType },
+                        rules,
+                        true,
+                    ).apply {
+                        setPreviewUsages(true)
+                    }.run()
                 }, ModalityState.nonModal())
             }
             .submit(AppExecutorUtil.getAppExecutorService())

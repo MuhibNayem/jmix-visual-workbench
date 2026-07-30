@@ -20,6 +20,7 @@ import type {
   DatabaseColumnSnapshot,
   EntityAttributePropagationChangeRequest,
   EntityAttributePropagationInspectionResponse,
+  EntityAttributeTypeSchemaImpact,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
@@ -29,6 +30,10 @@ const ATTRIBUTE_TYPES: AttributeType[] = [
   'sqlDate', 'sqlTime', 'uuid', 'uri', 'byteArray', 'fileRef',
   'enum', 'association', 'composition', 'embedded', 'custom',
 ]
+
+const TYPE_MIGRATION_TYPES: AttributeType[] = ATTRIBUTE_TYPES.filter(type =>
+  !['enum', 'association', 'composition', 'embedded', 'custom'].includes(type),
+)
 
 const TRAITS: { value: TraitType; label: string }[] = [
   { value: 'standardEntity', label: 'Standard Entity (UUID + Version + Audit)' },
@@ -80,6 +85,10 @@ export default function EntityDesigner() {
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameLaunched, setRenameLaunched] = useState(false)
   const [safeDeleteBusy, setSafeDeleteBusy] = useState(false)
+  const [typeMigrationTarget, setTypeMigrationTarget] = useState<AttributeType>('long')
+  const [typeMigrationBusy, setTypeMigrationBusy] = useState(false)
+  const [typeMigrationImpact, setTypeMigrationImpact] =
+    useState<EntityAttributeTypeSchemaImpact | null>(null)
   const [databaseInspection, setDatabaseInspection] =
     useState<DatabaseEntityTableInspectionResponse | null>(null)
   const [databaseColumnDrafts, setDatabaseColumnDrafts] =
@@ -128,6 +137,20 @@ export default function EntityDesigner() {
       active = false
     }
   }, [])
+
+  useEffect(() => {
+    const selected = selectedAttr === null ? undefined : entity.attributes[selectedAttr]
+    if (
+      selected &&
+      TYPE_MIGRATION_TYPES.includes(selected.type) &&
+      selected.type === typeMigrationTarget
+    ) {
+      setTypeMigrationTarget(
+        TYPE_MIGRATION_TYPES.find(candidate => candidate !== selected.type) ?? selected.type,
+      )
+    }
+    setTypeMigrationImpact(null)
+  }, [selectedAttr])
 
   const selectedModuleId = entity.generationTarget?.moduleId
     ?? schemaWorkspace?.stores.find((store) => store.id === entity.generationTarget?.storeId)?.moduleId
@@ -239,6 +262,34 @@ export default function EntityDesigner() {
       addToast(`Native Safe Delete failed: ${error.message}`, 'error')
     } finally {
       setSafeDeleteBusy(false)
+    }
+  }
+
+  const handleNativeAttributeTypeMigration = async (
+    attributeName: string,
+    currentType: AttributeType,
+  ) => {
+    if (!existingEntity) return
+    if (typeMigrationTarget === currentType) {
+      addToast('Choose a different target type', 'error')
+      return
+    }
+    setTypeMigrationBusy(true)
+    setTypeMigrationImpact(null)
+    try {
+      const response = await bridge.launchEntityAttributeTypeMigration({
+        sourceLocator: existingEntity.sourceLocator,
+        entityClassName: existingEntity.className,
+        attributeName,
+        targetType: typeMigrationTarget,
+      })
+      setTypeMigrationImpact(response.schemaImpact ?? null)
+      addToast(response.message, response.success ? 'info' : 'error')
+      if (response.success) setRenameLaunched(true)
+    } catch (error: any) {
+      addToast(`Native type migration failed: ${error.message}`, 'error')
+    } finally {
+      setTypeMigrationBusy(false)
     }
   }
 
@@ -1809,6 +1860,68 @@ export default function EntityDesigner() {
                             </button>
                           )}
                         </div>
+                        {!['enum', 'association', 'composition', 'embedded', 'custom'].includes(selected.type) && (
+                          <div className="mt-4 border-t border-surface-border pt-3">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-300">
+                              Project-wide type migration
+                            </div>
+                            <p className="mt-1 text-[10px] leading-relaxed text-gray-500">
+                              Runs IntelliJ&apos;s real Type Migration over Java and Kotlin light declarations, dependent
+                              variables, parameters, return types, and call sites. Persistent columns are inspected
+                              separately because a data conversion is not automatically reversible.
+                            </p>
+                            <div className="mt-3 flex min-w-0 flex-col gap-2 sm:flex-row">
+                              <select
+                                value={typeMigrationTarget}
+                                onChange={event => {
+                                  setTypeMigrationTarget(event.target.value as AttributeType)
+                                  setTypeMigrationImpact(null)
+                                }}
+                                className="min-w-0 flex-1"
+                                aria-label={`Target type for ${selected.name}`}
+                              >
+                                {TYPE_MIGRATION_TYPES.map(type => (
+                                  <option key={type} value={type} disabled={type === selected.type}>
+                                    {type === selected.type ? `${type} (current)` : type}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                disabled={typeMigrationBusy || typeMigrationTarget === selected.type}
+                                onClick={() => handleNativeAttributeTypeMigration(selected.name, selected.type)}
+                                className="shrink-0 rounded border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
+                              >
+                                {typeMigrationBusy ? 'Analyzing project…' : 'Open type preview'}
+                              </button>
+                            </div>
+                            {typeMigrationImpact && (
+                              <div className={`mt-3 min-w-0 rounded border p-2.5 text-[10px] leading-relaxed ${
+                                typeMigrationImpact.strategy === 'SOURCE_ONLY'
+                                  ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100/80'
+                                  : 'border-amber-500/30 bg-amber-500/5 text-amber-100/80'
+                              }`}>
+                                <div className="font-semibold">
+                                  {typeMigrationImpact.strategy.replace(/_/g, ' ')}
+                                </div>
+                                <div className="mt-1 break-words">{typeMigrationImpact.summary}</div>
+                                {typeMigrationImpact.tableName && typeMigrationImpact.columnName && (
+                                  <div className="mt-1 break-all font-mono text-[9px] opacity-75">
+                                    {typeMigrationImpact.tableName}.{typeMigrationImpact.columnName}
+                                    {typeMigrationImpact.currentSqlType && typeMigrationImpact.targetSqlType
+                                      ? ` · ${typeMigrationImpact.currentSqlType} → ${typeMigrationImpact.targetSqlType}`
+                                      : ''}
+                                  </div>
+                                )}
+                                {typeMigrationImpact.dependencies.length > 0 && (
+                                  <div className="mt-1 break-words text-[9px] opacity-75">
+                                    Dependencies: {typeMigrationImpact.dependencies.join(', ')}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <div className="mt-4 border-t border-surface-border pt-3">
                           <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <div className="min-w-0">

@@ -20,6 +20,8 @@ import type {
   EntityAttributeRenameLaunchResponse,
   EntityAttributeSafeDeleteRequest,
   EntityAttributeSafeDeleteLaunchResponse,
+  EntityAttributeTypeMigrationRequest,
+  EntityAttributeTypeMigrationLaunchResponse,
   GenerationResult,
   GraphSourceLocator,
   IntegrationConnectorModel,
@@ -754,6 +756,28 @@ class ${scenario.className} {
                   retainedColumnName: payload.attributeName
                     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
                     .toUpperCase(),
+                }
+              case 'launchEntityAttributeTypeMigration':
+                return {
+                  success: true,
+                  message: `IntelliJ project-wide Type Migration preview opened for ${payload.attributeName} → ${payload.targetType}.`,
+                  sourceLanguage: 'java',
+                  schemaImpact: {
+                    strategy: payload.targetType === 'long'
+                      ? 'EXPAND_CONTRACT_REQUIRED'
+                      : 'SOURCE_ONLY',
+                    storeId: 'loan:main',
+                    tableName: 'LOAN_APP',
+                    columnName: payload.attributeName
+                      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+                      .toUpperCase(),
+                    currentSqlType: 'INT',
+                    targetSqlType: payload.targetType === 'long' ? 'BIGINT' : 'INT',
+                    dependencies: ['index IDX_LOAN_APP_STATUS'],
+                    summary: payload.targetType === 'long'
+                      ? 'The mapped column requires a reviewed INT → BIGINT data conversion. This is not automatically reversible.'
+                      : 'No physical type rewrite is required.',
+                  },
                 }
               case 'inspectDatabaseEntityTable':
                 return {
@@ -1571,6 +1595,13 @@ class ${scenario.className} {
   launchEntityAttributeSafeDelete(change: EntityAttributeSafeDeleteRequest) {
     return this.request<EntityAttributeSafeDeleteLaunchResponse>(
       'launchEntityAttributeSafeDelete',
+      change,
+    )
+  }
+
+  launchEntityAttributeTypeMigration(change: EntityAttributeTypeMigrationRequest) {
+    return this.request<EntityAttributeTypeMigrationLaunchResponse>(
+      'launchEntityAttributeTypeMigration',
       change,
     )
   }
