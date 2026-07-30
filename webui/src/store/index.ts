@@ -145,6 +145,9 @@ interface AppState {
   flowUiLocator: GraphSourceLocator | null
   openFlowUiDesigner: (locator: GraphSourceLocator) => void
   closeFlowUiDesigner: () => void
+  crudEntityLocator: GraphSourceLocator | null
+  openCrudDesigner: (locator?: GraphSourceLocator) => void
+  closeCrudDesigner: () => void
 
   projectConfig: ProjectConfig | null
   setProjectConfig: (config: ProjectConfig) => void
@@ -179,6 +182,12 @@ export const useStore = create<AppState>((set, get) => ({
   flowUiLocator: null,
   openFlowUiDesigner: (locator) => set({ activeTab: 'view', flowUiLocator: locator }),
   closeFlowUiDesigner: () => set({ flowUiLocator: null }),
+  crudEntityLocator: null,
+  openCrudDesigner: (locator) => set({
+    activeTab: 'crud',
+    crudEntityLocator: locator ?? null,
+  }),
+  closeCrudDesigner: () => set({ crudEntityLocator: null }),
 
   projectConfig: null,
   setProjectConfig: (config) => set({ projectConfig: config }),

@@ -4,9 +4,13 @@ import { bridge } from '../../bridge'
 import type { CrudOptions, WorkspaceChangePreviewResponse } from '../../types'
 
 const defaultOptions: CrudOptions = {
+  generateEntity: true,
   generateMigration: true,
   generateDataRepository: false,
   generateFetchPlan: true,
+  generateMenu: true,
+  generateSecurityRole: true,
+  generateMessages: true,
   listViewType: 'dataGrid',
   detailViewMode: 'form',
   includeFilter: true,
@@ -17,8 +21,21 @@ const defaultOptions: CrudOptions = {
 }
 
 export default function CrudWizard() {
-  const { entity, addToast, isGenerating, setIsGenerating } = useStore()
-  const [options, setOptions] = useState<CrudOptions>(defaultOptions)
+  const {
+    entity,
+    crudEntityLocator,
+    addToast,
+    isGenerating,
+    setIsGenerating,
+  } = useStore()
+  const existingEntityMode = crudEntityLocator !== null
+  const [options, setOptions] = useState<CrudOptions>(() => ({
+    ...defaultOptions,
+    generateEntity: !existingEntityMode,
+    existingEntitySource: crudEntityLocator ?? undefined,
+    generateMigration: !existingEntityMode,
+    generateSecurityRole: !existingEntityMode,
+  }))
   const [step, setStep] = useState(0)
   const [result, setResult] = useState<{ files: string[]; errors: string[] } | null>(null)
   const [generationPreview, setGenerationPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
@@ -79,7 +96,16 @@ export default function CrudWizard() {
     <div className="flex h-full min-w-0 flex-col">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-surface-light px-3 py-2.5 sm:px-4">
-        <h2 className="text-sm font-semibold text-gray-200">CRUD Scaffolding Wizard</h2>
+        <div>
+          <h2 className="text-sm font-semibold text-gray-200">
+            {existingEntityMode ? 'Existing Entity View Wizard' : 'CRUD Scaffolding Wizard'}
+          </h2>
+          {existingEntityMode && (
+            <p className="mt-0.5 text-[10px] text-emerald-300/80">
+              Source-safe mode · entity and table creation are excluded
+            </p>
+          )}
+        </div>
         <div className="flex min-w-[11rem] max-w-xs flex-1 items-center gap-2 sm:flex-none" aria-label={`Step ${step + 1} of ${steps.length}: ${steps[step]}`}>
           <div className="min-w-0 flex-1">
             <div className="mb-1 flex items-center justify-between gap-3 text-[10px]">
@@ -152,9 +178,18 @@ export default function CrudWizard() {
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
               <div className="space-y-3">
                 <h4 className="text-[10px] font-semibold text-gray-400 uppercase">Artifacts</h4>
-                <Toggle label="Database Migration (Liquibase)" checked={options.generateMigration} onChange={v => setOptions({ ...options, generateMigration: v })} />
+                {!existingEntityMode && (
+                  <Toggle label="Database Migration (Liquibase)" checked={options.generateMigration} onChange={v => setOptions({ ...options, generateMigration: v })} />
+                )}
                 <Toggle label="Data Repository" checked={options.generateDataRepository} onChange={v => setOptions({ ...options, generateDataRepository: v })} />
                 <Toggle label="Fetch Plans" checked={options.generateFetchPlan} onChange={v => setOptions({ ...options, generateFetchPlan: v })} />
+                <Toggle label="Menu entry" checked={options.generateMenu} onChange={v => setOptions({ ...options, generateMenu: v })} />
+                <Toggle label="Localization messages" checked={options.generateMessages} onChange={v => setOptions({ ...options, generateMessages: v })} />
+                <Toggle
+                  label={existingEntityMode ? 'New full-access role (explicit opt-in)' : 'Full-access resource role'}
+                  checked={options.generateSecurityRole}
+                  onChange={v => setOptions({ ...options, generateSecurityRole: v })}
+                />
                 <Toggle label="Generic Filter" checked={options.includeFilter} onChange={v => setOptions({ ...options, includeFilter: v })} />
                 <Toggle label="Pagination" checked={options.includePagination} onChange={v => setOptions({ ...options, includePagination: v })} />
                 <Toggle label="CRUD Actions (Create/Edit/Remove)" checked={options.includeActions} onChange={v => setOptions({ ...options, includeActions: v })} />
@@ -178,16 +213,18 @@ export default function CrudWizard() {
                     <option value="sidePanel">Side Panel</option>
                   </select>
                 </div>
-                <div>
-                  <label className="block text-[10px] text-gray-500 mb-1">Database Type</label>
-                  <select value={options.dbType} onChange={e => setOptions({ ...options, dbType: e.target.value })} className="w-full">
-                    <option value="postgres">PostgreSQL</option>
-                    <option value="mysql">MySQL</option>
-                    <option value="mssql">MS SQL Server</option>
-                    <option value="oracle">Oracle</option>
-                    <option value="hsqldb">HSQLDB</option>
-                  </select>
-                </div>
+                {!existingEntityMode && (
+                  <div>
+                    <label className="block text-[10px] text-gray-500 mb-1">Database Type</label>
+                    <select value={options.dbType} onChange={e => setOptions({ ...options, dbType: e.target.value })} className="w-full">
+                      <option value="postgres">PostgreSQL</option>
+                      <option value="mysql">MySQL</option>
+                      <option value="mssql">MS SQL Server</option>
+                      <option value="oracle">Oracle</option>
+                      <option value="hsqldb">HSQLDB</option>
+                    </select>
+                  </div>
+                )}
                 <div>
                   <label className="block text-[10px] text-gray-500 mb-1">Menu Icon</label>
                   <input value={options.menuIcon || ''} onChange={e => setOptions({ ...options, menuIcon: e.target.value })} className="w-full" placeholder="vaadin:table" />
@@ -248,7 +285,9 @@ export default function CrudWizard() {
                     <span className="animate-spin">⏳</span> Planning...
                   </span>
                 ) : (
-                  '⚡ Preview Full CRUD Stack'
+                  existingEntityMode
+                    ? '⚡ Preview views and UI support'
+                    : '⚡ Preview Full CRUD Stack'
                 )}
               </button>
             ) : generationPreview ? (
@@ -260,6 +299,7 @@ export default function CrudWizard() {
                   <p className="mt-1 text-[10px] leading-relaxed text-amber-100/60">
                     Existing menu and message files are merged at exact source locations. New Java, FlowUI, security,
                     fetch-plan, and Liquibase files are created only if their destinations remain unchanged.
+                    {existingEntityMode && ' The indexed entity source and its database table are never regenerated.'}
                   </p>
                   <div className="mt-3 max-h-72 space-y-1 overflow-auto">
                     {generationPreview.files.map((file) => (
@@ -354,16 +394,18 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
 function getExpectedFiles(entityName: string, options: CrudOptions): string[] {
   if (!entityName) return ['(define an entity first)']
   const files = [
-    `entity/${entityName}.java`,
     `view/${entityName}ListView.xml`,
     `view/${entityName}ListView.java`,
     `view/${entityName}DetailView.xml`,
     `view/${entityName}DetailView.java`,
-    `menu.xml (entry)`,
-    `security/${entityName}Role.java`,
-    `messages.properties`,
   ]
-  if (options.generateMigration) files.splice(1, 0, `db/changelog/001-${entityName.toLowerCase()}.xml`)
+  if (options.generateMenu) files.push('menu.xml (entry)')
+  if (options.generateSecurityRole) files.push(`security/${entityName}Role.java`)
+  if (options.generateMessages) files.push('messages.properties')
+  if (options.generateEntity) files.unshift(`entity/${entityName}.java`)
+  if (options.generateEntity && options.generateMigration) {
+    files.splice(1, 0, `db/changelog/001-${entityName.toLowerCase()}.xml`)
+  }
   if (options.generateDataRepository) files.push(`entity/${entityName}Repository.java`)
   if (options.generateFetchPlan) files.push(`entity/${entityName}-fetch-plans.xml`)
   return files

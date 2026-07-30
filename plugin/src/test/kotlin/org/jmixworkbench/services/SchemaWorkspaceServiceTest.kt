@@ -29,6 +29,7 @@ import org.jmixworkbench.model.DdlGenerationMode
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.ProjectConfig
 import org.jmixworkbench.model.IdType
+import org.jmixworkbench.model.IdConfig
 import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.LifecycleCallback
 import org.jmixworkbench.model.TraitType
@@ -2105,6 +2106,83 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                 it.relativePath.contains("/liquibase/changelog/") &&
                     it.relativePath.endsWith("-create-repayment_schedule.xml")
             },
+        )
+    }
+
+    fun testExistingEntityViewGenerationRequiresExactSourceAndNeverRecreatesEntityOrTable() {
+        createFixture(includeAll = true)
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val snapshot = workspace.entities.single { it.className == "LoanApp" }
+        val store = workspace.stores.single()
+        val entity = EntityModel(
+            className = snapshot.className,
+            packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+            entityName = snapshot.entityName,
+            tableName = snapshot.tableName,
+            tableSchema = snapshot.tableSchema,
+            tableCatalog = snapshot.tableCatalog,
+            dataStore = snapshot.storeName,
+            entityType = snapshot.entityType,
+            id = IdConfig(
+                type = snapshot.idType,
+                columnName = snapshot.idColumnName,
+            ),
+            traits = snapshot.traits.toMutableList(),
+            databaseView = snapshot.databaseView,
+            generationTarget = EntityGenerationTarget(snapshot.moduleId, store.id),
+            attributes = snapshot.attributes.map { attribute ->
+                AttributeModel(
+                    name = attribute.name,
+                    type = when {
+                        attribute.javaType.endsWith("BigDecimal") -> AttributeType.BIG_DECIMAL
+                        attribute.javaType.endsWith("UUID") -> AttributeType.UUID
+                        else -> AttributeType.STRING
+                    },
+                    columnName = attribute.columnName,
+                    mandatory = !attribute.nullable,
+                    unique = attribute.unique,
+                    length = attribute.length,
+                    precision = attribute.precision,
+                    scale = attribute.scale,
+                    transientFlag = !attribute.persistent,
+                )
+            }.toMutableList(),
+        )
+        val config = ProjectConfig(
+            projectRoot = requireNotNull(project.basePath),
+            basePackage = "com.acme",
+        )
+        val options = CrudOrchestrator.CrudOptions(
+            generateEntity = false,
+            existingEntitySource = snapshot.sourceLocator,
+            generateMigration = true,
+            generateSecurityRole = false,
+        )
+
+        val preview = CodeGenerationService.getInstance(project)
+            .previewCrudGeneration(entity, config, options)
+
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        assertTrue(preview.label.contains("existing LoanApp"))
+        assertFalse(preview.files.any { it.relativePath.endsWith("/entity/LoanApp.java") })
+        assertFalse(preview.files.any { it.relativePath.contains("/liquibase/changelog/") })
+        assertFalse(preview.files.any { it.relativePath.endsWith("/security/LoanAppRole.java") })
+        assertTrue(preview.files.any { it.relativePath.endsWith("/view/LoanAppListView.xml") })
+        assertTrue(preview.files.any { it.relativePath.endsWith("/view/LoanAppDetailView.java") })
+
+        val stale = CodeGenerationService.getInstance(project).previewCrudGeneration(
+            entity,
+            config,
+            options.copy(
+                existingEntitySource = snapshot.sourceLocator.copy(
+                    revisionFingerprint = "stale-revision",
+                ),
+            ),
+        )
+        assertFalse(stale.accepted)
+        assertTrue(
+            stale.issues.any { it.message.contains("JVW-CRUD-EXISTING-SOURCE-STALE") },
+            stale.issues.joinToString { it.message },
         )
     }
 

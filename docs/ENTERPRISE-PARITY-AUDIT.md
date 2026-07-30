@@ -270,9 +270,9 @@ inspection control rather than relying on a hard-to-hit table-row target.
 - The workflow palette, subprocess inspector, Jmix email inspector and scenario
   failure-assertion editor were exercised in a real browser without console
   errors.
-- IntelliJ 2025.3: 264 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2025.3: 267 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-253.28294.334.
-- IntelliJ 2026.2: 264 tests and 3 host smoke tests passed; the packaged
+- IntelliJ 2026.2: 267 tests and 3 host smoke tests passed; the packaged
   plugin verifier reports compatibility with IU-262.8665.258.
 - Platform-independent discovery/parser contracts: 70 tests passed.
 - Eight native editor-assistance scenarios pass on both IntelliJ hosts,
@@ -454,12 +454,15 @@ inspection control rather than relying on a hard-to-hit table-row target.
 ## Recommended next execution order
 
 1. Complete the remaining high-frequency entity workflows: listener class
-   creation/navigation, view actions, discriminator fields, embedded overrides,
+   creation/navigation, discriminator fields, embedded overrides,
    mature repository methods, localized-caption workflows and safe enum-usage
    migration. Copy/reorder, inherited/trait visibility, callback authoring and
    listener discovery are now implemented with source-protected existing
-   declarations.
-2. Split the 6,077-line central Entity Designer into bounded feature modules and add
+   declarations. Exact-revision existing-entity view creation plus connected
+   source/visual navigation now work from both tool-window and native editor
+   surfaces without regenerating entity/table source or silently granting a
+   full-access role.
+2. Split the 6,051-line central Entity Designer into bounded feature modules and add
    component, interaction, responsive and accessibility regression tests.
 3. Complete arbitrary handwritten Java/Kotlin fixtures, database-first
    usability and installed-IDE dual-host performance/memory/leak certification.

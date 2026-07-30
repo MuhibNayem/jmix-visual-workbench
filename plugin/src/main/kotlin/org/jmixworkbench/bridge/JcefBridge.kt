@@ -9,6 +9,7 @@ import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.refactoring.rename.RenameProcessor
 import com.intellij.refactoring.safeDelete.SafeDeleteProcessor
 import com.intellij.refactoring.typeMigration.TypeMigrationProcessor
@@ -135,6 +136,11 @@ import org.jmixworkbench.services.WorkspaceHistoryService
 import org.jmixworkbench.services.WorkflowWorkspaceService
 import org.jmixworkbench.toolwindow.isPackagedWorkbenchOriginUrl
 import org.jmixworkbench.toolwindow.WorkbenchLaunchContext
+import org.jmixworkbench.toolwindow.WorkbenchNavigationService
+import org.jmixworkbench.toolwindow.WorkbenchSurface
+import org.jmixworkbench.toolwindow.WorkbenchSurfaceOpenPolicy
+import org.jmixworkbench.toolwindow.WorkbenchSurfaceOpenRequest
+import org.jmixworkbench.toolwindow.WorkbenchSurfaceOpenResponse
 import org.cef.browser.CefBrowser
 import org.cef.handler.CefLoadHandlerAdapter
 
@@ -450,6 +456,10 @@ class JcefBridge(
             }
             if (action == "navigateToSource") {
                 handleNavigateToSource(action, requestId, payload)
+                return
+            }
+            if (action == "openWorkbenchSurface") {
+                handleOpenWorkbenchSurface(action, requestId, payload)
                 return
             }
             if (action == "getFlowUiWorkspace") {
@@ -2313,6 +2323,58 @@ class JcefBridge(
                     ).navigate(true)
                 }
                 sendResponse(action, requestId, gson.toJson(prepared.response()))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleOpenWorkbenchSurface(action: String, requestId: String?, payload: JsonObject) {
+        val request = runCatching {
+            gson.fromJson(payload, WorkbenchSurfaceOpenRequest::class.java)
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkbenchSurfaceOpenResponse(
+                        success = false,
+                        errorCode = "JVW-WORKBENCH-SURFACE-REQUEST-INVALID",
+                        message = error.message ?: "The workbench surface request is malformed.",
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<org.jmixworkbench.toolwindow.PreparedWorkbenchSurfaceOpen> {
+            val entities = if (request.surface == WorkbenchSurface.CRUD_DESIGNER) {
+                SchemaWorkspaceService.getInstance(project)
+                    .load()
+                    .entities
+                    .mapTo(linkedSetOf()) { it.sourceLocator }
+            } else {
+                emptySet()
+            }
+            val artifactKinds =
+                if (request.surface == WorkbenchSurface.FLOW_UI_EDITOR) {
+                    ApplicationGraphService.getInstance(project)
+                        .graph()
+                        .artifacts
+                        .groupBy({ it.sourceLocator }, { it.kind })
+                        .mapValues { (_, kinds) -> kinds.toSet() }
+                } else {
+                    emptyMap()
+                }
+            WorkbenchSurfaceOpenPolicy.prepare(request, entities, artifactKinds)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                prepared.context?.let { context ->
+                    WorkbenchNavigationService.getInstance(project).request(context)
+                    ToolWindowManager.getInstance(project)
+                        .getToolWindow("Jmix Visual Workbench")
+                        ?.show()
+                }
+                sendResponse(action, requestId, gson.toJson(prepared.response))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

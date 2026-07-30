@@ -25,7 +25,7 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   Registrations exist in the shared descriptor and both host-specific
   descriptors; build-time source parity and nested packaged-ZIP checks reject a
   missing entity editor or navigation service. Both installable JAR
-  descriptors were inspected after assembly, 264 tests and three packaged-host
+  descriptors were inspected after assembly, 267 tests and three packaged-host
   smoke tests pass on each supported IntelliJ lane, and the native route
   completed preview interaction with zero shell overflow at a 360-pixel
   development editor width.
@@ -46,6 +46,21 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   source-derived and protected. Browser interaction verified copy, safe column
   regeneration, draft reorder, inherited evidence expansion and zero shell
   overflow at a 360-pixel embedded width.
+- Indexed entities now open a dedicated list/detail-view workflow directly
+  from both the normal workbench and the native IntelliJ entity editor. The
+  launch crosses surfaces only with an exact revision-bound entity locator;
+  stale or non-entity locators and attempts to elevate web content into native
+  editor surfaces fail closed. Existing-entity mode never recreates the
+  handwritten Java/Kotlin class or its table migration, rejects any visual
+  entity-contract drift, and lets developers select menu, messages, fetch
+  plans, repositories and security artifacts independently. A new full-access
+  role is off by default for existing entities and requires explicit opt-in.
+  Connected impact cards navigate to exact source, while indexed FlowUI
+  descriptors open directly in the visual designer. Dual-host tests prove
+  exact-revision routing and generation exclusion; browser interaction proves
+  the security-role opt-in default, no entity or Liquibase entry in preview,
+  native-editor routing, and a 360-pixel shell with
+  equal visible/scroll widths and no runtime warnings.
 - JPA entity, mapped-superclass, embeddable, DTO and typed Jmix enumeration
   generation.
 - UUID, Long, Integer, String and configured embedded identifier classes, with

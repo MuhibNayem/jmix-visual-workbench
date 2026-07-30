@@ -36,12 +36,14 @@ import type {
   EntityAttributeTypeExpansionVerificationResponse,
   EntityAttributeTypeMappingCutoverRequest,
   GraphSourceLocator,
+  GraphArtifact,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 import {
   EntitySourceContractEvidence,
   InheritedAttributeEvidence,
 } from './EntitySourceEvidence'
+import { existingEntityModel } from './entityModelAdapter'
 
 const ATTRIBUTE_TYPES: AttributeType[] = [
   'string', 'character', 'integer', 'long', 'double', 'bigDecimal', 'boolean',
@@ -133,6 +135,8 @@ export default function EntityDesigner({
     addToast,
     isGenerating,
     setIsGenerating,
+    openCrudDesigner,
+    openFlowUiDesigner,
   } = useStore()
   const [selectedAttr, setSelectedAttr] = useState<number | null>(null)
   const [showPreview, setShowPreview] = useState(false)
@@ -410,6 +414,69 @@ export default function EntityDesigner({
       .sort((left, right) =>
         left.kind.localeCompare(right.kind) || left.displayName.localeCompare(right.displayName))
   }, [applicationGraph, entity.className, entity.packageName, existingEntity])
+
+  const existingViewContractHasDraftChanges = useMemo(() => {
+    if (!existingEntity) return false
+    const store = schemaWorkspace?.stores.find(candidate =>
+      candidate.moduleId === existingEntity.moduleId &&
+      candidate.name === existingEntity.storeName,
+    )
+    const baseline = existingEntityModel(existingEntity, store?.id)
+    return baseline.className !== entity.className ||
+      baseline.packageName !== entity.packageName ||
+      baseline.entityName !== entity.entityName ||
+      JSON.stringify(baseline.attributes ?? []) !== JSON.stringify(entity.attributes)
+  }, [entity, existingEntity, schemaWorkspace])
+
+  const openEntityViewWorkflow = async () => {
+    if (!entity.className.trim()) {
+      addToast('Define or select an entity before creating views.', 'error')
+      return
+    }
+    if (!existingEntity) {
+      openCrudDesigner()
+      return
+    }
+    if (existingViewContractHasDraftChanges || generationPreview) {
+      addToast(
+        'Apply or discard the pending entity-source changes before creating bound views.',
+        'error',
+      )
+      return
+    }
+    if (!editorSurface) {
+      openCrudDesigner(existingEntity.sourceLocator)
+      return
+    }
+    const response = await bridge.openWorkbenchSurface(
+      'CRUD_DESIGNER',
+      existingEntity.sourceLocator,
+    )
+    addToast(
+      response.message,
+      response.success ? 'success' : 'error',
+    )
+  }
+
+  const openImpactSource = async (artifact: GraphArtifact) => {
+    const response = await bridge.navigateToSource(artifact.sourceLocator)
+    if (!response.success) addToast(response.message, 'error')
+  }
+
+  const designImpactView = async (artifact: GraphArtifact) => {
+    if (!editorSurface) {
+      openFlowUiDesigner(artifact.sourceLocator)
+      return
+    }
+    const response = await bridge.openWorkbenchSurface(
+      'FLOW_UI_EDITOR',
+      artifact.sourceLocator,
+    )
+    addToast(
+      response.message,
+      response.success ? 'success' : 'error',
+    )
+  }
 
   const handleGenerate = async () => {
     if (!entity.className.trim()) {
@@ -1470,6 +1537,15 @@ export default function EntityDesigner({
             : 'Entity Designer'}
         </h2>
         <div className="flex flex-wrap justify-end gap-2">
+          {(existingEntity || entity.className) && (
+            <button
+              type="button"
+              onClick={() => void openEntityViewWorkflow()}
+              className="rounded border border-emerald-500/35 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-100 transition-colors hover:bg-emerald-500/20"
+            >
+              {existingEntity ? 'Create bound views' : 'Create CRUD views'}
+            </button>
+          )}
           <button
             onClick={() => {
               setShowPreview((current) => {
@@ -3425,9 +3501,18 @@ export default function EntityDesigner({
                     artifacts connected to this entity. Safe structural changes must account for every listed consumer.
                   </p>
                 </div>
-                <span className="rounded bg-surface-lighter px-2 py-1 text-[10px] text-jmix-300">
-                  {entityImpact.length} connected
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void openEntityViewWorkflow()}
+                    className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-medium text-emerald-100 hover:bg-emerald-500/20"
+                  >
+                    Create list + detail views
+                  </button>
+                  <span className="rounded bg-surface-lighter px-2 py-1 text-[10px] text-jmix-300">
+                    {entityImpact.length} connected
+                  </span>
+                </div>
               </div>
               {entityImpact.length ? (
                 <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
@@ -3441,6 +3526,24 @@ export default function EntityDesigner({
                       <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-gray-600">
                         <span className="truncate">{artifact.kind}</span>
                         <span className="shrink-0">{artifact.owner.moduleId}</span>
+                      </div>
+                      <div className="mt-2 flex flex-wrap justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void openImpactSource(artifact)}
+                          className="rounded border border-surface-border px-2 py-1 text-[9px] text-gray-400 hover:border-jmix-500/40 hover:text-gray-200"
+                        >
+                          Open source
+                        </button>
+                        {artifact.kind === 'VIEW_DESCRIPTOR' && (
+                          <button
+                            type="button"
+                            onClick={() => void designImpactView(artifact)}
+                            className="rounded border border-jmix-500/35 bg-jmix-500/10 px-2 py-1 text-[9px] text-jmix-200 hover:bg-jmix-500/20"
+                          >
+                            Design
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -5759,135 +5862,6 @@ function suggestedEntityPackage(
     .split('.')
     .slice(0, -1)
     .join('.')
-}
-
-function existingEntityModel(
-  snapshot: SchemaEntitySnapshot,
-  storeId?: string,
-): Partial<EntityModel> {
-  const packageName = snapshot.qualifiedName.split('.').slice(0, -1).join('.')
-  return {
-    className: snapshot.className,
-    packageName,
-    sourceLanguage: snapshot.sourceLocator.relativePath.endsWith('.kt') ? 'kotlin' : 'java',
-    dataStore: snapshot.storeName,
-    generationTarget: {
-      moduleId: snapshot.moduleId,
-      storeId,
-    },
-    entityName: snapshot.entityName,
-    tableName: snapshot.tableName,
-    tableSchema: snapshot.tableSchema,
-    tableCatalog: snapshot.tableCatalog,
-    entityType: snapshot.entityType,
-    id: {
-      type: snapshot.idType,
-      generation: 'jmixGenerated',
-      columnName: snapshot.idColumnName,
-    },
-    traits: [...snapshot.traits],
-    attributes: snapshot.attributes.map((attribute) => {
-      const discovered = attribute.associationDetails
-      const attributeType = discovered?.composition
-        ? 'composition' as const
-        : schemaAttributeType(attribute.javaType, attribute.association)
-      return {
-        name: attribute.name,
-        type: attributeType,
-        columnName: attribute.columnName,
-        mandatory: !attribute.nullable,
-        unique: attribute.unique,
-        length: attribute.length,
-        precision: attribute.precision,
-        scale: attribute.scale,
-        transientFlag: !attribute.persistent,
-        comment: attribute.comment,
-        systemLevel: attribute.systemLevel ?? false,
-        readOnly: attribute.readOnly ?? false,
-        jmixProperty: attribute.jmixProperty ?? false,
-        dependsOnProperties: attribute.dependsOnProperties ?? [],
-        propertyDatatype: attribute.propertyDatatype,
-        lob: attribute.lob ?? false,
-        sqlType: attribute.sqlType,
-        ...(attributeType === 'enum' ? {
-          enumClass: attribute.javaType.replace(/\?$/, ''),
-        } : {}),
-        enumIdType: 'string',
-        validations: attribute.validations ?? [],
-        annotations: [],
-        inBaseFetchPlan: true,
-        ...(attribute.association ? {
-          association: {
-            associationType: discovered?.associationType ?? 'manyToOne' as const,
-            relatedEntity: discovered?.relatedEntity ?? attribute.javaType,
-            relatedTableName: discovered?.relatedTableName,
-            relatedIdColumnName: discovered?.relatedIdColumnName ?? 'ID',
-            relatedIdType: discovered?.relatedIdType ?? 'uuid' as const,
-            localIdAttributeName: discovered?.localIdAttributeName,
-            mappedBy: discovered?.mappedBy,
-            joinColumnName: discovered?.joinColumnName,
-            joinTable: discovered?.joinTable,
-            cascade: discovered?.cascade ?? [],
-            fetch: discovered?.fetch ?? 'lazy' as const,
-            collectionType: discovered?.collectionType ?? 'list' as const,
-            crossDataStore: discovered?.crossDataStore ?? false,
-            orphanRemoval: discovered?.orphanRemoval ?? false,
-            onDelete: discovered?.onDelete,
-          },
-        } : {}),
-      }
-    }),
-    indexes: [],
-    uniqueConstraints: [],
-    databaseView: snapshot.databaseView,
-    ddlGeneration: {
-      enabled: snapshot.entityType === 'entity' && snapshot.ddlMode !== 'DISABLED',
-      mode: snapshot.ddlMode === 'CREATE_ONLY'
-        ? 'createOnly'
-        : snapshot.ddlMode === 'DISABLED'
-          ? 'disabled'
-          : 'createAndDrop',
-      unmappedColumns: [],
-      unmappedConstraints: [],
-    },
-    lifecycleCallbacks: [...snapshot.lifecycleCallbacks],
-    entityListeners: [...snapshot.entityListeners],
-    extendsClass: snapshot.extendsClass,
-    implementsInterfaces: [...snapshot.implementsInterfaces],
-    annotations: [],
-    systemLevel: false,
-    annotatedPropertiesOnly: false,
-  }
-}
-
-function schemaAttributeType(javaType: string, association: boolean): AttributeType {
-  if (association) return 'association'
-  const simple = javaType.replace(/\??$/, '').split('.').pop()?.replace(/<.*>/, '') ?? javaType
-  const mapping: Record<string, AttributeType> = {
-    String: 'string',
-    Character: 'character',
-    char: 'character',
-    Integer: 'integer',
-    int: 'integer',
-    Long: 'long',
-    long: 'long',
-    Double: 'double',
-    double: 'double',
-    BigDecimal: 'bigDecimal',
-    Boolean: 'boolean',
-    boolean: 'boolean',
-    Date: 'date',
-    LocalDate: 'localDate',
-    LocalDateTime: 'localDateTime',
-    LocalTime: 'localTime',
-    OffsetTime: 'offsetTime',
-    OffsetDateTime: 'offsetDateTime',
-    URI: 'uri',
-    FileRef: 'fileRef',
-    UUID: 'uuid',
-    'byte[]': 'byteArray',
-  }
-  return mapping[simple] ?? 'enum'
 }
 
 function generateExistingUpdatePreview(entity: EntityModel, snapshot: SchemaEntitySnapshot): string {

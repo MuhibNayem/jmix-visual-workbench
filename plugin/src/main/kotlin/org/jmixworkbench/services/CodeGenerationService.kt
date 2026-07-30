@@ -101,7 +101,16 @@ class CodeGenerationService(private val project: Project) {
         config: ProjectConfig,
         options: CrudOrchestrator.CrudOptions,
     ): WorkspaceChangePreviewResponse =
-        previewGeneratedPlan(crudGenerationPlan(entity, config, options))
+        runCatching { crudGenerationPlan(entity, config, options) }
+            .fold(
+                onSuccess = ::previewGeneratedPlan,
+                onFailure = { error ->
+                    rejectedGenerationPreview(
+                        "Generate Jmix CRUD for ${entity.className}",
+                        error,
+                    )
+                },
+            )
 
     fun prepareCrudGeneration(
         entity: EntityModel,
@@ -109,7 +118,16 @@ class CodeGenerationService(private val project: Project) {
         options: CrudOrchestrator.CrudOptions,
         expectedPlanDigest: String,
     ): PreparedWorkspaceChange =
-        prepareGeneratedPlan(crudGenerationPlan(entity, config, options), expectedPlanDigest)
+        runCatching { crudGenerationPlan(entity, config, options) }
+            .fold(
+                onSuccess = { plan -> prepareGeneratedPlan(plan, expectedPlanDigest) },
+                onFailure = { error ->
+                    rejectedPreparedGeneration(
+                        "Generate Jmix CRUD for ${entity.className}",
+                        error,
+                    )
+                },
+            )
 
     // ─── View Generation ─────────────────────────────────────────────────────
 
@@ -910,6 +928,23 @@ class CodeGenerationService(private val project: Project) {
         config: ProjectConfig,
         options: CrudOrchestrator.CrudOptions,
     ): GeneratedPlan {
+        if (!options.generateEntity) {
+            val locator = requireNotNull(options.existingEntitySource) {
+                "JVW-CRUD-EXISTING-SOURCE-REQUIRED: existing-entity view generation requires an indexed source locator."
+            }
+            val indexed = SchemaWorkspaceService.getInstance(project)
+                .load()
+                .entities
+                .singleOrNull { it.sourceLocator == locator }
+                ?: error(
+                    "JVW-CRUD-EXISTING-SOURCE-STALE: the existing entity source changed after the view workflow was opened.",
+                )
+            val mismatch = existingCrudEntityMismatch(entity, indexed)
+            require(mismatch == null) {
+                "JVW-CRUD-EXISTING-CONTRACT-CHANGED: $mismatch " +
+                    "Apply or discard entity draft changes before generating bound views."
+            }
+        }
         val target = resolveGenerationTarget(entity, config)
         val effectiveEntity = entity
             .copy(dataStore = target.store?.name ?: entity.dataStore)
@@ -921,14 +956,14 @@ class CodeGenerationService(private val project: Project) {
             options.copy(generateMigration = false),
         )
         val generatedFiles = listOfNotNull(
-            output.entityFile,
+            output.entityFile.takeIf { options.generateEntity },
             output.listViewXml,
             output.listViewController,
             output.detailViewXml,
             output.detailViewController,
-            output.menuXml,
-            output.roleFile,
-            output.messagesFile,
+            output.menuXml.takeIf { options.generateMenu },
+            output.roleFile.takeIf { options.generateSecurityRole },
+            output.messagesFile.takeIf { options.generateMessages },
             output.dataRepositoryFile,
             output.fetchPlanFile,
         ).toMutableList()
@@ -941,7 +976,7 @@ class CodeGenerationService(private val project: Project) {
                 )
             }
         }
-        val migrationChanges = if (options.generateMigration && target.store != null) {
+        val migrationChanges = if (options.generateEntity && options.generateMigration && target.store != null) {
             val migration = MigrationGenerator.generateFromEntity(effectiveEntity, options.dbType)
             val proposal = SchemaWorkspaceService.getInstance(project).migrationProposal(
                 SchemaMigrationChangeRequest(
@@ -955,7 +990,7 @@ class CodeGenerationService(private val project: Project) {
         } else {
             emptyList()
         }
-        if (options.generateMigration && target.store == null) {
+        if (options.generateEntity && options.generateMigration && target.store == null) {
             val migration = MigrationGenerator.generateFromEntity(effectiveEntity, options.dbType)
             generatedFiles += CrudOrchestrator.GeneratedFile(
                 relativePath =
@@ -965,7 +1000,11 @@ class CodeGenerationService(private val project: Project) {
             )
         }
         return GeneratedPlan(
-            label = "Generate Jmix CRUD for ${effectiveEntity.className}",
+            label = if (options.generateEntity) {
+                "Generate Jmix CRUD for ${effectiveEntity.className}"
+            } else {
+                "Generate Jmix views and UI support for existing ${effectiveEntity.className}"
+            },
             config = effectiveConfig,
             files = generatedFiles.map { file ->
                 GeneratedSource(
@@ -980,6 +1019,80 @@ class CodeGenerationService(private val project: Project) {
             },
             additionalChanges = migrationChanges,
         )
+    }
+
+    private fun existingCrudEntityMismatch(
+        entity: EntityModel,
+        indexed: SchemaEntitySnapshot,
+    ): String? {
+        val requestedQualifiedName = "${entity.packageName}.${entity.className}"
+        if (requestedQualifiedName != indexed.qualifiedName) return "The qualified entity name changed."
+        if (entity.generationTarget?.moduleId != indexed.moduleId) return "The owning module changed."
+        if (entity.entityName != indexed.entityName) return "The Jmix entity name changed."
+        if (entity.tableName != indexed.tableName) return "The mapped table name changed."
+        if (entity.tableSchema != indexed.tableSchema) return "The mapped table schema changed."
+        if (entity.tableCatalog != indexed.tableCatalog) return "The mapped table catalog changed."
+        if (entity.entityType != indexed.entityType) return "The entity kind changed."
+        if (entity.databaseView != indexed.databaseView) return "The database-view contract changed."
+        if (entity.id.type != indexed.idType) return "The identifier type changed."
+        if (entity.id.columnName != indexed.idColumnName) return "The identifier column changed."
+        if (entity.traits != indexed.traits) return "The declared trait contract changed."
+        if (entity.attributes.size != indexed.attributes.size) return "The declared attribute count changed."
+        entity.attributes.zip(indexed.attributes).forEach { (requested, source) ->
+            val sourceType = when {
+                source.associationDetails?.composition == true -> AttributeType.COMPOSITION
+                source.association -> AttributeType.ASSOCIATION
+                else -> indexedCrudAttributeType(source.javaType)
+            }
+            if (requested.name != source.name) return "Attribute order or name changed at '${source.name}'."
+            if (requested.type != sourceType) return "Attribute '${source.name}' type changed."
+            if (requested.columnName != source.columnName) return "Attribute '${source.name}' mapping changed."
+            if (requested.mandatory != !source.nullable) return "Attribute '${source.name}' nullability changed."
+            if (requested.unique != source.unique) return "Attribute '${source.name}' uniqueness changed."
+            if (requested.transientFlag != !source.persistent) return "Attribute '${source.name}' persistence changed."
+            if (requested.length != source.length) return "Attribute '${source.name}' length changed."
+            if (requested.precision != source.precision) return "Attribute '${source.name}' precision changed."
+            if (requested.scale != source.scale) return "Attribute '${source.name}' scale changed."
+            if (
+                source.association &&
+                (
+                    requested.association?.associationType != source.associationDetails?.associationType ||
+                        requested.association?.relatedEntity != source.associationDetails?.relatedEntity ||
+                        requested.association?.mappedBy != source.associationDetails?.mappedBy ||
+                        requested.association?.joinColumnName != source.associationDetails?.joinColumnName
+                    )
+            ) {
+                return "Attribute '${source.name}' relationship contract changed."
+            }
+        }
+        return null
+    }
+
+    private fun indexedCrudAttributeType(javaType: String): AttributeType {
+        val simple = javaType
+            .removeSuffix("?")
+            .substringAfterLast('.')
+            .substringBefore('<')
+        return when (simple) {
+            "String" -> AttributeType.STRING
+            "Character", "char" -> AttributeType.CHARACTER
+            "Integer", "int" -> AttributeType.INTEGER
+            "Long", "long" -> AttributeType.LONG
+            "Double", "double" -> AttributeType.DOUBLE
+            "BigDecimal" -> AttributeType.BIG_DECIMAL
+            "Boolean", "boolean" -> AttributeType.BOOLEAN
+            "Date" -> AttributeType.DATE
+            "LocalDate" -> AttributeType.LOCAL_DATE
+            "LocalDateTime" -> AttributeType.LOCAL_DATE_TIME
+            "LocalTime" -> AttributeType.LOCAL_TIME
+            "OffsetTime" -> AttributeType.OFFSET_TIME
+            "OffsetDateTime" -> AttributeType.OFFSET_DATE_TIME
+            "URI" -> AttributeType.URI
+            "FileRef" -> AttributeType.FILE_REF
+            "UUID" -> AttributeType.UUID
+            "byte[]" -> AttributeType.BYTE_ARRAY
+            else -> AttributeType.ENUM
+        }
     }
 
     private fun applyGeneratedPlan(plan: GeneratedPlan): GenerationResult =
@@ -1007,23 +1120,29 @@ class CodeGenerationService(private val project: Project) {
                 WorkspaceChangeApplyRequest(generationChangeSet(plan), expectedPlanDigest),
             )
         }.getOrElse { error ->
-            PreparedWorkspaceChange(
-                plan = org.jmixworkbench.discovery.change.WorkspaceChangePlan(
-                    accepted = false,
-                    changeSetId = "generation:rejected",
-                    label = plan.label,
-                    planDigest = null,
-                    files = emptyList(),
-                    issues = listOf(
-                        org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
-                            code = "JVW-GENERATION-PLAN-REJECTED",
-                            message = error.message ?: "Generation planning failed.",
-                        ),
+            rejectedPreparedGeneration(plan.label, error)
+        }
+
+    private fun rejectedPreparedGeneration(
+        label: String,
+        error: Throwable,
+    ): PreparedWorkspaceChange =
+        PreparedWorkspaceChange(
+            plan = org.jmixworkbench.discovery.change.WorkspaceChangePlan(
+                accepted = false,
+                changeSetId = "generation:rejected",
+                label = label,
+                planDigest = null,
+                files = emptyList(),
+                issues = listOf(
+                    org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                        code = "JVW-GENERATION-PLAN-REJECTED",
+                        message = error.message ?: "Generation planning failed.",
                     ),
                 ),
-                baseDir = null,
-            )
-        }
+            ),
+            baseDir = null,
+        )
 
     private fun generationChangeSet(plan: GeneratedPlan): WorkspaceChangeSet {
         val projectRoot = project.basePath

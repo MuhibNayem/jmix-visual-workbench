@@ -62,12 +62,13 @@ the present substantial implementation to a superior daily developer product
 is:
 
 1. remaining high-frequency entity actions: listener class creation/navigation,
-   view creation/navigation, complete discriminator and embedded-override
+   complete discriminator and embedded-override
    editing, mature repository methods, localized-caption workflows and safe
    enum-usage migration. Copy/reorder, inherited/trait visibility, callback
-   authoring and listener discovery are implemented with handwritten-source
+   authoring, listener discovery and exact-revision entity-to-view creation/
+   source/design navigation are implemented with handwritten-source
    protection;
-2. decomposition of the 6,077-line central React designer plus component, interaction,
+2. decomposition of the 6,051-line central React designer plus component, interaction,
    responsive and accessibility regression tests;
 3. representative arbitrary-source, database-first, installed-IDE dual-host,
    scale, latency, memory and leak certification.

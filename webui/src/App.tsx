@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore, type ActiveTab } from './store'
 import { bridge } from './bridge'
 import type { GraphSourceLocator } from './types'
 import EntityDesigner from './components/EntityDesigner/EntityDesigner'
+import { existingEntityModel } from './components/EntityDesigner/entityModelAdapter'
 import ViewDesigner from './components/ViewDesigner/ViewDesigner'
 import CrudWizard from './components/CrudWizard/CrudWizard'
 import MenuDesigner from './components/MenuDesigner/MenuDesigner'
@@ -38,11 +39,16 @@ export default function App() {
     activeTab,
     setActiveTab,
     setProjectConfig,
+    setEntity,
+    addToast,
     flowUiLocator,
     openFlowUiDesigner,
     closeFlowUiDesigner,
     resetEntity,
+    openCrudDesigner,
+    crudEntityLocator,
   } = useStore()
+  const launchSequence = useRef(0)
   const nativeFlowUiEditor = window.location.pathname === '/flowui-editor.html'
   const nativeEntityEditor = window.location.pathname === '/entity-editor.html'
   const [entityEditorLocator, setEntityEditorLocator] = useState<GraphSourceLocator | null>(() => {
@@ -75,6 +81,7 @@ export default function App() {
 
   useEffect(() => {
     const applyLaunchContext = (context: ReturnType<typeof bridge.getLaunchContext>) => {
+      const sequence = ++launchSequence.current
       switch (context?.surface) {
         case 'FLOW_UI_EDITOR':
           if (context.sourceLocator) openFlowUiDesigner(context.sourceLocator)
@@ -93,13 +100,50 @@ export default function App() {
           setActiveTab('view')
           break
         case 'CRUD_DESIGNER':
-          setActiveTab('crud')
+          if (!context.sourceLocator) {
+            openCrudDesigner()
+            break
+          }
+          void bridge.getSchemaWorkspace()
+            .then((workspace) => {
+              if (sequence !== launchSequence.current) return
+              const snapshot = workspace.entities.find(candidate =>
+                candidate.sourceLocator.relativePath === context.sourceLocator?.relativePath &&
+                candidate.sourceLocator.revisionFingerprint === context.sourceLocator?.revisionFingerprint,
+              )
+              if (!snapshot) {
+                addToast(
+                  'The selected entity changed after indexing. Refresh the Entity Designer before creating views.',
+                  'error',
+                )
+                return
+              }
+              const store = workspace.stores.find(candidate =>
+                candidate.moduleId === snapshot.moduleId &&
+                candidate.name === snapshot.storeName,
+              )
+              setEntity(existingEntityModel(snapshot, store?.id))
+              openCrudDesigner(snapshot.sourceLocator)
+            })
+            .catch((error) => {
+              if (sequence === launchSequence.current) {
+                addToast(`Cannot open the entity view workflow: ${error.message}`, 'error')
+              }
+            })
           break
       }
     }
     applyLaunchContext(bridge.getLaunchContext())
     return bridge.onLaunchContext(applyLaunchContext)
-  }, [closeFlowUiDesigner, openFlowUiDesigner, resetEntity, setActiveTab])
+  }, [
+    addToast,
+    closeFlowUiDesigner,
+    openCrudDesigner,
+    openFlowUiDesigner,
+    resetEntity,
+    setActiveTab,
+    setEntity,
+  ])
 
   if (nativeFlowUiEditor) {
     return (
@@ -162,7 +206,13 @@ export default function App() {
           {workspaces.map((workspace) => (
             <button
               key={workspace.id}
-              onClick={() => setActiveTab(workspace.id)}
+              onClick={() => {
+                if (workspace.id === 'crud') {
+                  openCrudDesigner()
+                } else {
+                  setActiveTab(workspace.id)
+                }
+              }}
               title={workspace.label}
               aria-label={workspace.label}
               aria-current={activeTab === workspace.id ? 'page' : undefined}
@@ -187,7 +237,11 @@ export default function App() {
         {activeTab === 'projectMap' && <ProjectMap />}
         {activeTab === 'entity' && <EntityDesigner key={entityDesignerKey} />}
         {activeTab === 'view' && <ViewDesigner />}
-        {activeTab === 'crud' && <CrudWizard />}
+        {activeTab === 'crud' && (
+          <CrudWizard
+            key={crudEntityLocator?.revisionFingerprint ?? 'new-entity'}
+          />
+        )}
         {activeTab === 'menu' && <MenuDesigner />}
         {activeTab === 'role' && <RoleDesigner />}
         {activeTab === 'api' && <ApiDesigner />}

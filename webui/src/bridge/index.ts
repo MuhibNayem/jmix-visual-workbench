@@ -73,6 +73,7 @@ import type {
   VisualRuleModel,
   VisualRuleWorkspaceResponse,
   WorkbenchLaunchContext,
+  WorkbenchSurfaceOpenResponse,
 } from '../types'
 import {
   developmentApplicationGraph,
@@ -1447,19 +1448,31 @@ class ${scenario.className} {
                   .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
                   .toLowerCase()
                 const paths = [
-                  `${moduleId}/src/main/java/${sourcePackage}/entity/${entityName}.java`,
                   `${moduleId}/src/main/java/${sourcePackage}/view/${entityName}ListView.java`,
                   `${moduleId}/src/main/resources/${sourcePackage}/view/${entityName}ListView.xml`,
                   `${moduleId}/src/main/java/${sourcePackage}/view/${entityName}DetailView.java`,
                   `${moduleId}/src/main/resources/${sourcePackage}/view/${entityName}DetailView.xml`,
-                  `${moduleId}/src/main/resources/${sourcePackage}/menu.xml`,
-                  `${moduleId}/src/main/java/${sourcePackage}/security/${entityName}Role.java`,
-                  `${moduleId}/src/main/resources/${sourcePackage}/messages.properties`,
                 ]
+                if (payload.options?.generateMenu !== false) {
+                  paths.push(`${moduleId}/src/main/resources/${sourcePackage}/menu.xml`)
+                }
+                if (payload.options?.generateSecurityRole !== false) {
+                  paths.push(`${moduleId}/src/main/java/${sourcePackage}/security/${entityName}Role.java`)
+                }
+                if (payload.options?.generateMessages !== false) {
+                  paths.push(`${moduleId}/src/main/resources/${sourcePackage}/messages.properties`)
+                }
+                if (payload.options?.generateEntity !== false) {
+                  paths.unshift(`${moduleId}/src/main/java/${sourcePackage}/entity/${entityName}.java`)
+                }
                 if (payload.options?.generateFetchPlan !== false) {
                   paths.push(`${moduleId}/src/main/resources/${sourcePackage}/entity/${entityName}-fetch-plans.xml`)
                 }
-                if (payload.options?.generateMigration !== false && store?.generatedDirectory) {
+                if (
+                  payload.options?.generateEntity !== false &&
+                  payload.options?.generateMigration !== false &&
+                  store?.generatedDirectory
+                ) {
                   paths.push(`${store.generatedDirectory}/2026/07/29-create-${tableStem}.xml`)
                 }
                 if (payload.options?.generateDataRepository) {
@@ -1468,7 +1481,9 @@ class ${scenario.className} {
                 return {
                   accepted: true,
                   changeSetId: 'generation:development-crud',
-                  label: `Generate Jmix CRUD for ${entityName}`,
+                  label: payload.options?.generateEntity === false
+                    ? `Generate Jmix views and UI support for existing ${entityName}`
+                    : `Generate Jmix CRUD for ${entityName}`,
                   planDigest: 'development-crud-generation',
                   files: paths.map((relativePath) => ({
                     relativePath,
@@ -1497,6 +1512,11 @@ class ${scenario.className} {
                   planDigest: payload.expectedPlanDigest,
                   filesChanged: ['loan/src/main/java/com/company/loan/entity/LoanApp.java'],
                   issues: [],
+                }
+              case 'openWorkbenchSurface':
+                return {
+                  success: true,
+                  message: 'Development bridge accepted the indexed workbench surface.',
                 }
               case 'previewWorkflowGeneration': {
                 const workflow = payload as WorkflowModel
@@ -2485,6 +2505,16 @@ class ${scenario.className} {
 
   navigateToSource(locator: GraphSourceLocator) {
     return this.request<SourceNavigationResponse>('navigateToSource', locator)
+  }
+
+  openWorkbenchSurface(
+    surface: 'CRUD_DESIGNER' | 'FLOW_UI_EDITOR',
+    sourceLocator: GraphSourceLocator,
+  ) {
+    return this.request<WorkbenchSurfaceOpenResponse>('openWorkbenchSurface', {
+      surface,
+      sourceLocator,
+    })
   }
 
   getFlowUiWorkspace(sourceLocator: GraphSourceLocator) {

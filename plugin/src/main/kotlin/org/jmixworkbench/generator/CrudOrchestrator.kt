@@ -1,6 +1,7 @@
 package org.jmixworkbench.generator
 
 import org.jmixworkbench.model.*
+import org.jmixworkbench.discovery.model.SourceLocator
 
 /**
  * Orchestrates full CRUD stack generation from a single EntityModel.
@@ -33,9 +34,14 @@ object CrudOrchestrator {
     )
 
     data class CrudOptions(
+        val generateEntity: Boolean = true,
+        val existingEntitySource: SourceLocator? = null,
         val generateMigration: Boolean = true,
         val generateDataRepository: Boolean = false,
         val generateFetchPlan: Boolean = true,
+        val generateMenu: Boolean = true,
+        val generateSecurityRole: Boolean = true,
+        val generateMessages: Boolean = true,
         val listViewType: ListViewStyle = ListViewStyle.DATA_GRID,
         val detailViewMode: DetailViewMode = DetailViewMode.FORM,
         val includeFilter: Boolean = true,

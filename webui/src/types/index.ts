@@ -996,6 +996,12 @@ export interface WorkbenchLaunchContext {
   sourceLocator?: GraphSourceLocator
 }
 
+export interface WorkbenchSurfaceOpenResponse {
+  success: boolean
+  errorCode?: string
+  message: string
+}
+
 // ─── Indexed Menu Workspace ─────────────────────────────────────────────────
 
 export interface MenuNodeSnapshot {
@@ -2650,9 +2656,14 @@ export interface JmixFlowUiHotDeployRequest {
 // ─── CRUD Options ────────────────────────────────────────────────────────────
 
 export interface CrudOptions {
+  generateEntity: boolean
+  existingEntitySource?: GraphSourceLocator
   generateMigration: boolean
   generateDataRepository: boolean
   generateFetchPlan: boolean
+  generateMenu: boolean
+  generateSecurityRole: boolean
+  generateMessages: boolean
   listViewType: 'dataGrid' | 'treeDataGrid' | 'virtualList'
   detailViewMode: 'form' | 'tabbed' | 'sidePanel'
   includeFilter: boolean
