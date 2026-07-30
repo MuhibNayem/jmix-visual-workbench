@@ -22,6 +22,7 @@ import org.jmixworkbench.model.CascadeType
 import org.jmixworkbench.model.EntityGenerationTarget
 import org.jmixworkbench.model.EntityModel
 import org.jmixworkbench.model.EntitySourceLanguage
+import org.jmixworkbench.model.EntityType
 import org.jmixworkbench.model.DdlGenerationConfig
 import org.jmixworkbench.model.DdlGenerationMode
 import org.jmixworkbench.model.MigrationModel
@@ -549,6 +550,120 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(
             columnCollision.issues.any { it.code == "JVW-ENTITY-COLUMN-RENAME-COLLISION" },
         )
+    }
+
+    fun testNonPersistentAndReusableHandwrittenJmixTypesRoundTripWithoutTableDdl() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/PayrollProjection.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+
+                @JmixEntity(name = "acme_PayrollProjection")
+                public class PayrollProjection {
+                    private String runNo;
+
+                    public String manualLabel() {
+                        return "Payroll " + runNo;
+                    }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/LoanTerms.kt",
+                """
+                package com.acme.entity
+
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.Column
+                import jakarta.persistence.Embeddable
+
+                @JmixEntity
+                @Embeddable
+                open class LoanTerms {
+                    @Column(name = "TERM_MONTHS", nullable = false)
+                    var termMonths: Int? = null
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/AuditedRecord.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.Column;
+                import jakarta.persistence.MappedSuperclass;
+
+                @JmixEntity
+                @MappedSuperclass
+                public abstract class AuditedRecord {
+                    @Column(name = "AUDIT_NOTE")
+                    protected String auditNote;
+                }
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val projection = workspace.entities.single { it.className == "PayrollProjection" }
+        val terms = workspace.entities.single { it.className == "LoanTerms" }
+        val mapped = workspace.entities.single { it.className == "AuditedRecord" }
+
+        assertEquals(EntityType.DTO, projection.entityType)
+        assertEquals(EntityType.EMBEDDABLE, terms.entityType)
+        assertEquals(EntityType.MAPPED_SUPERCLASS, mapped.entityType)
+        listOf(projection, terms, mapped).forEach {
+            assertEquals("", it.tableName)
+            assertEquals(SchemaDdlMode.DISABLED, it.ddlMode)
+            assertEquals(SchemaMigrationCoverage.DISABLED, it.migrationCoverage)
+            assertTrue(workspace.drifts.none { drift -> drift.entityArtifactId == it.artifactId })
+        }
+        assertFalse(projection.attributes.single { it.name == "runNo" }.persistent)
+        assertTrue(terms.attributes.single { it.name == "termMonths" }.persistent)
+
+        val store = workspace.stores.single()
+        val desired = EntityModel(
+            className = projection.className,
+            packageName = projection.qualifiedName.substringBeforeLast('.'),
+            entityType = EntityType.DTO,
+            entityName = projection.entityName,
+            tableName = "",
+            dataStore = projection.storeName,
+            generationTarget = EntityGenerationTarget(projection.moduleId, store.id),
+            attributes = mutableListOf(
+                AttributeModel(
+                    name = "runNo",
+                    type = AttributeType.STRING,
+                    transientFlag = true,
+                ),
+                AttributeModel(
+                    name = "netAmount",
+                    type = AttributeType.BIG_DECIMAL,
+                    transientFlag = true,
+                ),
+            ),
+            ddlGeneration = DdlGenerationConfig(
+                enabled = false,
+                mode = DdlGenerationMode.DISABLED,
+            ),
+        )
+        val preview = ExistingEntityChangeService.getInstance(project).previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(projection.sourceLocator, desired),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(1, preview.files.size)
+        val java = preview.files.single().resultContent
+        assertTrue(java.contains("public String manualLabel()"))
+        assertTrue(java.contains("protected BigDecimal netAmount;"))
+        assertFalse(java.contains("""@Column(name = "NET_AMOUNT""""))
     }
 
     fun testExistingKotlinEntityAdditionPreservesManualSourceAndAddsRollbackMigration() {

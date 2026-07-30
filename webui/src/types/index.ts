@@ -422,6 +422,7 @@ export interface SchemaEntitySnapshot {
   moduleId: string
   className: string
   qualifiedName: string
+  entityType: EntityType
   entityName: string
   tableName: string
   tableSchema?: string

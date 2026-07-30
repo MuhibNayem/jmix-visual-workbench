@@ -21,6 +21,7 @@ import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.JoinTableConfig
 import org.jmixworkbench.model.MigrationModel
+import org.jmixworkbench.model.EntityType
 import java.time.LocalDate
 import java.util.Locale
 
@@ -141,9 +142,14 @@ class SchemaWorkspaceService(
             .filter { it.kind == ArtifactKind.ENTITY }
             .map { entity ->
                 val source = content(entity.sourceLocator.relativePath).orEmpty()
-                val tableName = tableName(entity, source)
+                val entityType = entityType(source)
+                val tableName = if (entityType == EntityType.ENTITY) tableName(entity, source) else ""
                 val storeName = STORE_ANNOTATION.find(source)?.groupValues?.get(1) ?: "main"
-                val ddlMode = ddlMode(source)
+                val ddlMode = if (entityType == EntityType.ENTITY) {
+                    ddlMode(source)
+                } else {
+                    SchemaDdlMode.DISABLED
+                }
                 val idMapping = idMapping(source)
                 val attributes = attributesByEntity[entity.id].orEmpty().map { attribute ->
                     val name = attribute.displayName
@@ -182,9 +188,8 @@ class SchemaWorkspaceService(
                             association?.localIdAttributeName ?: name,
                             "scale",
                         ),
-                        persistent = !TRANSIENT_ANNOTATION.containsMatchIn(
-                            fieldDeclaration(source, name),
-                        ),
+                        persistent = entityType != EntityType.DTO &&
+                            !TRANSIENT_ANNOTATION.containsMatchIn(fieldDeclaration(source, name)),
                         association = association != null || run {
                             val normalizedType = type.trim().removeSuffix("?").trim()
                             val simpleType = normalizedType.substringAfterLast('.').substringBefore('<')
@@ -204,6 +209,7 @@ class SchemaWorkspaceService(
                     moduleId = entity.owner.moduleId,
                     className = entity.displayName,
                     qualifiedName = entity.semanticKey,
+                    entityType = entityType,
                     entityName = ENTITY_ANNOTATION.find(source)?.groupValues?.get(1)
                         ?.takeIf(String::isNotBlank)
                         ?: entity.displayName,
@@ -221,6 +227,7 @@ class SchemaWorkspaceService(
                     sourceLocator = entity.sourceLocator,
                     attributes = attributes,
                     migrationCoverage = when {
+                        entityType != EntityType.ENTITY -> SchemaMigrationCoverage.DISABLED
                         ddlMode == SchemaDdlMode.DISABLED -> SchemaMigrationCoverage.DISABLED
                         migratedBy.isNotEmpty() -> SchemaMigrationCoverage.COVERED
                         else -> SchemaMigrationCoverage.MISSING
@@ -687,7 +694,9 @@ class SchemaWorkspaceService(
         val entitiesByName = entities.associateBy(SchemaEntitySnapshot::qualifiedName)
         val entitiesBySimpleName = entities.groupBy(SchemaEntitySnapshot::className)
         val drifts = mutableListOf<SchemaDriftSnapshot>()
-        entities.filterNot(SchemaEntitySnapshot::databaseView).forEach { entity ->
+        entities.filter {
+            it.entityType == EntityType.ENTITY && !it.databaseView
+        }.forEach { entity ->
             val store = stores.firstOrNull {
                 it.moduleId == entity.moduleId && it.name == entity.storeName
             } ?: return@forEach
@@ -1275,6 +1284,13 @@ class SchemaWorkspaceService(
         TABLE_ANNOTATION.find(source)?.groupValues?.get(1)?.takeIf(String::isNotBlank)
             ?: entity.displayName.replace(Regex("([a-z0-9])([A-Z])"), "$1_$2").uppercase(Locale.ROOT)
 
+    private fun entityType(source: String): EntityType = when {
+        MAPPED_SUPERCLASS_ANNOTATION.containsMatchIn(source) -> EntityType.MAPPED_SUPERCLASS
+        EMBEDDABLE_ANNOTATION.containsMatchIn(source) -> EntityType.EMBEDDABLE
+        JPA_ENTITY_ANNOTATION.containsMatchIn(source) -> EntityType.ENTITY
+        else -> EntityType.DTO
+    }
+
     private fun idMapping(source: String): Pair<IdType, String> {
         val declaration = sourceFields(source).firstOrNull { field ->
             ID_ANNOTATION.containsMatchIn(field.declaration)
@@ -1619,6 +1635,12 @@ class SchemaWorkspaceService(
         private val TABLE_CATALOG_ANNOTATION = Regex(
             """(?s)@(?:[\w.]+\.)?Table\s*\([^)]*?\bcatalog\s*=\s*"([^"]+)"""",
         )
+        private val MAPPED_SUPERCLASS_ANNOTATION =
+            Regex("""@\s*(?:[\w.]+\.)?MappedSuperclass\b""")
+        private val EMBEDDABLE_ANNOTATION =
+            Regex("""@\s*(?:[\w.]+\.)?Embeddable\b""")
+        private val JPA_ENTITY_ANNOTATION =
+            Regex("""@\s*(?:jakarta\.persistence\.)?Entity\b""")
         private val ENTITY_ANNOTATION = Regex("""(?s)@Entity\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
         private val COLUMN_ANNOTATION = Regex("""@Column\s*\([^)]*?\bname\s*=\s*"([^"]+)"""")
         private val JAVA_FIELD_DECLARATION = Regex(
@@ -1778,6 +1800,7 @@ data class SchemaEntitySnapshot(
     val moduleId: String,
     val className: String,
     val qualifiedName: String,
+    val entityType: EntityType = EntityType.ENTITY,
     val entityName: String,
     val tableName: String,
     val storeName: String,

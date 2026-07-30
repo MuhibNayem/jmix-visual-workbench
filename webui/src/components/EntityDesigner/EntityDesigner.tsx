@@ -1296,7 +1296,7 @@ export default function EntityDesigner() {
                   <optgroup label="Edit an existing entity">
                     {schemaWorkspace.entities.map((candidate) => (
                       <option key={candidate.artifactId} value={candidate.artifactId}>
-                        {candidate.moduleId} · {candidate.qualifiedName}
+                        {candidate.moduleId} · {candidate.qualifiedName} · {candidate.entityType}
                       </option>
                     ))}
                   </optgroup>
@@ -1307,8 +1307,10 @@ export default function EntityDesigner() {
               <div className="rounded border border-jmix-500/30 bg-jmix-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-jmix-100/80">
                 Safe round-trip mode preserves manual {entity.sourceLanguage === 'kotlin' ? 'Kotlin' : 'Java'}.
                 Existing names, types, relationships, and removals are
-                protected; nullability, uniqueness, string length, decimal shape, new fields, and rollback-capable
-                Liquibase changes are previewed and applied atomically.
+                protected; mapping metadata and new fields are revision-bound.
+                {entity.entityType === 'entity'
+                  ? ' Rollback-capable Liquibase changes are previewed and applied atomically.'
+                  : ' This non-table type never generates table DDL.'}
               </div>
             )}
             <Field label="Target Module">
@@ -4435,7 +4437,7 @@ function existingEntityModel(
     tableName: snapshot.tableName,
     tableSchema: snapshot.tableSchema,
     tableCatalog: snapshot.tableCatalog,
-    entityType: 'entity',
+    entityType: snapshot.entityType,
     id: {
       type: snapshot.idType,
       generation: 'jmixGenerated',
@@ -4490,7 +4492,7 @@ function existingEntityModel(
     uniqueConstraints: [],
     databaseView: snapshot.databaseView,
     ddlGeneration: {
-      enabled: snapshot.ddlMode !== 'DISABLED',
+      enabled: snapshot.entityType === 'entity' && snapshot.ddlMode !== 'DISABLED',
       mode: snapshot.ddlMode === 'CREATE_ONLY'
         ? 'createOnly'
         : snapshot.ddlMode === 'DISABLED'
