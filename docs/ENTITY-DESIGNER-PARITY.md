@@ -416,19 +416,19 @@ blocked until all of the following pass:
    classification, Native Safe Delete and reversible quarantine are implemented.
    Additive and managed-mapping Java/Kotlin round trip is implemented.
 2. Credential-safe live catalog/schema/table/view browsing, arbitrary read-only
-   inspection, and exact-mapping-gated missing-column merge are implemented.
-   Composite-key and join-table mapping, recursive FK dependency import, saved
-   mapping overrides and repeatable regeneration across schema evolution
-   remain.
+   inspection, exact-mapping-gated missing-column merge, composite IDs,
+   multi-column joins, strict pure join tables, recursive FK dependency import,
+   exact existing-entity reuse, saved mapping overrides and repeatable
+   regeneration with drift review are implemented. Complete vendor-specific
+   type coverage, arbitrary handwritten partial-import shapes, richer
+   override/regeneration UX and customer-schema evidence remain.
 3. Deeper propagation remains for controller code that constructs components
    dynamically, inherited fetch-plan coverage, fragment-owned bindings and
    translation-catalog/provider integration. Static FlowUI forms/grids,
    inline/shared fetch plans, default messages and exact resource-role
    attribute policies are implemented in one impact-reviewed atomic plan.
 4. Composite-ID migration generation from a proven embeddable structure.
-5. Populated PostgreSQL, MySQL/MariaDB, MSSQL and Oracle reverse-engineering
-   and migration fixtures.
-6. Installed-IDE interaction, undo, accessibility, large-project latency,
+5. Installed-IDE interaction, undo, accessibility, large-project latency,
    memory and leak evidence.
 
 Repository creation, additive Java/Kotlin method authoring, lossless supported
@@ -442,10 +442,12 @@ Jmix API provides them, and wires Java or Kotlin DataContext delegates in the
 same revision-bound atomic preview. Cross-store compositions, target
 collisions, stale/forged evidence and existing conflicting business logic fail
 closed. The two-file operation is undoable as one change, and packaged host
-descriptors are required to contain the service. Remaining repository work is
-complete JPQL semantics and runtime compilation/integration certification
-against representative Jmix applications and the supported Jmix/Java/database
-matrix.
+descriptors are required to contain the service. Generated
+repository/controller/service contracts now compile in the four certified
+Jmix/JDK cells, and the database/runtime matrix starts real Jmix applications
+on five engines. Remaining repository work is complete JPQL semantics,
+representative customer-application integration and installed-IDE interaction
+certification.
 
 No release or marketing claim may describe complete Studio Entity Designer
 parity until those gates are closed.

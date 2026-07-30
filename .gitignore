@@ -3,6 +3,9 @@ plugin/.gradle/
 plugin/build/
 plugin/out/
 plugin/**/.kotlin/
+certification/**/.gradle/
+certification/**/build/
+certification/**/evidence/current/
 
 # Node
 webui/node_modules/

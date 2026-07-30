@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.20.xsd">
+
+    <changeSet id="jvw-runtime-baseline" author="jmix-workbench">
+        <createTable tableName="JVW_ORG_UNIT">
+            <column name="ID" type="BIGINT">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="PK_JVW_ORG_UNIT"/>
+            </column>
+            <column name="CODE" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="NAME" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addUniqueConstraint
+                tableName="JVW_ORG_UNIT"
+                columnNames="CODE"
+                constraintName="UK_JVW_ORG_UNIT_CODE"/>
+
+        <createTable tableName="JVW_LOAN_APPLICATION">
+            <column name="ID" type="BIGINT">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="PK_JVW_LOAN_APP"/>
+            </column>
+            <column name="VERSION" type="INT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="APPLICATION_NO" type="VARCHAR(64)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="AMOUNT" type="DECIMAL(19,2)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="STATUS" type="VARCHAR(32)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ORG_UNIT_ID" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addUniqueConstraint
+                tableName="JVW_LOAN_APPLICATION"
+                columnNames="APPLICATION_NO"
+                constraintName="UK_JVW_LOAN_APP_NO"/>
+        <createIndex tableName="JVW_LOAN_APPLICATION" indexName="IDX_JVW_LOAN_ORG">
+            <column name="ORG_UNIT_ID"/>
+        </createIndex>
+        <addForeignKeyConstraint
+                baseTableName="JVW_LOAN_APPLICATION"
+                baseColumnNames="ORG_UNIT_ID"
+                referencedTableName="JVW_ORG_UNIT"
+                referencedColumnNames="ID"
+                constraintName="FK_JVW_LOAN_ORG"/>
+
+        <rollback>
+            <dropTable tableName="JVW_LOAN_APPLICATION"/>
+            <dropTable tableName="JVW_ORG_UNIT"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

@@ -35,6 +35,34 @@ class DatabaseReverseEngineeringServiceTest {
         assertEquals(19, money.precision)
         assertEquals(2, money.scale)
 
+        val oracleBigIntPrimaryKey = DatabaseTypeMapper.suggest(
+            column = column("ID", Types.NUMERIC, "NUMBER", size = 19, scale = 0, nullable = false),
+            primaryKey = true,
+            foreignKey = null,
+            relatedEntity = null,
+        )
+        assertEquals(AttributeType.LONG, oracleBigIntPrimaryKey.attributeType)
+        assertEquals("java.lang.Long", oracleBigIntPrimaryKey.javaType)
+        assertNull(oracleBigIntPrimaryKey.precision)
+        assertNull(oracleBigIntPrimaryKey.scale)
+
+        val oracleLiquibaseBigIntPrimaryKey = DatabaseTypeMapper.suggest(
+            column = column("ID", Types.NUMERIC, "NUMBER", size = 38, scale = 0, nullable = false),
+            primaryKey = true,
+            foreignKey = null,
+            relatedEntity = null,
+        )
+        assertEquals(AttributeType.LONG, oracleLiquibaseBigIntPrimaryKey.attributeType)
+        assertEquals("java.lang.Long", oracleLiquibaseBigIntPrimaryKey.javaType)
+
+        val oracleArbitraryPrecisionValue = DatabaseTypeMapper.suggest(
+            column = column("EXTERNAL_NUMBER", Types.NUMERIC, "NUMBER", size = 38, scale = 0),
+            primaryKey = false,
+            foreignKey = null,
+            relatedEntity = null,
+        )
+        assertEquals(AttributeType.BIG_DECIMAL, oracleArbitraryPrecisionValue.attributeType)
+
         val uuid = DatabaseTypeMapper.suggest(
             column = column("EXTERNAL_ID", Types.OTHER, "uuid"),
             primaryKey = false,

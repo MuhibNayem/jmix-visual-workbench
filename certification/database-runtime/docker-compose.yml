@@ -1,0 +1,86 @@
+name: jmix-workbench-database-certification
+
+services:
+  postgres:
+    image: postgres:16.9
+    environment:
+      POSTGRES_DB: jmixcert
+      POSTGRES_USER: jmixcert
+      POSTGRES_PASSWORD: ${CERT_POSTGRES_PASSWORD:-jmixcert-postgres}
+    ports:
+      - "127.0.0.1:${CERT_POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jmixcert -d jmixcert"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  mysql:
+    image: mysql:8.4.6
+    environment:
+      MYSQL_DATABASE: jmixcert
+      MYSQL_USER: jmixcert
+      MYSQL_PASSWORD: ${CERT_MYSQL_PASSWORD:-jmixcert-mysql}
+      MYSQL_ROOT_PASSWORD: ${CERT_MYSQL_ROOT_PASSWORD:-root-mysql-cert}
+    ports:
+      - "127.0.0.1:${CERT_MYSQL_PORT:-53306}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$${MYSQL_ROOT_PASSWORD}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+    tmpfs:
+      - /var/lib/mysql
+
+  mariadb:
+    image: mariadb:11.4.8
+    environment:
+      MARIADB_DATABASE: jmixcert
+      MARIADB_USER: jmixcert
+      MARIADB_PASSWORD: ${CERT_MARIADB_PASSWORD:-jmixcert-mariadb}
+      MARIADB_ROOT_PASSWORD: ${CERT_MARIADB_ROOT_PASSWORD:-root-mariadb-cert}
+    ports:
+      - "127.0.0.1:${CERT_MARIADB_PORT:-53307}:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+    tmpfs:
+      - /var/lib/mysql
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-CU20-ubuntu-22.04
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${CERT_MSSQL_PASSWORD:-JmixCert-Mssql-2026!}
+    ports:
+      - "127.0.0.1:${CERT_MSSQL_PORT:-51433}:1433"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          (/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$${MSSQL_SA_PASSWORD}"
+          -C -Q 'select 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa
+          -P "$${MSSQL_SA_PASSWORD}" -Q 'select 1') >/dev/null
+      interval: 10s
+      timeout: 10s
+      retries: 60
+
+  oracle:
+    image: gvenzl/oracle-free:23.7-slim-faststart
+    environment:
+      ORACLE_PASSWORD: ${CERT_ORACLE_ADMIN_PASSWORD:-JmixCert-Oracle-2026}
+      APP_USER: jmixcert
+      APP_USER_PASSWORD: ${CERT_ORACLE_PASSWORD:-jmixcert-oracle}
+    ports:
+      - "127.0.0.1:${CERT_ORACLE_PORT:-51521}:1521"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 10s
+      retries: 60

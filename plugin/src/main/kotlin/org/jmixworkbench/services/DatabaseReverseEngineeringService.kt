@@ -1,6 +1,7 @@
 package org.jmixworkbench.services
 
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.OrderEnumerator
@@ -32,7 +33,12 @@ import java.util.Properties
 @Service(Service.Level.PROJECT)
 class DatabaseReverseEngineeringService(
     private val project: Project,
-) {
+) : Disposable {
+    private val driverLoaderLock = Any()
+    private var cachedDriverUrls: List<URL> = emptyList()
+    private var cachedDriverLoader: URLClassLoader? = null
+    private val cachedDriverClassNames = linkedSetOf<String>()
+
     fun inspectEntityTable(
         request: DatabaseEntityTableInspectionRequest,
     ): DatabaseEntityTableInspectionResponse {
@@ -710,43 +716,129 @@ class DatabaseReverseEngineeringService(
             configuration.username?.let { setProperty("user", it) }
             password?.let { setProperty("password", String(it)) }
         }
-        val loader = URLClassLoader(projectLibraryUrls().toTypedArray(), javaClass.classLoader)
-        return try {
-            val driver = loadDriver(configuration, loader)
-                ?: return DatabaseReadOnlyResult.failure(
-                    "JVW-DB-DRIVER-MISSING",
-                    "JDBC driver ${configuration.driverClassName} is not available in the synced project libraries.",
-                )
-            val connection = driver.connect(configuration.url, properties)
-                ?: return DatabaseReadOnlyResult.failure(
-                    "JVW-DB-DRIVER-URL-REJECTED",
-                    "The configured JDBC driver does not accept the data store URL.",
-                )
-            connection.use { live ->
-                runCatching { live.isReadOnly = true }
-                runCatching { live.autoCommit = false }
-                runCatching {
-                    live.setNetworkTimeout(
-                        AppExecutorUtil.getAppExecutorService(),
-                        networkTimeoutSeconds.coerceIn(1, 120) * 1_000,
+        return synchronized(driverLoaderLock) {
+            val loader = projectDriverLoader()
+            try {
+                val driver = loadDriver(configuration, loader)
+                    ?: return@synchronized DatabaseReadOnlyResult.failure(
+                        "JVW-DB-DRIVER-MISSING",
+                        "JDBC driver ${configuration.driverClassName} is not available in the synced project libraries.",
                     )
+                cachedDriverClassNames += driver.javaClass.name
+                val connection = driver.connect(configuration.url, properties)
+                    ?: return@synchronized DatabaseReadOnlyResult.failure(
+                        "JVW-DB-DRIVER-URL-REJECTED",
+                        "The configured JDBC driver does not accept the data store URL.",
+                    )
+                connection.use { live ->
+                    runCatching { live.isReadOnly = true }
+                    runCatching { live.autoCommit = false }
+                    runCatching {
+                        live.setNetworkTimeout(
+                            AppExecutorUtil.getAppExecutorService(),
+                            networkTimeoutSeconds.coerceIn(1, 120) * 1_000,
+                        )
+                    }
+                    val value = operation(
+                        live,
+                        DatabaseReadOnlyContext(store, workspace, configuration),
+                    )
+                    runCatching { live.rollback() }
+                    DatabaseReadOnlyResult(value = value, issue = null)
                 }
-                val value = operation(
-                    live,
-                    DatabaseReadOnlyContext(store, workspace, configuration),
+            } catch (error: Throwable) {
+                DatabaseReadOnlyResult.failure(
+                    "JVW-DB-INSPECTION-FAILED",
+                    redactDatabaseError(error),
                 )
-                runCatching { live.rollback() }
-                DatabaseReadOnlyResult(value = value, issue = null)
+            } finally {
+                properties.clear()
+                password?.fill('\u0000')
             }
-        } catch (error: Throwable) {
-            DatabaseReadOnlyResult.failure(
-                "JVW-DB-INSPECTION-FAILED",
-                redactDatabaseError(error),
-            )
+        }
+    }
+
+    private fun projectDriverLoader(): ClassLoader {
+        val urls = projectLibraryUrls()
+        if (cachedDriverLoader == null || urls != cachedDriverUrls) {
+            cachedDriverLoader?.let(::closeDriverLoader)
+            cachedDriverClassNames.clear()
+            cachedDriverUrls = urls
+            cachedDriverLoader = URLClassLoader(urls.toTypedArray(), javaClass.classLoader)
+        }
+        return cachedDriverLoader ?: javaClass.classLoader
+    }
+
+    private fun closeDriverLoader(loader: URLClassLoader) {
+        val current = Thread.currentThread()
+        val previousLoader = current.contextClassLoader
+        try {
+            current.contextClassLoader = loader
+            if (cachedDriverClassNames.any { it.startsWith("com.mysql.cj.") }) {
+                runCatching {
+                    val cleanup = Class.forName(
+                        "com.mysql.cj.jdbc.AbandonedConnectionCleanupThread",
+                        false,
+                        loader,
+                    )
+                    val shutdown = cleanup.methods.firstOrNull {
+                        it.parameterCount == 0 && it.name == "checkedShutdown"
+                    } ?: cleanup.methods.firstOrNull {
+                        it.parameterCount == 0 && it.name == "shutdown"
+                    }
+                    shutdown?.invoke(null)
+                }
+            }
+            if (cachedDriverClassNames.any { it.startsWith("oracle.jdbc.") }) {
+                closeOracleDriver(loader)
+            }
         } finally {
-            runCatching { loader.close() }
-            properties.clear()
-            password?.fill('\u0000')
+            current.contextClassLoader = previousLoader
+        }
+        runCatching { loader.close() }
+    }
+
+    private fun closeOracleDriver(loader: ClassLoader) {
+        val driver = runCatching {
+            Class.forName("oracle.jdbc.driver.OracleDriver", false, loader)
+        }.getOrNull() ?: return
+        val completeCleanup = driver.declaredMethods.firstOrNull {
+            it.name == "deregister" && it.parameterCount == 0
+        }
+        if (completeCleanup?.trySetAccessible() == true) {
+            if (runCatching { completeCleanup.invoke(null) }.isSuccess) return
+        }
+
+        // Compatibility fallback for driver releases that rename or encapsulate
+        // the aggregate deregistration callback.
+        listOf(
+            "oracle.jdbc.driver.OracleTimeoutThreadPerVM" to "stopWatchdog",
+            "oracle.jdbc.driver.BlockSource\$ThreadedCachingBlockSource" to
+                "stopBlockReleaserThread",
+            "oracle.net.nt.TimeoutInterruptHandler" to "stopTimer",
+            "oracle.jdbc.diagnostics.Diagnostic" to "stopClockTimer",
+        ).forEach { (className, methodName) ->
+            runCatching {
+                val type = Class.forName(className, false, loader)
+                val method = type.declaredMethods.firstOrNull {
+                    it.name == methodName && it.parameterCount == 0
+                } ?: return@runCatching
+                if (method.trySetAccessible()) method.invoke(null)
+            }
+        }
+        runCatching {
+            val executor = driver.getMethod("getExecutorService").invoke(null)
+                as? java.util.concurrent.ExecutorService
+            executor?.shutdownNow()
+        }
+    }
+
+    override fun dispose() {
+        synchronized(driverLoaderLock) {
+            cachedDriverLoader?.let(::closeDriverLoader)
+            cachedDriverLoader = null
+            cachedDriverUrls = emptyList()
+            cachedDriverClassNames.clear()
         }
     }
 
@@ -901,7 +993,7 @@ class DatabaseReverseEngineeringService(
         return roots.mapNotNull { root ->
             val local = JarFileSystem.getInstance().getVirtualFileForJar(root) ?: root
             runCatching { local.toNioPath().toUri().toURL() }.getOrNull()
-        }.toList()
+        }.sortedBy(URL::toExternalForm).toList()
     }
 
     private fun loadDriver(
@@ -1192,7 +1284,23 @@ internal object DatabaseTypeMapper {
             Types.TINYINT, Types.SMALLINT, Types.INTEGER -> AttributeType.INTEGER
             Types.BIGINT -> AttributeType.LONG
             Types.FLOAT, Types.REAL, Types.DOUBLE -> AttributeType.DOUBLE
-            Types.NUMERIC, Types.DECIMAL -> AttributeType.BIG_DECIMAL
+            Types.NUMERIC, Types.DECIMAL -> when {
+                primaryKey && column.scale == 0 && (column.size ?: Int.MAX_VALUE) <= 9 ->
+                    AttributeType.INTEGER
+                primaryKey && column.scale == 0 && (column.size ?: Int.MAX_VALUE) <= 19 ->
+                    AttributeType.LONG
+                primaryKey &&
+                    normalizedType == "NUMBER" &&
+                    column.scale == 0 &&
+                    column.size == 38 ->
+                    // Liquibase maps BIGINT to NUMBER(38,0) on Oracle. Jmix supports
+                    // scalar entity identifiers through Long rather than BigInteger,
+                    // so retain the source Jmix identifier contract for this exact
+                    // Oracle/Jmix convention. Non-identifier NUMBER(38,0) columns
+                    // remain BigDecimal and are never narrowed by this rule.
+                    AttributeType.LONG
+                else -> AttributeType.BIG_DECIMAL
+            }
             Types.BOOLEAN, Types.BIT -> AttributeType.BOOLEAN
             Types.DATE -> AttributeType.LOCAL_DATE
             Types.TIME -> AttributeType.LOCAL_TIME

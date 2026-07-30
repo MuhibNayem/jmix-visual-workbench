@@ -149,6 +149,24 @@ dependencies {
     }
 }
 
+tasks.withType<Test>().configureEach {
+    listOf(
+        "jvw.live.db.enabled",
+        "jvw.live.db.id",
+        "jvw.live.db.url",
+        "jvw.live.db.username",
+        "jvw.live.db.password",
+        "jvw.live.db.driver",
+        "jvw.live.db.driverClasspath",
+        "jvw.live.db.catalog",
+        "jvw.live.db.schema",
+        "jvw.live.db.hostLane",
+        "jvw.live.db.evidenceFile",
+    ).forEach { name ->
+        providers.systemProperty(name).orNull?.let { systemProperty(name, it) }
+    }
+}
+
 val lockedConfigurationNames = setOf("runtimeClasspath", "testRuntimeClasspath")
 
 configurations.matching { it.name in lockedConfigurationNames }.configureEach {
