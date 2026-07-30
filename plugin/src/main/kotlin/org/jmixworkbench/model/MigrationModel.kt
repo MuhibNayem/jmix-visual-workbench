@@ -18,6 +18,8 @@ data class ChangeSetModel(
     val comment: String? = null,
     val changes: MutableList<DbChange> = mutableListOf(),
     val preConditions: MutableList<PreCondition> = mutableListOf(),
+    val preConditionOnFail: PreConditionOutcome = PreConditionOutcome.HALT,
+    val preConditionOnError: PreConditionOutcome = PreConditionOutcome.HALT,
     val context: String? = null,
     val dbms: String? = null,
     val runOnChange: Boolean = false,
@@ -26,6 +28,13 @@ data class ChangeSetModel(
     val labels: String? = null,
     val rollback: MutableList<DbChange> = mutableListOf(),
 )
+
+enum class PreConditionOutcome {
+    HALT,
+    WARN,
+    CONTINUE,
+    MARK_RAN,
+}
 
 sealed class DbChange {
     // ── Table operations ──
@@ -49,12 +58,14 @@ sealed class DbChange {
     // ── Column operations ──
     data class AddColumn(
         val tableName: String,
-        val columns: MutableList<ColumnDef> = mutableListOf()
+        val columns: MutableList<ColumnDef> = mutableListOf(),
+        val schemaName: String? = null,
     ) : DbChange()
 
     data class DropColumn(
         val tableName: String,
-        val columnName: String
+        val columnName: String,
+        val schemaName: String? = null,
     ) : DbChange()
 
     data class RenameColumn(
@@ -115,12 +126,14 @@ sealed class DbChange {
         val tableName: String,
         val columnName: String,
         val columnDataType: String? = null,
-        val defaultNullValue: String? = null
+        val defaultNullValue: String? = null,
+        val schemaName: String? = null,
     ) : DbChange()
 
     data class DropNotNullConstraint(
         val tableName: String,
-        val columnName: String
+        val columnName: String,
+        val schemaName: String? = null,
     ) : DbChange()
 
     // ── Index operations ──
@@ -146,7 +159,8 @@ sealed class DbChange {
     data class UpdateData(
         val tableName: String,
         val columns: MutableList<ColumnValueDef> = mutableListOf(),
-        val whereClause: String? = null
+        val whereClause: String? = null,
+        val schemaName: String? = null,
     ) : DbChange()
 
     data class DeleteData(

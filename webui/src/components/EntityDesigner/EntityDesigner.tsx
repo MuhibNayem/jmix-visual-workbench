@@ -21,6 +21,8 @@ import type {
   EntityAttributePropagationChangeRequest,
   EntityAttributePropagationInspectionResponse,
   EntityAttributeTypeSchemaImpact,
+  EntityAttributeTypeMigrationRequest,
+  EntityAttributeTypeExpansionPreviewResponse,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
@@ -89,6 +91,12 @@ export default function EntityDesigner() {
   const [typeMigrationBusy, setTypeMigrationBusy] = useState(false)
   const [typeMigrationImpact, setTypeMigrationImpact] =
     useState<EntityAttributeTypeSchemaImpact | null>(null)
+  const [typeExpansionPending, setTypeExpansionPending] = useState<{
+    change: EntityAttributeTypeMigrationRequest
+    response: EntityAttributeTypeExpansionPreviewResponse
+  } | null>(null)
+  const [typeExpansionBusy, setTypeExpansionBusy] = useState(false)
+  const [typeExpansionApplied, setTypeExpansionApplied] = useState<string | null>(null)
   const [databaseInspection, setDatabaseInspection] =
     useState<DatabaseEntityTableInspectionResponse | null>(null)
   const [databaseColumnDrafts, setDatabaseColumnDrafts] =
@@ -150,6 +158,8 @@ export default function EntityDesigner() {
       )
     }
     setTypeMigrationImpact(null)
+    setTypeExpansionPending(null)
+    setTypeExpansionApplied(null)
   }, [selectedAttr])
 
   const selectedModuleId = entity.generationTarget?.moduleId
@@ -276,6 +286,8 @@ export default function EntityDesigner() {
     }
     setTypeMigrationBusy(true)
     setTypeMigrationImpact(null)
+    setTypeExpansionPending(null)
+    setTypeExpansionApplied(null)
     try {
       const response = await bridge.launchEntityAttributeTypeMigration({
         sourceLocator: existingEntity.sourceLocator,
@@ -284,12 +296,68 @@ export default function EntityDesigner() {
         targetType: typeMigrationTarget,
       })
       setTypeMigrationImpact(response.schemaImpact ?? null)
-      addToast(response.message, response.success ? 'info' : 'error')
+      addToast(
+        response.message,
+        response.success || response.code === 'JVW-ENTITY-TYPE-MIGRATION-SCHEMA-STAGE-REQUIRED'
+          ? 'info'
+          : 'error',
+      )
       if (response.success) setRenameLaunched(true)
     } catch (error: any) {
       addToast(`Native type migration failed: ${error.message}`, 'error')
     } finally {
       setTypeMigrationBusy(false)
+    }
+  }
+
+  const previewTypeExpansion = async (attributeName: string) => {
+    if (!existingEntity) return
+    const change: EntityAttributeTypeMigrationRequest = {
+      sourceLocator: existingEntity.sourceLocator,
+      entityClassName: existingEntity.className,
+      attributeName,
+      targetType: typeMigrationTarget,
+    }
+    setTypeExpansionBusy(true)
+    setTypeExpansionPending(null)
+    try {
+      const response = await bridge.previewEntityAttributeTypeExpansion(change)
+      if (!response.accepted || !response.preview.planDigest) {
+        addToast(response.message, 'error')
+        return
+      }
+      setTypeExpansionPending({ change, response })
+      addToast(response.message, 'info')
+    } catch (error: any) {
+      addToast(`Expansion preview failed: ${error.message}`, 'error')
+    } finally {
+      setTypeExpansionBusy(false)
+    }
+  }
+
+  const applyTypeExpansion = async () => {
+    const pending = typeExpansionPending
+    const digest = pending?.response.preview.planDigest
+    if (!pending || !digest) return
+    setTypeExpansionBusy(true)
+    try {
+      const response = await bridge.applyEntityAttributeTypeExpansion(pending.change, digest)
+      if (!response.success) {
+        addToast(response.issues[0]?.message ?? 'Expansion apply was rejected', 'error')
+        return
+      }
+      setTypeExpansionApplied(pending.response.shadowColumnName ?? 'shadow column')
+      setTypeExpansionPending(null)
+      addToast(
+        'Expansion migration created. Deploy it and verify the backfill before source cutover.',
+        'success',
+      )
+      const refreshed = await bridge.getSchemaWorkspace(true)
+      setSchemaWorkspace(refreshed)
+    } catch (error: any) {
+      addToast(`Expansion apply failed: ${error.message}`, 'error')
+    } finally {
+      setTypeExpansionBusy(false)
     }
   }
 
@@ -1916,6 +1984,68 @@ export default function EntityDesigner() {
                                 {typeMigrationImpact.dependencies.length > 0 && (
                                   <div className="mt-1 break-words text-[9px] opacity-75">
                                     Dependencies: {typeMigrationImpact.dependencies.join(', ')}
+                                  </div>
+                                )}
+                                {typeMigrationImpact.strategy === 'EXPAND_CONTRACT_REQUIRED' && (
+                                  <div className="mt-3 border-t border-amber-500/20 pt-2">
+                                    <p className="text-[9px] leading-relaxed opacity-80">
+                                      Expansion adds a deterministic nullable shadow column, copies every existing
+                                      non-null value through the portable lossless matrix, restores mandatory
+                                      nullability, and rolls back by dropping only the shadow. The original column
+                                      remains untouched.
+                                    </p>
+                                    {!typeExpansionPending && !typeExpansionApplied && (
+                                      <button
+                                        type="button"
+                                        disabled={typeExpansionBusy}
+                                        onClick={() => previewTypeExpansion(selected.name)}
+                                        className="mt-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-[10px] font-medium text-amber-100 hover:bg-amber-500/20 disabled:opacity-50"
+                                      >
+                                        {typeExpansionBusy ? 'Building safe plan…' : 'Preview expansion migration'}
+                                      </button>
+                                    )}
+                                    {typeExpansionPending && (
+                                      <div className="mt-2 rounded border border-surface-border bg-black/15 p-2">
+                                        <div className="font-semibold text-gray-200">
+                                          Shadow: {typeExpansionPending.response.shadowColumnName}
+                                        </div>
+                                        <div className="mt-1 flex max-w-full flex-wrap gap-1">
+                                          {typeExpansionPending.response.preview.files.map(file => (
+                                            <span
+                                              key={file.relativePath}
+                                              className="max-w-full truncate rounded border border-surface-border px-1.5 py-1 font-mono text-[8px] text-gray-400"
+                                              title={file.relativePath}
+                                            >
+                                              {file.mode} · {file.relativePath}
+                                            </span>
+                                          ))}
+                                        </div>
+                                        <div className="mt-2 flex flex-wrap gap-2">
+                                          <button
+                                            type="button"
+                                            disabled={typeExpansionBusy}
+                                            onClick={() => setTypeExpansionPending(null)}
+                                            className="rounded border border-surface-border px-2.5 py-1 text-[9px] text-gray-400 hover:text-gray-200"
+                                          >
+                                            Discard
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={typeExpansionBusy}
+                                            onClick={applyTypeExpansion}
+                                            className="rounded bg-amber-500 px-2.5 py-1 text-[9px] font-semibold text-black hover:bg-amber-400 disabled:opacity-50"
+                                          >
+                                            {typeExpansionBusy ? 'Applying…' : 'Create expansion changelog'}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                    {typeExpansionApplied && (
+                                      <div className="mt-2 rounded border border-emerald-500/30 bg-emerald-500/5 p-2 text-emerald-100/80">
+                                        Created {typeExpansionApplied}. Deploy and validate this migration before
+                                        mapping cutover. The plugin will not open the source refactor early.
+                                      </div>
+                                    )}
                                   </div>
                                 )}
                               </div>

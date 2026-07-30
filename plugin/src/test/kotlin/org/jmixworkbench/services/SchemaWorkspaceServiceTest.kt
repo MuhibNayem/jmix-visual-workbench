@@ -7,6 +7,7 @@ import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.testFramework.HeavyPlatformTestCase
 import org.jmixworkbench.generator.CrudOrchestrator
+import org.jmixworkbench.generator.MigrationGenerator
 import org.jmixworkbench.model.ChangeSetModel
 import org.jmixworkbench.model.ColumnDef
 import org.jmixworkbench.model.DbChange
@@ -923,6 +924,28 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         WriteAction.run<RuntimeException> {
             write(
                 root,
+                "src/main/java/com/acme/entity/LoanApp.java",
+                """
+                    package com.acme.entity;
+                    import io.jmix.core.metamodel.annotation.JmixEntity;
+                    import jakarta.persistence.*;
+                    @JmixEntity
+                    @Entity
+                    @Table(name = "LOAN_APP")
+                    public class LoanApp {
+                        @Id
+                        private java.util.UUID id;
+                        @Column(name = "APPLICATION_NO", nullable = false)
+                        private String applicationNo;
+                        @Column(name = "LOAN_AMOUNT", nullable = false, precision = 19, scale = 2)
+                        private java.math.BigDecimal loanAmount;
+                        @Column(name = "RISK_SCORE", nullable = false)
+                        private Integer riskScore;
+                    }
+                """.trimIndent(),
+            )
+            write(
+                root,
                 "src/main/resources/com/acme/liquibase/changelog/020-entity-types.xml",
                 """
                     <databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
@@ -930,6 +953,9 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                             <addColumn tableName="LOAN_APP">
                                 <column name="APPLICATION_NO" type="VARCHAR(255)"/>
                                 <column name="LOAN_AMOUNT" type="DECIMAL(19, 2)"/>
+                                <column name="RISK_SCORE" type="INT">
+                                    <constraints nullable="false"/>
+                                </column>
                             </addColumn>
                             <createIndex tableName="LOAN_APP" indexName="IDX_LOAN_APP_AMOUNT">
                                 <column name="LOAN_AMOUNT"/>
@@ -978,6 +1004,56 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
             conversion.schemaImpact?.dependencies?.contains("index IDX_LOAN_APP_AMOUNT") == true,
         )
         assertTrue(conversion.schemaImpact?.summary?.contains("not automatically reversible") == true)
+
+        val expansionRequest = EntityAttributeTypeMigrationRequest(
+            loanApp.sourceLocator,
+            loanApp.className,
+            "riskScore",
+            AttributeType.LONG,
+        )
+        val expansion = EntityAttributeTypeExpansionService.getInstance(project)
+            .build(expansionRequest)
+        val expansionMigration = assertNotNull(
+            expansion.migration,
+            "${expansion.code}: ${expansion.message}",
+        )
+        val expansionXml = MigrationGenerator.generate(expansionMigration.migration)
+        assertTrue(expansionXml.contains("""onFail="HALT""""))
+        assertTrue(expansionXml.contains("""onError="HALT""""))
+        assertTrue(expansionXml.contains("""<addColumn tableName="LOAN_APP""""))
+        assertTrue(expansionXml.contains("""valueComputed="RISK_SCORE""""))
+        assertTrue(expansionXml.contains("<where>"))
+        assertTrue(expansionXml.contains("RISK_SCORE IS NOT NULL"))
+        assertTrue(expansionXml.contains("<addNotNullConstraint"))
+        assertTrue(expansionXml.contains("<rollback>"))
+        assertTrue(expansionXml.contains("<dropColumn"))
+        assertFalse(expansionXml.contains("<modifyDataType"))
+        assertFalse(expansionXml.contains("""columnName="RISK_SCORE"</dropColumn"""))
+        assertTrue(expansionXml.contains("<sqlCheck expectedResult=\"0\">"))
+        assertTrue(expansionXml.contains("SET ${expansion.shadowColumnName} = NULL"))
+
+        val expansionPreview = EntityAttributeTypeExpansionService.getInstance(project)
+            .preview(expansionRequest)
+        assertTrue(
+            expansionPreview.accepted,
+            "${expansionPreview.code}: ${expansionPreview.message}",
+        )
+        assertNotNull(expansionPreview.preview.planDigest)
+        assertEquals(1, expansionPreview.preview.files.size)
+        assertTrue(expansionPreview.preview.files.single().resultContent.contains("<sqlCheck"))
+
+        val unsafeExpansion = EntityAttributeTypeExpansionService.getInstance(project).build(
+            EntityAttributeTypeMigrationRequest(
+                loanApp.sourceLocator,
+                loanApp.className,
+                "loanAmount",
+                AttributeType.DOUBLE,
+            ),
+        )
+        assertEquals(
+            "JVW-ENTITY-TYPE-EXPANSION-CONVERSION-REQUIRES-EXPRESSION",
+            unsafeExpansion.code,
+        )
     }
 
     fun testExistingJavaAndKotlinOwningJoinColumnRenameIsSourceSafeAndRollbackChecked() {

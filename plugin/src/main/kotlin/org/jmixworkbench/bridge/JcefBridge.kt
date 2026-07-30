@@ -41,6 +41,9 @@ import org.jmixworkbench.services.EntityAttributeTypeMigrationLaunchResponse
 import org.jmixworkbench.services.EntityAttributeTypeMigrationRequest
 import org.jmixworkbench.services.PreparedEntityAttributeTypeMigration
 import org.jmixworkbench.services.EntityAttributeTypeSchemaStrategy
+import org.jmixworkbench.services.EntityAttributeTypeExpansionApplyRequest
+import org.jmixworkbench.services.EntityAttributeTypeExpansionPreviewResponse
+import org.jmixworkbench.services.EntityAttributeTypeExpansionService
 import org.jmixworkbench.services.EntityAttributePropagationApplyRequest
 import org.jmixworkbench.services.EntityAttributePropagationChangeRequest
 import org.jmixworkbench.services.EntityAttributePropagationInspectionRequest
@@ -345,6 +348,14 @@ class JcefBridge(
             }
             if (action == "launchEntityAttributeTypeMigration") {
                 handleLaunchEntityAttributeTypeMigration(action, requestId, payload)
+                return
+            }
+            if (action == "previewEntityAttributeTypeExpansion") {
+                handlePreviewEntityAttributeTypeExpansion(action, requestId, payload)
+                return
+            }
+            if (action == "applyEntityAttributeTypeExpansion") {
+                handleApplyEntityAttributeTypeExpansion(action, requestId, payload)
                 return
             }
             if (action == "inspectDatabaseEntityTable") {
@@ -1463,6 +1474,51 @@ class JcefBridge(
                         setPreviewUsages(true)
                     }.run()
                 }, ModalityState.nonModal())
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewEntityAttributeTypeExpansion(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeTypeMigrationRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<EntityAttributeTypeExpansionPreviewResponse> {
+            EntityAttributeTypeExpansionService.getInstance(project).preview(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { response ->
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyEntityAttributeTypeExpansion(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, EntityAttributeTypeExpansionApplyRequest::class.java)
+        }.getOrElse { error ->
+            sendGenerationRequestError(action, requestId, error)
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            EntityAttributeTypeExpansionService.getInstance(project).prepareApply(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

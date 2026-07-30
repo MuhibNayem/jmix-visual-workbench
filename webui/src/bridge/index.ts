@@ -22,6 +22,7 @@ import type {
   EntityAttributeSafeDeleteLaunchResponse,
   EntityAttributeTypeMigrationRequest,
   EntityAttributeTypeMigrationLaunchResponse,
+  EntityAttributeTypeExpansionPreviewResponse,
   GenerationResult,
   GraphSourceLocator,
   IntegrationConnectorModel,
@@ -759,25 +760,63 @@ class ${scenario.className} {
                 }
               case 'launchEntityAttributeTypeMigration':
                 return {
-                  success: true,
-                  message: `IntelliJ project-wide Type Migration preview opened for ${payload.attributeName} → ${payload.targetType}.`,
+                  success: payload.targetType === 'uri',
+                  code: payload.targetType === 'uri'
+                    ? undefined
+                    : 'JVW-ENTITY-TYPE-MIGRATION-SCHEMA-STAGE-REQUIRED',
+                  message: payload.targetType === 'uri'
+                    ? `IntelliJ project-wide Type Migration preview opened for ${payload.attributeName} → URI.`
+                    : `Schema expansion is required before ${payload.attributeName} can migrate to ${payload.targetType}.`,
                   sourceLanguage: 'java',
                   schemaImpact: {
-                    strategy: payload.targetType === 'long'
-                      ? 'EXPAND_CONTRACT_REQUIRED'
-                      : 'SOURCE_ONLY',
+                    strategy: payload.targetType === 'uri'
+                      ? 'SOURCE_ONLY'
+                      : 'EXPAND_CONTRACT_REQUIRED',
                     storeId: 'loan:main',
                     tableName: 'LOAN_APP',
                     columnName: payload.attributeName
                       .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
                       .toUpperCase(),
                     currentSqlType: 'INT',
-                    targetSqlType: payload.targetType === 'long' ? 'BIGINT' : 'INT',
+                    targetSqlType: payload.targetType === 'long'
+                      ? 'BIGINT'
+                      : payload.targetType === 'uri' ? 'INT' : 'DOUBLE',
                     dependencies: ['index IDX_LOAN_APP_STATUS'],
-                    summary: payload.targetType === 'long'
-                      ? 'The mapped column requires a reviewed INT → BIGINT data conversion. This is not automatically reversible.'
-                      : 'No physical type rewrite is required.',
+                    summary: payload.targetType === 'uri'
+                      ? 'No physical type rewrite is required.'
+                      : 'The mapped column requires a reviewed data conversion. This is not automatically reversible.',
                   },
+                }
+              case 'previewEntityAttributeTypeExpansion':
+                return {
+                  accepted: true,
+                  message: `Expansion preview is ready for ${payload.attributeName}.`,
+                  shadowColumnName: 'JVE_91A8B2C_LOAN_AMOUNT',
+                  targetSqlType: payload.targetType === 'long' ? 'BIGINT' : 'DOUBLE',
+                  preview: {
+                    accepted: true,
+                    changeSetId: 'entity-type-expansion:development',
+                    label: `Expand ${payload.attributeName} safely`,
+                    planDigest: 'development-entity-type-expansion',
+                    files: [{
+                      relativePath: 'loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/30-entity-type-expand.xml',
+                      mode: 'CREATE',
+                      afterFingerprint: 'development-expansion-after',
+                      resultContent: '<databaseChangeLog><!-- shadow column + backfill + rollback --></databaseChangeLog>',
+                      appliedEditCount: 0,
+                    }],
+                    issues: [],
+                  },
+                }
+              case 'applyEntityAttributeTypeExpansion':
+                return {
+                  success: true,
+                  changeSetId: 'entity-type-expansion:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    'loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/30-entity-type-expand.xml',
+                  ],
+                  issues: [],
                 }
               case 'inspectDatabaseEntityTable':
                 return {
@@ -1603,6 +1642,23 @@ class ${scenario.className} {
     return this.request<EntityAttributeTypeMigrationLaunchResponse>(
       'launchEntityAttributeTypeMigration',
       change,
+    )
+  }
+
+  previewEntityAttributeTypeExpansion(change: EntityAttributeTypeMigrationRequest) {
+    return this.request<EntityAttributeTypeExpansionPreviewResponse>(
+      'previewEntityAttributeTypeExpansion',
+      change,
+    )
+  }
+
+  applyEntityAttributeTypeExpansion(
+    change: EntityAttributeTypeMigrationRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyEntityAttributeTypeExpansion',
+      { change, expectedPlanDigest },
     )
   }
 

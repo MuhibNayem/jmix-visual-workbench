@@ -352,6 +352,8 @@ export interface ChangeSetModel {
   runInTransaction?: boolean
   labels?: string
   preConditions?: any[]
+  preConditionOnFail?: 'HALT' | 'WARN' | 'CONTINUE' | 'MARK_RAN'
+  preConditionOnError?: 'HALT' | 'WARN' | 'CONTINUE' | 'MARK_RAN'
 }
 
 export interface SchemaWorkspaceResponse {
@@ -495,6 +497,15 @@ export interface EntityAttributeTypeMigrationLaunchResponse {
   message: string
   sourceLanguage?: string
   schemaImpact?: EntityAttributeTypeSchemaImpact
+}
+
+export interface EntityAttributeTypeExpansionPreviewResponse {
+  accepted: boolean
+  code?: string
+  message: string
+  shadowColumnName?: string
+  targetSqlType?: string
+  preview: WorkspaceChangePreviewResponse
 }
 
 export interface DatabaseEntityTableInspectionRequest {

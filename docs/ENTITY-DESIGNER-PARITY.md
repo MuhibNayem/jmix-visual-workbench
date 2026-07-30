@@ -95,9 +95,16 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
   Source-only changes such as compatible persisted representations open the
   real refactoring preview without inventing a schema rewrite. Expand/contract,
   externally managed and incomplete-evidence outcomes fail closed before the
-  source refactor opens. SQL type changes remain a separately reviewed
-  conversion because Liquibase `modifyDataType` has no automatic rollback and
-  reversing the declaration cannot restore truncated data.
+  source refactor opens. Proven lossless conversions can now create the
+  expansion stage: a deterministic portable shadow column, transactional
+  non-null backfill, restored mandatory constraint, old-column/shadow-column
+  existence preconditions that HALT on failure or evaluation error, and custom
+  rollback that drops only the shadow. Qualified `SCHEMA.TABLE` mappings are
+  preserved. The original column remains authoritative and untouched.
+  Unproven or database-specific conversions fail closed. Mapping cutover,
+  deployed-data verification and later contraction remain separate gates
+  because Liquibase `modifyDataType` has no automatic rollback and reversing
+  the declaration cannot restore truncated data.
 - Existing entities can inspect their live mapped table through the
   project-owned JDBC driver and the active profile configuration. The backend
   supports datasource-only stores with Liquibase intentionally disabled,
@@ -145,8 +152,9 @@ blocked until all of the following pass:
    to IntelliJ usage preview, including native `mappedBy` references, and
    explicit scalar and owning to-one join-column physical rename is atomic
    with checked Liquibase rollback. Combined property-and-physical mapping
-   changes, relationship shape changes, data-preserving expand/contract
-   execution and final post-retention physical deletion remain. Native
+   changes, relationship shape changes, mapping cutover, deployed-data
+   verification, contraction and final post-retention physical deletion remain.
+   The non-destructive expansion stage, Native
    project-wide Java/Kotlin type-migration preview with physical dependency
    classification, Native Safe Delete and reversible quarantine are implemented.
    Additive and managed-mapping Java/Kotlin round trip is implemented.

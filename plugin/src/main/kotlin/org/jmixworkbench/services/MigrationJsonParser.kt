@@ -11,6 +11,7 @@ import org.jmixworkbench.model.DbChange
 import org.jmixworkbench.model.IndexColumnDef
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.PreCondition
+import org.jmixworkbench.model.PreConditionOutcome
 
 /**
  * Strict bridge decoder for Liquibase requests.
@@ -43,6 +44,14 @@ object MigrationJsonParser {
                 runAlways = json.boolean("runAlways"),
                 runInTransaction = json.booleanOrDefault("runInTransaction", true),
                 labels = json.optionalString("labels"),
+                preConditionOnFail = json.optionalString("preConditionOnFail")
+                    ?.uppercase()
+                    ?.let(PreConditionOutcome::valueOf)
+                    ?: PreConditionOutcome.HALT,
+                preConditionOnError = json.optionalString("preConditionOnError")
+                    ?.uppercase()
+                    ?.let(PreConditionOutcome::valueOf)
+                    ?: PreConditionOutcome.HALT,
                 preConditions = json.array("preConditions").mapIndexedTo(mutableListOf()) { pcIndex, pc ->
                     runCatching { gson.fromJson(pc, PreCondition::class.java) }
                         .getOrElse { error("Invalid precondition at changes[$index].preConditions[$pcIndex].") }
@@ -94,7 +103,11 @@ object MigrationJsonParser {
                         ),
                     )
                 }
-                DbChange.AddColumn(json.requiredString("tableName"), columns)
+                DbChange.AddColumn(
+                    tableName = json.requiredString("tableName"),
+                    columns = columns,
+                    schemaName = json.optionalString("schemaName"),
+                )
             }
             "dropColumn" -> concrete(json, DbChange.DropColumn::class.java)
             "renameColumn" -> concrete(json, DbChange.RenameColumn::class.java)

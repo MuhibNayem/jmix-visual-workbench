@@ -53,7 +53,8 @@ object MigrationGenerator {
             // Preconditions
             if (cs.preConditions.isNotEmpty()) {
                 child("preConditions") {
-                    attr("onFail", "MARK_RAN")
+                    attr("onFail", cs.preConditionOnFail.name)
+                    attr("onError", cs.preConditionOnError.name)
                     cs.preConditions.forEach { pc ->
                         generatePreCondition(this, pc)
                     }
@@ -91,6 +92,7 @@ object MigrationGenerator {
                 child("columnExists") {
                     pc.params["tableName"]?.let { attr("tableName", it) }
                     pc.params["columnName"]?.let { attr("columnName", it) }
+                    pc.params["schemaName"]?.let { attr("schemaName", it) }
                 }
             }
             PreConditionType.SQL_CHECK -> parent.child("sqlCheck") {
@@ -124,12 +126,14 @@ object MigrationGenerator {
 
             is DbChange.AddColumn -> parent.child("addColumn") {
                 attr("tableName", change.tableName)
+                change.schemaName?.let { attr("schemaName", it) }
                 change.columns.forEach { col -> generateColumn(this, col) }
             }
 
             is DbChange.DropColumn -> parent.child("dropColumn") {
                 attr("tableName", change.tableName)
                 attr("columnName", change.columnName)
+                change.schemaName?.let { attr("schemaName", it) }
             }
 
             is DbChange.RenameColumn -> parent.child("renameColumn") {
@@ -204,6 +208,7 @@ object MigrationGenerator {
             is DbChange.AddNotNullConstraint -> parent.child("addNotNullConstraint") {
                 attr("tableName", change.tableName)
                 attr("columnName", change.columnName)
+                change.schemaName?.let { attr("schemaName", it) }
                 change.columnDataType?.let { attr("columnDataType", it) }
                 change.defaultNullValue?.let { attr("defaultNullValue", it) }
             }
@@ -211,6 +216,7 @@ object MigrationGenerator {
             is DbChange.DropNotNullConstraint -> parent.child("dropNotNullConstraint") {
                 attr("tableName", change.tableName)
                 attr("columnName", change.columnName)
+                change.schemaName?.let { attr("schemaName", it) }
             }
 
             is DbChange.CreateIndex -> parent.child("createIndex") {
@@ -245,6 +251,7 @@ object MigrationGenerator {
 
             is DbChange.UpdateData -> parent.child("update") {
                 attr("tableName", change.tableName)
+                change.schemaName?.let { attr("schemaName", it) }
                 change.columns.forEach { cv ->
                     child("column") {
                         attr("name", cv.name)
