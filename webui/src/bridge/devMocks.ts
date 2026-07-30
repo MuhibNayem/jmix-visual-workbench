@@ -1319,6 +1319,7 @@ export const developmentSchemaWorkspace: SchemaWorkspaceResponse = {
     methodEvidence: [{
       sourceSignature: 'findByProcessState(String)',
       editable: true,
+      methodIndex: 0,
     }],
   }],
   changelogs: [{

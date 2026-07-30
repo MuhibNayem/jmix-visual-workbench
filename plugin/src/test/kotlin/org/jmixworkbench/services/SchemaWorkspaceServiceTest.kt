@@ -36,6 +36,7 @@ import org.jmixworkbench.model.LifecycleCallback
 import org.jmixworkbench.model.MethodParameter
 import org.jmixworkbench.model.RepositoryMethod
 import org.jmixworkbench.model.RepositoryParameterRole
+import org.jmixworkbench.model.RepositoryQueryHint
 import org.jmixworkbench.model.InheritanceRole
 import org.jmixworkbench.model.InheritanceStrategy
 import org.jmixworkbench.model.TraitType
@@ -64,6 +65,10 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
                 public interface LoanAppRepository extends JmixDataRepository<LoanApp, UUID> {
                     // manual repository contract must survive
                     List<LoanApp> findByLegacyRiskBucket(String legacyRiskBucket);
+
+                    /** Stable handwritten lookup documentation. */
+                    @Override
+                    List<LoanApp> findByApplicationNo(String applicationNo);
                 }
                 """.trimIndent(),
             )
@@ -74,14 +79,19 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         val repository = workspace.repositories.single()
         assertEquals(entity.qualifiedName, repository.entityQualifiedName)
         assertEquals("LoanAppRepository", repository.interfaceName)
-        assertEquals(repository.methodEvidence.toString(), 1, repository.config.methods.size)
+        assertEquals(repository.methodEvidence.toString(), 2, repository.config.methods.size)
+
+        val requestedMethods = repository.config.methods.toMutableList()
+        requestedMethods[1] = requestedMethods[1].copy(
+            fetchPlan = "loan-app-summary",
+        )
 
         val change = DataRepositoryChangeRequest(
             entitySource = entity.sourceLocator,
             repositorySource = repository.sourceLocator,
             config = repository.config.copy(
                 methods = (
-                    repository.config.methods +
+                    requestedMethods +
                         RepositoryMethod(
                             name = "findRecent",
                             returnType = "Page<LoanApp>",
@@ -111,9 +121,47 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         val source = preview.files.single().resultContent
         assertTrue(source.contains("// manual repository contract must survive"))
         assertTrue(source.contains("List<LoanApp> findByLegacyRiskBucket(String legacyRiskBucket);"))
+        assertTrue(source.contains("@FetchPlan(\"loan-app-summary\")"))
+        assertTrue(source.contains("/** Stable handwritten lookup documentation. */"))
+        assertTrue(source.contains("@Override"))
+        assertTrue(source.contains("List<LoanApp> findByApplicationNo(String applicationNo);"))
         assertTrue(source.contains("Page<LoanApp> findRecent(Pageable pageable);"))
+        assertTrue(source.contains("import io.jmix.core.repository.FetchPlan;"))
         assertTrue(source.contains("import org.springframework.data.domain.Page;"))
         assertTrue(source.contains("import org.springframework.data.domain.Pageable;"))
+
+        val invalidSourceOwnedEdit = DataRepositoryChangeService.getInstance(project).validate(
+            change.copy(
+                config = repository.config.copy(
+                    methods = repository.config.methods.mapIndexed { index, method ->
+                        if (index == 0) method.copy(fetchPlan = "unsafe-edit") else method
+                    }.toMutableList(),
+                ),
+            ),
+        )
+        assertFalse(invalidSourceOwnedEdit.accepted)
+        assertTrue(
+            invalidSourceOwnedEdit.diagnostics.any {
+                it.methodIndex == 0 && it.blocking && !it.sourceOwned
+            },
+        )
+
+        val structuralRefactor = DataRepositoryChangeService.getInstance(project).preview(
+            change.copy(
+                config = repository.config.copy(
+                    methods = repository.config.methods.mapIndexed { index, method ->
+                        if (index == 1) method.copy(name = "findByApplicationNoContaining") else method
+                    }.toMutableList(),
+                ),
+            ),
+        )
+        assertFalse(structuralRefactor.accepted)
+        assertTrue(
+            structuralRefactor.issues.any {
+                it.code == "JVW-REPOSITORY-METHOD-REFACTOR-NATIVE"
+            },
+            structuralRefactor.issues.toString(),
+        )
 
         val rejected = DataRepositoryChangeService.getInstance(project).preview(
             change.copy(
@@ -124,6 +172,123 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         )
         assertFalse(rejected.accepted)
         assertTrue(rejected.issues.any { it.code == "JVW-REPOSITORY-NOOP" })
+    }
+
+    fun testExistingKotlinRepositoryMethodMetadataUsesExactRevisionBoundReplacement() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/LoanAppRepository.kt",
+                """
+                package com.acme.entity
+
+                import io.jmix.core.repository.JmixDataRepository
+                import io.jmix.core.repository.Query
+                import org.springframework.data.repository.query.Param
+                import java.util.UUID
+
+                interface LoanAppRepository : JmixDataRepository<LoanApp, UUID> {
+                    // unsupported body must remain byte-for-byte
+                    fun manualLabel(): String = "manual"
+
+                    /** Handwritten business-key lookup documentation. */
+                    @Query("select l from LoanApp l where l.applicationNo = :applicationNo")
+                    fun findByApplicationNoQuery(
+                        @Param("applicationNo") applicationNo: String
+                    ): List<LoanApp>
+                }
+                """.trimIndent(),
+            )
+        }
+
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val entity = workspace.entities.single { it.className == "LoanApp" }
+        val repository = workspace.repositories.single()
+        assertEquals(EntitySourceLanguage.KOTLIN, repository.sourceLanguage)
+        assertEquals(1, repository.config.methods.size)
+        assertTrue(repository.methodEvidence.first().methodIndex == null)
+        assertFalse(repository.methodEvidence.first().editable)
+        assertEquals(0, repository.methodEvidence.last().methodIndex)
+        assertTrue(repository.methodEvidence.last().editable)
+
+        val revised = repository.config.methods.single().copy(
+            query = """
+                select l from LoanApp l
+                where l.applicationNo = :applicationNo
+                order by l.applicationNo
+            """.trimIndent(),
+            fetchPlan = "loan-app-summary",
+            applyConstraints = false,
+            queryHints = mutableListOf(
+                RepositoryQueryHint("jmix.query.cacheable", "true"),
+            ),
+        )
+        val preview = DataRepositoryChangeService.getInstance(project).preview(
+            DataRepositoryChangeRequest(
+                entitySource = entity.sourceLocator,
+                repositorySource = repository.sourceLocator,
+                config = repository.config.copy(methods = mutableListOf(revised)),
+            ),
+        )
+
+        assertTrue(preview.accepted, preview.issues.joinToString { "${it.code}: ${it.message}" })
+        val source = preview.files.single().resultContent
+        assertTrue(source.contains("@FetchPlan(\"loan-app-summary\")"))
+        assertTrue(source.contains("@ApplyConstraints(false)"))
+        assertTrue(source.contains("@QueryHints(value = [QueryHint(name = \"jmix.query.cacheable\", value = \"true\")])"))
+        assertTrue(source.contains("order by l.applicationNo"))
+        assertTrue(source.contains("/** Handwritten business-key lookup documentation. */"))
+        assertTrue(source.contains("// unsupported body must remain byte-for-byte"))
+        assertTrue(source.contains("fun manualLabel(): String = \"manual\""))
+    }
+
+    fun testExistingRepositoryAnnotationCommentsMakeMetadataReadOnly() {
+        createFixture(includeAll = true)
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/entity/LoanAppRepository.java",
+                """
+                package com.acme.entity;
+
+                import io.jmix.core.repository.JmixDataRepository;
+                import io.jmix.core.repository.Query;
+                import java.util.List;
+                import java.util.UUID;
+
+                public interface LoanAppRepository extends JmixDataRepository<LoanApp, UUID> {
+                    @Query(
+                        /* Security reviewer requires this predicate. */
+                        "select l from LoanApp l where l.applicationNo = :applicationNo"
+                    )
+                    List<LoanApp> findByApplicationNoQuery(String applicationNo);
+                }
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val entity = workspace.entities.single { it.className == "LoanApp" }
+        val repository = workspace.repositories.single()
+        val revised = repository.config.methods.single().copy(
+            query = "select l from LoanApp l where l.applicationNo = :applicationNo order by l.applicationNo",
+        )
+
+        val preview = DataRepositoryChangeService.getInstance(project).preview(
+            DataRepositoryChangeRequest(
+                entitySource = entity.sourceLocator,
+                repositorySource = repository.sourceLocator,
+                config = repository.config.copy(methods = mutableListOf(revised)),
+            ),
+        )
+
+        assertFalse(preview.accepted)
+        assertTrue(
+            preview.issues.any { it.code == "JVW-REPOSITORY-METHOD-EVIDENCE" },
+            preview.issues.toString(),
+        )
     }
 
     fun testInheritanceAndEmbeddedOverridesRoundTripForJavaAndKotlin() {

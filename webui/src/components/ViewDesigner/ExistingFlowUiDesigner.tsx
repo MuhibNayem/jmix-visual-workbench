@@ -90,6 +90,29 @@ function actionTargetId(
   return [...ownerIds, action.id].join('.')
 }
 
+function repositoriesForEntity(
+  workspace: FlowUiWorkspaceResponse,
+  entityClass?: string,
+) {
+  if (!entityClass) return []
+  const entitySimpleName = entityClass.substring(entityClass.lastIndexOf('.') + 1)
+  const entityIds = new Set(workspace.contextArtifacts
+    .filter((artifact) => artifact.kind === 'ENTITY')
+    .filter((artifact) => artifact.semanticKey === entityClass ||
+      artifact.semanticKey.endsWith(`.${entityClass}`) ||
+      artifact.displayName === entitySimpleName)
+    .map((artifact) => artifact.id))
+  const relatedRepositoryIds = new Set(workspace.contextRelationships
+    .filter((relationship) => relationship.type === 'USES_ENTITY' &&
+      relationship.targetArtifactId &&
+      entityIds.has(relationship.targetArtifactId))
+    .map((relationship) => relationship.sourceArtifactId))
+  return workspace.contextArtifacts
+    .filter((artifact) => artifact.kind === 'REPOSITORY' &&
+      relatedRepositoryIds.has(artifact.id))
+    .sort((left, right) => left.displayName.localeCompare(right.displayName))
+}
+
 function attributeValue(element: FlowUiElementSnapshot, name: string): string | undefined {
   return element.attributes.find((attribute) => attribute.name === name)?.value
 }
@@ -367,6 +390,7 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     redoDepth: 0,
   })
   const [historyBusy, setHistoryBusy] = useState(false)
+  const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null)
   const [pending, setPending] = useState<{
     kind: 'property'
     change: FlowUiPropertyChangeRequest
@@ -903,8 +927,18 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
     component?: FlowUiElementSnapshot,
   ) => {
     if (!workspace?.controllerModel?.psiSupported) return
-    const loaderContainer = component
-      ? workspace.dataModel?.containers.find((container) => container.loaderElementKey === component.key)
+    const dataContainer = component
+      ? workspace.dataModel?.containers.find((container) => (
+          kind === 'DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE'
+            ? container.elementKey === component.key
+            : container.loaderElementKey === component.key
+        ))
+      : undefined
+    const repositoryOptions = repositoriesForEntity(workspace, dataContainer?.entityClass)
+    const repository = kind === 'COLLECTION_LOADER_LOAD_DELEGATE' ||
+      kind === 'DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE'
+      ? repositoryOptions.find((candidate) => candidate.id === selectedRepositoryId)
+        ?? repositoryOptions[0]
       : undefined
     const change: FlowUiControllerHandlerRequest = {
       controllerLocator: {
@@ -915,7 +949,9 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       componentId: component?.id,
       componentTag: component?.localTag,
       targetId: component ? actionTargetId(component, elements) : undefined,
-      entityClass: loaderContainer?.entityClass,
+      entityClass: dataContainer?.entityClass,
+      repositoryLocator: repository?.sourceLocator,
+      repositoryQualifiedName: repository?.semanticKey,
     }
     const preview = await bridge.previewFlowUiControllerHandler(change)
     if (!preview.accepted) {
@@ -1159,6 +1195,26 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
       field.entitySemanticKey.endsWith(`.${selectedContainer.entityClass}`)
   }) ?? []
   const selectedParent = selected?.parentKey ? elements.get(selected.parentKey) : undefined
+  const selectedLoaderContainer = selected?.localTag === 'loader'
+    ? workspace.dataModel?.containers.find((container) => container.loaderElementKey === selected.key)
+    : undefined
+  const selectedLoaderRepositories = repositoriesForEntity(
+    workspace,
+    selectedLoaderContainer?.entityClass,
+  )
+  const selectedLoaderRepository = selectedLoaderRepositories.find(
+    (repository) => repository.id === selectedRepositoryId,
+  ) ?? selectedLoaderRepositories[0]
+  const selectedInstanceContainer = selected?.localTag === 'instance'
+    ? workspace.dataModel?.containers.find((container) => container.elementKey === selected.key)
+    : undefined
+  const selectedInstanceRepositories = repositoriesForEntity(
+    workspace,
+    selectedInstanceContainer?.entityClass,
+  )
+  const selectedInstanceRepository = selectedInstanceRepositories.find(
+    (repository) => repository.id === selectedRepositoryId,
+  ) ?? selectedInstanceRepositories[0]
 
   return (
     <div className="view-designer-shell flex h-full min-w-0 flex-col bg-surface">
@@ -2117,13 +2173,70 @@ export default function ExistingFlowUiDesigner({ initialLocator, onClose }: {
                         >
                           Post-load
                         </button>
+                        <label className="col-span-2 min-w-0 text-[9px] text-gray-500">
+                          Repository preserving filter, paging, sorting and fetch plan
+                          <select
+                            value={selectedLoaderRepository?.id ?? ''}
+                            onChange={(event) => setSelectedRepositoryId(event.target.value || null)}
+                            className="mt-1 w-full min-w-0 py-1 text-[10px]"
+                          >
+                            {selectedLoaderRepositories.length === 0 && (
+                              <option value="">No matching JmixDataRepository indexed</option>
+                            )}
+                            {selectedLoaderRepositories.map((repository) => (
+                              <option key={repository.id} value={repository.id}>
+                                {repository.displayName} · {repository.owner.moduleId}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
                         <button
                           type="button"
                           onClick={() => void previewControllerHandler('COLLECTION_LOADER_LOAD_DELEGATE', selected)}
+                          disabled={!selectedLoaderRepository}
                           className={`${quietButton} col-span-2`}
                         >
-                          Preview load delegate
+                          Wire repository load delegate
                         </button>
+                        <p className="col-span-2 text-[9px] leading-relaxed text-gray-600">
+                          Uses JmixDataRepositoryContext. Repositories that disable Jmix constraints are refused.
+                        </p>
+                      </div>
+                    )}
+                    {selected.localTag === 'instance' && selectedInstanceContainer?.entityClass && (
+                      <div className="mt-1.5 space-y-1.5 rounded border border-surface-border p-2">
+                        <div className="text-[9px] uppercase tracking-wider text-gray-600">
+                          Repository-backed detail save
+                        </div>
+                        <select
+                          value={selectedInstanceRepository?.id ?? ''}
+                          onChange={(event) => setSelectedRepositoryId(event.target.value || null)}
+                          className="w-full min-w-0 py-1 text-[10px]"
+                        >
+                          {selectedInstanceRepositories.length === 0 && (
+                            <option value="">No matching JmixDataRepository indexed</option>
+                          )}
+                          {selectedInstanceRepositories.map((repository) => (
+                            <option key={repository.id} value={repository.id}>
+                              {repository.displayName} · {repository.owner.moduleId}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => void previewControllerHandler(
+                            'DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE',
+                            selected,
+                          )}
+                          disabled={!selectedInstanceRepository}
+                          className="w-full rounded border border-jmix-500/30 bg-jmix-500/10 px-2 py-1 text-[10px] text-jmix-200 disabled:opacity-50"
+                        >
+                          Wire safe detail save delegate
+                        </button>
+                        <p className="text-[9px] leading-relaxed text-amber-300/70">
+                          Single-entity saves only. Aggregate compositions or removals require a transactional update
+                          service; the generated guard rejects them before any write.
+                        </p>
                       </div>
                     )}
                   </div>

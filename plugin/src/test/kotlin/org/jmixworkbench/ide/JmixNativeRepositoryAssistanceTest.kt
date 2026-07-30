@@ -5,6 +5,8 @@ import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.psi.PsiField
 import com.intellij.psi.PsiLanguageInjectionHost
 import com.intellij.psi.PsiLiteralExpression
+import com.intellij.psi.PsiNamedElement
+import com.intellij.psi.PsiParameter
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.testFramework.fixtures.LightJavaCodeInsightFixtureTestCase
@@ -19,6 +21,14 @@ class JmixNativeRepositoryAssistanceTest : LightJavaCodeInsightFixtureTestCase()
             public @interface JmixEntity {
                 String name() default "";
                 String value() default "";
+            }
+            """.trimIndent(),
+        )
+        myFixture.addClass(
+            """
+            package org.springframework.data.repository.query;
+            public @interface Param {
+                String value();
             }
             """.trimIndent(),
         )
@@ -197,6 +207,158 @@ class JmixNativeRepositoryAssistanceTest : LightJavaCodeInsightFixtureTestCase()
         )
     }
 
+    fun testImplicitJavaRepositoryParameterRenameUpdatesJpqlBinding() {
+        domainClasses()
+        myFixture.configureByText(
+            "EmployeeRepository.java",
+            """
+            package com.company.payroll.repository;
+
+            import com.company.payroll.entity.Employee;
+            import io.jmix.core.repository.JmixDataRepository;
+            import io.jmix.core.repository.Query;
+            import java.util.List;
+            import java.util.UUID;
+
+            public interface EmployeeRepository extends JmixDataRepository<Employee, UUID> {
+                @Query("select e from payroll_Employee e where e.employeeNumber = :number")
+                List<Employee> findByNumber(String num<caret>ber);
+            }
+            """.trimIndent(),
+        )
+        val parameter = PsiTreeUtil.getParentOfType(
+            myFixture.file.findElementAt(myFixture.caretOffset),
+            PsiParameter::class.java,
+            false,
+        )!!
+
+        myFixture.renameElement(parameter, "personnelNumber")
+
+        assertTrue(myFixture.file.text.contains(":personnelNumber"))
+        assertTrue(myFixture.file.text.contains("String personnelNumber"))
+    }
+
+    fun testExplicitParamBindingRenamesAnnotationAndEveryJpqlOccurrenceTogether() {
+        domainClasses()
+        myFixture.configureByText(
+            "EmployeeRepository.java",
+            """
+            package com.company.payroll.repository;
+
+            import com.company.payroll.entity.Employee;
+            import io.jmix.core.repository.JmixDataRepository;
+            import io.jmix.core.repository.Query;
+            import java.util.List;
+            import java.util.UUID;
+            import org.springframework.data.repository.query.Param;
+
+            public interface EmployeeRepository extends JmixDataRepository<Employee, UUID> {
+                @Query("select e from payroll_Employee e where e.employeeNumber = :employeeNo or :employeeNo is null")
+                List<Employee> findByNumber(@Param("employee<caret>No") String number);
+            }
+            """.trimIndent(),
+        )
+        val target = javaReferenceAtCaret<JmixJavaRepositoryParameterReference>()
+            .resolve() as PsiNamedElement
+
+        myFixture.renameElement(target, "personnelNo")
+
+        assertTrue(myFixture.file.text.contains("""@Param("personnelNo")"""))
+        assertEquals(2, Regex(""":personnelNo\b""").findAll(myFixture.file.text).count())
+        assertTrue(myFixture.file.text.contains("String number"))
+    }
+
+    fun testUnresolvedJpqlParameterIsHighlightedAndFixedFromParamBinding() {
+        domainClasses()
+        myFixture.enableInspections(JmixJavaReferenceInspection())
+        myFixture.configureByText(
+            "EmployeeRepository.java",
+            """
+            package com.company.payroll.repository;
+
+            import com.company.payroll.entity.Employee;
+            import io.jmix.core.repository.JmixDataRepository;
+            import io.jmix.core.repository.Query;
+            import java.util.List;
+            import java.util.UUID;
+            import org.springframework.data.repository.query.Param;
+
+            public interface EmployeeRepository extends JmixDataRepository<Employee, UUID> {
+                @Query("select e from payroll_Employee e where e.employeeNumber = :employeeNu<caret>ber")
+                List<Employee> findByNumber(@Param("employeeNumber") String number);
+            }
+            """.trimIndent(),
+        )
+
+        val problem = myFixture.doHighlighting().single {
+            it.description?.contains("Unresolved Jmix reference 'employeeNuber'") == true
+        }
+        assertEquals(HighlightSeverity.ERROR, problem.severity)
+        myFixture.launchAction(myFixture.findSingleIntention("Replace with 'employeeNumber'"))
+        assertTrue(myFixture.file.text.contains(":employeeNumber"))
+    }
+
+    fun testImplicitKotlinRepositoryParameterRenameUpdatesJpqlBinding() {
+        domainClasses()
+        myFixture.configureByText(
+            "EmployeeRepository.kt",
+            """
+            package com.company.payroll.repository
+
+            import com.company.payroll.entity.Employee
+            import io.jmix.core.repository.JmixDataRepository
+            import io.jmix.core.repository.Query
+            import java.util.UUID
+
+            interface EmployeeRepository : JmixDataRepository<Employee, UUID> {
+                @Query("select e from payroll_Employee e where e.employeeNumber = :number")
+                fun findByNumber(num<caret>ber: String): List<Employee>
+            }
+            """.trimIndent(),
+        )
+        val parameter = generateSequence(myFixture.file.findElementAt(myFixture.caretOffset)) {
+            it.parent
+        }.filterIsInstance<PsiNamedElement>()
+            .first { it.javaClass.simpleName == "KtParameter" }
+
+        myFixture.renameElement(parameter, "personnelNumber")
+
+        assertTrue(myFixture.file.text.contains(":personnelNumber"))
+        assertTrue(myFixture.file.text.contains("personnelNumber: String"))
+    }
+
+    fun testExplicitKotlinParamBindingRenamesAnnotationAndEveryJpqlOccurrenceTogether() {
+        domainClasses()
+        myFixture.configureByText(
+            "EmployeeRepository.kt",
+            """
+            package com.company.payroll.repository
+
+            import com.company.payroll.entity.Employee
+            import io.jmix.core.repository.JmixDataRepository
+            import io.jmix.core.repository.Query
+            import java.util.UUID
+            import org.springframework.data.repository.query.Param
+
+            interface EmployeeRepository : JmixDataRepository<Employee, UUID> {
+                @Query("select e from payroll_Employee e where e.employeeNumber = :employeeNo or :employeeNo is null")
+                fun findByNumber(@Param("employee<caret>No") number: String): List<Employee>
+            }
+            """.trimIndent(),
+        )
+        val target = kotlinReferenceAtCaret<JmixKotlinRepositoryParameterReference>()
+            .resolve() as PsiNamedElement
+
+        myFixture.renameElement(target, "personnelNo")
+
+        assertTrue(
+            myFixture.file.text,
+            myFixture.file.text.contains("""@Param("personnelNo")"""),
+        )
+        assertEquals(2, Regex(""":personnelNo\b""").findAll(myFixture.file.text).count())
+        assertTrue(myFixture.file.text.contains("number: String"))
+    }
+
     private fun domainClasses(): PsiField {
         myFixture.addClass(
             """
@@ -237,6 +399,16 @@ class JmixNativeRepositoryAssistanceTest : LightJavaCodeInsightFixtureTestCase()
         return literal.references.filterIsInstance<T>().first {
             it is com.intellij.psi.PsiReference &&
                 it.rangeInElement.contains(myFixture.caretOffset - literal.textRange.startOffset)
+        }
+    }
+
+    private inline fun <reified T> kotlinReferenceAtCaret(): T {
+        val host = generateSequence(myFixture.file.findElementAt(myFixture.caretOffset - 1)) {
+            it.parent
+        }.filterIsInstance<PsiLanguageInjectionHost>().first()
+        return host.references.filterIsInstance<T>().first {
+            it is com.intellij.psi.PsiReference &&
+                it.rangeInElement.contains(myFixture.caretOffset - host.textRange.startOffset)
         }
     }
 }

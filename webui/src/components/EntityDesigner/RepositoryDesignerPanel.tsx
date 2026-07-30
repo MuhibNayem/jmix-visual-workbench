@@ -18,6 +18,7 @@ import type {
   RepositoryMethodParameter,
   RepositoryParameterRole,
   RepositorySemanticValidationResponse,
+  SchemaRepositoryMethodEvidence,
 } from '../../types'
 
 interface RepositoryDesignerPanelProps {
@@ -25,6 +26,7 @@ interface RepositoryDesignerPanelProps {
   onChange: (config: DataRepositoryConfig) => void
   sourceLocked?: boolean
   lockedMethodCount?: number
+  methodEvidence?: SchemaRepositoryMethodEvidence[]
   semantics?: RepositorySemanticValidationResponse | null
   semanticsBusy?: boolean
   footer?: React.ReactNode
@@ -172,6 +174,7 @@ export default function RepositoryDesignerPanel({
   onChange,
   sourceLocked = false,
   lockedMethodCount = 0,
+  methodEvidence = [],
   semantics,
   semanticsBusy = false,
   footer,
@@ -205,9 +208,16 @@ export default function RepositoryDesignerPanel({
       candidate.path === propertyDrafts[index])
     if (!property) return
     const method = config.methods[index]
-    const name = method.name.includes('By')
-      ? `${method.name}And${property.derivedToken}`
-      : `findBy${property.derivedToken}`
+    const orderByIndex = method.name.indexOf('OrderBy')
+    const predicateName = orderByIndex >= 0
+      ? method.name.slice(0, orderByIndex)
+      : method.name
+    const orderBySuffix = orderByIndex >= 0
+      ? method.name.slice(orderByIndex)
+      : ''
+    const name = predicateName.includes('By')
+      ? `${predicateName}And${property.derivedToken}${orderBySuffix}`
+      : `findBy${property.derivedToken}${orderBySuffix}`
     const parameterName = property.path.split('.').pop() || `value${method.parameters.length + 1}`
     updateMethod(index, {
       name,
@@ -391,7 +401,10 @@ export default function RepositoryDesignerPanel({
           <div className="space-y-2">
             {config.methods.map((method, index) => {
               const expanded = expandedMethod === index
-              const sourceMethod = index < lockedMethodCount
+              const existingMethod = index < lockedMethodCount
+              const sourceEvidence = methodEvidence.find(evidence => evidence.methodIndex === index)
+              const sourceOwned = existingMethod && sourceEvidence?.editable !== true
+              const safelyEditable = existingMethod && sourceEvidence?.editable === true
               const signature = `${method.name}(${method.parameters.map(parameter => parameter.type).join(',')})`
               const duplicate = (signatureCount.get(signature) ?? 0) > 1
               const parameterIssue = queryParameterIssue(method, config.useNamedParameters)
@@ -440,16 +453,20 @@ export default function RepositoryDesignerPanel({
                         <XCircle className="h-3.5 w-3.5 shrink-0 text-red-300" />
                       </span>
                     )}
-                    {sourceMethod && (
-                      <span className="shrink-0 rounded bg-surface-light px-1.5 py-0.5 text-[8px] uppercase tracking-wide text-gray-500">
-                        Source-owned
+                    {existingMethod && (
+                      <span className={`shrink-0 rounded px-1.5 py-0.5 text-[8px] uppercase tracking-wide ${
+                        safelyEditable
+                          ? 'bg-emerald-500/10 text-emerald-200/75'
+                          : 'bg-surface-light text-gray-500'
+                      }`}>
+                        {safelyEditable ? 'Existing · metadata editable' : 'Source-owned'}
                       </span>
                     )}
                     <button
                       type="button"
                       onClick={() => removeMethod(index)}
                       aria-label={`Remove ${method.name || 'repository method'}`}
-                      disabled={sourceMethod}
+                      disabled={existingMethod}
                       className="rounded p-1 text-red-400 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-25"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -458,13 +475,19 @@ export default function RepositoryDesignerPanel({
 
                   {expanded && (
                     <fieldset
-                      disabled={sourceMethod}
+                      disabled={sourceOwned}
                       className="min-w-0 space-y-3 border-t border-surface-border p-3 disabled:opacity-65"
                     >
-                      {sourceMethod && (
+                      {sourceOwned && (
                         <div className="rounded border border-surface-border bg-surface-light/50 p-2 text-[9px] leading-relaxed text-gray-500">
-                          This declaration is reconstructed from handwritten source. Add a new method here;
-                          use IntelliJ source/refactoring tools for structural changes to this method.
+                          {sourceEvidence?.issue ||
+                            'This declaration contains source-owned constructs. Add a new method here or use IntelliJ source tools.'}
+                        </div>
+                      )}
+                      {safelyEditable && (
+                        <div className="rounded border border-emerald-500/25 bg-emerald-500/5 p-2 text-[9px] leading-relaxed text-emerald-100/75">
+                          Query, bindings, fetch plan, documentation, hints and method security are revision-safe.
+                          Callable name, return type and parameter contract remain locked to protect callers.
                         </div>
                       )}
                       {(duplicate || parameterIssue) && (
@@ -517,7 +540,7 @@ export default function RepositoryDesignerPanel({
                           ))}
                         </div>
                       )}
-                      {method.queryType === 'derived' && semantics && !sourceMethod && (
+                      {method.queryType === 'derived' && semantics && !existingMethod && (
                         <div className="grid min-w-0 gap-2 rounded border border-violet-500/20 bg-violet-500/[0.04] p-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                           <label className="min-w-0 text-[9px] text-violet-100/70">
                             Add an entity property condition
@@ -554,6 +577,7 @@ export default function RepositoryDesignerPanel({
                           Method name
                           <input
                             value={method.name}
+                            disabled={existingMethod}
                             onChange={event => updateMethod(index, { name: event.target.value })}
                             className="mt-1 w-full min-w-0 font-mono"
                           />
@@ -562,6 +586,7 @@ export default function RepositoryDesignerPanel({
                           Result type
                           <input
                             value={method.returnType}
+                            disabled={existingMethod}
                             onChange={event => updateMethod(index, { returnType: event.target.value })}
                             list={`repository-return-${index}`}
                             className="mt-1 w-full min-w-0 font-mono"
@@ -588,6 +613,7 @@ export default function RepositoryDesignerPanel({
                         Developer intent
                         <input
                           value={method.description ?? ''}
+                          disabled={existingMethod}
                           onChange={event => updateMethod(index, {
                             description: event.target.value || undefined,
                           })}
@@ -638,6 +664,7 @@ export default function RepositoryDesignerPanel({
                           </div>
                           <button
                             type="button"
+                            disabled={existingMethod}
                             onClick={() => updateMethod(index, {
                               parameters: [
                                 ...method.parameters,
@@ -657,6 +684,7 @@ export default function RepositoryDesignerPanel({
                             >
                               <input
                                 value={parameter.name}
+                                disabled={existingMethod}
                                 onChange={event => {
                                   const parameters = method.parameters.map((candidate, candidateIndex) =>
                                     candidateIndex === parameterIndex
@@ -670,6 +698,7 @@ export default function RepositoryDesignerPanel({
                               />
                               <select
                                 value={parameter.role}
+                                disabled={existingMethod}
                                 onChange={event => {
                                   const role = event.target.value as RepositoryParameterRole
                                   const roleConfig = PARAMETER_ROLES.find(candidate => candidate.value === role)
@@ -700,7 +729,7 @@ export default function RepositoryDesignerPanel({
                                       : candidate)
                                   updateMethod(index, { parameters })
                                 }}
-                                disabled={parameter.role !== 'value'}
+                                disabled={existingMethod || parameter.role !== 'value'}
                                 aria-label="Parameter JVM type"
                                 placeholder="String"
                                 className="min-w-0 font-mono text-[10px] disabled:opacity-60"
@@ -709,7 +738,7 @@ export default function RepositoryDesignerPanel({
                                 <input
                                   type="checkbox"
                                   checked={parameter.nullable}
-                                  disabled={!['value', 'fetchPlan'].includes(parameter.role)}
+                                  disabled={existingMethod || !['value', 'fetchPlan'].includes(parameter.role)}
                                   onChange={event => {
                                     const parameters = method.parameters.map((candidate, candidateIndex) =>
                                       candidateIndex === parameterIndex
@@ -722,6 +751,7 @@ export default function RepositoryDesignerPanel({
                               </label>
                               <button
                                 type="button"
+                                disabled={existingMethod}
                                 onClick={() => updateMethod(index, {
                                   parameters: method.parameters.filter(
                                     (_, candidateIndex) => candidateIndex !== parameterIndex,

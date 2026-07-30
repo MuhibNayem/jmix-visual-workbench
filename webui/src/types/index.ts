@@ -486,6 +486,7 @@ export interface SchemaRepositoryMethodEvidence {
   sourceSignature: string
   editable: boolean
   issue?: string
+  methodIndex?: number
 }
 
 export interface SchemaModuleSnapshot {
@@ -2766,6 +2767,7 @@ export type FlowUiControllerHandlerKind =
   | 'COLLECTION_LOADER_PRE_LOAD'
   | 'COLLECTION_LOADER_POST_LOAD'
   | 'COLLECTION_LOADER_LOAD_DELEGATE'
+  | 'DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE'
   | 'COMPONENT_VALIDATOR'
 
 export interface FlowUiControllerHandlerRequest {
@@ -2775,6 +2777,8 @@ export interface FlowUiControllerHandlerRequest {
   componentTag?: string
   targetId?: string
   entityClass?: string
+  repositoryLocator?: GraphSourceLocator
+  repositoryQualifiedName?: string
 }
 
 export interface JmixRuntimeInspectionResponse {

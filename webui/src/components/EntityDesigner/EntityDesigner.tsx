@@ -2436,6 +2436,7 @@ export default function EntityDesigner({
                 entity={entity}
                 sourceLocked={Boolean(existingRepository)}
                 lockedMethodCount={existingRepository?.config.methods.length ?? 0}
+                methodEvidence={existingRepository?.methodEvidence ?? []}
                 semantics={repositorySemantics}
                 semanticsBusy={repositorySemanticsBusy}
                 onChange={dataRepository => {

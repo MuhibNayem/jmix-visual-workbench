@@ -1,14 +1,24 @@
 package org.jmixworkbench.services
 
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.fileTypes.FileTypeManager
+import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiClassType
+import com.intellij.psi.PsiField
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiManager
+import com.intellij.psi.PsiMethod
+import com.intellij.psi.PsiModifierListOwner
+import com.intellij.psi.PsiNamedElement
+import com.intellij.psi.PsiErrorElement
+import com.intellij.psi.PsiFileFactory
 import com.intellij.psi.search.ProjectScope
+import com.intellij.psi.util.PsiTreeUtil
 import org.jmixworkbench.discovery.change.WorkspaceChangeIssue
 import org.jmixworkbench.discovery.change.WorkspaceChangePlan
 import org.jmixworkbench.discovery.change.WorkspaceChangeSet
@@ -18,6 +28,7 @@ import org.jmixworkbench.discovery.change.WorkspaceTextEdit
 import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
 import org.jmixworkbench.discovery.model.SourceLocator
 import org.jmixworkbench.discovery.navigation.SourceNavigationPolicy
+import org.jmixworkbench.model.RepositoryMethod
 import javax.lang.model.SourceVersion
 
 @Service(Service.Level.PROJECT)
@@ -249,21 +260,50 @@ class FlowUiControllerChangeService(
                         request.controllerLocator.relativePath,
                     )
                 }
-                if (request.kind == FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE) {
+            }
+            FlowUiControllerHandlerKind.DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE -> {
+                if (request.componentId.isNullOrBlank() ||
+                    request.componentTag?.substringAfter(':') != "instance"
+                ) {
                     return rejected(
-                        "JVW-CONTROLLER-DELEGATE-BODY-REQUIRED",
-                        "A load delegate changes runtime data semantics and requires a complete typed implementation; placeholder delegates are never generated.",
+                        "JVW-CONTROLLER-HANDLER-TARGET-INVALID",
+                        "A repository save delegate requires a selected instance data container with an id.",
+                        request.controllerLocator.relativePath,
+                    )
+                }
+                if (request.entityClass?.matches(JAVA_QUALIFIED_NAME) != true) {
+                    return rejected(
+                        "JVW-CONTROLLER-HANDLER-ENTITY-MISSING",
+                        "The instance container must resolve to a valid entity class.",
                         request.controllerLocator.relativePath,
                     )
                 }
             }
             else -> Unit
         }
+        if (request.controllerLocator.relativePath.endsWith(".kt", ignoreCase = true)) {
+            return if (request.kind in REPOSITORY_HANDLER_KINDS) {
+                proposeKotlinRepositoryHandler(request)
+            } else {
+                rejected(
+                    "JVW-CONTROLLER-KOTLIN-HANDLER-NOT-CERTIFIED",
+                    "This Kotlin controller handler is not yet certified for source-safe generation.",
+                    request.controllerLocator.relativePath,
+                )
+            }
+        }
         val loaded = loadController(request.controllerLocator)
         val psiFile = loaded.psiFile
             ?: return ControllerChangeProposal(false, null, loaded.issues)
         val controllerClass = loaded.controllerClass
             ?: return ControllerChangeProposal(false, null, loaded.issues)
+        val repositoryBinding = if (request.kind in REPOSITORY_HANDLER_KINDS) {
+            val repository = loadRepositoryBinding(request, controllerClass)
+            repository.binding
+                ?: return ControllerChangeProposal(false, null, repository.issues)
+        } else {
+            null
+        }
         val subscribeSubjectSupported = if (request.kind == FlowUiControllerHandlerKind.BUTTON_CLICK) {
             subscribeSubjectSupported()
                 ?: return rejected(
@@ -274,7 +314,7 @@ class FlowUiControllerChangeService(
         } else {
             false
         }
-        val handler = handlerTemplate(request, subscribeSubjectSupported)
+        val handler = handlerTemplate(request, subscribeSubjectSupported, repositoryBinding)
         if (!SourceVersion.isIdentifier(handler.methodName) || SourceVersion.isKeyword(handler.methodName)) {
             return rejected(
                 "JVW-CONTROLLER-METHOD-NAME-INVALID",
@@ -308,6 +348,14 @@ class FlowUiControllerChangeService(
                 request.controllerLocator.relativePath,
             )
         }
+        importConflict(psiFile, handler.imports)?.let { (simpleName, existingImport) ->
+            return rejected(
+                "JVW-CONTROLLER-IMPORT-COLLISION",
+                "Cannot import '${handler.imports.first { it.substringAfterLast('.') == simpleName }}' because " +
+                    "'$existingImport' already owns the simple name '$simpleName'.",
+                request.controllerLocator.relativePath,
+            )
+        }
 
         val edits = mutableListOf<WorkspaceTextEdit>()
         addImportEdit(
@@ -322,6 +370,10 @@ class FlowUiControllerChangeService(
             )
         val indent = memberIndent(loaded.content, controllerClass)
         val methodText = buildString {
+            repositoryBinding?.fieldText?.let { field ->
+                append("\n\n")
+                append(field.prependIndent(indent))
+            }
             append("\n\n")
             append(indent).append(handler.annotation).append('\n')
             append(indent).append(handler.visibility).append(' ').append(handler.returnType).append(' ')
@@ -343,6 +395,8 @@ class FlowUiControllerChangeService(
             append('\u0000').append(request.componentId)
             append('\u0000').append(request.targetId)
             append('\u0000').append(request.entityClass)
+            append('\u0000').append(request.repositoryQualifiedName)
+            append('\u0000').append(request.repositoryLocator?.revisionFingerprint)
         }
         return ControllerChangeProposal(
             accepted = true,
@@ -362,9 +416,173 @@ class FlowUiControllerChangeService(
         )
     }
 
+    private fun proposeKotlinRepositoryHandler(
+        request: FlowUiControllerHandlerRequest,
+    ): ControllerChangeProposal {
+        val loaded = loadKotlinController(request.controllerLocator)
+        val psiClass = loaded.psiClass
+            ?: return ControllerChangeProposal(false, null, loaded.issues)
+        val syntheticController = JavaPsiFacade.getElementFactory(project)
+            .createClass("__JmixKotlinRepositoryValidation")
+        val repositoryValidation = loadRepositoryBinding(request, syntheticController)
+        val repository = repositoryValidation.binding
+            ?: return ControllerChangeProposal(false, null, repositoryValidation.issues)
+        val qualifiedRepository = request.repositoryQualifiedName.orEmpty()
+        val repositorySimpleName = qualifiedRepository.substringAfterLast('.')
+        val source = loaded.content
+        val imports = IMPORT_DECLARATION.findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        val controllerPackage = PACKAGE_DECLARATION.find(source)?.groupValues?.get(1).orEmpty()
+        val injectionCandidates = descendants(psiClass)
+            .filterIsInstance<PsiNamedElement>()
+            .filter { element ->
+                element.javaClass.simpleName in setOf("KtProperty", "KtParameter") &&
+                    nearestKotlinClass(element) === psiClass &&
+                    kotlinDeclaredType(element.text)?.let { type ->
+                        type == qualifiedRepository ||
+                            (
+                                type == repositorySimpleName &&
+                                    (
+                                        qualifiedRepository in imports ||
+                                            controllerPackage == qualifiedRepository.substringBeforeLast('.', "")
+                                        )
+                                )
+                    } == true
+            }
+            .toList()
+        if (injectionCandidates.size > 1) {
+            return rejected(
+                "JVW-CONTROLLER-REPOSITORY-INJECTION-AMBIGUOUS",
+                "The Kotlin controller has multiple $repositorySimpleName injection candidates.",
+                request.controllerLocator.relativePath,
+            )
+        }
+        val preferredName = repositorySimpleName.replaceFirstChar(Char::lowercase)
+        val existingInjection = injectionCandidates.singleOrNull()
+        val fieldName = existingInjection?.name ?: preferredName
+        val conflictingName = descendants(psiClass)
+            .filterIsInstance<PsiNamedElement>()
+            .firstOrNull { element ->
+                element !== existingInjection &&
+                    element.name == preferredName &&
+                    element.javaClass.simpleName in setOf("KtProperty", "KtParameter")
+            }
+        if (conflictingName != null) {
+            return rejected(
+                "JVW-CONTROLLER-REPOSITORY-FIELD-CONFLICT",
+                "A different Kotlin declaration already uses the name '$preferredName'.",
+                request.controllerLocator.relativePath,
+            )
+        }
+        val methodName = when (request.kind) {
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE ->
+                "${lowercaseStem(request.componentId.orEmpty())}LoadFromRepositoryDelegate"
+            FlowUiControllerHandlerKind.DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE ->
+                "${fieldName}SaveDelegate"
+            else -> error("Unsupported Kotlin repository handler: ${request.kind}")
+        }
+        val existingFunction = descendants(psiClass)
+            .filterIsInstance<PsiNamedElement>()
+            .firstOrNull { element ->
+                element.javaClass.simpleName == "KtNamedFunction" &&
+                    nearestKotlinClass(element) === psiClass &&
+                    element.name == methodName
+            }
+        if (existingFunction != null) {
+            val expectedTarget = request.componentId?.let(::escapeJavaString)
+            val equivalent = existingFunction.text.contains("Install") &&
+                existingFunction.text.contains(fieldName) &&
+                (
+                    request.kind == FlowUiControllerHandlerKind.DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE ||
+                        existingFunction.text.contains("\"$expectedTarget\"")
+                    )
+            return if (equivalent) {
+                ControllerChangeProposal(true, null, emptyList())
+            } else {
+                rejected(
+                    "JVW-CONTROLLER-METHOD-CONFLICT",
+                    "A Kotlin function named '$methodName' already exists but is not the requested delegate.",
+                    request.controllerLocator.relativePath,
+                )
+            }
+        }
+        val classBody = descendants(psiClass)
+            .firstOrNull { it.javaClass.simpleName == "KtClassBody" }
+            ?: return rejected(
+                "JVW-CONTROLLER-CLASS-MALFORMED",
+                "The Kotlin controller class body cannot be edited safely.",
+                request.controllerLocator.relativePath,
+            )
+        val rBraceOffset = classBody.textRange.endOffset - 1
+        if (rBraceOffset !in source.indices || source[rBraceOffset] != '}') {
+            return rejected(
+                "JVW-CONTROLLER-CLASS-MALFORMED",
+                "The Kotlin controller closing brace is unavailable.",
+                request.controllerLocator.relativePath,
+            )
+        }
+        val indent = kotlinMemberIndent(source, psiClass)
+        val fieldSource = if (existingInjection == null) {
+            """
+            @org.springframework.beans.factory.annotation.Autowired
+            private lateinit var $fieldName: $qualifiedRepository
+            """.trimIndent()
+        } else {
+            null
+        }
+        val handlerSource = kotlinRepositoryHandlerSource(request, fieldName, methodName)
+        val insertion = buildString {
+            fieldSource?.let {
+                append("\n\n")
+                append(it.prependIndent(indent))
+            }
+            append("\n\n")
+            append(handlerSource.prependIndent(indent))
+            append('\n')
+        }
+        val edit = WorkspaceTextEdit(
+            startOffset = rBraceOffset,
+            endOffset = rBraceOffset,
+            expectedText = "",
+            replacement = insertion,
+        )
+        val resulting = source.replaceRange(edit.startOffset, edit.endOffset, edit.replacement)
+        kotlinSyntaxIssue(request.controllerLocator.relativePath, resulting)?.let { issue ->
+            return ControllerChangeProposal(false, null, listOf(issue))
+        }
+        val identity = listOf(
+            request.controllerLocator.relativePath,
+            request.controllerLocator.revisionFingerprint,
+            request.kind,
+            request.componentId,
+            request.entityClass,
+            request.repositoryQualifiedName,
+            request.repositoryLocator?.revisionFingerprint,
+        ).joinToString("\u0000")
+        return ControllerChangeProposal(
+            accepted = true,
+            changeSet = WorkspaceChangeSet(
+                id = "flowui-kotlin-repository-handler:" +
+                    CanonicalDiscoveryJson.sha256(identity).take(24),
+                label = "Add $methodName to ${psiClass.name}",
+                files = listOf(
+                    WorkspaceFileChange(
+                        relativePath = request.controllerLocator.relativePath,
+                        mode = WorkspaceFileChangeMode.MODIFY,
+                        baseRevisionFingerprint = loaded.fingerprint,
+                        edits = listOf(edit),
+                    ),
+                ),
+            ),
+            issues = emptyList(),
+        )
+    }
+
     private fun handlerTemplate(
         request: FlowUiControllerHandlerRequest,
         subscribeSubjectSupported: Boolean,
+        repositoryBinding: RepositoryControllerBinding?,
     ): ControllerHandlerTemplate =
         when (request.kind) {
             FlowUiControllerHandlerKind.VIEW_INIT -> ControllerHandlerTemplate(
@@ -572,25 +790,64 @@ class FlowUiControllerChangeService(
             FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE -> {
                 val loaderId = request.componentId.orEmpty()
                 val entityType = entityType(request.entityClass)
+                val repository = requireNotNull(repositoryBinding)
                 ControllerHandlerTemplate(
-                    methodName = "${lowercaseStem(loaderId)}LoadDelegate",
-                    annotation = "@Install(to = \"${escapeJavaString(loaderId)}\", target = Target.DATA_LOADER)",
+                    methodName = "${lowercaseStem(loaderId)}LoadFromRepositoryDelegate",
+                    annotation = "@Install(to = \"${escapeJavaString(loaderId)}\", " +
+                        "target = Target.DATA_LOADER, subject = \"loadFromRepositoryDelegate\")",
                     annotationKind = "Install",
                     target = loaderId,
-                    subject = null,
+                    subject = "loadFromRepositoryDelegate",
                     targetScope = "Target.DATA_LOADER",
                     eventSimpleName = null,
                     visibility = "private",
                     returnType = "List<${entityType.sourceType}>",
-                    parameters = "final LoadContext<${entityType.sourceType}> loadContext",
+                    parameters = "final Pageable pageable, final JmixDataRepositoryContext context",
                     imports = setOf(
                         INSTALL_IMPORT,
                         TARGET_IMPORT,
-                        "io.jmix.core.LoadContext",
+                        "io.jmix.core.repository.JmixDataRepositoryContext",
+                        "org.springframework.data.domain.Pageable",
                         "java.util.List",
-                    ) + entityType.imports,
+                    ) + entityType.imports + repository.imports,
                     bodyLines = listOf(
-                        "throw new IllegalStateException(\"JVW invariant violation: unvalidated load delegate\");",
+                        "return ${repository.fieldName}.findAll(pageable, context).getContent();",
+                    ),
+                )
+            }
+            FlowUiControllerHandlerKind.DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE -> {
+                val entityType = entityType(request.entityClass)
+                val repository = requireNotNull(repositoryBinding)
+                ControllerHandlerTemplate(
+                    methodName = "${repository.fieldName}SaveDelegate",
+                    annotation = "@Install(target = Target.DATA_CONTEXT)",
+                    annotationKind = "Install",
+                    target = null,
+                    subject = null,
+                    targetScope = "Target.DATA_CONTEXT",
+                    eventSimpleName = null,
+                    visibility = "private",
+                    returnType = "Set<Object>",
+                    parameters = "final SaveContext saveContext",
+                    imports = setOf(
+                        INSTALL_IMPORT,
+                        TARGET_IMPORT,
+                        "io.jmix.core.SaveContext",
+                        "java.util.Set",
+                    ) + entityType.imports + repository.imports,
+                    bodyLines = listOf(
+                        "if (saveContext.getEntitiesToSave().size() != 1 || " +
+                            "!saveContext.getEntitiesToRemove().isEmpty()) {",
+                        "    throw new IllegalStateException(\"Repository save delegate supports one " +
+                            "${escapeJavaString(entityType.sourceType)} and no removals. " +
+                            "Use a transactional update service for aggregate saves.\");",
+                        "}",
+                        "final Object entity = saveContext.getEntitiesToSave().iterator().next();",
+                        "if (!(entity instanceof ${entityType.sourceType} typedEntity)) {",
+                        "    throw new IllegalStateException(\"Unexpected entity type in repository save delegate: \" + " +
+                            "entity.getClass().getName());",
+                        "}",
+                        "return Set.of(${repository.fieldName}.save(typedEntity));",
                     ),
                 )
             }
@@ -611,6 +868,380 @@ class FlowUiControllerChangeService(
             }
         }
 
+    private fun loadRepositoryBinding(
+        request: FlowUiControllerHandlerRequest,
+        controllerClass: PsiClass,
+    ): LoadedRepositoryBinding {
+        val locator = request.repositoryLocator
+            ?: return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-MISSING",
+                "Choose the Jmix data repository that will back this loader.",
+                request.controllerLocator.relativePath,
+            )
+        val expectedQualifiedName = request.repositoryQualifiedName
+            ?.trim()
+            ?.takeIf(JAVA_QUALIFIED_NAME::matches)
+            ?: return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-NAME-INVALID",
+                "The selected repository must have a valid qualified JVM type name.",
+                locator.relativePath,
+            )
+        val validation = SourceNavigationPolicy.validate(
+            locator.relativePath,
+            locator.line,
+            locator.column,
+            locator.revisionFingerprint,
+        )
+        val validated = validation.locator
+            ?: return LoadedRepositoryBinding.rejected(
+                validation.errorCode ?: "JVW-CONTROLLER-REPOSITORY-PATH-REJECTED",
+                validation.message,
+                locator.relativePath,
+            )
+        val kotlin = validated.relativePath.endsWith(".kt", ignoreCase = true)
+        if (!kotlin && !validated.relativePath.endsWith(".java", ignoreCase = true)) {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-LANGUAGE-UNSUPPORTED",
+                "Jmix repository delegates require a Java or Kotlin repository interface.",
+                validated.relativePath,
+            )
+        }
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(validated.relativePath)
+            ?: return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-SOURCE-MISSING",
+                "The selected repository source no longer exists.",
+                validated.relativePath,
+            )
+        val file = resolved.file
+        if (file.isDirectory || !VfsUtilCore.isAncestor(resolved.root, file, false)) {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-PATH-REJECTED",
+                "The repository is outside registered project content roots.",
+                validated.relativePath,
+            )
+        }
+        if (file.length > MAX_REPOSITORY_BYTES) {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-SOURCE-TOO-LARGE",
+                "The repository exceeds the reviewed ${MAX_REPOSITORY_BYTES / (1024 * 1024)} MiB limit.",
+                validated.relativePath,
+            )
+        }
+        val content = runCatching { ProjectSourceText.read(file) }.getOrElse {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-SOURCE-UNREADABLE",
+                "The selected repository source cannot be read.",
+                validated.relativePath,
+            )
+        }
+        val fingerprint = CanonicalDiscoveryJson.sha256(content)
+        if (!SourceNavigationPolicy.revisionMatches(validated, fingerprint)) {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-SOURCE-STALE",
+                "The repository changed after this view workspace was loaded. Refresh before generating the delegate.",
+                validated.relativePath,
+            )
+        }
+        val parsed = RepositorySourceParser.parse(content, kotlin)
+            ?: return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-SOURCE-PARSE",
+                "The selected type is not a supported JmixDataRepository interface.",
+                validated.relativePath,
+            )
+        val packageName = PACKAGE_DECLARATION.find(content)?.groupValues?.get(1).orEmpty()
+        val actualQualifiedName = if (packageName.isBlank()) {
+            parsed.interfaceName
+        } else {
+            "$packageName.${parsed.interfaceName}"
+        }
+        if (actualQualifiedName != expectedQualifiedName) {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-IDENTITY-MISMATCH",
+                "The selected repository identity changed. Refresh before generating the delegate.",
+                validated.relativePath,
+            )
+        }
+        val requestedEntity = request.entityClass.orEmpty()
+        if (!sourceTypeMatchesExpected(parsed.entityType, requestedEntity, content, packageName)) {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-ENTITY-MISMATCH",
+                "${parsed.interfaceName} targets ${parsed.entityType}, not $requestedEntity.",
+                validated.relativePath,
+            )
+        }
+        val constraintEvaluation = effectiveRepositoryConstraints(
+            request.kind,
+            parsed,
+            file,
+            actualQualifiedName,
+        )
+        if (constraintEvaluation.enabled != true) {
+            return LoadedRepositoryBinding.rejected(
+                if (constraintEvaluation.enabled == false) {
+                    "JVW-CONTROLLER-REPOSITORY-SECURITY-BYPASS"
+                } else {
+                    "JVW-CONTROLLER-REPOSITORY-SECURITY-UNPROVEN"
+                },
+                constraintEvaluation.reason,
+                validated.relativePath,
+            )
+        }
+
+        val sameTypeFields = controllerClass.fields.filter { field ->
+            fieldMatchesQualifiedType(field, actualQualifiedName, controllerClass.containingFile as PsiJavaFile)
+        }
+        if (sameTypeFields.size > 1) {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-INJECTION-AMBIGUOUS",
+                "The controller has multiple ${parsed.interfaceName} fields. Choose the injection in native code.",
+                request.controllerLocator.relativePath,
+            )
+        }
+        val existing = sameTypeFields.singleOrNull()
+        val preferredName = parsed.interfaceName.replaceFirstChar(Char::lowercase)
+        val conflicting = controllerClass.fields.firstOrNull {
+            it.name == preferredName && it != existing
+        }
+        if (conflicting != null) {
+            return LoadedRepositoryBinding.rejected(
+                "JVW-CONTROLLER-REPOSITORY-FIELD-CONFLICT",
+                "A different controller field already uses the name '$preferredName'.",
+                request.controllerLocator.relativePath,
+            )
+        }
+        val fieldName = existing?.name ?: preferredName
+        val fieldText = if (existing == null) {
+            "@Autowired\nprivate ${parsed.interfaceName} $fieldName;"
+        } else {
+            null
+        }
+        return LoadedRepositoryBinding(
+            binding = RepositoryControllerBinding(
+                fieldName = fieldName,
+                imports = buildSet {
+                    add(actualQualifiedName)
+                    if (existing == null) add(AUTOWIRED_IMPORT)
+                },
+                fieldText = fieldText,
+            ),
+            issues = emptyList(),
+        )
+    }
+
+    private fun effectiveRepositoryConstraints(
+        handlerKind: FlowUiControllerHandlerKind,
+        parsed: ParsedRepositorySource,
+        repositoryFile: com.intellij.openapi.vfs.VirtualFile,
+        repositoryQualifiedName: String,
+    ): RepositoryConstraintEvaluation {
+        val invocation = when (handlerKind) {
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE ->
+                RepositoryInvocation.LOAD_PAGE_WITH_CONTEXT
+            FlowUiControllerHandlerKind.DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE ->
+                RepositoryInvocation.SAVE_ONE
+            else -> return RepositoryConstraintEvaluation(
+                null,
+                "The generated repository invocation could not be identified.",
+            )
+        }
+        parsed.config.methods.firstOrNull(invocation::matches)?.applyConstraints?.let { enabled ->
+            return RepositoryConstraintEvaluation(
+                enabled,
+                "${parsed.interfaceName}.${invocation.presentableSignature} explicitly resolves to " +
+                    "@ApplyConstraints($enabled).",
+            )
+        }
+
+        val source = ProjectSourceText.read(repositoryFile)
+        val hasAdditionalParent = repositoryHeaderHasAdditionalParent(source, parsed.interfaceName)
+        val repositoryClass = if (hasAdditionalParent && !DumbService.isDumb(project)) {
+            (PsiManager.getInstance(project).findFile(repositoryFile) as? PsiJavaFile)
+                ?.classes
+                ?.firstOrNull { it.qualifiedName == repositoryQualifiedName || it.name == parsed.interfaceName }
+                ?: JavaPsiFacade.getInstance(project).findClass(
+                    repositoryQualifiedName,
+                    ProjectScope.getAllScope(project),
+                )
+        } else {
+            null
+        }
+        if (hasAdditionalParent && repositoryClass != null) {
+            inheritedMethodConstraint(repositoryClass, invocation)?.let { inherited ->
+                return inherited
+            }
+            if (hasUnresolvedCustomRepositoryParent(repositoryClass)) {
+                return RepositoryConstraintEvaluation(
+                    null,
+                    "The repository has an unresolved custom parent, so inherited method-level " +
+                        "@ApplyConstraints policy cannot be proven.",
+                )
+            }
+        } else if (hasAdditionalParent) {
+            return RepositoryConstraintEvaluation(
+                null,
+                "The custom repository hierarchy is not available to IntelliJ indexes. Refresh Gradle and indexing " +
+                    "before wiring a security-sensitive delegate.",
+            )
+        }
+
+        parsed.repositoryApplyConstraints?.let { enabled ->
+            return RepositoryConstraintEvaluation(
+                enabled,
+                "${parsed.interfaceName} explicitly declares @ApplyConstraints($enabled).",
+            )
+        }
+        if (hasAdditionalParent && repositoryClass != null) {
+            inheritedTypeConstraint(repositoryClass)?.let { inherited ->
+                return inherited
+            }
+        }
+        return RepositoryConstraintEvaluation(
+            true,
+            "${parsed.interfaceName}.${invocation.presentableSignature} uses Jmix's constrained default.",
+        )
+    }
+
+    private fun inheritedMethodConstraint(
+        repositoryClass: PsiClass,
+        invocation: RepositoryInvocation,
+    ): RepositoryConstraintEvaluation? {
+        var level = repositoryClass.supers.toList()
+        val visited = linkedSetOf<PsiClass>()
+        while (level.isNotEmpty()) {
+            val current = level.filter(visited::add)
+            val values = current.flatMap { owner ->
+                owner.methods.asSequence()
+                    .filter(invocation::matches)
+                    .mapNotNull(::explicitApplyConstraints)
+                    .toList()
+            }.distinct()
+            if (values.size > 1) {
+                return RepositoryConstraintEvaluation(
+                    null,
+                    "Conflicting inherited method-level @ApplyConstraints policies were found for " +
+                        invocation.presentableSignature + ".",
+                )
+            }
+            values.singleOrNull()?.let { enabled ->
+                return RepositoryConstraintEvaluation(
+                    enabled,
+                    "Inherited ${invocation.presentableSignature} declares @ApplyConstraints($enabled).",
+                )
+            }
+            level = current.flatMap { it.supers.toList() }
+        }
+        return null
+    }
+
+    private fun inheritedTypeConstraint(
+        repositoryClass: PsiClass,
+    ): RepositoryConstraintEvaluation? {
+        var level = repositoryClass.supers.toList()
+        val visited = linkedSetOf<PsiClass>()
+        while (level.isNotEmpty()) {
+            val current = level.filter(visited::add)
+            val values = current.mapNotNull(::explicitApplyConstraints).distinct()
+            if (values.size > 1) {
+                return RepositoryConstraintEvaluation(
+                    null,
+                    "Conflicting inherited repository-level @ApplyConstraints policies were found.",
+                )
+            }
+            values.singleOrNull()?.let { enabled ->
+                return RepositoryConstraintEvaluation(
+                    enabled,
+                    "An inherited repository interface declares @ApplyConstraints($enabled).",
+                )
+            }
+            level = current.flatMap { it.supers.toList() }
+        }
+        return null
+    }
+
+    private fun explicitApplyConstraints(owner: PsiModifierListOwner): Boolean? {
+        val annotation = owner.modifierList?.annotations?.firstOrNull { candidate ->
+            candidate.shortName() == "ApplyConstraints"
+        } ?: return null
+        val value = annotation.findAttributeValue("value")?.text?.trim()
+        return value?.equals("false", ignoreCase = true)?.not() ?: true
+    }
+
+    private fun hasUnresolvedCustomRepositoryParent(repositoryClass: PsiClass): Boolean =
+        generateSequence(listOf(repositoryClass)) { level ->
+            level.flatMap { it.supers.toList() }.takeIf(List<PsiClass>::isNotEmpty)
+        }.flatten().any { owner ->
+            owner.extendsListTypes.any { type ->
+                type.resolve() == null &&
+                    type.className !in KNOWN_REPOSITORY_BASES
+            }
+        }
+
+    private fun repositoryHeaderHasAdditionalParent(
+        source: String,
+        interfaceName: String,
+    ): Boolean {
+        val header = source.substringAfter("interface $interfaceName", "")
+            .substringBefore('{')
+        var genericDepth = 0
+        return header.any { character ->
+            when (character) {
+                '<' -> genericDepth++
+                '>' -> genericDepth--
+                ',' -> if (genericDepth == 0) return true
+            }
+            false
+        }
+    }
+
+    private fun sourceTypeMatchesExpected(
+        declaredType: String,
+        expectedQualifiedName: String,
+        source: String,
+        sourcePackage: String,
+    ): Boolean {
+        val normalized = declaredType.trim().removeSuffix("?")
+        if (normalized == expectedQualifiedName) return true
+        if ('.' in normalized || normalized != expectedQualifiedName.substringAfterLast('.')) {
+            return false
+        }
+        val expectedPackage = expectedQualifiedName.substringBeforeLast('.', "")
+        val imports = IMPORT_DECLARATION.findAll(source)
+            .map { it.groupValues[1] }
+            .toList()
+        val explicitSameSimpleName = imports.firstOrNull { imported ->
+            !imported.endsWith(".*") &&
+                imported.substringAfterLast('.') == normalized
+        }
+        if (explicitSameSimpleName != null) {
+            return explicitSameSimpleName == expectedQualifiedName
+        }
+        if (sourcePackage == expectedPackage) return true
+        return "$expectedPackage.*" in imports
+    }
+
+    private fun fieldMatchesQualifiedType(
+        field: PsiField,
+        expectedQualifiedName: String,
+        psiFile: PsiJavaFile,
+    ): Boolean {
+        val resolvedName = (field.type as? PsiClassType)?.resolve()?.qualifiedName
+        if (resolvedName != null) return resolvedName == expectedQualifiedName
+        val canonical = field.type.canonicalText.trim().removeSuffix("?")
+        if (canonical == expectedQualifiedName) return true
+        if ('.' in canonical || canonical != expectedQualifiedName.substringAfterLast('.')) {
+            return false
+        }
+        val expectedPackage = expectedQualifiedName.substringBeforeLast('.', "")
+        val explicitSameSimpleName = psiFile.importList?.allImportStatements.orEmpty()
+            .filterNot { it.isOnDemand }
+            .mapNotNull { it.importReference?.qualifiedName }
+            .firstOrNull { it.substringAfterLast('.') == canonical }
+        if (explicitSameSimpleName != null) {
+            return explicitSameSimpleName == expectedQualifiedName
+        }
+        return psiFile.packageName == expectedPackage || psiFile.hasImport(expectedQualifiedName)
+    }
+
     private fun addImportEdit(
         psiFile: PsiJavaFile,
         requiredImports: Set<String>,
@@ -629,6 +1260,22 @@ class FlowUiControllerChangeService(
             else -> "$importText\n\n"
         }
         return WorkspaceTextEdit(importOffset, importOffset, "", replacement)
+    }
+
+    private fun importConflict(
+        psiFile: PsiJavaFile,
+        requiredImports: Set<String>,
+    ): Pair<String, String>? {
+        val explicitImports = psiFile.importList?.allImportStatements.orEmpty()
+            .filterNot { it.isOnDemand }
+            .mapNotNull { it.importReference?.qualifiedName }
+            .associateBy { it.substringAfterLast('.') }
+        return requiredImports.firstNotNullOfOrNull { required ->
+            val simpleName = required.substringAfterLast('.')
+            explicitImports[simpleName]
+                ?.takeIf { it != required }
+                ?.let { simpleName to it }
+        }
     }
 
     private fun escapeJavaString(value: String): String =
@@ -673,6 +1320,224 @@ class FlowUiControllerChangeService(
             )
             ?.findMethodsByName("subject", false)
             ?.isNotEmpty()
+
+    private fun loadKotlinController(locator: SourceLocator): LoadedKotlinController {
+        val validation = SourceNavigationPolicy.validate(
+            locator.relativePath,
+            locator.line,
+            locator.column,
+            locator.revisionFingerprint,
+        )
+        val validated = validation.locator
+            ?: return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    validation.errorCode ?: "JVW-CONTROLLER-PATH-REJECTED",
+                    validation.message,
+                    locator.relativePath,
+                ),
+            )
+        if (!validated.relativePath.endsWith(".kt", ignoreCase = true)) {
+            return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-LANGUAGE-UNSUPPORTED",
+                    "Expected a Kotlin controller source file.",
+                    validated.relativePath,
+                ),
+            )
+        }
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(validated.relativePath)
+            ?: return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-SOURCE-MISSING",
+                    "The connected Kotlin controller no longer exists.",
+                    validated.relativePath,
+                ),
+            )
+        val file = resolved.file
+        if (file.isDirectory || !VfsUtilCore.isAncestor(resolved.root, file, false)) {
+            return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-PATH-REJECTED",
+                    "The Kotlin controller is outside registered project content roots.",
+                    validated.relativePath,
+                ),
+            )
+        }
+        if (file.length > MAX_CONTROLLER_BYTES) {
+            return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-SOURCE-TOO-LARGE",
+                    "The Kotlin controller exceeds the reviewed " +
+                        "${MAX_CONTROLLER_BYTES / (1024 * 1024)} MiB mutation limit.",
+                    validated.relativePath,
+                ),
+            )
+        }
+        val content = runCatching { ProjectSourceText.read(file) }.getOrElse {
+            return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-SOURCE-UNREADABLE",
+                    "The Kotlin controller source cannot be read.",
+                    validated.relativePath,
+                ),
+            )
+        }
+        val fingerprint = CanonicalDiscoveryJson.sha256(content)
+        if (!SourceNavigationPolicy.revisionMatches(validated, fingerprint)) {
+            return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-SOURCE-STALE",
+                    "The Kotlin controller changed after this workspace was loaded. Refresh before editing.",
+                    validated.relativePath,
+                ),
+            )
+        }
+        val psiFile = PsiManager.getInstance(project).findFile(file)
+            ?: return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-PSI-UNAVAILABLE",
+                    "IntelliJ could not build a Kotlin PSI model for this controller.",
+                    validated.relativePath,
+                ),
+            )
+        if (psiFile.javaClass.simpleName != "KtFile") {
+            return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-PSI-UNAVAILABLE",
+                    "The selected source is not recognized as a Kotlin PSI file.",
+                    validated.relativePath,
+                ),
+            )
+        }
+        val classes = descendants(psiFile)
+            .filterIsInstance<PsiNamedElement>()
+            .filter { it.javaClass.simpleName in setOf("KtClass", "KtObjectDeclaration") }
+            .filter { nearestKotlinClass(it.parent) == null }
+            .toList()
+        val controllerClass = classes.firstOrNull { candidate ->
+            candidate.text.substringBefore('{').contains("ViewController")
+        } ?: classes.firstOrNull()
+            ?: return LoadedKotlinController.rejected(
+                WorkspaceChangeIssue(
+                    "JVW-CONTROLLER-CLASS-MISSING",
+                    "No Kotlin controller class or object was found.",
+                    validated.relativePath,
+                ),
+            )
+        return LoadedKotlinController(
+            content,
+            fingerprint,
+            controllerClass,
+            emptyList(),
+        )
+    }
+
+    private fun kotlinRepositoryHandlerSource(
+        request: FlowUiControllerHandlerRequest,
+        fieldName: String,
+        methodName: String,
+    ): String {
+        val entityType = requireNotNull(request.entityClass)
+        return when (request.kind) {
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE -> """
+                @io.jmix.flowui.view.Install(
+                    to = "${escapeJavaString(request.componentId.orEmpty())}",
+                    target = io.jmix.flowui.view.Target.DATA_LOADER,
+                    subject = "loadFromRepositoryDelegate",
+                )
+                private fun $methodName(
+                    pageable: org.springframework.data.domain.Pageable,
+                    context: io.jmix.core.repository.JmixDataRepositoryContext,
+                ): List<$entityType> {
+                    return $fieldName.findAll(pageable, context).content
+                }
+            """.trimIndent()
+            FlowUiControllerHandlerKind.DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE -> """
+                @io.jmix.flowui.view.Install(target = io.jmix.flowui.view.Target.DATA_CONTEXT)
+                private fun $methodName(
+                    saveContext: io.jmix.core.SaveContext,
+                ): Set<Any> {
+                    if (saveContext.getEntitiesToSave().size != 1 ||
+                        saveContext.getEntitiesToRemove().isNotEmpty()
+                    ) {
+                        error(
+                            "Repository save delegate supports one ${escapeJavaString(entityType.substringAfterLast('.'))} " +
+                                "and no removals. Use a transactional update service for aggregate saves.",
+                        )
+                    }
+                    val entity = saveContext.getEntitiesToSave().first()
+                    require(entity is $entityType) {
+                        "Unexpected entity type in repository save delegate: " + entity.javaClass.name
+                    }
+                    return setOf($fieldName.save(entity))
+                }
+            """.trimIndent()
+            else -> error("Unsupported Kotlin repository handler: ${request.kind}")
+        }
+    }
+
+    private fun kotlinDeclaredType(source: String): String? =
+        KOTLIN_DECLARED_TYPE.find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?.removeSuffix("?")
+
+    private fun nearestKotlinClass(element: com.intellij.psi.PsiElement?): PsiNamedElement? =
+        generateSequence(element) { it.parent }
+            .filterIsInstance<PsiNamedElement>()
+            .firstOrNull {
+                it.javaClass.simpleName in setOf("KtClass", "KtObjectDeclaration")
+            }
+
+    private fun descendants(root: com.intellij.psi.PsiElement): Sequence<com.intellij.psi.PsiElement> =
+        sequence {
+            root.children.forEach { child ->
+                yield(child)
+                yieldAll(descendants(child))
+            }
+        }
+
+    private fun kotlinMemberIndent(source: String, psiClass: PsiNamedElement): String {
+        val member = descendants(psiClass)
+            .filterIsInstance<PsiNamedElement>()
+            .firstOrNull { element ->
+                element.javaClass.simpleName in setOf("KtProperty", "KtNamedFunction") &&
+                    nearestKotlinClass(element.parent) === psiClass
+            }
+        if (member != null) {
+            val lineStart = source.lastIndexOf('\n', member.textOffset - 1).let { it + 1 }
+            val indentation = source.substring(lineStart, member.textOffset).takeWhile(Char::isWhitespace)
+            if (indentation.isNotEmpty()) return indentation
+        }
+        val classLineStart = source.lastIndexOf('\n', psiClass.textOffset - 1).let { it + 1 }
+        val classIndent = source.substring(classLineStart, psiClass.textOffset).takeWhile(Char::isWhitespace)
+        return "$classIndent    "
+    }
+
+    private fun kotlinSyntaxIssue(
+        fileName: String,
+        content: String,
+    ): WorkspaceChangeIssue? {
+        val fileType = FileTypeManager.getInstance().getFileTypeByExtension("kt")
+            .takeIf { it.name.contains("kotlin", ignoreCase = true) }
+            ?: return WorkspaceChangeIssue(
+                "JVW-CONTROLLER-KOTLIN-MISSING",
+                "Kotlin controller updates require the bundled IntelliJ Kotlin plugin.",
+                fileName,
+            )
+        val psi = PsiFileFactory.getInstance(project).createFileFromText(
+            fileName.substringAfterLast('/'),
+            fileType,
+            content,
+        )
+        val error = PsiTreeUtil.findChildOfType(psi, PsiErrorElement::class.java) ?: return null
+        return WorkspaceChangeIssue(
+            "JVW-CONTROLLER-GENERATED-SYNTAX",
+            "Proposed Kotlin controller source is invalid: ${error.errorDescription}.",
+            fileName,
+        )
+    }
 
     private fun loadController(locator: SourceLocator): LoadedJavaController {
         val validation = SourceNavigationPolicy.validate(
@@ -850,13 +1715,73 @@ class FlowUiControllerChangeService(
         private const val SUBSCRIBE_IMPORT = "io.jmix.flowui.view.Subscribe"
         private const val INSTALL_IMPORT = "io.jmix.flowui.view.Install"
         private const val TARGET_IMPORT = "io.jmix.flowui.view.Target"
+        private const val AUTOWIRED_IMPORT = "org.springframework.beans.factory.annotation.Autowired"
         private const val MAX_CONTROLLER_BYTES = 2L * 1024 * 1024
+        private const val MAX_REPOSITORY_BYTES = 2L * 1024 * 1024
+        private val REPOSITORY_HANDLER_KINDS = setOf(
+            FlowUiControllerHandlerKind.COLLECTION_LOADER_LOAD_DELEGATE,
+            FlowUiControllerHandlerKind.DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE,
+        )
         private val JAVA_QUALIFIED_NAME = Regex("""[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*""")
+        private val PACKAGE_DECLARATION = Regex(
+            """(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;?""",
+        )
+        private val IMPORT_DECLARATION = Regex(
+            """(?m)^\s*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$*][\w$*]*)*)\s*;?""",
+        )
+        private val KOTLIN_DECLARED_TYPE = Regex(
+            """:\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\??""",
+        )
+        private val KNOWN_REPOSITORY_BASES = setOf(
+            "JmixDataRepository",
+            "PagingAndSortingRepository",
+            "ListPagingAndSortingRepository",
+            "CrudRepository",
+            "ListCrudRepository",
+            "Repository",
+        )
 
         fun getInstance(project: Project): FlowUiControllerChangeService =
             project.getService(FlowUiControllerChangeService::class.java)
     }
 }
+
+private enum class RepositoryInvocation(
+    val presentableSignature: String,
+) {
+    LOAD_PAGE_WITH_CONTEXT("findAll(Pageable, JmixDataRepositoryContext)"),
+    SAVE_ONE("save(entity)"),
+    ;
+
+    fun matches(method: RepositoryMethod): Boolean {
+        val parameterTypes = method.parameters.map { parameter ->
+            parameter.type.removeSuffix("?").substringAfterLast('.').substringBefore('<')
+        }
+        return when (this) {
+            LOAD_PAGE_WITH_CONTEXT ->
+                method.name == "findAll" &&
+                    parameterTypes == listOf("Pageable", "JmixDataRepositoryContext")
+            SAVE_ONE -> method.name == "save" && parameterTypes.size == 1
+        }
+    }
+
+    fun matches(method: PsiMethod): Boolean {
+        val parameterTypes = method.parameterList.parameters.map { parameter ->
+            parameter.type.presentableText.substringAfterLast('.').substringBefore('<')
+        }
+        return when (this) {
+            LOAD_PAGE_WITH_CONTEXT ->
+                method.name == "findAll" &&
+                    parameterTypes == listOf("Pageable", "JmixDataRepositoryContext")
+            SAVE_ONE -> method.name == "save" && parameterTypes.size == 1
+        }
+    }
+}
+
+private data class RepositoryConstraintEvaluation(
+    val enabled: Boolean?,
+    val reason: String,
+)
 
 data class FlowUiControllerInjectionRequest(
     val controllerLocator: SourceLocator,
@@ -886,6 +1811,7 @@ enum class FlowUiControllerHandlerKind {
     COLLECTION_LOADER_PRE_LOAD,
     COLLECTION_LOADER_POST_LOAD,
     COLLECTION_LOADER_LOAD_DELEGATE,
+    DATA_CONTEXT_REPOSITORY_SAVE_DELEGATE,
     COMPONENT_VALIDATOR,
 }
 
@@ -896,6 +1822,8 @@ data class FlowUiControllerHandlerRequest(
     val componentTag: String? = null,
     val targetId: String? = null,
     val entityClass: String? = null,
+    val repositoryLocator: SourceLocator? = null,
+    val repositoryQualifiedName: String? = null,
 )
 
 data class FlowUiControllerHandlerApplyRequest(
@@ -924,6 +1852,24 @@ private data class ControllerHandlerTemplate(
     val allowMissingSubject: Boolean = false,
 )
 
+private data class RepositoryControllerBinding(
+    val fieldName: String,
+    val imports: Set<String>,
+    val fieldText: String?,
+)
+
+private data class LoadedRepositoryBinding(
+    val binding: RepositoryControllerBinding?,
+    val issues: List<WorkspaceChangeIssue>,
+) {
+    companion object {
+        fun rejected(code: String, message: String, path: String) = LoadedRepositoryBinding(
+            binding = null,
+            issues = listOf(WorkspaceChangeIssue(code, message, path)),
+        )
+    }
+}
+
 private data class ControllerChangeProposal(
     val accepted: Boolean,
     val changeSet: WorkspaceChangeSet?,
@@ -949,5 +1895,17 @@ private data class LoadedJavaController(
     companion object {
         fun rejected(issue: WorkspaceChangeIssue) =
             LoadedJavaController("", "", null, null, listOf(issue))
+    }
+}
+
+private data class LoadedKotlinController(
+    val content: String,
+    val fingerprint: String,
+    val psiClass: PsiNamedElement?,
+    val issues: List<WorkspaceChangeIssue>,
+) {
+    companion object {
+        fun rejected(issue: WorkspaceChangeIssue) =
+            LoadedKotlinController("", "", null, listOf(issue))
     }
 }

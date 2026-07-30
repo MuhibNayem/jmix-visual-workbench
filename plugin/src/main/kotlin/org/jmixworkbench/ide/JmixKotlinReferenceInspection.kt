@@ -86,6 +86,7 @@ private fun PsiReference.isJmixKotlinReference(): Boolean =
         this is JmixKotlinMenuIdReference ||
         this is JmixKotlinEntityNameReference ||
         this is JmixKotlinEntityPropertyReference ||
+        this is JmixKotlinRepositoryParameterReference ||
         this is JmixKotlinMessageReference ||
         this is JmixKotlinSpecificPolicyReference ||
         this is JmixKotlinSpringBeanDeclarationReference

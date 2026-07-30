@@ -31,10 +31,16 @@ internal object RepositorySourceParser {
         } else {
             javaMethods(members, source)
         }
-        val applyConstraints = annotationArguments(prefix, "ApplyConstraints")
+        val rangedMethods = locateMethodRanges(
+            source = source,
+            bodyStartOffset = bodyStart + 1,
+            bodyEndOffset = bodyEnd,
+            methods = parsedMethods,
+        )
+        val explicitApplyConstraints = annotationArguments(prefix, "ApplyConstraints")
             ?.let(::booleanAnnotationValue)
-            ?: true
-        val supportedMethods = parsedMethods.mapNotNull(ParsedRepositoryMethod::method)
+        val applyConstraints = explicitApplyConstraints ?: true
+        val supportedMethods = rangedMethods.mapNotNull(ParsedRepositoryMethod::method)
         return ParsedRepositorySource(
             interfaceName = interfaceName,
             entityType = entityType,
@@ -50,8 +56,9 @@ internal object RepositorySourceParser {
                     ?: true,
                 methods = supportedMethods.toMutableList(),
             ),
-            methods = parsedMethods,
+            methods = rangedMethods,
             bodyCloseOffset = bodyEnd,
+            repositoryApplyConstraints = explicitApplyConstraints,
         )
     }
 
@@ -73,6 +80,7 @@ internal object RepositorySourceParser {
                     sourceSignature = withoutAnnotations.take(240),
                     editable = false,
                     issue = "Default, custom, or structurally unsupported repository member.",
+                    sourceText = trimmed,
                 )
             val returnType = signature.groupValues[1].trim()
                 .removePrefix("public ")
@@ -146,6 +154,7 @@ internal object RepositorySourceParser {
                     sourceSignature = withoutAnnotations.take(240),
                     editable = false,
                     issue = "Default, custom, or structurally unsupported Kotlin repository member.",
+                    sourceText = segment.trim(),
                 )
             val name = signature.groupValues[1]
             val parameterSource = methodParameterSource(segment, name)
@@ -154,6 +163,18 @@ internal object RepositorySourceParser {
                 kotlinParameter(value, index)
             }
             val returnType = signature.groupValues[3].trim()
+            val implementationTail = withoutAnnotations
+                .substring(signature.range.last + 1)
+                .trimStart()
+            if (implementationTail.startsWith('=') || implementationTail.startsWith('{')) {
+                return@mapNotNull ParsedRepositoryMethod(
+                    method = null,
+                    sourceSignature = "$name(${parameters.joinToString(",") { it.type }})",
+                    editable = false,
+                    issue = "Kotlin repository method implementations are source-owned.",
+                    sourceText = segment.trim(),
+                )
+            }
             parsedMethod(
                 source = source,
                 segment = segment.trim(),
@@ -224,7 +245,35 @@ internal object RepositorySourceParser {
                     "Custom annotations are source-owned: ${unsupportedAnnotations.sorted().joinToString()}."
                 else -> null
             },
+            sourceText = segment,
         )
+    }
+
+    private fun locateMethodRanges(
+        source: String,
+        bodyStartOffset: Int,
+        bodyEndOffset: Int,
+        methods: List<ParsedRepositoryMethod>,
+    ): List<ParsedRepositoryMethod> {
+        var cursor = bodyStartOffset
+        return methods.map { method ->
+            val start = source.indexOf(method.sourceText, cursor)
+                .takeIf { it in bodyStartOffset until bodyEndOffset }
+            if (start == null) {
+                method.copy(
+                    editable = false,
+                    issue = method.issue
+                        ?: "The exact source range could not be reconstructed safely.",
+                )
+            } else {
+                val end = start + method.sourceText.length
+                cursor = end
+                method.copy(
+                    sourceStartOffset = start,
+                    sourceEndOffset = end,
+                )
+            }
+        }
     }
 
     private fun javaParameter(value: String, index: Int): MethodParameter? {
@@ -511,6 +560,7 @@ internal data class ParsedRepositorySource(
     val config: DataRepositoryConfig,
     val methods: List<ParsedRepositoryMethod>,
     val bodyCloseOffset: Int,
+    val repositoryApplyConstraints: Boolean? = null,
 )
 
 internal data class ParsedRepositoryMethod(
@@ -518,4 +568,7 @@ internal data class ParsedRepositoryMethod(
     val sourceSignature: String,
     val editable: Boolean,
     val issue: String?,
+    val sourceText: String,
+    val sourceStartOffset: Int? = null,
+    val sourceEndOffset: Int? = null,
 )

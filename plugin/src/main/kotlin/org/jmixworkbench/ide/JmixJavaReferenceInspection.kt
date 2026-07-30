@@ -90,6 +90,7 @@ private fun PsiReference.isJmixJavaReference(): Boolean =
         this is JmixJavaMenuIdReference ||
         this is JmixJavaEntityNameReference ||
         this is JmixJavaEntityPropertyReference ||
+        this is JmixJavaRepositoryParameterReference ||
         this is JmixJavaMessageReference ||
         this is JmixJavaSpecificPolicyReference ||
         this is JmixJavaSpringBeanDeclarationReference

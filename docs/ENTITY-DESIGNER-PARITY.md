@@ -23,8 +23,9 @@ contract and
   `@ApplyConstraints`, aggregate `KeyValueEntity` properties, query hints and
   developer documentation. Handwritten/custom/default/native-query members
   remain visible source-owned evidence instead of being silently rewritten.
-  New repositories and additive methods share one responsive visual editor;
-  existing methods are locked while additions remain editable.
+  New repositories, additive methods and the supported metadata of existing
+  methods share one responsive visual editor. Existing callable contracts,
+  documentation and binding declarations remain native-refactoring owned.
 - Repository authoring now uses one entity-aware semantic model in the backend,
   the responsive designer and native IntelliJ references. Derived queries
   resolve inherited and nested properties, operators, arity, value types,
@@ -40,10 +41,14 @@ contract and
   rename through the same PSI entity model used by FlowUI, fetch-plan and
   security references. Escaped Java strings, Kotlin strings, qualified entity
   names, nested paths and class/property rename are covered on both IDE hosts.
+  Named JPQL parameters and Spring Data `@Param` literals now form one native
+  Java/Kotlin symbol: completion, navigation, unresolved diagnostics, quick
+  fixes, Find Usages and rename update every query occurrence and the explicit
+  binding without renaming an intentionally different JVM parameter.
   This remains a bounded JPQL analyzer, not a complete JPQL language
   implementation: subqueries, constructor projections, `TREAT`, map functions,
-  complete correlated-alias scoping and parameter declaration refactoring are
-  explicit certification gaps.
+  complete correlated-alias scoping and language injection are explicit
+  certification gaps.
 - Four release-blocking round-trip defects are closed. Java embedded mappings
   collect nested override imports; repository fetch-plan annotations use a
   qualified name when the `io.jmix.core.FetchPlan` parameter type would
@@ -60,15 +65,28 @@ contract and
   emits only explicit `@ApplyConstraints(false)`. Unsupported native Spring
   Data JPA queries fail closed because their execution and Jmix DataManager
   security semantics cannot be guaranteed.
-- Existing handwritten repositories receive only revision-bound additive
-  imports and method declarations before their exact interface closing brace.
-  Comments, formatting, custom annotations, default methods and existing
-  declarations remain byte-for-byte outside those insertion ranges; rename,
-  delete, reorder, security-policy mutation, stale revisions and signature
-  collisions are rejected with a native-refactoring/source workflow. Creation
-  also emits module/language-correct repository activation when the indexed
-  project has none. The project service is registered in the shared descriptor
-  and both independently packaged IntelliJ host descriptors.
+- Existing handwritten repositories receive revision-bound additive imports
+  and declarations plus exact annotation-range updates for modeled `@Query`,
+  `@FetchPlan`, `@ApplyConstraints` and `@QueryHints` metadata. The callable
+  declaration is never regenerated: `@Override`, modifiers, documentation,
+  custom annotations, parameter nullability/bindings, comments and formatting
+  remain byte-preserved. A comment inside a changed annotation or any unknown
+  construct makes that metadata read-only. Rename, delete, reorder, callable
+  changes, stale revisions and signature collisions route to native
+  refactoring or fail closed. Creation also emits module/language-correct
+  repository activation when the indexed project has none.
+- FlowUI collection loading can now be wired to the official
+  `findAll(Pageable, JmixDataRepositoryContext)` delegate contract, preserving
+  filter, paging, sorting, fetch-plan and hint context. Detail saving emits a
+  deliberately bounded one-entity/no-removal delegate and rejects aggregate
+  semantics in favor of a transactional update service. Java and Kotlin
+  controllers both receive revision-bound injection and delegates; Kotlin
+  insertion is anchored to Kotlin PSI class-body evidence and uses
+  collision-proof qualified types. The backend evaluates the exact invoked
+  `findAll` or `save` constraint policy, honors method-over-repository
+  precedence, follows resolvable parent interfaces, rejects unproven custom
+  hierarchies during indexing and exposes no bridge-controlled unconstrained
+  override.
 - Entity Designer pane selection now responds to its actual IntelliJ/JCEF
   container width rather than the outer browser viewport. At 360 and 768
   pixels, configuration, attributes and preview are keyboard-selectable full

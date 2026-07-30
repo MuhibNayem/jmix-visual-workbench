@@ -63,6 +63,11 @@ class RepositorySourceParserTest {
         assertEquals("jmix.query.cacheable", aggregate.queryHints.single().name)
         assertTrue(aggregate.description.orEmpty().contains("Department totals"))
         assertTrue(parsed.methods.all { it.editable })
+        parsed.methods.forEach { evidence ->
+            val start = assertNotNull(evidence.sourceStartOffset)
+            val end = assertNotNull(evidence.sourceEndOffset)
+            assertEquals(evidence.sourceText, source.substring(start, end))
+        }
     }
 
     @Test
@@ -95,5 +100,10 @@ class RepositorySourceParserTest {
         assertTrue(parsed.methods[0].editable)
         assertFalse(parsed.methods[1].editable)
         assertTrue(parsed.methods[1].issue.orEmpty().contains("AuditedQuery"))
+        parsed.methods.forEach { evidence ->
+            val start = assertNotNull(evidence.sourceStartOffset)
+            val end = assertNotNull(evidence.sourceEndOffset)
+            assertEquals(evidence.sourceText, source.substring(start, end))
+        }
     }
 }

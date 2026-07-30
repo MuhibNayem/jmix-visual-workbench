@@ -69,9 +69,11 @@ is:
    authoring, current Java/Kotlin Jmix listener creation/navigation and
    exact-revision entity-to-view creation/source/design navigation are
    implemented with handwritten-source protection. Typed Java/Kotlin Jmix
-   repository creation, existing-source reconstruction and revision-bound
-   additive method authoring are implemented; injection/delegate integration
-   and native existing-method refactoring remain;
+   repository creation, existing-source reconstruction, additive authoring,
+   lossless supported metadata editing, repository-backed Java/Kotlin view
+   delegates and native JPQL-parameter refactoring are implemented. Native
+   callable change-signature/delete workflows and aggregate update-service
+   generation remain;
 2. decomposition of the 6,051-line central React designer plus component, interaction,
    responsive and accessibility regression tests;
 3. representative arbitrary-source, database-first, installed-IDE dual-host,
@@ -119,7 +121,7 @@ justify an overall Entity Designer superiority claim.
 | ID | Mandatory capability | Current status | Completion evidence required |
 |---|---|---|---|
 | STUDIO-ADV-001 | OpenAPI-first client generation with authentication, configuration, model customization, regeneration safety and contract testing | MISSING | Multiple OpenAPI-version fixtures and generated-client compilation |
-| STUDIO-ADV-002 | Data-repository creation, method/query design, injection, view delegate integration and refactoring | SUBSTANTIAL | A shared typed Java/Kotlin generator and responsive editor cover derived/JPQL methods, value/page/sort/fetch-plan/context parameters, nullability, named or positional binding, aggregate `KeyValueEntity` projections, fetch plans, query hints, documentation and visible repository/method `@ApplyConstraints` behavior. Existing Java/Kotlin repository interfaces are indexed conservatively; source-owned methods remain advisory and cannot globally block an independent valid addition, while new methods are inserted through exact-revision additive edits that preserve manual source and fail closed on blocking semantics. Java/Kotlin query strings now have native property completion/navigation/inspection/quick-fix/Find-Usages/rename. Embedded import generation, fetch-plan type/annotation collisions, hierarchy-root switching and composite-join preservation are covered by regressions. Safe modification of supported existing methods, repository-backed view delegates, Jmix-aware injection, native parameter refactoring, complete JPQL semantics, runtime application fixtures and installed-IDE interaction certification remain |
+| STUDIO-ADV-002 | Data-repository creation, method/query design, injection, view delegate integration and refactoring | SUBSTANTIAL | The shared Java/Kotlin generator and responsive editor cover derived/JPQL methods, typed parameters, bindings, projections, fetch plans, hints, documentation and constraint policy. Existing supported method metadata is edited only at exact annotation ranges; callable source, comments, `@Override`, modifiers, custom annotations, nullability and bindings are preserved, while unknown/comment-bearing constructs fail closed. Official context-preserving collection load delegates and bounded detail save delegates inject repositories into revision-checked Java and Kotlin controllers. Effective `@ApplyConstraints` is evaluated for the exact `findAll`/`save` invocation with method precedence and resolvable hierarchy analysis; unproven hierarchies are denied and no bridge override exists. Java/Kotlin query properties and named parameters provide native completion/navigation/inspection/quick-fix/Find-Usages/rename. Callable change-signature/delete workflows, transactional aggregate update-service generation, complete JPQL semantics, real Jmix compilation matrices and installed-IDE interaction certification remain |
 | STUDIO-ADV-003 | Custom project-template creation, validation, versioning, organization catalog and offline use | MISSING | Signed template bundles and generated-project matrix |
 | STUDIO-ADV-004 | Docker and cloud deployment designer with environment configuration, secrets, health checks, migrations, rollback and portable output | MISSING | Local container plus supported-provider deployment rehearsals |
 | STUDIO-ADV-005 | Jmix REST/OpenAPI service authoring, saved invocation, authorization, transactions, contract evolution and client generation | PARTIAL | Provider/consumer contract and compatibility suites |

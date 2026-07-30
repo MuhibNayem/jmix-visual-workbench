@@ -22,15 +22,16 @@ import org.jmixworkbench.model.EntityModel
 import org.jmixworkbench.model.EntitySourceLanguage
 import org.jmixworkbench.model.EntityType
 import org.jmixworkbench.model.IdConfig
+import org.jmixworkbench.model.RepositoryMethod
 
 /**
- * Revision-bound repository creation and additive handwritten-source updates.
+ * Revision-bound repository creation and lossless handwritten-source updates.
  *
- * Existing members are immutable evidence in this tranche. New abstract
- * derived/JPQL methods are generated from the typed contract, inserted before
- * the exact interface closing brace, and accompanied by only missing imports.
- * Custom annotations, default methods, native queries, comments, and manual
- * formatting outside the insertion points are untouched.
+ * Existing callable declarations are never regenerated. Supported repository
+ * metadata is changed at exact annotation ranges, while new abstract methods
+ * are inserted before the exact interface closing brace. Custom annotations,
+ * default methods, native queries, comments, modifiers, and manual formatting
+ * outside those annotation ranges remain byte-preserved.
  */
 @Service(Service.Level.PROJECT)
 class DataRepositoryChangeService(private val project: Project) {
@@ -51,18 +52,19 @@ class DataRepositoryChangeService(private val project: Project) {
                 methods = emptyList(),
             )
         val analyzed = RepositorySemanticAnalyzer.analyze(entity, schema.entities, request.config)
-        val lockedMethodCount = request.repositorySource
+        val baselineMethods = request.repositorySource
             ?.let { locator ->
                 schema.repositories.singleOrNull { it.sourceLocator == locator }
                     ?.config
                     ?.methods
-                    ?.size
             }
-            ?: 0
+            .orEmpty()
         val diagnostics = analyzed.diagnostics.map { diagnostic ->
+            val methodIndex = diagnostic.methodIndex
             val sourceOwned = request.repositorySource != null &&
-                diagnostic.methodIndex != null &&
-                diagnostic.methodIndex < lockedMethodCount
+                methodIndex != null &&
+                methodIndex in baselineMethods.indices &&
+                request.config.methods.getOrNull(methodIndex) == baselineMethods[methodIndex]
             diagnostic.copy(
                 blocking = diagnostic.severity == RepositorySemanticSeverity.ERROR && !sourceOwned,
                 sourceOwned = sourceOwned,
@@ -129,20 +131,22 @@ class DataRepositoryChangeService(private val project: Project) {
             schema.entities,
             request.config,
         )
-        val lockedMethodCount = request.repositorySource
+        val baselineMethods = request.repositorySource
             ?.let { locator ->
                 schema.repositories.singleOrNull { it.sourceLocator == locator }
                     ?.config
                     ?.methods
-                    ?.size
             }
-            ?: 0
+            .orEmpty()
         val blockingDiagnostics = semantics.diagnostics.filter { diagnostic ->
+            val methodIndex = diagnostic.methodIndex
+            val unchangedExistingMethod = methodIndex != null &&
+                methodIndex in baselineMethods.indices &&
+                request.config.methods.getOrNull(methodIndex) == baselineMethods[methodIndex]
             diagnostic.severity == RepositorySemanticSeverity.ERROR &&
                 (
                     request.repositorySource == null ||
-                        diagnostic.methodIndex == null ||
-                        diagnostic.methodIndex >= lockedMethodCount
+                        !unchangedExistingMethod
                     )
         }
         if (blockingDiagnostics.isNotEmpty()) {
@@ -235,6 +239,7 @@ class DataRepositoryChangeService(private val project: Project) {
                 locator.relativePath,
             )
         }
+        val repositoryModel = model.copy(sourceLanguage = snapshot.sourceLanguage)
         val content = read(locator.relativePath)
             ?: return rejected(
                 "JVW-REPOSITORY-SOURCE-MISSING",
@@ -266,6 +271,14 @@ class DataRepositoryChangeService(private val project: Project) {
             )
         }
         val baseline = parsed.config.methods
+        val parsedSupportedMethods = parsed.methods.filter { it.method != null }
+        if (parsedSupportedMethods.size != baseline.size) {
+            return rejected(
+                "JVW-REPOSITORY-METHOD-EVIDENCE",
+                "Repository method ordering could not be paired with exact source evidence.",
+                locator.relativePath,
+            )
+        }
         if (request.config.methods.size < baseline.size) {
             return rejected(
                 "JVW-REPOSITORY-DELETE-NATIVE",
@@ -273,55 +286,103 @@ class DataRepositoryChangeService(private val project: Project) {
                 locator.relativePath,
             )
         }
-        baseline.forEachIndexed { index, method ->
-            if (request.config.methods.getOrNull(index) != method) {
+        val modifications = baseline.indices.filter { index ->
+            request.config.methods.getOrNull(index) != baseline[index]
+        }
+        modifications.forEach { index ->
+            val baselineMethod = baseline[index]
+            val requestedMethod = request.config.methods[index]
+            val evidence = parsedSupportedMethods[index]
+            if (!evidence.editable ||
+                evidence.sourceStartOffset == null ||
+                evidence.sourceEndOffset == null
+            ) {
                 return rejected(
                     "JVW-REPOSITORY-EXISTING-METHOD-LOCKED",
-                    "Existing method '${method.name}' changed or moved. Refresh and add a new method, or edit source directly.",
+                    "Existing method '${baselineMethod.name}' is source-owned and cannot be rewritten safely. " +
+                        (evidence.issue ?: "Use IntelliJ source tools for this declaration."),
+                    locator.relativePath,
+                )
+            }
+            if (!sameCallableContract(baselineMethod, requestedMethod)) {
+                return rejected(
+                    "JVW-REPOSITORY-METHOD-REFACTOR-NATIVE",
+                    "Changing the name, return type, parameter names/types/nullability, or parameter roles of " +
+                        "'${baselineMethod.name}' requires IntelliJ refactoring so callers participate.",
                     locator.relativePath,
                 )
             }
         }
         val additions = request.config.methods.drop(baseline.size)
-        if (additions.isEmpty()) {
+        if (additions.isEmpty() && modifications.isEmpty()) {
             return rejected(
                 "JVW-REPOSITORY-NOOP",
-                "No new repository methods were added.",
+                "No repository method changes were requested.",
                 locator.relativePath,
             )
         }
-        val baselineSignatures = baseline.map(RepositorySourceParser::signature).toSet()
-        val additionSignatures = additions.map(RepositorySourceParser::signature)
-        if (additionSignatures.distinct().size != additionSignatures.size ||
-            additionSignatures.any { it in baselineSignatures }
-        ) {
+        val requestedSignatures = request.config.methods.map(RepositorySourceParser::signature)
+        if (requestedSignatures.distinct().size != requestedSignatures.size) {
             return rejected(
                 "JVW-REPOSITORY-METHOD-COLLISION",
-                "New repository methods collide with an existing JVM signature.",
+                "Repository methods contain a duplicate JVM signature.",
                 locator.relativePath,
             )
         }
-        val additionConfig = request.config.copy(methods = additions.toMutableList())
-        val generated = generatedRepository(model.copy(dataRepository = additionConfig))
+        val changedMethods = modifications.map(request.config.methods::get) + additions
+        val changedConfig = request.config.copy(methods = changedMethods.toMutableList())
+        val generated = generatedRepository(repositoryModel.copy(dataRepository = changedConfig))
             ?: return rejected(
                 "JVW-REPOSITORY-METHOD-GENERATION",
-                "One or more new repository methods are invalid.",
-            )
-        val generatedBody = interfaceBody(generated)
-            ?: return rejected(
-                "JVW-REPOSITORY-METHOD-GENERATION",
-                "Generated repository methods could not be isolated safely.",
+                "One or more changed repository methods are invalid.",
             )
         val missingImports = imports(generated) - imports(content)
         val edits = mutableListOf<WorkspaceTextEdit>()
         importEdit(content, missingImports, snapshot.sourceLanguage)?.let(edits::add)
-        edits += WorkspaceTextEdit(
-            startOffset = parsed.bodyCloseOffset,
-            endOffset = parsed.bodyCloseOffset,
-            expectedText = "",
-            replacement = generatedBody.trimEnd().prependIndent("    ")
-                .let { body -> "\n$body\n" },
-        )
+        modifications.forEach { index ->
+            val generatedMethod = generatedMethodBody(
+                model = repositoryModel,
+                config = request.config,
+                method = request.config.methods[index],
+            ) ?: return rejected(
+                "JVW-REPOSITORY-METHOD-GENERATION",
+                "Changed method '${request.config.methods[index].name}' could not be isolated safely.",
+                locator.relativePath,
+            )
+            sourceMethodEdit(
+                content = content,
+                evidence = parsedSupportedMethods[index],
+                baselineMethod = baseline[index],
+                requestedMethod = request.config.methods[index],
+                generatedMethod = generatedMethod,
+                language = snapshot.sourceLanguage,
+            )?.let(edits::add) ?: return rejected(
+                "JVW-REPOSITORY-METHOD-EVIDENCE",
+                "Changed method '${request.config.methods[index].name}' contains metadata that cannot be " +
+                    "edited without rewriting handwritten source. Use native IntelliJ editing for this declaration.",
+                locator.relativePath,
+            )
+        }
+        if (additions.isNotEmpty()) {
+            val additionConfig = request.config.copy(methods = additions.toMutableList())
+            val additionSource = generatedRepository(repositoryModel.copy(dataRepository = additionConfig))
+                ?: return rejected(
+                    "JVW-REPOSITORY-METHOD-GENERATION",
+                    "One or more new repository methods are invalid.",
+                )
+            val generatedBody = interfaceBody(additionSource)
+                ?: return rejected(
+                    "JVW-REPOSITORY-METHOD-GENERATION",
+                    "Generated repository methods could not be isolated safely.",
+                )
+            edits += WorkspaceTextEdit(
+                startOffset = parsed.bodyCloseOffset,
+                endOffset = parsed.bodyCloseOffset,
+                expectedText = "",
+                replacement = generatedBody.trimEnd().prependIndent("    ")
+                    .let { body -> "\n$body\n" },
+            )
+        }
         val resulting = applyEdits(content, edits)
         syntaxIssue(
             locator.relativePath.substringAfterLast('/'),
@@ -331,13 +392,17 @@ class DataRepositoryChangeService(private val project: Project) {
         val identity = listOf(
             locator.relativePath,
             locator.revisionFingerprint,
+            modifications.joinToString("\u0000") { index ->
+                RepositorySourceParser.signature(request.config.methods[index])
+            },
             additions.joinToString("\u0000", transform = RepositorySourceParser::signature),
             resulting,
         ).joinToString("\u0000")
+        val changeCount = modifications.size + additions.size
         return DataRepositoryChangeProposal(
             changeSet = WorkspaceChangeSet(
                 id = "data-repository:${CanonicalDiscoveryJson.sha256(identity).take(24)}",
-                label = "Add ${additions.size} method(s) to ${snapshot.interfaceName}",
+                label = "Update $changeCount method(s) in ${snapshot.interfaceName}",
                 files = listOf(
                     WorkspaceFileChange(
                         relativePath = locator.relativePath,
@@ -350,6 +415,290 @@ class DataRepositoryChangeService(private val project: Project) {
             issues = emptyList(),
         )
     }
+
+    private fun sameCallableContract(
+        baseline: RepositoryMethod,
+        requested: RepositoryMethod,
+    ): Boolean =
+        baseline.name == requested.name &&
+            baseline.returnType == requested.returnType &&
+            baseline.parameters.size == requested.parameters.size &&
+            baseline.parameters.zip(requested.parameters).all { (left, right) ->
+                left.name == right.name &&
+                    left.type == right.type &&
+                    left.nullable == right.nullable &&
+                    left.role == right.role
+            }
+
+    private fun generatedMethodBody(
+        model: EntityModel,
+        config: DataRepositoryConfig,
+        method: RepositoryMethod,
+    ): String? {
+        val singleMethodConfig = config.copy(methods = mutableListOf(method))
+        val source = generatedRepository(model.copy(dataRepository = singleMethodConfig))
+            ?: return null
+        return interfaceBody(source)
+    }
+
+    private fun sourceMethodEdit(
+        content: String,
+        evidence: ParsedRepositoryMethod,
+        baselineMethod: RepositoryMethod,
+        requestedMethod: RepositoryMethod,
+        generatedMethod: String,
+        language: EntitySourceLanguage,
+    ): WorkspaceTextEdit? {
+        val methodStart = evidence.sourceStartOffset ?: return null
+        val methodEnd = evidence.sourceEndOffset ?: return null
+        if (methodStart !in 0..content.length ||
+            methodEnd !in methodStart..content.length
+        ) {
+            return null
+        }
+        val lineStart = content.lastIndexOf('\n', (methodStart - 1).coerceAtLeast(0))
+            .let { if (it < 0) 0 else it + 1 }
+        val indentation = content.substring(lineStart, methodStart)
+        if (indentation.any { !it.isWhitespace() }) return null
+        val expected = content.substring(lineStart, methodEnd)
+        val replacementBody = preservingMethodMetadataEdit(
+            source = content.substring(methodStart, methodEnd),
+            baseline = baselineMethod,
+            requested = requestedMethod,
+            generatedMethod = generatedMethod,
+            language = language,
+            baseIndent = indentation,
+        ) ?: return null
+        val replacement = indentation + replacementBody
+        return WorkspaceTextEdit(
+            startOffset = lineStart,
+            endOffset = methodEnd,
+            expectedText = expected,
+            replacement = replacement,
+        )
+    }
+
+    private fun preservingMethodMetadataEdit(
+        source: String,
+        baseline: RepositoryMethod,
+        requested: RepositoryMethod,
+        generatedMethod: String,
+        language: EntitySourceLanguage,
+        baseIndent: String,
+    ): String? {
+        if (baseline.description != requested.description) return null
+        if (baseline.parameters.zip(requested.parameters).any { (left, right) ->
+                left.bindingName != right.bindingName
+            }
+        ) {
+            return null
+        }
+        val changes = listOf(
+            AnnotationMetadataChange(
+                annotationName = "Query",
+                changed = baseline.queryType != requested.queryType ||
+                    baseline.query != requested.query ||
+                    baseline.queryProperties != requested.queryProperties,
+            ),
+            AnnotationMetadataChange(
+                annotationName = "FetchPlan",
+                changed = baseline.fetchPlan != requested.fetchPlan,
+            ),
+            AnnotationMetadataChange(
+                annotationName = "ApplyConstraints",
+                changed = baseline.applyConstraints != requested.applyConstraints,
+            ),
+            AnnotationMetadataChange(
+                annotationName = "QueryHints",
+                changed = baseline.queryHints != requested.queryHints,
+            ),
+        ).filter(AnnotationMetadataChange::changed)
+        if (changes.isEmpty()) return null
+
+        val replacements = mutableListOf<LocalSourceReplacement>()
+        val additions = mutableListOf<String>()
+        changes.forEach { change ->
+            val existing = annotationSpan(source, change.annotationName)
+            val generated = annotationSpan(generatedMethod, change.annotationName)
+            if (existing != null && existing.text.hasSourceComment()) return null
+            when {
+                existing != null && generated != null -> {
+                    replacements += LocalSourceReplacement(
+                        existing.startOffset,
+                        existing.endOffset,
+                        preserveAnnotationQualifier(existing.text, generated.text),
+                    )
+                }
+                existing != null -> {
+                    replacements += LocalSourceReplacement(
+                        existing.startOffset,
+                        existing.endOffset,
+                        "",
+                    )
+                }
+                generated != null -> additions += generated.text.trim()
+            }
+        }
+        if (additions.isNotEmpty()) {
+            val declarationOffset = methodDeclarationOffset(source, requested.name, language)
+                ?: return null
+            val declarationLineStart = source.lastIndexOf('\n', declarationOffset - 1)
+                .let { if (it < 0) 0 else it + 1 }
+            val declarationIndent = source.substring(declarationLineStart, declarationOffset)
+            if (declarationIndent.any { !it.isWhitespace() }) return null
+            val continuationIndent = declarationIndent.ifEmpty { baseIndent }
+            replacements += LocalSourceReplacement(
+                declarationOffset,
+                declarationOffset,
+                additions.joinToString("\n$continuationIndent") + "\n$continuationIndent",
+            )
+        }
+        var result = source
+        replacements.sortedByDescending(LocalSourceReplacement::startOffset).forEach { replacement ->
+            result = result.replaceRange(
+                replacement.startOffset,
+                replacement.endOffset,
+                replacement.text,
+            )
+        }
+        return result.takeIf { it != source }
+    }
+
+    private fun annotationSpan(source: String, simpleName: String): SourceAnnotationSpan? {
+        val searchable = maskCommentsAndStrings(source)
+        val match = ANNOTATION_REFERENCE.findAll(searchable)
+            .firstOrNull { it.groupValues[1].substringAfterLast('.') == simpleName }
+            ?: return null
+        var end = match.range.last + 1
+        var cursor = end
+        while (cursor < searchable.length && searchable[cursor].isWhitespace()) cursor++
+        if (searchable.getOrNull(cursor) == '(') {
+            var depth = 0
+            var index = cursor
+            while (index < searchable.length) {
+                when (searchable[index]) {
+                    '(' -> depth++
+                    ')' -> {
+                        depth--
+                        if (depth == 0) {
+                            end = index + 1
+                            break
+                        }
+                    }
+                }
+                index++
+            }
+            if (depth != 0) return null
+        }
+        return SourceAnnotationSpan(
+            startOffset = match.range.first,
+            endOffset = end,
+            text = source.substring(match.range.first, end),
+        )
+    }
+
+    private fun maskCommentsAndStrings(source: String): String {
+        val masked = source.toCharArray()
+        var index = 0
+        var state = SourceMaskState.CODE
+        var escaped = false
+        while (index < source.length) {
+            val char = source[index]
+            val next = source.getOrNull(index + 1)
+            when (state) {
+                SourceMaskState.CODE -> when {
+                    char == '/' && next == '/' -> {
+                        masked[index] = ' '
+                        masked[index + 1] = ' '
+                        index++
+                        state = SourceMaskState.LINE_COMMENT
+                    }
+                    char == '/' && next == '*' -> {
+                        masked[index] = ' '
+                        masked[index + 1] = ' '
+                        index++
+                        state = SourceMaskState.BLOCK_COMMENT
+                    }
+                    char == '"' -> {
+                        masked[index] = ' '
+                        escaped = false
+                        state = SourceMaskState.STRING
+                    }
+                    char == '\'' -> {
+                        masked[index] = ' '
+                        escaped = false
+                        state = SourceMaskState.CHAR
+                    }
+                }
+                SourceMaskState.LINE_COMMENT -> {
+                    if (char == '\n' || char == '\r') {
+                        state = SourceMaskState.CODE
+                    } else {
+                        masked[index] = ' '
+                    }
+                }
+                SourceMaskState.BLOCK_COMMENT -> {
+                    masked[index] = ' '
+                    if (char == '*' && next == '/') {
+                        masked[index + 1] = ' '
+                        index++
+                        state = SourceMaskState.CODE
+                    }
+                }
+                SourceMaskState.STRING,
+                SourceMaskState.CHAR -> {
+                    masked[index] = ' '
+                    if (escaped) {
+                        escaped = false
+                    } else if (char == '\\') {
+                        escaped = true
+                    } else if (
+                        (state == SourceMaskState.STRING && char == '"') ||
+                        (state == SourceMaskState.CHAR && char == '\'')
+                    ) {
+                        state = SourceMaskState.CODE
+                    }
+                }
+            }
+            index++
+        }
+        return String(masked)
+    }
+
+    private fun methodDeclarationOffset(
+        source: String,
+        methodName: String,
+        language: EntitySourceLanguage,
+    ): Int? {
+        val escapedName = Regex.escape(methodName)
+        val pattern = if (language == EntitySourceLanguage.KOTLIN) {
+            Regex("""\bfun\s+$escapedName\s*\(""")
+        } else {
+            Regex("""\b$escapedName\s*\(""")
+        }
+        val match = pattern.findAll(maskCommentsAndStrings(source)).lastOrNull() ?: return null
+        val lineStart = source.lastIndexOf('\n', match.range.first - 1)
+            .let { if (it < 0) 0 else it + 1 }
+        var declarationOffset = lineStart
+        while (source.getOrNull(declarationOffset)?.let(Char::isWhitespace) == true &&
+            source[declarationOffset] !in setOf('\n', '\r')
+        ) {
+            declarationOffset++
+        }
+        return declarationOffset
+    }
+
+    private fun preserveAnnotationQualifier(existing: String, generated: String): String {
+        val generatedArguments = generated.indexOf('(')
+            .takeIf { it >= 0 }
+            ?.let(generated::substring)
+            .orEmpty()
+        val existingHead = existing.substringBefore('(').trimEnd()
+        return existingHead + generatedArguments
+    }
+
+    private fun String.hasSourceComment(): Boolean =
+        contains("//") || contains("/*")
 
     private fun repositoryActivation(
         entity: SchemaEntitySnapshot,
@@ -520,13 +869,44 @@ class DataRepositoryChangeService(private val project: Project) {
 
     companion object {
         private val IMPORT = Regex(
-            """(?m)^\s*import\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*;?""",
+            """(?m)^[ \t]*import[ \t]+(?:static[ \t]+)?""" +
+                """([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)[ \t]*;?[ \t]*$""",
         )
-        private val PACKAGE = Regex("""(?m)^\s*package\s+[A-Za-z_$][\w$.]*\s*;?""")
+        private val PACKAGE = Regex(
+            """(?m)^[ \t]*package[ \t]+[A-Za-z_$][\w$.]*[ \t]*;?[ \t]*$""",
+        )
+        private val ANNOTATION_REFERENCE = Regex(
+            """@([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)""",
+        )
 
         fun getInstance(project: Project): DataRepositoryChangeService =
             project.getService(DataRepositoryChangeService::class.java)
     }
+}
+
+private data class AnnotationMetadataChange(
+    val annotationName: String,
+    val changed: Boolean,
+)
+
+private data class LocalSourceReplacement(
+    val startOffset: Int,
+    val endOffset: Int,
+    val text: String,
+)
+
+private data class SourceAnnotationSpan(
+    val startOffset: Int,
+    val endOffset: Int,
+    val text: String,
+)
+
+private enum class SourceMaskState {
+    CODE,
+    LINE_COMMENT,
+    BLOCK_COMMENT,
+    STRING,
+    CHAR,
 }
 
 data class DataRepositoryChangeRequest(

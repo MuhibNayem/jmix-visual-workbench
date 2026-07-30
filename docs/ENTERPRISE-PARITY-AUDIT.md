@@ -431,9 +431,19 @@ inspection control rather than relying on a hard-to-hit table-row target.
   internal `component.action` references follow the copied IDs, wrapper
   insertion preserves manual XML, and conversion preserves XML namespace
   prefixes and children while removing incompatible layout-only properties.
-- Generated `TODO` bodies were removed, non-void controller methods now require
-  explicit bodies, and collection load-delegate scaffolding is rejected until
-  a complete typed implementation is available.
+- Generated `TODO` bodies were removed and non-void controller methods require
+  explicit bodies. Collection loading now emits the official repository
+  delegate using `Pageable` plus `JmixDataRepositoryContext`; bounded detail
+  saving rejects aggregate/removal semantics before any write. Java and Kotlin
+  controller injection is revision-bound, and effective method/repository
+  constraint bypass is denied without any bridge-controlled override.
+- Supported existing repository metadata now changes only exact annotation
+  ranges. Handwritten callable declarations, comments, `@Override`, modifiers,
+  documentation, nullability and parameter bindings are preserved; comments
+  inside a changed annotation and unknown shapes make the operation read-only.
+  Java/Kotlin JPQL parameters and explicit `@Param` literals participate in one
+  native rename/find-usages symbol. Derived-condition insertion retains any
+  static `OrderBy` suffix.
 - The conventional `./gradlew test` lifecycle now builds and fingerprints the
   current self-managed-Node web bundle before starting isolated IntelliJ
   2025.3 and 2026.2 lanes, avoiding stale-bundle races and retaining the outer
@@ -464,15 +474,14 @@ inspection control rather than relying on a hard-to-hit table-row target.
 
 ## Recommended next execution order
 
-1. Remove the remaining manual fallback points in the ordinary
-   entity-to-repository-to-view journey. First add safe visual modification of
-   supported existing repository methods. Then generate repository-backed
-   FlowUI load/save delegates and Jmix-aware injection, and complete native
-   `@Param`/JPQL parameter refactoring. The current shared semantic model
-   already validates derived/JPQL drafts and supplies Java/Kotlin query-string
-   property completion, navigation, inspection, quick fix, Find Usages and
-   rename; source-owned handwritten diagnostics are advisory for independent
-   additions. Complete JPQL grammar coverage and runtime fixtures remain.
+1. Finish the remaining repository workflow edges: native callable
+   change-signature/delete preview, transactional aggregate update-service
+   generation, complete JPQL grammar/language injection, and semantic
+   compilation of generated Java/Kotlin repositories and controllers against
+   the supported Jmix/Java matrix. Lossless existing metadata edits,
+   repository-backed view delegates, controller injection and native
+   `@Param`/JPQL parameter refactoring are now implemented; source-owned
+   diagnostics remain advisory for independent additions.
 2. Complete evidence-backed editing of existing inheritance and embedded
    mappings, followed by localized-caption workflows and safe enum-usage
    migration. Root/subtype authoring, explicit nested scalar/association

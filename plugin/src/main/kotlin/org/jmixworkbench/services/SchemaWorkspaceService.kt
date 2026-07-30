@@ -382,6 +382,7 @@ class SchemaWorkspaceService(
                     else -> candidates.singleOrNull()
                 } ?: return@mapNotNull null
                 val packageName = PACKAGE_DECLARATION.find(source)?.groupValues?.get(1).orEmpty()
+                var configMethodIndex = 0
                 SchemaRepositorySnapshot(
                     artifactId = artifact.id,
                     moduleId = artifact.owner.moduleId,
@@ -401,10 +402,15 @@ class SchemaWorkspaceService(
                     sourceLocator = artifact.sourceLocator,
                     config = parsed.config,
                     methodEvidence = parsed.methods.map { method ->
+                        val methodIndex = configMethodIndex.takeIf { method.method != null }
+                        if (method.method != null) {
+                            configMethodIndex++
+                        }
                         SchemaRepositoryMethodEvidence(
                             sourceSignature = method.sourceSignature,
                             editable = method.editable,
                             issue = method.issue,
+                            methodIndex = methodIndex,
                         )
                     },
                 )
@@ -2538,6 +2544,7 @@ data class SchemaRepositoryMethodEvidence(
     val sourceSignature: String,
     val editable: Boolean,
     val issue: String? = null,
+    val methodIndex: Int? = null,
 )
 
 data class SchemaModuleSnapshot(
