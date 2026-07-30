@@ -7,10 +7,12 @@ import type {
   TraitType,
   IdType,
   IdGeneration,
+  AssociationConfig,
   AssociationType,
   CascadeType,
   FetchType,
   EntityModel,
+  SchemaEntityAttributeSnapshot,
   SchemaEntitySnapshot,
   ValidationType,
   SchemaWorkspaceResponse,
@@ -2418,10 +2420,17 @@ export default function EntityDesigner() {
                         </Field>
                         <div className="min-w-0 rounded border border-emerald-500/20 bg-emerald-500/5 p-2 text-[10px] leading-relaxed text-emerald-200/80">
                           Preview updates only the literal <code>@JoinColumn(name)</code> and creates a guarded
-                          Liquibase rename with reverse rollback. Target, cardinality, ownership, cascade, fetch,
-                          nullability, and constraints remain locked.
+                          Liquibase rename with reverse rollback. Target, cardinality, ownership, nullability, and
+                          constraints remain locked; source-only relationship semantics are edited below.
                         </div>
                       </div>
+                    )}
+                    {sourceAssociation && selected.association && (
+                      <ExistingRelationshipSemanticsEditor
+                        attribute={selected}
+                        sourceAssociation={sourceAssociation}
+                        onChange={(change) => updateAttribute(selectedAttr, change)}
+                      />
                     )}
                     {!mappingLocked && (
                       <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -3573,6 +3582,135 @@ function ExistingAttributeSourceMetadataEditor({
             ))}
           </div>
         </div>
+      )}
+    </div>
+  )
+}
+
+function ExistingRelationshipSemanticsEditor({
+  attribute,
+  sourceAssociation,
+  onChange,
+}: {
+  attribute: AttributeModel
+  sourceAssociation: NonNullable<SchemaEntityAttributeSnapshot['associationDetails']>
+  onChange: (change: Partial<AttributeModel>) => void
+}) {
+  const association = attribute.association!
+  const semanticEditingDisabled = association.crossDataStore
+  const compositionEligible = ['oneToMany', 'oneToOne'].includes(association.associationType)
+  const orphanRemovalEligible = compositionEligible
+  const updateAssociation = (change: Partial<AssociationConfig>) => {
+    onChange({ association: { ...association, ...change } })
+  }
+
+  return (
+    <div className="mt-4 rounded-lg border border-cyan-500/20 bg-cyan-500/[0.04] p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-cyan-200">
+            Relationship semantics
+          </div>
+          <p className="mt-1 text-[9px] leading-relaxed text-gray-500">
+            Exact source edits preserve target, cardinality, ownership, join structure, custom arguments, and manual code.
+          </p>
+        </div>
+        <span className="max-w-full break-words rounded border border-surface-border bg-black/15 px-2 py-1 font-mono text-[8px] text-gray-400">
+          {sourceAssociation.associationType} · {sourceAssociation.relatedEntity}
+        </span>
+      </div>
+      {semanticEditingDisabled ? (
+        <div className="mt-3 rounded border border-amber-500/20 bg-amber-500/5 p-2 text-[9px] leading-relaxed text-amber-200/80">
+          Cross-store references use an ID bridge instead of a JPA relationship. JPA fetch, cascade,
+          composition, orphan-removal, and delete-policy controls are intentionally unavailable.
+        </div>
+      ) : (
+        <>
+          <div className="mt-3 grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="Ownership semantics">
+              <select
+                value={attribute.type}
+                disabled={!compositionEligible}
+                onChange={event => onChange({
+                  type: event.target.value as AttributeType,
+                })}
+                className="w-full min-w-0"
+                aria-label={`Ownership semantics for ${attribute.name}`}
+              >
+                <option value="association">Association</option>
+                <option value="composition">Composition</option>
+              </select>
+            </Field>
+            <Field label="Fetch mode">
+              <select
+                value={association.fetch}
+                onChange={event => updateAssociation({ fetch: event.target.value as FetchType })}
+                className="w-full min-w-0"
+                aria-label={`Fetch mode for ${attribute.name}`}
+              >
+                <option value="lazy">Lazy</option>
+                <option value="eager">Eager</option>
+              </select>
+            </Field>
+            <Field label="Delete policy">
+              <select
+                value={association.onDelete ?? ''}
+                onChange={event => updateAssociation({ onDelete: event.target.value || undefined })}
+                className="w-full min-w-0"
+                aria-label={`Delete policy for ${attribute.name}`}
+              >
+                <option value="">No Jmix policy</option>
+                <option value="DENY">Deny</option>
+                <option value="CASCADE">Cascade</option>
+                <option value="UNLINK">Unlink</option>
+              </select>
+            </Field>
+          </div>
+          <div className="mt-3 border-t border-cyan-500/15 pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[9px] font-medium uppercase tracking-wider text-gray-500">
+                Cascade operations
+              </div>
+              {orphanRemovalEligible && (
+                <label className="flex cursor-pointer items-center gap-1.5 text-[9px] text-gray-400">
+                  <input
+                    type="checkbox"
+                    checked={association.orphanRemoval}
+                    onChange={event => updateAssociation({ orphanRemoval: event.target.checked })}
+                  />
+                  orphan removal
+                </label>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {(['all', 'persist', 'merge', 'remove', 'refresh', 'detach'] as CascadeType[]).map(cascade => {
+                const active = association.cascade.includes(cascade)
+                return (
+                  <button
+                    key={cascade}
+                    type="button"
+                    onClick={() => updateAssociation({
+                      cascade: active
+                        ? association.cascade.filter(candidate => candidate !== cascade)
+                        : [...association.cascade, cascade],
+                    })}
+                    className={`rounded border px-2 py-1 text-[9px] transition-colors ${
+                      active
+                        ? 'border-cyan-500/40 bg-cyan-500/20 text-cyan-100'
+                        : 'border-surface-border bg-black/10 text-gray-500 hover:text-gray-300'
+                    }`}
+                  >
+                    {cascade}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <p className="mt-3 text-[9px] leading-relaxed text-gray-600">
+            These controls are source-only and never create a schema migration. Structural changes remain blocked
+            until target, inverse side, usages, data migration, and rollback can be reviewed together.
+          </p>
+        </>
       )}
     </div>
   )

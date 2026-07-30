@@ -1515,10 +1515,12 @@ class SchemaWorkspaceService(
             }
             .distinct()
             .toList()
-        val fetch = if (FETCH_EAGER.containsMatchIn(relationArguments)) {
-            FetchType.EAGER
-        } else {
-            FetchType.LAZY
+        val fetch = when {
+            FETCH_EAGER.containsMatchIn(relationArguments) -> FetchType.EAGER
+            FETCH_LAZY.containsMatchIn(relationArguments) -> FetchType.LAZY
+            associationType in setOf(AssociationType.MANY_TO_ONE, AssociationType.ONE_TO_ONE) ->
+                FetchType.EAGER
+            else -> FetchType.LAZY
         }
         val onDelete = ON_DELETE_POLICY.find(declaration)?.groupValues?.get(1)
 
@@ -1804,6 +1806,7 @@ class SchemaWorkspaceService(
         private val IMPORT_DECLARATION = Regex("""(?m)^\s*import\s+([\w.]+)\s*;?""")
         private val CASCADE_VALUE = Regex("""CascadeType\.([A-Za-z_]+)""")
         private val FETCH_EAGER = Regex("""FetchType\.EAGER\b""")
+        private val FETCH_LAZY = Regex("""FetchType\.LAZY\b""")
         private val BOOLEAN_TRUE_ARGUMENT = Regex("""\b(orphanRemoval)\s*=\s*(true)\b""")
         private val ON_DELETE_POLICY = Regex(
             """(?s)@\s*(?:[\w.]+\.)?OnDelete(?:Inverse)?\s*\([^)]*?DeletePolicy\.([A-Za-z_]+)""",

@@ -31,6 +31,7 @@ import org.jmixworkbench.model.DbChange
 import org.jmixworkbench.model.DdlGenerationMode
 import org.jmixworkbench.model.EntityModel
 import org.jmixworkbench.model.EnumIdType
+import org.jmixworkbench.model.FetchType
 import org.jmixworkbench.model.IdType
 import org.jmixworkbench.model.MigrationModel
 import org.jmixworkbench.model.PreCondition
@@ -181,7 +182,11 @@ class ExistingEntityChangeService(
                 current.association,
                 current.associationDetails?.composition == true,
             )
-            if (desired.type != currentType) {
+            val relationshipSemanticKindChange =
+                current.association &&
+                    currentType in RELATIONSHIP_ATTRIBUTE_TYPES &&
+                    desired.type in RELATIONSHIP_ATTRIBUTE_TYPES
+            if (desired.type != currentType && !relationshipSemanticKindChange) {
                 return rejected(
                     "JVW-ENTITY-TYPE-REFACTOR-REQUIRES-IMPACT",
                     "${current.name} changes Java type from ${current.javaType} ($currentType) to ${desired.type}. " +
@@ -397,6 +402,11 @@ class ExistingEntityChangeService(
                     .append('\u0000').append(change.desired.dependsOnProperties.joinToString(","))
                     .append('\u0000').append(change.desired.propertyDatatype)
                     .append('\u0000').append(change.desired.validations)
+                    .append('\u0000').append(change.desired.type)
+                    .append('\u0000').append(change.desired.association?.cascade)
+                    .append('\u0000').append(change.desired.association?.fetch)
+                    .append('\u0000').append(change.desired.association?.orphanRemoval)
+                    .append('\u0000').append(change.desired.association?.onDelete)
             }
             allChanges.forEach { change ->
                 append('\u0000').append(change.relativePath).append('\u0000').append(change.createContent.orEmpty())
@@ -506,7 +516,11 @@ class ExistingEntityChangeService(
                 current.association,
                 current.associationDetails?.composition == true,
             )
-            if (desired.type != currentType) {
+            val relationshipSemanticKindChange =
+                current.association &&
+                    currentType in RELATIONSHIP_ATTRIBUTE_TYPES &&
+                    desired.type in RELATIONSHIP_ATTRIBUTE_TYPES
+            if (desired.type != currentType && !relationshipSemanticKindChange) {
                 return rejected(
                     "JVW-ENTITY-TYPE-REFACTOR-REQUIRES-IMPACT",
                     "${current.name} changes Kotlin type from ${current.javaType} ($currentType) to ${desired.type}. " +
@@ -533,9 +547,6 @@ class ExistingEntityChangeService(
                     return ExistingEntityChangeProposal(null, listOf(it))
                 }
                 if (columnRenamed || sourceMetadataChanged) {
-                    metadataChanges += ExistingAttributeMetadataChange(current, desired)
-                }
-                if (sourceMetadataChanged) {
                     metadataChanges += ExistingAttributeMetadataChange(current, desired)
                 }
                 return@forEach
@@ -733,6 +744,11 @@ class ExistingEntityChangeService(
                     .append('\u0000').append(it.desired.dependsOnProperties.joinToString(","))
                     .append('\u0000').append(it.desired.propertyDatatype)
                     .append('\u0000').append(it.desired.validations)
+                    .append('\u0000').append(it.desired.type)
+                    .append('\u0000').append(it.desired.association?.cascade)
+                    .append('\u0000').append(it.desired.association?.fetch)
+                    .append('\u0000').append(it.desired.association?.orphanRemoval)
+                    .append('\u0000').append(it.desired.association?.onDelete)
             }
         }
         return ExistingEntityChangeProposal(
@@ -1145,20 +1161,49 @@ class ExistingEntityChangeService(
                 source.localIdAttributeName != target.localIdAttributeName ||
                 source.mappedBy != target.mappedBy ||
                 source.joinTable != target.joinTable ||
-                source.cascade != target.cascade ||
-                source.fetch != target.fetch ||
                 source.collectionType != target.collectionType ||
                 source.crossDataStore != target.crossDataStore ||
-                source.orphanRemoval != target.orphanRemoval ||
-                source.onDelete != target.onDelete ||
                 desired.mandatory != !current.nullable ||
                 desired.unique != current.unique
         if (immutableShapeChanged) {
             return WorkspaceChangeIssue(
                 "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT",
-                "${current.name} changes relationship cardinality, target, ownership, constraints, cascade, fetch, " +
-                    "or cross-store semantics. Only a physical owning-side join-column rename is allowed in this workflow.",
+                "${current.name} changes relationship cardinality, target, ownership, constraints, collection type, " +
+                    "or cross-store semantics. Use the structural relationship choreography workflow.",
             )
+        }
+        if (source.crossDataStore && relationshipSourceMetadataChanged(current, desired)) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-CROSS-STORE-RELATIONSHIP-SEMANTICS",
+                "${current.name} is a synthetic cross-store reference. JPA cascade, fetch, orphan removal, " +
+                    "composition, and delete-policy annotations are not valid on this mapping.",
+            )
+        }
+        if (
+            desired.type == AttributeType.COMPOSITION &&
+            target.associationType !in setOf(AssociationType.ONE_TO_MANY, AssociationType.ONE_TO_ONE)
+        ) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-COMPOSITION-CARDINALITY-UNSAFE",
+                "${current.name} can become a composition only on one-to-many or one-to-one mappings.",
+            )
+        }
+        if (
+            target.orphanRemoval &&
+            target.associationType !in setOf(AssociationType.ONE_TO_MANY, AssociationType.ONE_TO_ONE)
+        ) {
+            return WorkspaceChangeIssue(
+                "JVW-ENTITY-ORPHAN-REMOVAL-CARDINALITY-INVALID",
+                "${current.name} enables orphan removal on a relationship type that Jakarta Persistence does not support.",
+            )
+        }
+        target.onDelete?.takeIf(String::isNotBlank)?.let { policy ->
+            if (policy !in DELETE_POLICIES) {
+                return WorkspaceChangeIssue(
+                    "JVW-ENTITY-DELETE-POLICY-INVALID",
+                    "${current.name} uses unsupported delete policy '$policy'. Expected DENY, CASCADE, or UNLINK.",
+                )
+            }
         }
         val desiredColumn = desiredPhysicalColumnName(desired)
         if (desiredColumn == current.columnName) return null
@@ -1351,7 +1396,21 @@ class ExistingEntityChangeService(
             current.jmixProperty != desired.jmixProperty ||
             current.dependsOnProperties != desired.dependsOnProperties ||
             current.propertyDatatype != desired.propertyDatatype?.takeIf(String::isNotBlank) ||
-            current.validations.map(::normalizedValidation) != desired.validations.map(::normalizedValidation)
+            current.validations.map(::normalizedValidation) != desired.validations.map(::normalizedValidation) ||
+            relationshipSourceMetadataChanged(current, desired)
+
+    private fun relationshipSourceMetadataChanged(
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+    ): Boolean {
+        val source = current.associationDetails ?: return false
+        val target = desired.association ?: return true
+        return source.composition != (desired.type == AttributeType.COMPOSITION) ||
+            source.cascade != target.cascade ||
+            source.fetch != target.fetch ||
+            source.orphanRemoval != target.orphanRemoval ||
+            source.onDelete != target.onDelete?.takeIf(String::isNotBlank)
+    }
 
     private fun normalizedValidation(validation: ValidationModel): List<String> = listOf(
         validation.type.name,
@@ -1503,6 +1562,151 @@ class ExistingEntityChangeService(
             .takeIf(String::isNotBlank)
     }
 
+    private fun managedRelationshipMetadataEdits(
+        source: String,
+        ownerStart: Int,
+        annotations: List<SourceAnnotation>,
+        current: SchemaEntityAttributeSnapshot,
+        desired: AttributeModel,
+        kotlin: Boolean,
+    ): GeneratedMetadataEdits? {
+        if (!current.association || !relationshipSourceMetadataChanged(current, desired)) {
+            return GeneratedMetadataEdits(emptyList(), emptySet())
+        }
+        val sourceRelationship = current.associationDetails ?: return null
+        val target = desired.association ?: return null
+        val relationshipAnnotations = annotations.filter { it.name in RELATION_ANNOTATIONS }
+        if (relationshipAnnotations.size != 1) return null
+        val relationshipAnnotation = relationshipAnnotations.single()
+        val expectedRelationshipName = when (sourceRelationship.associationType) {
+            AssociationType.MANY_TO_ONE -> "ManyToOne"
+            AssociationType.ONE_TO_MANY -> "OneToMany"
+            AssociationType.MANY_TO_MANY -> "ManyToMany"
+            AssociationType.ONE_TO_ONE -> "OneToOne"
+        }
+        if (relationshipAnnotation.name != expectedRelationshipName) return null
+
+        val argumentsText = relationshipAnnotation.text
+            .substringAfter('(', "")
+            .substringBeforeLast(')', "")
+        val existingArguments = splitTopLevelArguments(argumentsText)
+        val preservedArguments = existingArguments.filter { argument ->
+            val equals = topLevelEquals(argument)
+            val name = if (equals < 0) "value" else argument.substring(0, equals).trim()
+            name !in MANAGED_RELATION_ARGUMENTS
+        }
+        val managedArguments = mutableListOf<String>()
+        if (target.cascade.isNotEmpty()) {
+            val cascades = target.cascade.joinToString(", ") { "CascadeType.${it.name}" }
+            managedArguments += "cascade = ${if (kotlin) "[$cascades]" else "{$cascades}"}"
+        }
+        val defaultFetch = if (
+            target.associationType in setOf(AssociationType.MANY_TO_ONE, AssociationType.ONE_TO_ONE)
+        ) {
+            FetchType.EAGER
+        } else {
+            FetchType.LAZY
+        }
+        val existingFetchExplicit = existingArguments.any {
+            val equals = topLevelEquals(it)
+            equals >= 0 && it.substring(0, equals).trim() == "fetch"
+        }
+        if (existingFetchExplicit || target.fetch != defaultFetch) {
+            managedArguments += "fetch = FetchType.${target.fetch.name}"
+        }
+        if (target.orphanRemoval) {
+            managedArguments += "orphanRemoval = true"
+        }
+        val relationArguments = preservedArguments + managedArguments
+        val relationshipPrefix = relationshipAnnotation.text.substringBefore('(').trim()
+        val relationshipReplacement = if (relationArguments.isEmpty()) {
+            relationshipPrefix
+        } else {
+            "$relationshipPrefix(${relationArguments.joinToString(", ")})"
+        }
+        val edits = mutableListOf<WorkspaceTextEdit>()
+        val imports = mutableSetOf<String>()
+        if (relationshipReplacement != relationshipAnnotation.text) {
+            edits += WorkspaceTextEdit(
+                startOffset = relationshipAnnotation.startOffset,
+                endOffset = relationshipAnnotation.endOffset,
+                expectedText = relationshipAnnotation.text,
+                replacement = relationshipReplacement,
+            )
+        }
+        if (target.cascade.isNotEmpty()) imports += "jakarta.persistence.CascadeType"
+        if (existingFetchExplicit || target.fetch != defaultFetch) {
+            imports += "jakarta.persistence.FetchType"
+        }
+
+        val compositionAnnotations = annotations.filter { it.name == "Composition" }
+        if (compositionAnnotations.size > 1) return null
+        val compositionAnnotation = compositionAnnotations.singleOrNull()
+        val deleteAnnotations = annotations.filter { it.name in setOf("OnDelete", "OnDeleteInverse") }
+        if (deleteAnnotations.size > 1) return null
+        val deleteAnnotation = deleteAnnotations.singleOrNull()
+        val missingAnnotations = mutableListOf<String>()
+        if (desired.type == AttributeType.COMPOSITION) {
+            if (compositionAnnotation == null) {
+                missingAnnotations += "@Composition"
+                imports += "io.jmix.core.metamodel.annotation.Composition"
+            }
+        } else if (compositionAnnotation != null) {
+            edits += WorkspaceTextEdit(
+                compositionAnnotation.startOffset,
+                compositionAnnotation.endOffset,
+                compositionAnnotation.text,
+                "",
+            )
+        }
+
+        val desiredDeletePolicy = target.onDelete?.trim()?.takeIf(String::isNotBlank)
+        if (desiredDeletePolicy == null) {
+            if (deleteAnnotation != null) {
+                edits += WorkspaceTextEdit(
+                    deleteAnnotation.startOffset,
+                    deleteAnnotation.endOffset,
+                    deleteAnnotation.text,
+                    "",
+                )
+            }
+        } else if (deleteAnnotation != null) {
+            val prefix = deleteAnnotation.text.substringBefore('(').trim()
+            val replacement = "$prefix(DeletePolicy.$desiredDeletePolicy)"
+            if (replacement != deleteAnnotation.text) {
+                edits += WorkspaceTextEdit(
+                    deleteAnnotation.startOffset,
+                    deleteAnnotation.endOffset,
+                    deleteAnnotation.text,
+                    replacement,
+                )
+            }
+            imports += "io.jmix.core.DeletePolicy"
+        } else {
+            missingAnnotations += "@OnDelete(DeletePolicy.$desiredDeletePolicy)"
+            imports += "io.jmix.core.entity.annotation.OnDelete"
+            imports += "io.jmix.core.DeletePolicy"
+        }
+        if (missingAnnotations.isNotEmpty()) {
+            val lineStart = source.lastIndexOf(
+                '\n',
+                (ownerStart - 1).coerceAtLeast(0),
+            ) + 1
+            val indentation = source.substring(lineStart, ownerStart)
+                .takeWhile { it == ' ' || it == '\t' }
+            edits += WorkspaceTextEdit(
+                startOffset = relationshipAnnotation.endOffset,
+                endOffset = relationshipAnnotation.endOffset,
+                expectedText = "",
+                replacement = missingAnnotations.joinToString(
+                    separator = "\n$indentation",
+                    prefix = "\n$indentation",
+                ),
+            )
+        }
+        return GeneratedMetadataEdits(edits, imports)
+    }
+
     private fun metadataAnnotationEdits(
         source: String,
         entityClass: com.intellij.psi.PsiClass,
@@ -1529,6 +1733,23 @@ class ExistingEntityChangeService(
             ) ?: return null
             edits += sourceMetadata.edits
             imports += sourceMetadata.imports
+            val relationshipMetadata = managedRelationshipMetadataEdits(
+                source = source,
+                ownerStart = modifierList.textRange.startOffset,
+                annotations = modifierList.annotations.map { annotation ->
+                    SourceAnnotation(
+                        name = annotation.nameReferenceElement?.text?.substringAfterLast('.').orEmpty(),
+                        text = annotation.text,
+                        startOffset = annotation.textRange.startOffset,
+                        endOffset = annotation.textRange.endOffset,
+                    )
+                },
+                current = change.current,
+                desired = change.desired,
+                kotlin = false,
+            ) ?: return null
+            edits += relationshipMetadata.edits
+            imports += relationshipMetadata.imports
             if (!change.physicalMappingChanged) return@forEach
             val managedAnnotationName = if (change.relationshipColumnRenamed) "JoinColumn" else "Column"
             val columnAnnotation = modifierList.annotations.firstOrNull { annotation ->
@@ -1642,6 +1863,16 @@ class ExistingEntityChangeService(
             ) ?: return null
             edits += sourceMetadata.edits
             imports += sourceMetadata.imports
+            val relationshipMetadata = managedRelationshipMetadataEdits(
+                source = source,
+                ownerStart = property.textRange.startOffset,
+                annotations = propertyAnnotations,
+                current = change.current,
+                desired = change.desired,
+                kotlin = true,
+            ) ?: return null
+            edits += relationshipMetadata.edits
+            imports += relationshipMetadata.imports
             if (!change.physicalMappingChanged) return@forEach
             val managedAnnotationName = if (change.relationshipColumnRenamed) "JoinColumn" else "Column"
             val columnAnnotation = PsiTreeUtil.findChildrenOfType(
@@ -1915,6 +2146,13 @@ class ExistingEntityChangeService(
             "precision",
             "scale",
         )
+        private val RELATIONSHIP_ATTRIBUTE_TYPES =
+            setOf(AttributeType.ASSOCIATION, AttributeType.COMPOSITION)
+        private val RELATION_ANNOTATIONS =
+            setOf("ManyToOne", "OneToMany", "ManyToMany", "OneToOne")
+        private val MANAGED_RELATION_ARGUMENTS =
+            setOf("cascade", "fetch", "orphanRemoval")
+        private val DELETE_POLICIES = setOf("DENY", "CASCADE", "UNLINK")
         private val SOURCE_METADATA_ANNOTATIONS = setOf(
             "SystemLevel",
             "Comment",

@@ -157,6 +157,222 @@ class SchemaWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertEquals("FUND_PROFILE", fundRelation.relatedTableName)
     }
 
+    fun testExistingJavaAndKotlinRelationshipSemanticsAreSourceSafeAndStructureLocked() {
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            val module = ModuleManager.getInstance(project).modules.first()
+            if (ModuleRootManager.getInstance(module).contentRoots.none { it == root }) {
+                val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+                rootModel.addContentEntry(root)
+                rootModel.commit()
+            }
+            write(
+                root,
+                "src/main/java/com/acme/entity/RelationshipChild.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "RELATIONSHIP_CHILD")
+                public class RelationshipChild {
+                    @Id
+                    private UUID id;
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/entity/JavaRelationshipOwner.java",
+                """
+                package com.acme.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                import jakarta.persistence.*;
+                import java.util.List;
+                import java.util.UUID;
+                @JmixEntity
+                @Entity
+                @Table(name = "JAVA_RELATIONSHIP_OWNER")
+                public class JavaRelationshipOwner {
+                    @Id
+                    private UUID id;
+
+                    @CustomRelationshipGuard("manual")
+                    @OneToMany(mappedBy = "javaOwner", cascade = {CascadeType.MERGE})
+                    private List<RelationshipChild> children;
+
+                    public String manualRelationshipLabel() {
+                        return "java-owner";
+                    }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/kotlin/com/acme/entity/KotlinRelationshipOwner.kt",
+                """
+                package com.acme.entity
+                import io.jmix.core.metamodel.annotation.JmixEntity
+                import jakarta.persistence.*
+                import java.util.UUID
+                @JmixEntity
+                @Entity
+                @Table(name = "KOTLIN_RELATIONSHIP_OWNER")
+                open class KotlinRelationshipOwner {
+                    @Id
+                    var id: UUID? = null
+
+                    @CustomKotlinRelationship
+                    @OneToOne(mappedBy = "kotlinOwner")
+                    var detail: RelationshipChild? = null
+
+                    fun manualRelationshipLabel(): String = "kotlin-owner"
+                }
+                """.trimIndent(),
+            )
+        }
+        val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh = true)
+        val service = ExistingEntityChangeService.getInstance(project)
+
+        fun model(
+            snapshot: SchemaEntitySnapshot,
+            attributeName: String,
+            type: AttributeType,
+            cascade: List<CascadeType>,
+            fetch: FetchType,
+            orphanRemoval: Boolean,
+            onDelete: String,
+        ): EntityModel {
+            val current = snapshot.attributes.single { it.name == attributeName }
+            val relation = requireNotNull(current.associationDetails)
+            return EntityModel(
+                className = snapshot.className,
+                packageName = snapshot.qualifiedName.substringBeforeLast('.'),
+                sourceLanguage = if (snapshot.sourceLocator.relativePath.endsWith(".kt")) {
+                    EntitySourceLanguage.KOTLIN
+                } else {
+                    EntitySourceLanguage.JAVA
+                },
+                tableName = snapshot.tableName,
+                dataStore = snapshot.storeName,
+                attributes = mutableListOf(
+                    AttributeModel(
+                        name = current.name,
+                        type = type,
+                        columnName = current.columnName,
+                        mandatory = !current.nullable,
+                        unique = current.unique,
+                        association = AssociationConfig(
+                            associationType = relation.associationType,
+                            relatedEntity = relation.relatedEntity,
+                            relatedTableName = relation.relatedTableName,
+                            relatedIdColumnName = relation.relatedIdColumnName,
+                            relatedIdType = relation.relatedIdType,
+                            localIdAttributeName = relation.localIdAttributeName,
+                            mappedBy = relation.mappedBy,
+                            joinColumnName = relation.joinColumnName,
+                            joinTable = relation.joinTable,
+                            cascade = cascade.toMutableList(),
+                            fetch = fetch,
+                            collectionType = relation.collectionType,
+                            crossDataStore = relation.crossDataStore,
+                            orphanRemoval = orphanRemoval,
+                            onDelete = onDelete,
+                        ),
+                    ),
+                ),
+                ddlGeneration = DdlGenerationConfig(false, DdlGenerationMode.DISABLED),
+            )
+        }
+
+        val javaSnapshot = workspace.entities.single { it.className == "JavaRelationshipOwner" }
+        val javaPreview = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                javaSnapshot.sourceLocator,
+                model(
+                    javaSnapshot,
+                    "children",
+                    AttributeType.COMPOSITION,
+                    listOf(CascadeType.ALL, CascadeType.REMOVE),
+                    FetchType.EAGER,
+                    orphanRemoval = true,
+                    onDelete = "CASCADE",
+                ),
+            ),
+        )
+        assertTrue(javaPreview.accepted, javaPreview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(1, javaPreview.files.size)
+        val java = javaPreview.files.single().resultContent
+        assertTrue(java.contains("@CustomRelationshipGuard(\"manual\")"))
+        assertTrue(java.contains("mappedBy = \"javaOwner\""))
+        assertTrue(java.contains("cascade = {CascadeType.ALL, CascadeType.REMOVE}"))
+        assertTrue(java.contains("fetch = FetchType.EAGER"))
+        assertTrue(java.contains("orphanRemoval = true"))
+        assertTrue(java.contains("@Composition"))
+        assertTrue(java.contains("@OnDelete(DeletePolicy.CASCADE)"))
+        assertTrue(java.contains("public String manualRelationshipLabel()"))
+        assertFalse(javaPreview.files.any { it.relativePath.endsWith(".xml") })
+
+        val kotlinSnapshot = workspace.entities.single { it.className == "KotlinRelationshipOwner" }
+        assertEquals(
+            FetchType.EAGER,
+            kotlinSnapshot.attributes.single { it.name == "detail" }.associationDetails?.fetch,
+            "An omitted to-one fetch must reconstruct Jakarta Persistence's EAGER default.",
+        )
+        val kotlinPreview = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(
+                kotlinSnapshot.sourceLocator,
+                model(
+                    kotlinSnapshot,
+                    "detail",
+                    AttributeType.ASSOCIATION,
+                    listOf(CascadeType.MERGE),
+                    FetchType.LAZY,
+                    orphanRemoval = true,
+                    onDelete = "DENY",
+                ),
+            ),
+        )
+        assertTrue(kotlinPreview.accepted, kotlinPreview.issues.joinToString { "${it.code}: ${it.message}" })
+        assertEquals(1, kotlinPreview.files.size)
+        val kotlin = kotlinPreview.files.single().resultContent
+        assertTrue(kotlin.contains("@CustomKotlinRelationship"))
+        assertTrue(kotlin.contains("mappedBy = \"kotlinOwner\""))
+        assertTrue(kotlin.contains("cascade = [CascadeType.MERGE]"))
+        assertTrue(kotlin.contains("fetch = FetchType.LAZY"))
+        assertTrue(kotlin.contains("orphanRemoval = true"))
+        assertTrue(kotlin.contains("@OnDelete(DeletePolicy.DENY)"))
+        assertTrue(kotlin.contains("fun manualRelationshipLabel(): String"))
+        assertFalse(kotlinPreview.files.any { it.relativePath.endsWith(".xml") })
+
+        val structuralChange = model(
+            javaSnapshot,
+            "children",
+            AttributeType.ASSOCIATION,
+            listOf(CascadeType.MERGE),
+            FetchType.LAZY,
+            orphanRemoval = false,
+            onDelete = "DENY",
+        ).let { entity ->
+            entity.copy(
+                attributes = entity.attributes.map { attribute ->
+                    attribute.copy(
+                        association = attribute.association?.copy(
+                            associationType = AssociationType.MANY_TO_MANY,
+                        ),
+                    )
+                }.toMutableList(),
+            )
+        }
+        val rejected = service.previewAttributeAdditions(
+            ExistingEntityAttributeAdditionRequest(javaSnapshot.sourceLocator, structuralChange),
+        )
+        assertFalse(rejected.accepted)
+        assertTrue(rejected.issues.any { it.code == "JVW-ENTITY-RELATIONSHIP-SHAPE-REQUIRES-IMPACT" })
+    }
+
     fun testIncludeAllStoreEntityCoverageAndSourceSafeMigrationDestination() {
         createFixture(includeAll = true)
         val service = SchemaWorkspaceService.getInstance(project)
