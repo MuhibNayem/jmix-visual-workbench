@@ -33,6 +33,7 @@ import type {
   EntityAttributeTypeExpansionPreviewResponse,
   EntityAttributeTypeExpansionVerificationResponse,
   EntityAttributeTypeMappingCutoverRequest,
+  GraphSourceLocator,
 } from '../../types'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 
@@ -81,7 +82,15 @@ interface CoordinatedRenameSession {
   stage: 'MAPPING_PREVIEW' | 'MAPPING_APPLIED' | 'NATIVE_PREVIEW'
 }
 
-export default function EntityDesigner() {
+interface EntityDesignerProps {
+  editorSurface?: boolean
+  sourceLocator?: GraphSourceLocator
+}
+
+export default function EntityDesigner({
+  editorSurface = false,
+  sourceLocator,
+}: EntityDesignerProps = {}) {
   const {
     entity,
     projectConfig,
@@ -99,6 +108,7 @@ export default function EntityDesigner() {
   const [activePane, setActivePane] = useState<'config' | 'attributes' | 'preview'>('attributes')
   const [schemaWorkspace, setSchemaWorkspace] = useState<SchemaWorkspaceResponse | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(true)
+  const [nativeSourceIssue, setNativeSourceIssue] = useState<string | null>(null)
   const [generationPreview, setGenerationPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
   const [existingEntity, setExistingEntity] = useState<SchemaEntitySnapshot | null>(null)
   const [applicationGraph, setApplicationGraph] = useState<ApplicationGraphResponse | null>(null)
@@ -167,9 +177,43 @@ export default function EntityDesigner() {
 
   useEffect(() => {
     let active = true
-    bridge.getSchemaWorkspace().then((workspace) => {
+    setSchemaLoading(true)
+    bridge.getSchemaWorkspace(Boolean(editorSurface && sourceLocator)).then((workspace) => {
       if (!active) return
       setSchemaWorkspace(workspace)
+      if (editorSurface && sourceLocator) {
+        const matching = workspace.entities.filter(candidate =>
+          candidate.sourceLocator.relativePath === sourceLocator.relativePath,
+        )
+        if (matching.length !== 1) {
+          setNativeSourceIssue(
+            matching.length === 0
+              ? 'The current Java/Kotlin document is not a parseable indexed Jmix entity. Fix source errors or use the source editor.'
+              : 'The current source resolves to multiple entity models. Resolve module/source ownership before visual editing.',
+          )
+          return
+        }
+        const selected = matching[0]
+        if (selected.sourceLocator.revisionFingerprint !== sourceLocator.revisionFingerprint) {
+          setNativeSourceIssue(
+            'The Entity Designer index has not reached the current unsaved document revision. Reselect Design after indexing completes.',
+          )
+          return
+        }
+        const store = workspace.stores.find(candidate =>
+          candidate.moduleId === selected.moduleId && candidate.name === selected.storeName,
+        )
+        setNativeSourceIssue(null)
+        setExistingEntity(selected)
+        setGenerationPreview(null)
+        setSelectedAttr(null)
+        setRenameDraft('')
+        setRenameLaunched(false)
+        setCoordinatedRename(null)
+        setEntity(existingEntityModel(selected, store?.id))
+        setActivePane('attributes')
+        return
+      }
       if (!entity.generationTarget?.moduleId && workspace.modules.length) {
         const defaultModule = workspace.modules.find((module) => module.storeCount > 0) ?? workspace.modules[0]
         const defaultStore = workspace.stores.find(
@@ -199,7 +243,11 @@ export default function EntityDesigner() {
     return () => {
       active = false
     }
-  }, [])
+  }, [
+    editorSurface,
+    sourceLocator?.relativePath,
+    sourceLocator?.revisionFingerprint,
+  ])
 
   useEffect(() => {
     let active = true
@@ -1347,7 +1395,11 @@ export default function EntityDesigner() {
     <div className="flex h-full min-w-0 flex-col">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border bg-surface-light px-3 py-2.5 sm:px-4">
-        <h2 className="text-sm font-semibold text-gray-200">Entity Designer</h2>
+        <h2 className="min-w-0 truncate text-sm font-semibold text-gray-200">
+          {editorSurface && existingEntity
+            ? `Entity Designer · ${existingEntity.className}`
+            : 'Entity Designer'}
+        </h2>
         <div className="flex flex-wrap justify-end gap-2">
           <button
             onClick={() => {
@@ -1361,21 +1413,32 @@ export default function EntityDesigner() {
           >
             {showPreview ? 'Hide Preview' : 'Preview'}
           </button>
-          <button
-            onClick={handleReset}
-            className="px-3 py-1.5 text-xs rounded bg-surface-lighter text-gray-300 hover:bg-surface-border transition-colors"
-          >
-            {existingEntity ? 'Create New' : 'Reset'}
-          </button>
+          {!editorSurface && (
+            <button
+              onClick={handleReset}
+              className="px-3 py-1.5 text-xs rounded bg-surface-lighter text-gray-300 hover:bg-surface-border transition-colors"
+            >
+              {existingEntity ? 'Create New' : 'Reset'}
+            </button>
+          )}
           <button
             onClick={handleGenerate}
-            disabled={isGenerating}
+            disabled={isGenerating || Boolean(nativeSourceIssue)}
             className="px-4 py-1.5 text-xs rounded bg-jmix-500 text-white font-medium hover:bg-jmix-600 disabled:opacity-50 transition-colors"
           >
             {isGenerating ? 'Planning...' : existingEntity ? '⚡ Preview Safe Update' : '⚡ Preview Generation'}
           </button>
         </div>
       </div>
+
+      {nativeSourceIssue && (
+        <div
+          role="alert"
+          className="border-b border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-amber-100 sm:px-4"
+        >
+          {nativeSourceIssue}
+        </div>
+      )}
 
       {generationPreview && (
         <div className="flex flex-wrap items-center gap-3 border-b border-amber-500/30 bg-amber-500/5 px-3 py-2 sm:px-4">
@@ -1440,7 +1503,7 @@ export default function EntityDesigner() {
             <Field label="Entity Source">
               <select
                 value={existingEntity?.artifactId ?? 'new'}
-                disabled={schemaLoading}
+                disabled={editorSurface || schemaLoading}
                 onChange={(event) => selectExistingEntity(event.target.value)}
                 className="w-full"
               >

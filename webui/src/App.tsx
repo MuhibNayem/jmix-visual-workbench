@@ -1,6 +1,7 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useStore, type ActiveTab } from './store'
 import { bridge } from './bridge'
+import type { GraphSourceLocator } from './types'
 import EntityDesigner from './components/EntityDesigner/EntityDesigner'
 import ViewDesigner from './components/ViewDesigner/ViewDesigner'
 import CrudWizard from './components/CrudWizard/CrudWizard'
@@ -39,8 +40,18 @@ export default function App() {
     setProjectConfig,
     flowUiLocator,
     openFlowUiDesigner,
+    closeFlowUiDesigner,
+    resetEntity,
   } = useStore()
   const nativeFlowUiEditor = window.location.pathname === '/flowui-editor.html'
+  const nativeEntityEditor = window.location.pathname === '/entity-editor.html'
+  const [entityEditorLocator, setEntityEditorLocator] = useState<GraphSourceLocator | null>(() => {
+    const context = bridge.getLaunchContext()
+    return context?.surface === 'ENTITY_EDITOR'
+      ? context.sourceLocator ?? null
+      : null
+  })
+  const [entityDesignerKey, setEntityDesignerKey] = useState(0)
   const developmentEditorWidthParameter = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get('editorWidth')
     : null
@@ -64,13 +75,31 @@ export default function App() {
 
   useEffect(() => {
     const applyLaunchContext = (context: ReturnType<typeof bridge.getLaunchContext>) => {
-      if (context?.surface === 'FLOW_UI_EDITOR' && context.sourceLocator) {
-        openFlowUiDesigner(context.sourceLocator)
+      switch (context?.surface) {
+        case 'FLOW_UI_EDITOR':
+          if (context.sourceLocator) openFlowUiDesigner(context.sourceLocator)
+          break
+        case 'ENTITY_EDITOR':
+          if (context.sourceLocator) setEntityEditorLocator(context.sourceLocator)
+          break
+        case 'ENTITY_DESIGNER':
+          resetEntity()
+          setEntityEditorLocator(null)
+          setEntityDesignerKey(current => current + 1)
+          setActiveTab('entity')
+          break
+        case 'VIEW_DESIGNER':
+          closeFlowUiDesigner()
+          setActiveTab('view')
+          break
+        case 'CRUD_DESIGNER':
+          setActiveTab('crud')
+          break
       }
     }
     applyLaunchContext(bridge.getLaunchContext())
     return bridge.onLaunchContext(applyLaunchContext)
-  }, [openFlowUiDesigner])
+  }, [closeFlowUiDesigner, openFlowUiDesigner, resetEntity, setActiveTab])
 
   if (nativeFlowUiEditor) {
     return (
@@ -84,6 +113,32 @@ export default function App() {
             : (
               <div className="flex h-full items-center justify-center bg-surface text-xs text-gray-400">
                 Connecting the native FlowUI editor…
+              </div>
+            )}
+        </main>
+        <Toast />
+      </div>
+    )
+  }
+
+  if (nativeEntityEditor) {
+    return (
+      <div
+        className="workbench-shell flex h-full w-full min-w-0 max-w-full overflow-hidden bg-surface"
+        style={developmentEditorStyle}
+      >
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {entityEditorLocator
+            ? (
+              <EntityDesigner
+                key={entityDesignerKey}
+                editorSurface
+                sourceLocator={entityEditorLocator}
+              />
+            )
+            : (
+              <div className="flex h-full items-center justify-center bg-surface text-xs text-gray-400">
+                Connecting the native Entity Designer…
               </div>
             )}
         </main>
@@ -130,7 +185,7 @@ export default function App() {
       {/* Main Content */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {activeTab === 'projectMap' && <ProjectMap />}
-        {activeTab === 'entity' && <EntityDesigner />}
+        {activeTab === 'entity' && <EntityDesigner key={entityDesignerKey} />}
         {activeTab === 'view' && <ViewDesigner />}
         {activeTab === 'crud' && <CrudWizard />}
         {activeTab === 'menu' && <MenuDesigner />}

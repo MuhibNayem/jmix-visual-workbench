@@ -17,6 +17,7 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <fileEditorProvider implementation="org.jmixworkbench.editor.JmixFlowUiFileEditorProvider"/>
+        <fileEditorProvider implementation="org.jmixworkbench.editor.JmixEntityFileEditorProvider"/>
         <toolWindow id="Jmix Visual Workbench"
                     anchor="right"
                     factoryClass="org.jmixworkbench.toolwindow.JmixWorkbenchToolWindowFactory"
@@ -33,6 +34,7 @@
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiWorkspaceService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiControllerChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.JmixRuntimeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.toolwindow.WorkbenchNavigationService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixDomainSymbolService"/>
         <projectService serviceImplementation="org.jmixworkbench.ide.JmixUiSecuritySymbolService"/>

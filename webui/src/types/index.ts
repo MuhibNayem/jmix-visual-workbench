@@ -967,7 +967,13 @@ export interface GraphSourceLocator {
 }
 
 export interface WorkbenchLaunchContext {
-  surface: 'TOOL_WINDOW' | 'FLOW_UI_EDITOR'
+  surface:
+    | 'TOOL_WINDOW'
+    | 'FLOW_UI_EDITOR'
+    | 'ENTITY_EDITOR'
+    | 'ENTITY_DESIGNER'
+    | 'VIEW_DESIGNER'
+    | 'CRUD_DESIGNER'
   sourceLocator?: GraphSourceLocator
 }
 

@@ -30,6 +30,7 @@ class PackagedWorkbenchResourceHandlerTest {
         val index = provider.respond("GET", PACKAGED_WORKBENCH_ORIGIN)
         val explicitIndex = provider.respond("GET", "$PACKAGED_WORKBENCH_ORIGIN/index.html")
         val flowUiEditor = provider.respond("GET", PACKAGED_FLOW_UI_EDITOR_ENTRY_URL)
+        val entityEditor = provider.respond("GET", PACKAGED_ENTITY_EDITOR_ENTRY_URL)
         val javascript = provider.respond("GET", "$PACKAGED_WORKBENCH_ORIGIN/assets/workbench.js")
         val css = provider.respond("GET", "$PACKAGED_WORKBENCH_ORIGIN/assets/workbench.css")
 
@@ -37,6 +38,7 @@ class PackagedWorkbenchResourceHandlerTest {
         assertContentEquals(resources.getValue("/webui/index.html"), index.body)
         assertContentEquals(index.body, explicitIndex.body)
         assertContentEquals(index.body, flowUiEditor.body)
+        assertContentEquals(index.body, entityEditor.body)
         assertEquals("text/html; charset=utf-8", index.mimeType)
         assertEquals("text/html; charset=utf-8", index.headers.getValue("Content-Type"))
         assertEquals("text/javascript; charset=utf-8", javascript.mimeType)

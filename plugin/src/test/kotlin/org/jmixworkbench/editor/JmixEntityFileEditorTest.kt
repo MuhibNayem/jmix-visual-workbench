@@ -16,56 +16,72 @@ import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
-class JmixFlowUiFileEditorTest : LightJavaCodeInsightFixtureTestCase() {
-    fun testProviderAcceptsOnlyProjectFlowUiViewsAndFragments() {
-        val view = file(
-            "src/main/resources/com/company/loan/loan-detail-view.xml",
+class JmixEntityFileEditorTest : LightJavaCodeInsightFixtureTestCase() {
+    fun testProviderAcceptsHandwrittenJavaAndKotlinEntityKindsOnly() {
+        val javaEntity = file(
+            "modules/loan/src/main/java/com/company/loan/LoanApp.java",
             """
-                <view xmlns="http://jmix.io/schema/flowui/view">
-                    <layout/>
-                </view>
-            """.trimIndent(),
-        )
-        val fragment = file(
-            "src/main/resources/com/company/loan/payment-fragment.xml",
-            """
-                <fragment xmlns="http://jmix.io/schema/flowui/fragment">
-                    <content/>
-                </fragment>
-            """.trimIndent(),
-        )
-        val menu = file(
-            "src/main/resources/com/company/menu.xml",
-            "<menu-config><menu id=\"loan\"/></menu-config>",
-        )
-        val arbitrary = file(
-            "src/main/resources/com/company/arbitrary.xml",
-            "<beans><bean id=\"loan\"/></beans>",
-        )
-        val provider = JmixFlowUiFileEditorProvider()
+                package com.company.loan;
 
-        assertTrue(provider.accept(project, view))
-        assertTrue(provider.accept(project, fragment))
-        assertFalse(provider.accept(project, menu))
-        assertFalse(provider.accept(project, arbitrary))
+                @io.jmix.core.metamodel.annotation.JmixEntity
+                @jakarta.persistence.Entity
+                public class LoanApp {}
+            """.trimIndent(),
+        )
+        val kotlinDto = file(
+            "modules/payroll/src/main/kotlin/com/company/payroll/PayrollLine.kt",
+            """
+                package com.company.payroll
+
+                @io.jmix.core.metamodel.annotation.JmixEntity
+                data class PayrollLine(val amount: java.math.BigDecimal)
+            """.trimIndent(),
+        )
+        val mappedSuperclass = file(
+            "modules/shared/src/main/java/com/company/shared/BaseRecord.java",
+            """
+                package com.company.shared;
+
+                @io.jmix.core.metamodel.annotation.JmixEntity
+                @jakarta.persistence.MappedSuperclass
+                public abstract class BaseRecord {}
+            """.trimIndent(),
+        )
+        val service = file(
+            "modules/loan/src/main/java/com/company/loan/LoanService.java",
+            "package com.company.loan; public class LoanService {}",
+        )
+        val provider = JmixEntityFileEditorProvider()
+
+        assertTrue(provider.accept(project, javaEntity))
+        assertTrue(provider.accept(project, kotlinDto))
+        assertTrue(provider.accept(project, mappedSuperclass))
+        assertFalse(provider.accept(project, service))
         assertEquals(FileEditorPolicy.PLACE_BEFORE_DEFAULT_EDITOR, provider.policy)
-        assertEquals("jmix-flowui-visual-editor", provider.editorTypeId)
+        assertEquals("jmix-entity-visual-editor", provider.editorTypeId)
     }
 
-    fun testEditorPublishesUnsavedDocumentRevisionOnCreateAndReselect() {
-        val original = "<view><layout><textField id=\"amount\"/></layout></view>\n"
-        val manual = original.replace("amount", "principal")
-        val reselected = manual.replace("principal", "approvedPrincipal")
-        val view = file(
-            "src/main/resources/com/company/loan/loan-detail-view.xml",
+    fun testEditorPublishesExactUnsavedEntityRevisionOnCreateAndReselect() {
+        val original = """
+            package com.company.loan;
+
+            @jakarta.persistence.Entity
+            public class LoanApp {
+                private String applicationNo;
+            }
+        """.trimIndent()
+        val manuallyEdited = original.replace("applicationNo", "businessApplicationNo")
+        val reselected = manuallyEdited.replace("String", "java.lang.String")
+        val entity = file(
+            "modules/loan/src/main/java/com/company/loan/LoanApp.java",
             original,
         )
-        val document = requireNotNull(FileDocumentManager.getInstance().getDocument(view))
+        val document = requireNotNull(FileDocumentManager.getInstance().getDocument(entity))
         WriteAction.run<RuntimeException> {
-            document.setText(manual)
+            document.setText(manuallyEdited)
         }
         val runtime = RecordingRuntime()
-        val editor = JmixFlowUiFileEditor(project, view, runtime)
+        val editor = JmixEntityFileEditor(project, entity, runtime)
         val modifiedEvents = mutableListOf<Boolean>()
         editor.addPropertyChangeListener { event ->
             if (event.propertyName == FileEditor.getPropModified()) {
@@ -74,15 +90,15 @@ class JmixFlowUiFileEditorTest : LightJavaCodeInsightFixtureTestCase() {
         }
 
         assertEquals("Design", editor.name)
-        assertSame(view, editor.file)
+        assertSame(entity, editor.file)
         assertTrue(editor.isModified)
-        assertEquals(WorkbenchSurface.FLOW_UI_EDITOR, runtime.initial.surface)
+        assertEquals(WorkbenchSurface.ENTITY_EDITOR, runtime.initial.surface)
         val locatorPath = requireNotNull(runtime.initial.sourceLocator?.relativePath)
-        assertTrue(locatorPath.endsWith("src/main/resources/com/company/loan/loan-detail-view.xml"))
+        assertTrue(locatorPath.endsWith("modules/loan/src/main/java/com/company/loan/LoanApp.java"))
         assertFalse(locatorPath.startsWith("/"))
         assertFalse(locatorPath.split('/').any { it == ".." })
         assertEquals(
-            CanonicalDiscoveryJson.sha256(manual),
+            CanonicalDiscoveryJson.sha256(manuallyEdited),
             runtime.initial.sourceLocator?.revisionFingerprint,
         )
 

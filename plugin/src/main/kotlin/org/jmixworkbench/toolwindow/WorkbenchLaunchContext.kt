@@ -16,4 +16,8 @@ data class WorkbenchLaunchContext(
 enum class WorkbenchSurface {
     TOOL_WINDOW,
     FLOW_UI_EDITOR,
+    ENTITY_EDITOR,
+    ENTITY_DESIGNER,
+    VIEW_DESIGNER,
+    CRUD_DESIGNER,
 }

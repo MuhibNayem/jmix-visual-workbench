@@ -27,6 +27,7 @@ import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
+import javax.xml.parsers.DocumentBuilderFactory;
 
 public abstract class VerifyPluginZipContentsTask extends DefaultTask implements VerificationTask {
     private static final Pattern ASSET_PATTERN =
@@ -167,6 +168,20 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         String descriptor = text(contents.get("META-INF/plugin.xml"));
         requireContains(descriptor, "<id>org.jmixworkbench</id>", archive);
         requireContains(descriptor, "<name>Jmix Visual Workbench</name>", archive);
+        requireExtensionRegistration(
+                descriptor,
+                "fileEditorProvider",
+                "implementation",
+                "org.jmixworkbench.editor.JmixEntityFileEditorProvider",
+                archive
+        );
+        requireExtensionRegistration(
+                descriptor,
+                "projectService",
+                "serviceImplementation",
+                "org.jmixworkbench.toolwindow.WorkbenchNavigationService",
+                archive
+        );
         if ("idea253".equals(lane)) {
             requireContains(descriptor, "since-build=\"253\"", archive);
             requireContains(descriptor, "until-build=\"253.*\"", archive);
@@ -204,6 +219,43 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
             throw new IllegalStateException(archive + " build-info.json has no valid inputSha256");
         }
         return digest.group(1);
+    }
+
+    private static void requireExtensionRegistration(
+            String descriptor,
+            String elementName,
+            String attributeName,
+            String expectedValue,
+            Path archive
+    ) {
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            factory.setExpandEntityReferences(false);
+            factory.setXIncludeAware(false);
+            var document = factory.newDocumentBuilder().parse(
+                    new ByteArrayInputStream(descriptor.getBytes(StandardCharsets.UTF_8))
+            );
+            var candidates = document.getElementsByTagName(elementName);
+            for (int index = 0; index < candidates.getLength(); index++) {
+                var candidate = candidates.item(index);
+                var attribute = candidate.getAttributes().getNamedItem(attributeName);
+                if (attribute != null && expectedValue.equals(attribute.getNodeValue())) {
+                    return;
+                }
+            }
+        } catch (Exception exception) {
+            throw new IllegalStateException(
+                    archive + " contains an unreadable META-INF/plugin.xml",
+                    exception
+            );
+        }
+        throw new IllegalStateException(
+                archive + " descriptor is missing <" + elementName + " "
+                        + attributeName + "=\"" + expectedValue + "\">"
+        );
     }
 
     static void inspectPath(String entryName, String archive) {

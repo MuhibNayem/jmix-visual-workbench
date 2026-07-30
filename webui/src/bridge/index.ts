@@ -174,21 +174,32 @@ class Bridge {
   }
 
   private developmentLaunchContext(): WorkbenchLaunchContext | null {
-    const document = developmentFlowUiWorkspace.document
-    if (
-      !import.meta.env.DEV ||
-      window.location.pathname !== '/flowui-editor.html' ||
-      !document
-    ) {
-      return null
+    if (!import.meta.env.DEV) return null
+    if (window.location.pathname === '/flowui-editor.html') {
+      const document = developmentFlowUiWorkspace.document
+      return document
+        ? {
+            surface: 'FLOW_UI_EDITOR',
+            sourceLocator: {
+              relativePath: document.relativePath,
+              revisionFingerprint: document.revisionFingerprint,
+            },
+          }
+        : null
     }
-    return {
-      surface: 'FLOW_UI_EDITOR',
-      sourceLocator: {
-        relativePath: document.relativePath,
-        revisionFingerprint: document.revisionFingerprint,
-      },
+    if (window.location.pathname === '/entity-editor.html') {
+      const requestedSource = new URLSearchParams(window.location.search).get('source')
+      const entity = developmentSchemaWorkspace.entities.find(candidate =>
+        candidate.sourceLocator.relativePath === requestedSource,
+      ) ?? developmentSchemaWorkspace.entities[0]
+      return entity
+        ? {
+            surface: 'ENTITY_EDITOR',
+            sourceLocator: entity.sourceLocator,
+          }
+        : null
     }
+    return null
   }
 
   send(action: string, payload: any = {}, requestId: string = this.nextRequestId()) {

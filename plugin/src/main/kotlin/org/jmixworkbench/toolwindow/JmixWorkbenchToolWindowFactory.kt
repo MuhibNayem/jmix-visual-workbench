@@ -126,6 +126,8 @@ internal interface WorkbenchEmbeddedBrowser {
 
 internal fun interface WorkbenchProjectBridge {
     fun dispose()
+
+    fun publishLaunchContext(context: WorkbenchLaunchContext) = Unit
 }
 
 internal interface WorkbenchToolWindowRuntime {
@@ -140,6 +142,8 @@ internal interface WorkbenchToolWindowRuntime {
     fun createBrowser(): WorkbenchEmbeddedBrowser
 
     fun createProjectBridge(project: Project, browser: WorkbenchEmbeddedBrowser): WorkbenchProjectBridge
+
+    fun attachNavigation(project: Project, bridge: WorkbenchProjectBridge): Disposable
 
     fun createContent(component: JComponent, displayName: String): Content
 }
@@ -177,6 +181,10 @@ private class IntelliJEmbeddedBrowser(
 private class IntelliJProjectBridge(
     private val delegate: JcefBridge,
 ) : WorkbenchProjectBridge {
+    override fun publishLaunchContext(context: WorkbenchLaunchContext) {
+        delegate.publishLaunchContext(context)
+    }
+
     override fun dispose() {
         delegate.dispose()
     }
@@ -203,6 +211,12 @@ internal object IntelliJWorkbenchToolWindowRuntime : WorkbenchToolWindowRuntime 
             ?: error("The IntelliJ runtime requires an IntelliJ-backed browser")
         return IntelliJProjectBridge(JcefBridge(project, intellijBrowser.delegate))
     }
+
+    override fun attachNavigation(
+        project: Project,
+        bridge: WorkbenchProjectBridge,
+    ): Disposable =
+        WorkbenchNavigationService.getInstance(project).attach(bridge::publishLaunchContext)
 
     override fun createContent(component: JComponent, displayName: String): Content =
         ContentFactory.getInstance().createContent(component, displayName, false)
@@ -295,9 +309,15 @@ class JmixWorkbenchToolWindowFactory private constructor(
         browser.loadUrl(ui.url)
 
         val content = runtime.createContent(browser.component, "Designer")
+        val navigationAttachment = bridge?.let { projectBridge ->
+            runtime.attachNavigation(project, projectBridge)
+        }
         content.setDisposer(
             WorkbenchBrowserLifecycle(
-                disposeBridge = { bridge?.dispose() },
+                disposeBridge = {
+                    navigationAttachment?.dispose()
+                    bridge?.dispose()
+                },
                 disposeBrowser = browser::dispose,
             ),
         )

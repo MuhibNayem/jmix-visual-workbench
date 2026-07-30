@@ -77,41 +77,47 @@ internal object FlowUiFileEditorEligibility {
     }
 }
 
-internal interface FlowUiFileEditorSession : Disposable {
+internal interface WorkbenchFileEditorSession : Disposable {
     val component: JComponent
 
     fun publishLaunchContext(context: WorkbenchLaunchContext)
 }
 
-internal fun interface FlowUiFileEditorRuntime {
-    fun create(project: Project, initialContext: WorkbenchLaunchContext): FlowUiFileEditorSession
+internal fun interface WorkbenchFileEditorRuntime {
+    fun create(project: Project, initialContext: WorkbenchLaunchContext): WorkbenchFileEditorSession
 }
 
-internal object IntelliJFlowUiFileEditorRuntime : FlowUiFileEditorRuntime {
+internal object IntelliJFlowUiFileEditorRuntime : WorkbenchFileEditorRuntime {
     override fun create(
         project: Project,
         initialContext: WorkbenchLaunchContext,
-    ): FlowUiFileEditorSession {
+    ): WorkbenchFileEditorSession {
         if (!JBCefApp.isSupported()) {
-            return DiagnosticFlowUiFileEditorSession(
+            return DiagnosticWorkbenchFileEditorSession(
                 JCEF_UNAVAILABLE_CODE,
                 "JCEF is unavailable. Use IntelliJ's XML editor in this runtime.",
             )
         }
         val entryPoint = JmixFlowUiFileEditorProvider::class.java.getResource("/webui/index.html")
-            ?: return DiagnosticFlowUiFileEditorSession(
+            ?: return DiagnosticWorkbenchFileEditorSession(
                 WEB_BUNDLE_MISSING_CODE,
                 "The verified visual designer bundle is missing. Reinstall the plugin.",
             )
-        return JcefFlowUiFileEditorSession(project, initialContext, entryPoint)
+        return JcefWorkbenchFileEditorSession(
+            project = project,
+            initialContext = initialContext,
+            entryPoint = entryPoint,
+            entryUrl = PACKAGED_FLOW_UI_EDITOR_ENTRY_URL,
+        )
     }
 }
 
-private class JcefFlowUiFileEditorSession(
+internal class JcefWorkbenchFileEditorSession(
     project: Project,
     initialContext: WorkbenchLaunchContext,
     private val entryPoint: URL,
-) : FlowUiFileEditorSession {
+    private val entryUrl: String,
+) : WorkbenchFileEditorSession {
     private val browser = JBCefBrowser()
     private val resourceHandler = PackagedWorkbenchRequestHandler(
         PackagedWorkbenchResourceProvider(
@@ -131,7 +137,7 @@ private class JcefFlowUiFileEditorSession(
         }
         browser.jbCefClient.addRequestHandler(resourceHandler, browser.cefBrowser)
         bridge = JcefBridge(project, browser, initialContext)
-        browser.loadURL(PACKAGED_FLOW_UI_EDITOR_ENTRY_URL)
+        browser.loadURL(entryUrl)
     }
 
     override val component: JComponent
@@ -152,10 +158,10 @@ private class JcefFlowUiFileEditorSession(
     }
 }
 
-private class DiagnosticFlowUiFileEditorSession(
+internal class DiagnosticWorkbenchFileEditorSession(
     code: String,
     message: String,
-) : FlowUiFileEditorSession {
+) : WorkbenchFileEditorSession {
     override val component: JComponent = JPanel(BorderLayout()).also { panel ->
         panel.name = code
         panel.add(JLabel("[$code] $message", SwingConstants.CENTER), BorderLayout.CENTER)
@@ -166,19 +172,21 @@ private class DiagnosticFlowUiFileEditorSession(
     override fun dispose() = Unit
 }
 
-internal class JmixFlowUiFileEditor(
+internal open class JmixSourceVisualFileEditor(
     private val project: Project,
     private val virtualFile: VirtualFile,
-    runtime: FlowUiFileEditorRuntime,
+    runtime: WorkbenchFileEditorRuntime,
+    private val surface: WorkbenchSurface,
+    private val invalidContextMessage: String,
 ) : UserDataHolderBase(), FileEditor {
     private val fileDocumentManager = FileDocumentManager.getInstance()
     private val document: Document? = fileDocumentManager.getDocument(virtualFile)
     private val propertyChanges = PropertyChangeSupport(this)
-    private val session: FlowUiFileEditorSession
+    private val session: WorkbenchFileEditorSession
 
     init {
         val context = requireNotNull(currentLaunchContext()) {
-            "The selected FlowUI descriptor is outside the registered project roots."
+            invalidContextMessage
         }
         session = runtime.create(project, context)
         document?.addDocumentListener(
@@ -228,7 +236,7 @@ internal class JmixFlowUiFileEditor(
                     ?: return@Computable null
                 val content = ProjectSourceText.read(virtualFile)
                 WorkbenchLaunchContext(
-                    surface = WorkbenchSurface.FLOW_UI_EDITOR,
+                    surface = surface,
                     sourceLocator = SourceLocator(
                         relativePath = relativePath,
                         revisionFingerprint = CanonicalDiscoveryJson.sha256(content),
@@ -237,3 +245,15 @@ internal class JmixFlowUiFileEditor(
             },
         )
 }
+
+internal class JmixFlowUiFileEditor(
+    project: Project,
+    virtualFile: VirtualFile,
+    runtime: WorkbenchFileEditorRuntime,
+) : JmixSourceVisualFileEditor(
+    project = project,
+    virtualFile = virtualFile,
+    runtime = runtime,
+    surface = WorkbenchSurface.FLOW_UI_EDITOR,
+    invalidContextMessage = "The selected FlowUI descriptor is outside the registered project roots.",
+)

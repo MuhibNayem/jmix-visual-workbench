@@ -43,7 +43,7 @@ class WorkbenchToolWindowFactoryIntegrationTest {
         val disposer = assertNotNull(runtime.contents.single().disposer)
         disposer.dispose()
         disposer.dispose()
-        assertEquals(listOf("bridge", "handler", "browser"), runtime.disposalEvents)
+        assertEquals(listOf("navigation", "bridge", "handler", "browser"), runtime.disposalEvents)
     }
 
     @Test
@@ -139,6 +139,13 @@ class WorkbenchToolWindowFactoryIntegrationTest {
                 startupEvents += "create-project-bridge"
                 bridges += it
             }
+
+        override fun attachNavigation(
+            project: Project,
+            bridge: WorkbenchProjectBridge,
+        ): Disposable = Disposable {
+            disposalEvents += "navigation"
+        }
 
         override fun createContent(component: JComponent, displayName: String): Content =
             FakeContent(component, displayName).also(contents::add).proxy

@@ -88,6 +88,28 @@ class VerifyPluginZipContentsTaskTest {
         assertTrue(error.getMessage().contains("private key"));
     }
 
+    @Test
+    void rejectsAPluginWhosePackagedDescriptorOmitsTheNativeEntityEditor() throws Exception {
+        byte[] pluginJar = validPluginJar();
+        byte[] withoutEntityEditor = rewriteNestedEntry(
+                pluginJar,
+                "META-INF/plugin.xml",
+                text(pluginJar, "META-INF/plugin.xml").replace(
+                        "<fileEditorProvider implementation=\"org.jmixworkbench.editor.JmixEntityFileEditorProvider\" />",
+                        ""
+                )
+        );
+        Path archive = writeArchive("missing-entity-editor.zip", Map.of(
+                "plugin/lib/main.jar", withoutEntityEditor
+        ));
+
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> VerifyPluginZipContentsTask.inspectArchive(archive, "idea253")
+        );
+        assertTrue(error.getMessage().contains("JmixEntityFileEditorProvider"));
+    }
+
     private Path writeArchive(String name, Map<String, byte[]> entries) throws Exception {
         Path archive = temporaryDirectory.resolve(name);
         try (ZipOutputStream output = new ZipOutputStream(java.nio.file.Files.newOutputStream(archive))) {
@@ -104,6 +126,10 @@ class VerifyPluginZipContentsTaskTest {
         Map<String, byte[]> entries = new LinkedHashMap<>();
         entries.put("META-INF/plugin.xml", bytes(
                 "<idea-plugin><id>org.jmixworkbench</id><name>Jmix Visual Workbench</name>"
+                        + "<extensions>"
+                        + "<fileEditorProvider implementation=\"org.jmixworkbench.editor.JmixEntityFileEditorProvider\" />"
+                        + "<projectService serviceImplementation=\"org.jmixworkbench.toolwindow.WorkbenchNavigationService\" />"
+                        + "</extensions>"
                         + "<idea-version since-build=\"253\" until-build=\"253.*\"/></idea-plugin>"
         ));
         entries.put("webui/index.html", bytes(
@@ -129,6 +155,40 @@ class VerifyPluginZipContentsTaskTest {
             }
         }
         return bytes.toByteArray();
+    }
+
+    private static String text(byte[] archive, String entryName) throws Exception {
+        try (java.util.zip.ZipInputStream input =
+                     new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(archive))) {
+            java.util.zip.ZipEntry entry;
+            while ((entry = input.getNextEntry()) != null) {
+                if (entryName.equals(entry.getName())) {
+                    return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+                }
+            }
+        }
+        throw new IllegalArgumentException("Missing nested entry: " + entryName);
+    }
+
+    private static byte[] rewriteNestedEntry(
+            byte[] archive,
+            String targetEntry,
+            String replacement
+    ) throws Exception {
+        Map<String, byte[]> entries = new LinkedHashMap<>();
+        try (java.util.zip.ZipInputStream input =
+                     new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(archive))) {
+            java.util.zip.ZipEntry entry;
+            while ((entry = input.getNextEntry()) != null) {
+                entries.put(
+                        entry.getName(),
+                        targetEntry.equals(entry.getName())
+                                ? bytes(replacement)
+                                : input.readAllBytes()
+                );
+            }
+        }
+        return nestedArchive(entries);
     }
 
     private static byte[] bytes(String value) {

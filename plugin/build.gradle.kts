@@ -316,6 +316,18 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
             ) {
                 "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register the native FlowUI editor."
             }
+            check(
+                """<fileEditorProvider implementation="org.jmixworkbench.editor.JmixEntityFileEditorProvider"/>""" in
+                    descriptorText,
+            ) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register the native entity editor."
+            }
+            check(
+                """<projectService serviceImplementation="org.jmixworkbench.toolwindow.WorkbenchNavigationService"/>""" in
+                    descriptorText,
+            ) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register action navigation."
+            }
             listOf(
                 "org.jmixworkbench.ide.JmixJavaUiComponentPolicyInspection",
                 "org.jmixworkbench.ide.JmixKotlinUiComponentPolicyInspection",

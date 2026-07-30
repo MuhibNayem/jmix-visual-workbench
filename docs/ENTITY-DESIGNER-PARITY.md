@@ -12,6 +12,23 @@ This is the evidence and remaining-work contract for `STUDIO-CORE-001` and
 
 ## Implemented in the current entity milestone
 
+- Real Jmix entity Java and Kotlin files now open with a native IntelliJ
+  **Design** editor beside the normal source editor. Eligibility is
+  project-contained and annotation-aware; the editor passes only a
+  project-relative locator and the SHA-256 revision of the current IntelliJ
+  document, including unsaved changes. The isolated packaged route resolves
+  exactly one indexed entity at that revision, locks entity-source selection,
+  and fails closed on stale, missing, or ambiguous source evidence. Reselecting
+  Design republishes the current document revision. New Entity, New View, and
+  CRUD actions now use a retained project navigation channel and open their
+  exact workspaces even when the tool window has not yet been created.
+  Registrations exist in the shared descriptor and both host-specific
+  descriptors; build-time source parity and nested packaged-ZIP checks reject a
+  missing entity editor or navigation service. Both installable JAR
+  descriptors were inspected after assembly, 263 tests and three packaged-host
+  smoke tests pass on each supported IntelliJ lane, and the native route
+  completed preview interaction with zero shell overflow at a 360-pixel
+  development editor width.
 - JPA entity, mapped-superclass, embeddable, DTO and typed Jmix enumeration
   generation.
 - UUID, Long, Integer, String and configured embedded identifier classes, with
