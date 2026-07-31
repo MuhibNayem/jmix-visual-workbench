@@ -612,6 +612,7 @@ export default function IntegrationDesigner() {
   const [previewing, setPreviewing] = useState(false)
   const [applying, setApplying] = useState(false)
   const [approvingCatalog, setApprovingCatalog] = useState(false)
+  const [approvingEvolution, setApprovingEvolution] = useState(false)
   const [choosingOpenApi, setChoosingOpenApi] = useState(false)
   const [activePreviewFile, setActivePreviewFile] = useState(0)
   const historyRef = useRef<IntegrationConnectorModel[]>([])
@@ -643,6 +644,12 @@ export default function IntegrationDesigner() {
       if (!current) return current
       const next = cloneModel(current)
       mutate(next)
+      if (
+        current.openApiEvolutionCapability &&
+        next.openApiEvolutionCapability === current.openApiEvolutionCapability
+      ) {
+        next.openApiEvolutionCapability = undefined
+      }
       if (JSON.stringify(next) === JSON.stringify(current)) return current
       historyRef.current.push(cloneModel(current))
       if (historyRef.current.length > 100) historyRef.current.shift()
@@ -691,6 +698,10 @@ export default function IntegrationDesigner() {
     candidate.template.id === model?.catalogBinding?.templateId &&
     candidate.template.version === model?.catalogBinding?.templateVersion
   ))
+  const selectedDocument = workspace?.existingDocuments.find((document) => (
+    document.locator.relativePath === model?.sourceLocator?.relativePath
+  ))
+  const openApiEvolution = selectedDocument?.openApiEvolution
   const selectedOpenApiContract = workspace?.openApiContracts.find((candidate) => (
     candidate.relativePath === model?.openApiBinding?.relativePath &&
     candidate.documentSha256 === model?.openApiBinding?.documentSha256
@@ -722,6 +733,16 @@ export default function IntegrationDesigner() {
     blockers.push('The bound OpenAPI contract changed or is unavailable. Refresh and review the contract before generation.')
   } else if (model?.openApiBinding && (!selectedOpenApiOperation || !selectedOpenApiOperation.supported)) {
     blockers.push('The bound OpenAPI operation is missing or cannot be represented safely.')
+  }
+  const evolutionPrepared = Boolean(
+    openApiEvolution &&
+    model?.openApiBinding?.documentSha256 === openApiEvolution.candidateBinding.documentSha256 &&
+    model.openApiBinding.operationId === openApiEvolution.candidateBinding.operationId &&
+    model.openApiBinding.method === openApiEvolution.candidateBinding.method &&
+    model.openApiBinding.path === openApiEvolution.candidateBinding.path,
+  )
+  if (evolutionPrepared && !model?.openApiEvolutionCapability) {
+    blockers.push('Approve the reviewed OpenAPI contract evolution in native IntelliJ UI before previewing regeneration.')
   }
   if (selectedOpenApiRequestRepresentation && !selectedOpenApiRequestRepresentation.supported) {
     blockers.push(selectedOpenApiRequestRepresentation.issue ?? 'The request representation is not supported.')
@@ -941,6 +962,79 @@ export default function IntegrationDesigner() {
     }
   }
 
+  const prepareOpenApiEvolution = () => {
+    if (!model || !openApiEvolution || !workspace || !destination) return
+    const contract = workspace.openApiContracts.find((candidate) => (
+      candidate.relativePath === openApiEvolution.candidateBinding.relativePath &&
+      candidate.documentSha256 === openApiEvolution.candidateBinding.documentSha256
+    ))
+    const operation = contract?.operations.find((candidate) => (
+      candidate.method === openApiEvolution.candidateBinding.method &&
+      candidate.path === openApiEvolution.candidateBinding.path &&
+      (openApiEvolution.candidateBinding.operationId == null ||
+        candidate.operationId === openApiEvolution.candidateBinding.operationId)
+    ))
+    if (!operation) {
+      setError('The reviewed replacement operation is no longer present. Refresh the workspace.')
+      return
+    }
+    const next = cloneModel(model)
+    next.openApiBinding = { ...openApiEvolution.candidateBinding }
+    next.openApiEvolutionCapability = undefined
+    next.httpMethod = operation.method
+    if (operation.defaultBinding?.requestMediaType) next.contentType = operation.defaultBinding.requestMediaType
+    if (next.openApiJmixLayer?.enabled) {
+      const previousLayer = next.openApiJmixLayer
+      const defaults = defaultOpenApiJmixLayer(next, operation, destination.defaultPackage)
+      const previousMappings = new Map(previousLayer.mappings.map((mapping) => [mapping.schemaId, mapping]))
+      defaults.mappings = defaults.mappings.map((fresh) => {
+        const previous = previousMappings.get(fresh.schemaId)
+        if (!previous) return fresh
+        const previousProperties = new Map(previous.properties.map((property) => [property.schemaProperty, property]))
+        return {
+          ...fresh,
+          ...previous,
+          schemaId: fresh.schemaId,
+          properties: fresh.properties.map((property) => previousProperties.get(property.schemaProperty) ?? property),
+        }
+      })
+      next.openApiJmixLayer = {
+        ...defaults,
+        dtoPackage: previousLayer.dtoPackage,
+        mapperPackage: previousLayer.mapperPackage,
+        servicePackage: previousLayer.servicePackage,
+        serviceClassName: previousLayer.serviceClassName,
+        serviceBeanName: previousLayer.serviceBeanName,
+      }
+    }
+    replaceModel(next)
+    addToast('Prepared the current contract and preserved only exact, unambiguous Jmix mappings.', 'success')
+  }
+
+  const approveOpenApiEvolution = async () => {
+    if (!model || !openApiEvolution || !evolutionPrepared) return
+    setApprovingEvolution(true)
+    setError(null)
+    try {
+      const result = await bridge.approveOpenApiContractEvolution(model)
+      if (!result.approved || !result.approval) {
+        setError(result.message ?? 'OpenAPI evolution approval was not granted.')
+        return
+      }
+      commit((draft) => {
+        draft.openApiEvolutionCapability = result.approval?.capability
+      })
+      addToast(
+        `Approved contract regeneration until ${new Date(result.approval.expiresAt).toLocaleTimeString()}.`,
+        'success',
+      )
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'OpenAPI evolution approval failed.')
+    } finally {
+      setApprovingEvolution(false)
+    }
+  }
+
   const previewChanges = async () => {
     if (!model || blockers.length) return
     setPreviewing(true)
@@ -1020,6 +1114,52 @@ export default function IntegrationDesigner() {
           <span className="min-w-0 flex-1">{error}</span>
           <button aria-label="Dismiss error" onClick={() => setError(null)}><X size={14} /></button>
         </div>
+      )}
+
+      {openApiEvolution && (
+        <section className="shrink-0 border-b border-amber-500/30 bg-amber-500/[0.07] px-3 py-2" aria-label="OpenAPI contract evolution review">
+          <div className="flex min-w-0 flex-wrap items-start gap-2">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-300" />
+            <div className="min-w-[12rem] flex-1">
+              <p className="text-[11px] font-semibold text-amber-100">
+                Provider contract changed · wire {openApiEvolution.report.wireImpact.toLowerCase()} · source {openApiEvolution.report.sourceImpact.toLowerCase()}
+              </p>
+              <p className="mt-0.5 text-[9px] leading-4 text-amber-100/65">
+                {openApiEvolution.candidateTitle}{openApiEvolution.candidateApiVersion ? ` ${openApiEvolution.candidateApiVersion}` : ''}
+                {' · '}{openApiEvolution.report.changes.length} semantic change{openApiEvolution.report.changes.length === 1 ? '' : 's'}
+                {' · '}{openApiEvolution.report.baselineSha256.slice(0, 10)} → {openApiEvolution.report.candidateSha256.slice(0, 10)}
+              </p>
+              <div className="mt-1 flex max-h-20 flex-wrap gap-1 overflow-y-auto">
+                {openApiEvolution.report.changes.slice(0, 12).map((change) => (
+                  <span key={`${change.code}:${change.path}`} title={change.message} className="rounded border border-amber-400/20 bg-black/15 px-1.5 py-0.5 text-[8px] text-amber-100/75">
+                    {change.scope.toLowerCase()} · {change.path} · {change.sourceImpact.toLowerCase()}
+                  </span>
+                ))}
+              </div>
+              {openApiEvolution.mappingIssues.length > 0 && (
+                <div className="mt-1.5 rounded border border-red-400/25 bg-red-500/[0.06] px-2 py-1 text-[9px] leading-4 text-red-100/80">
+                  <span className="font-semibold">Jmix mapping review required:</span>{' '}
+                  {openApiEvolution.mappingIssues.slice(0, 3).join(' ')}
+                  {openApiEvolution.mappingIssues.length > 3 && ` +${openApiEvolution.mappingIssues.length - 3} more`}
+                </div>
+              )}
+            </div>
+            {!evolutionPrepared ? (
+              <button className="btn-secondary shrink-0" onClick={prepareOpenApiEvolution}>
+                Prepare guided update
+              </button>
+            ) : !model.openApiEvolutionCapability ? (
+              <button className="btn-primary shrink-0" disabled={approvingEvolution} onClick={() => void approveOpenApiEvolution()}>
+                {approvingEvolution ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
+                Approve regeneration
+              </button>
+            ) : (
+              <span className="flex shrink-0 items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2 py-1.5 text-[9px] text-emerald-200">
+                <CheckCircle2 size={12} /> Revision-bound approval ready
+              </span>
+            )}
+          </div>
+        </section>
       )}
 
       <div className="integration-designer-grid min-h-0 min-w-0 flex-1">
@@ -1118,7 +1258,13 @@ export default function IntegrationDesigner() {
                     {document.editable ? <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-emerald-400" /> : <FileKey2 size={13} className="mt-0.5 shrink-0 text-amber-400" />}
                     <span className="min-w-0">
                       <span className="block truncate text-[11px] text-gray-200">{document.model.name}</span>
-                      <span className="block truncate text-[9px] text-gray-500">{document.editable ? 'Owned and editable' : 'Manual changes · read only'}</span>
+                      <span className="block truncate text-[9px] text-gray-500">
+                        {document.editable
+                          ? 'Owned and editable'
+                          : document.openApiEvolution
+                            ? 'Contract update · review required'
+                            : 'Manual changes · read only'}
+                      </span>
                     </span>
                   </button>
                 ))}

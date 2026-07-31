@@ -28,6 +28,8 @@ import org.jmixworkbench.model.IntegrationOpenApiSchemaModel
 import org.jmixworkbench.model.IntegrationOpenApiSecurityRequirementModel
 import org.jmixworkbench.model.IntegrationOpenApiSecuritySchemeKind
 import org.jmixworkbench.model.IntegrationOpenApiSecuritySchemeModel
+import org.jmixworkbench.model.IntegrationOpenApiValidationModel
+import java.math.BigDecimal
 import java.security.MessageDigest
 import java.util.HexFormat
 import java.util.LinkedHashMap
@@ -123,6 +125,57 @@ class OpenApiContractService(private val project: Project) {
         val parsed = parseFile(binding.relativePath, resolved.file)
         val operation = parsed.resolve(binding)
         return OpenApiContractResolution(contract, operation)
+    }
+
+    /**
+     * Reopens the project-owned document at its current revision and locates
+     * the operation represented by a stale binding. This never authorizes
+     * generation: callers must compare the returned operation with their
+     * backend-issued baseline and obtain explicit evolution approval.
+     */
+    fun resolveCurrent(binding: IntegrationOpenApiBinding): OpenApiContractResolution {
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(binding.relativePath)
+            ?: throw IllegalArgumentException(
+                "OpenAPI contract '${binding.relativePath}' is no longer available in the project.",
+            )
+        val contract = inspect(binding.relativePath, resolved.file, null)
+        val supported = contract.operations.filter(OpenApiOperationSnapshot::supported)
+        val byOperationId = binding.operationId?.let { operationId ->
+            supported.filter { it.operationId == operationId }.singleOrNull()
+        }
+        val snapshot = byOperationId ?: supported.filter {
+            it.method == binding.method && it.path == binding.path
+        }.singleOrNull() ?: throw IllegalArgumentException(
+            "The previous OpenAPI operation cannot be matched uniquely in the current contract. " +
+                "Select its replacement explicitly.",
+        )
+        val defaultBinding = requireNotNull(snapshot.defaultBinding) {
+            "The matched OpenAPI operation has no safe default representation."
+        }
+        val requestMediaType = binding.requestMediaType?.takeIf { requested ->
+            snapshot.requestRepresentations.any { it.mediaType == requested && it.supported }
+        } ?: defaultBinding.requestMediaType
+        val selectedResponse = binding.responseStatus?.let { requested ->
+            snapshot.responses.singleOrNull { it.status == requested }
+        }
+        val responseStatus = selectedResponse?.status ?: defaultBinding.responseStatus
+        val response = responseStatus?.let { status ->
+            snapshot.responses.singleOrNull { it.status == status }
+        }
+        val responseMediaType = binding.responseMediaType?.takeIf { requested ->
+            response?.representations.orEmpty().any { it.mediaType == requested && it.supported }
+        } ?: if (responseStatus == defaultBinding.responseStatus) {
+            defaultBinding.responseMediaType
+        } else {
+            response?.representations.orEmpty().firstOrNull(OpenApiRepresentationSnapshot::supported)?.mediaType
+        }
+        val currentBinding = defaultBinding.copy(
+            requestMediaType = requestMediaType,
+            responseStatus = responseStatus,
+            responseMediaType = responseMediaType,
+        )
+        val parsed = parseFile(binding.relativePath, resolved.file)
+        return OpenApiContractResolution(contract, parsed.resolve(currentBinding))
     }
 
     private fun inspect(
@@ -241,6 +294,7 @@ data class OpenApiSchemaSnapshot(
     val enumValues: List<String>,
     val itemSchemaId: String?,
     val additionalPropertiesAllowed: Boolean,
+    val validation: IntegrationOpenApiValidationModel = IntegrationOpenApiValidationModel(),
     val properties: List<OpenApiSchemaPropertySnapshot>,
 )
 
@@ -561,6 +615,7 @@ internal class ParsedOpenApiContract(
                     enumValues = schema.enumValues,
                     itemSchemaId = schema.itemSchemaId,
                     additionalPropertiesAllowed = schema.additionalPropertiesAllowed,
+                    validation = schema.validation,
                     properties = schema.properties.map { property ->
                         OpenApiSchemaPropertySnapshot(
                             wireName = property.wireName,
@@ -1135,10 +1190,10 @@ private class SchemaCollector(
         }
         val allOf = resolved.allOf.orEmpty()
         val propertySources = if (allOf.isEmpty()) listOf(resolved) else allOf + resolved.copyWithoutAllOf()
+        val effectiveSources = propertySources.map(::resolveLocal)
         val mergedProperties = linkedMapOf<String, Schema<*>>()
         val required = linkedSetOf<String>()
-        propertySources.forEach { source ->
-            val effective = resolveLocal(source)
+        effectiveSources.forEach { effective ->
             require(effective.oneOf.orEmpty().isEmpty() && effective.anyOf.orEmpty().isEmpty()) {
                 "Schema '$baseName' contains a polymorphic allOf branch."
             }
@@ -1197,18 +1252,27 @@ private class SchemaCollector(
             is Schema<*> -> collect(additional, "${baseName}_value", depth + 1)
             else -> null
         }
+        val validation = validation(effectiveSources, baseName)
+        val enumSets = effectiveSources.mapNotNull { source ->
+            source.enum?.map(Any::toString)?.toSet()?.takeIf(Set<String>::isNotEmpty)
+        }
+        val enumValues = enumSets.reduceOrNull { left, right -> left intersect right }.orEmpty().sorted()
+        require(enumSets.isEmpty() || enumValues.isNotEmpty()) {
+            "Schema '$baseName' has contradictory allOf enum constraints."
+        }
         models[id] = IntegrationOpenApiSchemaModel(
             id = id,
             javaName = javaName,
             kind = kind,
             format = resolved.format?.lowercase(),
             nullable = nullable(resolved),
-            enumValues = resolved.enum.orEmpty().map { it.toString() }.distinct().sorted(),
+            enumValues = enumValues,
             properties = properties,
             itemSchemaId = itemSchemaId,
             additionalPropertiesSchemaId = additionalPropertiesSchemaId,
             additionalPropertiesAllowed = resolved.additionalProperties == true ||
                 resolved.additionalProperties is Schema<*>,
+            validation = validation,
         )
         return id
     }
@@ -1222,6 +1286,78 @@ private class SchemaCollector(
         require(models.size <= limits.maxSchemas && propertyCount <= limits.maxProperties) {
             "OpenAPI schema normalization exceeded its declared safety bounds."
         }
+    }
+
+    private fun validation(
+        sources: List<Schema<*>>,
+        schemaName: String,
+    ): IntegrationOpenApiValidationModel {
+        data class Bound(val value: BigDecimal, val exclusive: Boolean)
+
+        val lowerBounds = sources.flatMap { source ->
+            buildList {
+                source.minimum?.let { add(Bound(it, source.exclusiveMinimum == true)) }
+                source.exclusiveMinimumValue?.let { add(Bound(it, true)) }
+            }
+        }
+        val upperBounds = sources.flatMap { source ->
+            buildList {
+                source.maximum?.let { add(Bound(it, source.exclusiveMaximum == true)) }
+                source.exclusiveMaximumValue?.let { add(Bound(it, true)) }
+            }
+        }
+        val lower = lowerBounds.maxWithOrNull(
+            compareBy<Bound>(Bound::value).thenBy(Bound::exclusive),
+        )
+        val upper = upperBounds.minWithOrNull(
+            compareBy<Bound>(Bound::value).thenByDescending(Bound::exclusive),
+        )
+        require(
+            lower == null || upper == null || lower.value < upper.value ||
+                (lower.value == upper.value && !lower.exclusive && !upper.exclusive)
+        ) {
+            "Schema '$schemaName' has contradictory numeric bounds."
+        }
+        fun strongestMinimum(values: List<Int?>): Int? = values.filterNotNull().maxOrNull()
+        fun strongestMaximum(values: List<Int?>): Int? = values.filterNotNull().minOrNull()
+        val minLength = strongestMinimum(sources.map { it.minLength })
+        val maxLength = strongestMaximum(sources.map { it.maxLength })
+        val minItems = strongestMinimum(sources.map { it.minItems })
+        val maxItems = strongestMaximum(sources.map { it.maxItems })
+        val minProperties = strongestMinimum(sources.map { it.minProperties })
+        val maxProperties = strongestMaximum(sources.map { it.maxProperties })
+        require(minLength == null || maxLength == null || minLength <= maxLength) {
+            "Schema '$schemaName' has contradictory string-length bounds."
+        }
+        require(minItems == null || maxItems == null || minItems <= maxItems) {
+            "Schema '$schemaName' has contradictory array-size bounds."
+        }
+        require(minProperties == null || maxProperties == null || minProperties <= maxProperties) {
+            "Schema '$schemaName' has contradictory object-size bounds."
+        }
+        val constValues = sources.mapNotNull { it.`const`?.toString() }.distinct()
+        require(constValues.size <= 1) {
+            "Schema '$schemaName' has contradictory const constraints."
+        }
+        return IntegrationOpenApiValidationModel(
+            minimum = lower?.value?.stripTrailingZeros()?.toPlainString(),
+            minimumExclusive = lower?.exclusive == true,
+            maximum = upper?.value?.stripTrailingZeros()?.toPlainString(),
+            maximumExclusive = upper?.exclusive == true,
+            multiplesOf = sources.mapNotNull { it.multipleOf }
+                .map { it.stripTrailingZeros().toPlainString() }
+                .distinct()
+                .sorted(),
+            minLength = minLength,
+            maxLength = maxLength,
+            patterns = sources.mapNotNull { it.pattern }.distinct().sorted(),
+            minItems = minItems,
+            maxItems = maxItems,
+            uniqueItems = sources.any { it.uniqueItems == true },
+            minProperties = minProperties,
+            maxProperties = maxProperties,
+            constValue = constValues.singleOrNull(),
+        )
     }
 
     private fun resolveLocal(schema: Schema<*>): Schema<*> {

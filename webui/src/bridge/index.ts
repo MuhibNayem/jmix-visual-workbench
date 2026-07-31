@@ -40,6 +40,7 @@ import type {
   GenerationResult,
   GraphSourceLocator,
   IntegrationConnectorCatalogApprovalResponse,
+  IntegrationOpenApiEvolutionApprovalResponse,
   IntegrationConnectorModel,
   IntegrationConnectorWorkspaceResponse,
   OpenApiContractSelectionResponse,
@@ -744,6 +745,17 @@ ${model.reliability.outboxEnabled ? '# durable at-least-once outbox; deduplicate
                     approvalPolicyId: 'brac.integration.sensitive',
                   },
                 } satisfies IntegrationConnectorCatalogApprovalResponse
+              case 'approveOpenApiContractEvolution':
+                return {
+                  approved: true,
+                  approval: {
+                    capability: 'development-native-openapi-evolution-approval',
+                    expiresAt: new Date(Date.now() + 300_000).toISOString(),
+                    reportDigest: 'development-openapi-report',
+                    wireImpact: 'REVIEW',
+                    sourceImpact: 'BREAKING',
+                  },
+                } satisfies IntegrationOpenApiEvolutionApprovalResponse
               case 'previewVisualRule': {
                 const model = payload as VisualRuleModel
                 const destination = developmentVisualRuleWorkspace.destinations.find(
@@ -3161,6 +3173,13 @@ ${javaMethods}
 
   chooseOpenApiContract() {
     return this.request<OpenApiContractSelectionResponse>('chooseOpenApiContract', {})
+  }
+
+  approveOpenApiContractEvolution(model: IntegrationConnectorModel) {
+    return this.request<IntegrationOpenApiEvolutionApprovalResponse>(
+      'approveOpenApiContractEvolution',
+      model,
+    )
   }
 
   previewIntegrationConnector(model: IntegrationConnectorModel) {

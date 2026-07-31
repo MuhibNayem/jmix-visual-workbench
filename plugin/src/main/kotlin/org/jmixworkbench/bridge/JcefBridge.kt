@@ -147,6 +147,9 @@ import org.jmixworkbench.services.IntegrationConnectorCatalogApprovalReview
 import org.jmixworkbench.services.IntegrationConnectorCatalogApprovalResponse
 import org.jmixworkbench.services.IntegrationConnectorWorkspaceResponse
 import org.jmixworkbench.services.IntegrationConnectorWorkspaceService
+import org.jmixworkbench.services.IntegrationOpenApiEvolutionApprovalReview
+import org.jmixworkbench.services.IntegrationOpenApiEvolutionApprovalResponse
+import org.jmixworkbench.services.OpenApiEvolutionApproval
 import org.jmixworkbench.services.OpenApiContractSelectionResponse
 import org.jmixworkbench.services.OpenApiContractSnapshot
 import org.jmixworkbench.services.OpenApiContractService
@@ -356,6 +359,10 @@ class JcefBridge(
             }
             if (action == "chooseOpenApiContract") {
                 handleChooseOpenApiContract(action, requestId)
+                return
+            }
+            if (action == "approveOpenApiContractEvolution") {
+                handleApproveOpenApiContractEvolution(action, requestId, payload)
                 return
             }
             if (action == "previewIntegrationConnector") {
@@ -1497,6 +1504,118 @@ class JcefBridge(
         val model = gson.fromJson(payload, IntegrationConnectorModel::class.java)
         val result = IntegrationConnectorWorkspaceService.getInstance(project).preview(model)
         sendResponse(action, requestId, gson.toJson(result))
+    }
+
+    private fun handleApproveOpenApiContractEvolution(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val model = runCatching {
+            gson.fromJson(payload, IntegrationConnectorModel::class.java)
+        }.getOrElse { failure ->
+            sendOpenApiEvolutionApprovalResponse(
+                action,
+                requestId,
+                false,
+                message = failure.message ?: "Invalid OpenAPI evolution request.",
+            )
+            return
+        }
+        ReadAction.nonBlocking<Result<IntegrationOpenApiEvolutionApprovalReview>> {
+            runCatching {
+                IntegrationConnectorWorkspaceService.getInstance(project).openApiEvolutionReview(model)
+            }
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { reviewResult ->
+                val review = reviewResult.getOrElse { failure ->
+                    sendOpenApiEvolutionApprovalResponse(
+                        action,
+                        requestId,
+                        false,
+                        message = failure.message ?: "OpenAPI evolution could not be reviewed safely.",
+                    )
+                    return@finishOnUiThread
+                }
+                val approved = Messages.showYesNoDialog(
+                    project,
+                    "Approve regeneration of '${review.operation}'?\n\n" +
+                        "Wire impact: ${review.report.wireImpact}\n" +
+                        "Generated-source impact: ${review.report.sourceImpact}\n" +
+                        "Semantic changes: ${review.report.changes.size}\n" +
+                        "Owned files affected: ${review.generatedFileCount}\n" +
+                        "Old contract: ${review.baselineSha256.take(12)}\n" +
+                        "New contract: ${review.candidateSha256.take(12)}\n\n" +
+                        "The five-minute approval is bound to this source revision, exact contracts, " +
+                        "semantic report, and all mapping decisions.",
+                    "Approve OpenAPI Contract Evolution",
+                    "Approve regeneration",
+                    "Cancel",
+                    Messages.getWarningIcon(),
+                ) == Messages.YES
+                if (!approved) {
+                    sendOpenApiEvolutionApprovalResponse(
+                        action,
+                        requestId,
+                        false,
+                        message = "Approval cancelled.",
+                    )
+                    return@finishOnUiThread
+                }
+                ReadAction.nonBlocking<Result<OpenApiEvolutionApproval>> {
+                    runCatching {
+                        IntegrationConnectorWorkspaceService.getInstance(project)
+                            .issueOpenApiEvolutionApproval(model)
+                    }
+                }
+                    .inSmartMode(project)
+                    .expireWith(project)
+                    .finishOnUiThread(ModalityState.any()) { approvalResult ->
+                        approvalResult.fold(
+                            onSuccess = { approval ->
+                                sendOpenApiEvolutionApprovalResponse(
+                                    action,
+                                    requestId,
+                                    true,
+                                    approval,
+                                )
+                            },
+                            onFailure = { failure ->
+                                sendOpenApiEvolutionApprovalResponse(
+                                    action,
+                                    requestId,
+                                    false,
+                                    message = failure.message
+                                        ?: "OpenAPI evolution approval could not be issued.",
+                                )
+                            },
+                        )
+                    }
+                    .submit(AppExecutorUtil.getAppExecutorService())
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun sendOpenApiEvolutionApprovalResponse(
+        action: String,
+        requestId: String?,
+        approved: Boolean,
+        approval: OpenApiEvolutionApproval? = null,
+        message: String? = null,
+    ) {
+        sendResponse(
+            action,
+            requestId,
+            gson.toJson(
+                IntegrationOpenApiEvolutionApprovalResponse(
+                    approved = approved,
+                    approval = approval,
+                    message = message,
+                ),
+            ),
+        )
     }
 
     private fun handleApplyIntegrationConnector(action: String, requestId: String?, payload: JsonObject) {

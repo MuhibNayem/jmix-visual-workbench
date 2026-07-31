@@ -762,6 +762,7 @@ object IntegrationConnectorGenerator {
                 model.copy(
                     sourceLocator = null,
                     catalogBinding = model.catalogBinding?.copy(approvalCapability = null),
+                    openApiEvolutionCapability = null,
                     resolvedOpenApiOperation = null,
                 ),
             ).toByteArray(Charsets.UTF_8),

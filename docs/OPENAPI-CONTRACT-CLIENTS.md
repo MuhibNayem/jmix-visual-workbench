@@ -39,6 +39,20 @@ Authoritative public references:
    one immutable diff and apply them through the shared atomic workspace-change
    pipeline.
 
+When a provider changes the selected contract, the existing connector is shown
+as **Contract update · review required**, not as a generic manual-source
+conflict. The designer then:
+
+1. proves every generated source against the persisted old operation;
+2. matches the operation by exact `operationId`, then exact method/path only
+   when that fallback is unique;
+3. presents separate wire and generated-source compatibility ratings;
+4. lists operation, parameter, request, response, validation, enum and security
+   changes, plus Jmix mappings that no longer have an exact identity;
+5. carries forward only exact unambiguous mapping decisions;
+6. requires native IntelliJ approval before preview/apply; and
+7. invalidates that approval immediately after any model or mapping edit.
+
 The visual UI suggests contract-required authentication, but this is only a
 convenience. Preview and apply always reconstruct and validate the requirement
 in Kotlin.
@@ -57,8 +71,24 @@ in Kotlin.
   version, method, path, operation ID and selected representations.
 - Preview/apply reopen the file and reject stale digests, missing or ambiguous
   operations and changed representations.
-- The normalized operation/schema graph is backend-derived and removed from
-  the persisted source marker.
+- The transient normalized operation/schema graph is backend-derived and never
+  trusted from the browser. A separate backend-issued semantic baseline is
+  persisted solely as bounded comparison evidence (512 KiB maximum), is
+  coordinate-checked against the exact binding, and is overwritten by current
+  backend resolution before generation.
+- Semantic evolution distinguishes HTTP/wire compatibility from generated Java
+  and Jmix source compatibility. Optional parameter addition, for example, can
+  be wire-compatible while still breaking existing Java callers.
+- The analyzer covers operation identity, representations, typed parameters,
+  recursive request/response graphs, schema/type identity, nullability,
+  required/read-only/write-only properties, enum direction, security AND/OR
+  alternatives and scopes, plus numeric, length, pattern, collection,
+  uniqueness and `const` constraints (including merged `allOf` constraints).
+- A five-minute native approval capability is bound to the connector source
+  revision, old and new contract digests, deterministic semantic-report digest
+  and the complete proposed mapping model. The capability is never persisted;
+  edits, stale source, a new contract revision or changed mapping decisions
+  fail closed.
 - Unsupported polymorphism, external references, arbitrary object parameters,
   media-type parameters, unsupported serialization styles, reserved
   characters, unsafe headers, form/multipart bodies and unproven message
@@ -145,21 +175,26 @@ parameter/media serialization, security mismatch, Java name collisions,
 generated and existing Jmix targets, read-only attributes, inbound/outbound
 direction, source revision, complete create/reopen/update/remove round trips,
 manual supplemental-source protection and injected partial-write rollback.
+Evolution tests additionally cover distinct wire/source impact, validation
+tightening, deterministic reports, exact current-operation recovery, forged
+baseline replacement, stale generated ownership, native-capability scope and
+expiry, post-approval tamper rejection, capability non-persistence and the full
+create/change/review/approve/regenerate/reopen lifecycle.
 
-The clean `phase1Check` release gate on 2026-07-31 passed 401 regression tests
+The clean `phase1Check` release gate on 2026-07-31 passed 407 regression tests
 and 3 host smoke tests on each IntelliJ lane. Plugin Verifier reported both
 artifacts compatible:
 
 | IntelliJ host | Packaged ZIP SHA-256 |
 | --- | --- |
-| IU-253.28294.334 | `3db844ff750ee8edcc6353738b095958dc4886414ba91401b3acec901931a915` |
-| IU-262.8665.258 | `e19ded99d224d23ae3b6eb305e302815e87a5a20bcce4d8bcb383d672972b3a7` |
+| IU-253.28294.334 | `7fea5f026b2ecf9d35b88bcc8d44722dd499a8a170d7642af200866ee90c275e` |
+| IU-262.8665.258 | `3cbf057f365712bd691cbf6bba23edb1f6d188b71116fb99c113ef6bfd1f6549` |
 
 Both ZIPs contain the same verified web input digest:
-`bcd9f56e7fed9dc290ee0bfad3130c3d6787f75fd93d62cf64b536ea1632c263`.
+`9abfdd262bd461d3b0a64594d8c92160621129a972c659ce11b478fb67b5cd8e`.
 
 Responsive browser evidence on 2026-07-31 measured the real Integration
-Designer through its isolated iframe harness:
+Designer and the semantic-evolution workflow:
 
 | Embedded viewport | Layout | Document/client width | Region right edge |
 | --- | --- | --- | --- |
@@ -174,16 +209,23 @@ inside a 196-pixel keyboard-focusable local scroll region. Mapping targets and
 directions have schema-qualified accessible names. Generate, undo and redo were
 executed successfully at that width.
 
+The changed-contract banner also has zero global overflow at 1280, 720 and 360
+pixels. At 360 pixels the review chips and approval controls wrap without being
+cut off. Prepare, approve, approval-ready and edit-invalidated states were
+executed in the browser, and the console contained no warnings or errors.
+
 ## Deliberate remaining boundary
 
 This milestone does not yet claim complete Jmix Studio OpenAPI parity. The
 active remaining layers are:
 
-- semantic contract diff and guided breaking-change migration;
 - user-defined, versioned mapping converters and existing custom-enum adapters;
 - Kotlin DTO/mapper/service generation for Kotlin-owned target source sets;
 - controlled multi-file contract bundles and cross-operation shared models;
 - provider/consumer contract suites and saved runtime scenarios;
+- explicit visual mapping of renamed/structurally changed schemas when exact
+  identity cannot be proven (the current workflow discloses and defaults these
+  mappings, then binds the developer's reviewed decisions to approval);
 - installed-IDE accessibility, memory/leak and large-contract performance
   certification.
 

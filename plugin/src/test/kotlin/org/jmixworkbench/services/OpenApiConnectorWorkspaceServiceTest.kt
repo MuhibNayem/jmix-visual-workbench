@@ -5,6 +5,7 @@ import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.testFramework.HeavyPlatformTestCase
 import com.intellij.testFramework.PsiTestUtil
+import org.jmixworkbench.generator.IntegrationConnectorGenerator
 import org.jetbrains.jps.model.java.JavaResourceRootType
 import org.jetbrains.jps.model.java.JavaSourceRootType
 import org.jmixworkbench.model.IntegrationConnectorKind
@@ -15,6 +16,7 @@ import org.jmixworkbench.model.IntegrationOpenApiPropertyMapping
 import org.jmixworkbench.model.IntegrationOpenApiJmixTargetKind
 import org.jmixworkbench.model.IntegrationOpenApiJmixTypeMapping
 import java.io.IOException
+import java.util.Base64
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -76,7 +78,11 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
             responseJavaType = "java.lang.String",
             openApiBinding = binding,
         )
-        val proposal = service.propose(model)
+        val backendOperation = OpenApiContractService.getInstance(project).resolve(binding).operation
+        val forgedDigest = "f".repeat(64)
+        val proposal = service.propose(
+            model.copy(openApiBaseline = backendOperation.copy(contractSha256 = forgedDigest)),
+        )
         val changeSet = requireNotNull(proposal.changeSet) { proposal.issues.joinToString() }
         val generated = requireNotNull(
             changeSet.files.single { it.relativePath.endsWith("HrProviderConnector.java") }.createContent,
@@ -85,6 +91,13 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertContains(generated, ".path(\"/employees/{employeeId}\")")
         assertContains(generated, "public record Employee(")
         assertFalse(generated.contains("https://hr.example"))
+        val encodedMarker = generated.lineSequence()
+            .single { it.startsWith(IntegrationConnectorGenerator.markerPrefix()) }
+            .removePrefix(IntegrationConnectorGenerator.markerPrefix())
+            .trim()
+        val persistedModel = String(Base64.getUrlDecoder().decode(encodedMarker), Charsets.UTF_8)
+        assertContains(persistedModel, binding.documentSha256)
+        assertFalse(forgedDigest in persistedModel)
 
         val mappedProposal = service.propose(
             model.copy(
@@ -128,6 +141,12 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(stale.changeSet == null)
         assertTrue(stale.issues.any { it.code == "JVW-INTEGRATION-OPENAPI-CONTRACT-INVALID" })
         assertContains(stale.issues.single().message, "changed")
+
+        val current = OpenApiContractService.getInstance(project).resolveCurrent(binding)
+        assertEquals("2", current.operation.apiVersion)
+        assertTrue(current.operation.contractSha256 != binding.documentSha256)
+        assertEquals("findEmployee", current.operation.operationId)
+        assertEquals("200", current.operation.responseStatus)
     }
 
     fun testJmixLayerCreatesReopensUpdatesRemovesAndProtectsEveryOwnedFile() {
@@ -364,6 +383,58 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertFalse(WorkspaceHistoryService.getInstance(project).snapshot().canUndo)
     }
 
+    fun testChangedContractRequiresRevisionBoundSemanticApproval() {
+        val root = prepareProject(contract("1"))
+        val service = IntegrationConnectorWorkspaceService.getInstance(project)
+        val initialWorkspace = service.load(forceRefresh = true)
+        val destination = requireNotNull(initialWorkspace.destinations.firstOrNull())
+        val operation = initialWorkspace.openApiContracts.single().operations.single()
+        val initial = connector(destination.id, requireNotNull(operation.defaultBinding))
+        val createPreview = service.preview(initial)
+        assertTrue(createPreview.accepted, createPreview.issues.joinToString { it.message })
+        apply(service, initial, createPreview)
+
+        WriteAction.run<RuntimeException> {
+            write(root, "src/main/resources/openapi/hr-provider.yaml", contract("2", optionalParameter = true))
+        }
+        ApplicationGraphService.getInstance(project).invalidate()
+        val changed = service.load(forceRefresh = true).existingDocuments.single()
+        assertFalse(changed.editable)
+        assertContains(requireNotNull(changed.issue), "contract changed", ignoreCase = true)
+        val evolution = requireNotNull(changed.openApiEvolution)
+        assertEquals(OpenApiEvolutionImpact.COMPATIBLE, evolution.report.wireImpact)
+        assertEquals(OpenApiEvolutionImpact.BREAKING, evolution.report.sourceImpact)
+        assertTrue(evolution.report.changes.any { it.code == "OPENAPI_PARAMETER_ADDED" })
+
+        val candidate = changed.model.copy(openApiBinding = evolution.candidateBinding)
+        val unapproved = service.preview(candidate)
+        assertFalse(unapproved.accepted)
+        assertTrue(unapproved.issues.any {
+            it.code == "JVW-INTEGRATION-OPENAPI-EVOLUTION-APPROVAL-REQUIRED"
+        })
+
+        val review = service.openApiEvolutionReview(candidate)
+        assertEquals(evolution.report.reportDigest, review.report.reportDigest)
+        val approval = service.issueOpenApiEvolutionApproval(candidate)
+        val approved = candidate.copy(openApiEvolutionCapability = approval.capability)
+
+        val tampered = service.preview(approved.copy(description = "Changed after approval"))
+        assertFalse(tampered.accepted)
+        assertTrue(tampered.issues.any {
+            it.code == "JVW-INTEGRATION-OPENAPI-EVOLUTION-APPROVAL-SCOPE-MISMATCH"
+        })
+
+        val updatePreview = service.preview(approved)
+        assertTrue(updatePreview.accepted, updatePreview.issues.joinToString { it.message })
+        assertTrue(updatePreview.files.none { approval.capability in it.resultContent })
+        apply(service, approved, updatePreview)
+        ApplicationGraphService.getInstance(project).invalidate()
+        val reopened = service.load(forceRefresh = true).existingDocuments.single()
+        assertTrue(reopened.editable, reopened.issue)
+        assertNull(reopened.openApiEvolution)
+        assertEquals(evolution.candidateBinding.documentSha256, reopened.model.openApiBaseline?.contractSha256)
+    }
+
     private fun prepareProject(openApiContract: String): VirtualFile {
         val root = getOrCreateProjectBaseDir()
         WriteAction.run<RuntimeException> {
@@ -426,7 +497,8 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(applied.success, applied.issues.joinToString { "${it.code}: ${it.message}" })
     }
 
-    private fun contract(version: String) = """
+    private fun contract(version: String, optionalParameter: Boolean = false): String {
+        val source = """
         openapi: 3.0.3
         info:
           title: HR Provider
@@ -440,6 +512,7 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                   in: path
                   required: true
                   schema: { type: string }
+                # OPTIONAL_PARAMETER
               responses:
                 "200":
                   description: employee
@@ -455,7 +528,19 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
               properties:
                 id: { type: string }
                 displayName: { type: string }
-    """.trimIndent()
+        """.trimIndent()
+        val parameter = if (optionalParameter) {
+            listOf(
+                "        - name: locale",
+                "          in: query",
+                "          required: false",
+                "          schema: { type: string }",
+            ).joinToString("\n")
+        } else {
+            ""
+        }
+        return source.replace("        # OPTIONAL_PARAMETER", parameter)
+    }
 
     private fun write(root: VirtualFile, path: String, content: String) {
         val parentPath = path.substringBeforeLast('/', "")

@@ -223,6 +223,23 @@ data class IntegrationOpenApiPropertyModel(
     val writeOnly: Boolean = false,
 )
 
+data class IntegrationOpenApiValidationModel(
+    val minimum: String? = null,
+    val minimumExclusive: Boolean = false,
+    val maximum: String? = null,
+    val maximumExclusive: Boolean = false,
+    val multiplesOf: List<String> = emptyList(),
+    val minLength: Int? = null,
+    val maxLength: Int? = null,
+    val patterns: List<String> = emptyList(),
+    val minItems: Int? = null,
+    val maxItems: Int? = null,
+    val uniqueItems: Boolean = false,
+    val minProperties: Int? = null,
+    val maxProperties: Int? = null,
+    val constValue: String? = null,
+)
+
 data class IntegrationOpenApiSchemaModel(
     val id: String,
     val javaName: String,
@@ -234,6 +251,7 @@ data class IntegrationOpenApiSchemaModel(
     val itemSchemaId: String? = null,
     val additionalPropertiesSchemaId: String? = null,
     val additionalPropertiesAllowed: Boolean = false,
+    val validation: IntegrationOpenApiValidationModel = IntegrationOpenApiValidationModel(),
 )
 
 data class IntegrationOpenApiParameterModel(
@@ -247,9 +265,9 @@ data class IntegrationOpenApiParameterModel(
 )
 
 /**
- * Backend-derived, deterministic operation contract used only during
- * validation and generation. It is deliberately removed from the persisted
- * source marker so a large or forged schema cannot become an authority.
+ * Backend-derived, deterministic operation contract. The transient resolved
+ * value is never persisted; a separately bounded backend-issued baseline may
+ * be retained only as comparison evidence and is never trusted for generation.
  */
 data class IntegrationOpenApiOperationModel(
     val contractPath: String,
@@ -477,6 +495,15 @@ data class IntegrationConnectorModel(
     val catalogBinding: IntegrationConnectorCatalogBinding? = null,
     val openApiBinding: IntegrationOpenApiBinding? = null,
     val openApiJmixLayer: IntegrationOpenApiJmixLayerModel? = null,
+    /**
+     * Backend-derived semantic baseline of the selected operation. Unlike
+     * [resolvedOpenApiOperation], this bounded snapshot is persisted so a
+     * later provider-contract revision can be compared with the exact source
+     * contract that generated the owned connector.
+     */
+    val openApiBaseline: IntegrationOpenApiOperationModel? = null,
+    /** Short-lived backend capability; never persisted in generated source. */
+    val openApiEvolutionCapability: String? = null,
     val resolvedOpenApiOperation: IntegrationOpenApiOperationModel? = null,
     val sourceLocator: SourceLocator? = null,
 )

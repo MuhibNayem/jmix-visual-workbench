@@ -202,6 +202,77 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         )
     }
 
+    fun openApiEvolutionReview(
+        model: IntegrationConnectorModel,
+    ): IntegrationOpenApiEvolutionApprovalReview = evolutionContext(model).review
+
+    fun issueOpenApiEvolutionApproval(
+        model: IntegrationConnectorModel,
+    ): OpenApiEvolutionApproval {
+        val context = evolutionContext(model)
+        return OpenApiEvolutionApprovalService.getInstance(project).issue(
+            previous = context.owned.model,
+            candidate = context.normalized,
+            sourceRevision = context.owned.javaFingerprint,
+            report = context.review.report,
+        )
+    }
+
+    private fun evolutionContext(model: IntegrationConnectorModel): OpenApiEvolutionContext {
+        val locator = requireNotNull(model.sourceLocator) {
+            "OpenAPI evolution is available only for an existing generated connector."
+        }
+        val graph = ApplicationGraphService.getInstance(project).graph()
+        val destination = destinations(graph).singleOrNull { it.id == model.destinationId }
+            ?: throw IllegalArgumentException(
+                "The selected module destination is no longer available. Refresh the workspace.",
+            )
+        val schema = SchemaWorkspaceService.getInstance(project).load()
+        val selectedStoreId = when {
+            model.reliability.outboxEnabled -> model.reliability.outbox?.storeId
+            model.reliability.inboxEnabled -> model.reliability.inbox?.storeId
+            else -> null
+        }
+        val selectedStore = selectedStoreId?.let { storeId ->
+            schema.stores.singleOrNull { it.id == storeId }
+        }
+        val owned = requireNotNull(loadOwned(locator, destination, schema)) {
+            "The connector or a supplemental generated file changed. Refresh before reviewing contract evolution."
+        }
+        require(owned.model.openApiBinding != null) {
+            "The existing connector is not contract-owned."
+        }
+        val normalized = normalizeBackendContracts(model, destination, selectedStore, schema)
+        require(owned.model.openApiBinding != normalized.openApiBinding) {
+            "The candidate binding is identical to the connector's existing contract."
+        }
+        val baseline = requireNotNull(owned.model.openApiBaseline) {
+            "This connector predates semantic OpenAPI baselines and requires a manual reviewed migration."
+        }
+        val operation = requireNotNull(normalized.resolvedOpenApiOperation) {
+            "The candidate OpenAPI operation was not resolved by the backend."
+        }
+        val validation = IntegrationConnectorGenerator.validate(normalized, destination.capabilities)
+        require(validation.valid) {
+            validation.diagnostics.joinToString(" ") { it.message }
+        }
+        val layer = generateOpenApiJmixLayer(normalized, destination, schema)
+        require(layer.issues.isEmpty()) { layer.issues.joinToString(" ") }
+        val report = OpenApiContractEvolutionAnalyzer.compare(baseline, operation)
+        return OpenApiEvolutionContext(
+            owned = owned,
+            normalized = normalized,
+            review = IntegrationOpenApiEvolutionApprovalReview(
+                sourcePath = owned.javaPath,
+                operation = operation.operationId ?: "${operation.method} ${operation.path}",
+                baselineSha256 = report.baselineSha256,
+                candidateSha256 = report.candidateSha256,
+                report = report,
+                generatedFileCount = 2 + layer.sources.size,
+            ),
+        )
+    }
+
     internal fun propose(model: IntegrationConnectorModel): IntegrationConnectorProposal {
         val graph = ApplicationGraphService.getInstance(project).graph()
         val destination = destinations(graph).firstOrNull { it.id == model.destinationId }
@@ -453,6 +524,32 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     "The connector source changed after it was loaded. Refresh before editing.",
                     owned.javaPath,
                 )
+            }
+            if (owned.model.openApiBinding != stored.openApiBinding) {
+                val previousBinding = owned.model.openApiBinding
+                val candidateOperation = stored.resolvedOpenApiOperation
+                if (previousBinding != null && candidateOperation == null) {
+                    return rejected(
+                        "JVW-INTEGRATION-OPENAPI-BINDING-REMOVAL-UNSAFE",
+                        "An existing contract-owned connector cannot be converted to a manual signature in place. Create a replacement connector.",
+                        owned.javaPath,
+                    )
+                }
+                if (previousBinding != null && candidateOperation != null) {
+                    val baseline = owned.model.openApiBaseline
+                        ?: return rejected(
+                            "JVW-INTEGRATION-OPENAPI-BASELINE-MISSING",
+                            "This connector predates semantic OpenAPI baselines. Rebind it through a reviewed migration before regeneration.",
+                            owned.javaPath,
+                        )
+                    val report = OpenApiContractEvolutionAnalyzer.compare(baseline, candidateOperation)
+                    OpenApiEvolutionApprovalService.getInstance(project).validate(
+                        previous = owned.model,
+                        candidate = stored,
+                        sourceRevision = owned.javaFingerprint,
+                        report = report,
+                    )?.let { return IntegrationConnectorProposal(null, listOf(it)) }
+                }
             }
             val supplementalChanges = buildList {
                 val oldPaths = owned.supplementalContent.keys
@@ -734,8 +831,13 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 )
                 val policyPath = policyPath(destination, model.beanName)
                 val policyContent = resolver.resolveFile(policyPath)?.file?.let(::fileText)
+                val exactResolution = runCatching { resolveOpenApiContract(model) }
                 val regenerated = runCatching {
-                    val resolved = normalizeOpenApiJmixLayer(resolveOpenApiContract(model), destination, schema)
+                    val resolved = normalizeOpenApiJmixLayer(
+                        exactResolution.getOrElse { resolvePersistedOpenApiBaseline(model) },
+                        destination,
+                        schema,
+                    )
                     IntegrationConnectorGenerator.generate(resolved, encoded) to
                         generateOpenApiJmixLayer(resolved, destination, schema)
                 }.getOrNull()
@@ -753,12 +855,32 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                             regenerated.first.migrationXml == migrationContent
                         ) &&
                     supplementalOwned
+                val evolution = if (owned && exactResolution.isFailure && model.openApiBinding != null) {
+                    runCatching {
+                        val baseline = requireNotNull(model.openApiBaseline) {
+                            "This connector predates semantic OpenAPI baselines."
+                        }
+                        val current = OpenApiContractService.getInstance(project)
+                            .resolveCurrent(model.openApiBinding)
+                        IntegrationOpenApiEvolutionReview(
+                            candidateBinding = bindingFor(current.operation),
+                            report = OpenApiContractEvolutionAnalyzer.compare(baseline, current.operation),
+                            candidateTitle = current.contract.title,
+                            candidateApiVersion = current.contract.apiVersion,
+                            mappingIssues = openApiEvolutionMappingIssues(model, current.operation),
+                        )
+                    }.getOrNull()
+                } else null
                 documents += IntegrationConnectorDocumentSnapshot(
                     locator = locator,
                     model = model.copy(destinationId = destination.id, sourceLocator = locator),
-                    editable = owned,
-                    issue = if (owned) null
-                    else "Manual Java or reliability-policy changes were detected; visual overwrite is disabled.",
+                    editable = owned && exactResolution.isSuccess,
+                    issue = when {
+                        !owned -> "Manual Java or reliability-policy changes were detected; visual overwrite is disabled."
+                        evolution != null -> "The provider OpenAPI contract changed. Review and approve semantic regeneration."
+                        else -> null
+                    },
+                    openApiEvolution = evolution,
                 )
             }
         }
@@ -782,7 +904,12 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val policyContent = fileText(policyFile) ?: return null
         val policyFingerprint = CanonicalDiscoveryJson.sha256(policyContent)
         val resolved = runCatching {
-            normalizeOpenApiJmixLayer(resolveOpenApiContract(model), destination, schema)
+            normalizeOpenApiJmixLayer(
+                runCatching { resolveOpenApiContract(model) }
+                    .getOrElse { resolvePersistedOpenApiBaseline(model) },
+                destination,
+                schema,
+            )
         }.getOrNull() ?: return null
         val generated = runCatching {
             IntegrationConnectorGenerator.generate(resolved, encoded)
@@ -869,21 +996,105 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
 
     private fun resolveOpenApiContract(model: IntegrationConnectorModel): IntegrationConnectorModel {
         val binding = model.openApiBinding
-            ?: return model.copy(resolvedOpenApiOperation = null)
+            ?: return model.copy(openApiBaseline = null, resolvedOpenApiOperation = null)
         val operation = OpenApiContractService.getInstance(project).resolve(binding).operation
-        return model.copy(
-            httpMethod = operation.method,
-            contentType = operation.requestMediaType ?: model.contentType,
-            payloadJavaType = IntegrationConnectorGenerator.openApiPayloadJavaType(
-                operation,
-                model.className,
-            ),
-            responseJavaType = IntegrationConnectorGenerator.openApiResponseJavaType(
-                operation,
-                model.className,
-            ),
-            resolvedOpenApiOperation = operation,
+        require(gson.toJson(operation).toByteArray(Charsets.UTF_8).size <= MAX_OPENAPI_BASELINE_BYTES) {
+            "The normalized OpenAPI operation exceeds the ${MAX_OPENAPI_BASELINE_BYTES / 1024} KiB source-marker safety limit."
+        }
+        return applyOpenApiOperation(model, operation).copy(
+            openApiBaseline = operation,
         )
+    }
+
+    private fun resolvePersistedOpenApiBaseline(model: IntegrationConnectorModel): IntegrationConnectorModel {
+        val binding = model.openApiBinding
+            ?: return model.copy(openApiBaseline = null, resolvedOpenApiOperation = null)
+        val operation = requireNotNull(model.openApiBaseline) {
+            "The connector has no backend-issued OpenAPI semantic baseline."
+        }
+        require(gson.toJson(operation).toByteArray(Charsets.UTF_8).size <= MAX_OPENAPI_BASELINE_BYTES) {
+            "The persisted OpenAPI baseline exceeds the ${MAX_OPENAPI_BASELINE_BYTES / 1024} KiB safety limit."
+        }
+        require(
+            operation.contractPath == binding.relativePath &&
+                operation.contractSha256 == binding.documentSha256 &&
+                operation.specificationVersion == binding.specificationVersion &&
+                operation.operationId == binding.operationId &&
+                operation.method == binding.method &&
+                operation.path == binding.path &&
+                operation.requestMediaType == binding.requestMediaType &&
+                operation.responseStatus == binding.responseStatus &&
+                operation.responseMediaType == binding.responseMediaType
+        ) {
+            "The persisted OpenAPI baseline does not match its exact source binding."
+        }
+        return applyOpenApiOperation(model, operation)
+    }
+
+    private fun applyOpenApiOperation(
+        model: IntegrationConnectorModel,
+        operation: org.jmixworkbench.model.IntegrationOpenApiOperationModel,
+    ): IntegrationConnectorModel = model.copy(
+        httpMethod = operation.method,
+        contentType = operation.requestMediaType ?: model.contentType,
+        payloadJavaType = IntegrationConnectorGenerator.openApiPayloadJavaType(
+            operation,
+            model.className,
+        ),
+        responseJavaType = IntegrationConnectorGenerator.openApiResponseJavaType(
+            operation,
+            model.className,
+        ),
+        resolvedOpenApiOperation = operation,
+    )
+
+    private fun bindingFor(
+        operation: org.jmixworkbench.model.IntegrationOpenApiOperationModel,
+    ) = org.jmixworkbench.model.IntegrationOpenApiBinding(
+        relativePath = operation.contractPath,
+        documentSha256 = operation.contractSha256,
+        specificationVersion = operation.specificationVersion,
+        operationId = operation.operationId,
+        method = operation.method,
+        path = operation.path,
+        requestMediaType = operation.requestMediaType,
+        responseStatus = operation.responseStatus,
+        responseMediaType = operation.responseMediaType,
+    )
+
+    private fun openApiEvolutionMappingIssues(
+        model: IntegrationConnectorModel,
+        candidate: org.jmixworkbench.model.IntegrationOpenApiOperationModel,
+    ): List<String> {
+        val layer = model.openApiJmixLayer?.takeIf { it.enabled } ?: return emptyList()
+        val baseline = model.openApiBaseline ?: return listOf(
+            "The existing Jmix mapping has no semantic baseline and cannot be remapped automatically.",
+        )
+        val oldSchemas = baseline.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        val newSchemas = candidate.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        val reachable = reachableOpenApiSchemas(candidate).filterTo(linkedSetOf()) {
+            newSchemas[it]?.kind == IntegrationOpenApiSchemaKind.OBJECT
+        }
+        val mappings = layer.mappings.associateBy(IntegrationOpenApiJmixTypeMapping::schemaId)
+        return buildList {
+            layer.mappings.filter { it.schemaId !in reachable }.forEach { mapping ->
+                val target = mapping.existingEntity?.qualifiedName ?: mapping.generatedClassName ?: "generated DTO"
+                add("Schema '${mapping.schemaId}' mapped to '$target' has no exact identity in the new contract and requires an explicit remap.")
+            }
+            (reachable - mappings.keys).sorted().forEach { schemaId ->
+                add("New reachable schema '$schemaId' requires a reviewed Jmix target mapping.")
+            }
+            layer.mappings.filter { it.schemaId in reachable }.forEach { mapping ->
+                val oldProperties = oldSchemas[mapping.schemaId]?.properties.orEmpty()
+                    .mapTo(linkedSetOf(), org.jmixworkbench.model.IntegrationOpenApiPropertyModel::javaName)
+                val newProperties = newSchemas[mapping.schemaId]?.properties.orEmpty()
+                    .mapTo(linkedSetOf(), org.jmixworkbench.model.IntegrationOpenApiPropertyModel::javaName)
+                mapping.properties.filter { it.schemaProperty in oldProperties && it.schemaProperty !in newProperties }
+                    .forEach { property ->
+                        add("Mapped property '${mapping.schemaId}.${property.schemaProperty}' no longer exists and requires an explicit replacement or removal.")
+                    }
+            }
+        }.distinct().sorted().take(MAX_OPENAPI_EVOLUTION_MAPPING_ISSUES)
     }
 
     private fun normalizeOpenApiJmixLayer(
@@ -1228,7 +1439,52 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 authentication.addProperty("evictInvalidAuthorizedClient", true)
             }
         }
-        gson.fromJson(root, IntegrationConnectorModel::class.java).copy(sourceLocator = null)
+        root.getAsJsonObject("openApiBaseline")?.getAsJsonArray("schemas")?.forEach { schemaElement ->
+            val schema = schemaElement.asJsonObject
+            val defaults = gson.toJsonTree(
+                org.jmixworkbench.model.IntegrationOpenApiValidationModel(),
+            ).asJsonObject
+            if (!schema.has("validation")) {
+                schema.add("validation", defaults)
+            } else {
+                val validation = schema.getAsJsonObject("validation")
+                defaults.entrySet().forEach { (name, value) ->
+                    if (!validation.has(name)) validation.add(name, value)
+                }
+            }
+        }
+        val decoded = gson.fromJson(root, IntegrationConnectorModel::class.java)
+        require(decoded.resolvedOpenApiOperation == null) {
+            "Transient OpenAPI resolution must not be persisted."
+        }
+        require(decoded.openApiEvolutionCapability == null) {
+            "OpenAPI evolution capabilities must not be persisted."
+        }
+        require(decoded.catalogBinding?.approvalCapability == null) {
+            "Catalog approval capabilities must not be persisted."
+        }
+        val binding = decoded.openApiBinding
+        val baseline = decoded.openApiBaseline
+        require(binding != null || baseline == null) {
+            "An OpenAPI baseline cannot exist without an exact contract binding."
+        }
+        if (binding != null && baseline != null) {
+            require(gson.toJson(baseline).toByteArray(Charsets.UTF_8).size <= MAX_OPENAPI_BASELINE_BYTES)
+            require(
+                baseline.contractPath == binding.relativePath &&
+                    baseline.contractSha256 == binding.documentSha256 &&
+                    baseline.specificationVersion == binding.specificationVersion &&
+                    baseline.operationId == binding.operationId &&
+                    baseline.method == binding.method &&
+                    baseline.path == binding.path &&
+                    baseline.requestMediaType == binding.requestMediaType &&
+                    baseline.responseStatus == binding.responseStatus &&
+                    baseline.responseMediaType == binding.responseMediaType
+            ) {
+                "The persisted OpenAPI baseline does not match its binding."
+            }
+        }
+        decoded.copy(sourceLocator = null)
     }.getOrNull()
 
     private fun visitJava(root: VirtualFile, consumer: (VirtualFile) -> Unit) {
@@ -1252,6 +1508,8 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
     companion object {
         private const val MAX_CONNECTOR_FILES = 50_000
         private const val MAX_CONNECTOR_BYTES = 8L * 1024 * 1024
+        private const val MAX_OPENAPI_BASELINE_BYTES = 512 * 1024
+        private const val MAX_OPENAPI_EVOLUTION_MAPPING_ISSUES = 256
         private const val MAX_MARKER_LENGTH = 4_000_000
         private val CONSUMER_KINDS = setOf(
             IntegrationConnectorKind.KAFKA_CONSUMER,
@@ -1314,6 +1572,30 @@ data class IntegrationConnectorDocumentSnapshot(
     val model: IntegrationConnectorModel,
     val editable: Boolean,
     val issue: String?,
+    val openApiEvolution: IntegrationOpenApiEvolutionReview? = null,
+)
+
+data class IntegrationOpenApiEvolutionReview(
+    val candidateBinding: org.jmixworkbench.model.IntegrationOpenApiBinding,
+    val report: OpenApiEvolutionReport,
+    val candidateTitle: String,
+    val candidateApiVersion: String?,
+    val mappingIssues: List<String> = emptyList(),
+)
+
+data class IntegrationOpenApiEvolutionApprovalReview(
+    val sourcePath: String,
+    val operation: String,
+    val baselineSha256: String,
+    val candidateSha256: String,
+    val report: OpenApiEvolutionReport,
+    val generatedFileCount: Int,
+)
+
+private data class OpenApiEvolutionContext(
+    val owned: OwnedIntegrationConnector,
+    val normalized: IntegrationConnectorModel,
+    val review: IntegrationOpenApiEvolutionApprovalReview,
 )
 
 data class IntegrationConnectorWorkspaceResponse(
@@ -1380,6 +1662,12 @@ data class IntegrationConnectorCatalogApprovalReview(
 data class IntegrationConnectorCatalogApprovalResponse(
     val approved: Boolean,
     val approval: IntegrationConnectorCatalogApproval?,
+    val message: String?,
+)
+
+data class IntegrationOpenApiEvolutionApprovalResponse(
+    val approved: Boolean,
+    val approval: OpenApiEvolutionApproval?,
     val message: String?,
 )
 

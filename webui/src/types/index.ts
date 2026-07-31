@@ -1918,6 +1918,129 @@ export interface IntegrationOpenApiBinding {
   responseMediaType?: string
 }
 
+export interface IntegrationOpenApiPropertyModel {
+  wireName: string
+  javaName: string
+  schemaId: string
+  required: boolean
+  nullable: boolean
+  readOnly: boolean
+  writeOnly: boolean
+}
+
+export interface IntegrationOpenApiValidationModel {
+  minimum?: string
+  minimumExclusive: boolean
+  maximum?: string
+  maximumExclusive: boolean
+  multiplesOf: string[]
+  minLength?: number
+  maxLength?: number
+  patterns: string[]
+  minItems?: number
+  maxItems?: number
+  uniqueItems: boolean
+  minProperties?: number
+  maxProperties?: number
+  constValue?: string
+}
+
+export interface IntegrationOpenApiSchemaModel {
+  id: string
+  javaName: string
+  kind: OpenApiSchemaSnapshot['kind']
+  format?: string
+  nullable: boolean
+  enumValues: string[]
+  properties: IntegrationOpenApiPropertyModel[]
+  itemSchemaId?: string
+  additionalPropertiesSchemaId?: string
+  additionalPropertiesAllowed: boolean
+  validation: IntegrationOpenApiValidationModel
+}
+
+export interface IntegrationOpenApiParameterModel {
+  wireName: string
+  javaName: string
+  location: IntegrationOpenApiParameterLocation
+  schemaId: string
+  required: boolean
+  style?: string
+  explode?: boolean
+}
+
+export interface IntegrationOpenApiOperationModel {
+  contractPath: string
+  contractSha256: string
+  specificationVersion: string
+  title: string
+  apiVersion?: string
+  operationId?: string
+  javaMethodName: string
+  method: IntegrationHttpMethod
+  path: string
+  deprecated: boolean
+  requestMediaType?: string
+  requestRequired: boolean
+  requestSchemaId?: string
+  responseStatus?: string
+  responseMediaType?: string
+  responseSchemaId?: string
+  parameters: IntegrationOpenApiParameterModel[]
+  schemas: IntegrationOpenApiSchemaModel[]
+  securitySchemes: string[]
+  securityRequirements: IntegrationOpenApiSecurityRequirement[]
+}
+
+export type OpenApiEvolutionImpact = 'NONE' | 'COMPATIBLE' | 'REVIEW' | 'BREAKING'
+export type OpenApiEvolutionScope = 'OPERATION' | 'PARAMETER' | 'REQUEST' | 'RESPONSE' | 'SECURITY'
+
+export interface OpenApiEvolutionChange {
+  code: string
+  scope: OpenApiEvolutionScope
+  path: string
+  wireImpact: OpenApiEvolutionImpact
+  sourceImpact: OpenApiEvolutionImpact
+  message: string
+  before?: string
+  after?: string
+}
+
+export interface OpenApiEvolutionReport {
+  baselineSha256: string
+  candidateSha256: string
+  baselineApiVersion?: string
+  candidateApiVersion?: string
+  wireImpact: OpenApiEvolutionImpact
+  sourceImpact: OpenApiEvolutionImpact
+  changes: OpenApiEvolutionChange[]
+  reportDigest: string
+  different: boolean
+  breaking: boolean
+}
+
+export interface IntegrationOpenApiEvolutionReview {
+  candidateBinding: IntegrationOpenApiBinding
+  report: OpenApiEvolutionReport
+  candidateTitle: string
+  candidateApiVersion?: string
+  mappingIssues: string[]
+}
+
+export interface OpenApiEvolutionApproval {
+  capability: string
+  expiresAt: string
+  reportDigest: string
+  wireImpact: OpenApiEvolutionImpact
+  sourceImpact: OpenApiEvolutionImpact
+}
+
+export interface IntegrationOpenApiEvolutionApprovalResponse {
+  approved: boolean
+  approval?: OpenApiEvolutionApproval
+  message?: string
+}
+
 export interface OpenApiParameterSnapshot {
   name: string
   javaName: string
@@ -1975,6 +2098,7 @@ export interface OpenApiSchemaSnapshot {
   enumValues: string[]
   itemSchemaId?: string
   additionalPropertiesAllowed: boolean
+  validation?: IntegrationOpenApiValidationModel
   properties: OpenApiSchemaPropertySnapshot[]
 }
 
@@ -2192,6 +2316,8 @@ export interface IntegrationConnectorModel {
   catalogBinding?: IntegrationConnectorCatalogBinding
   openApiBinding?: IntegrationOpenApiBinding
   openApiJmixLayer?: IntegrationOpenApiJmixLayerModel
+  openApiBaseline?: IntegrationOpenApiOperationModel
+  openApiEvolutionCapability?: string
   sourceLocator?: GraphSourceLocator
 }
 
@@ -2213,6 +2339,7 @@ export interface IntegrationConnectorDocumentSnapshot {
   model: IntegrationConnectorModel
   editable: boolean
   issue?: string
+  openApiEvolution?: IntegrationOpenApiEvolutionReview
 }
 
 export interface IntegrationConnectorWorkspaceResponse {

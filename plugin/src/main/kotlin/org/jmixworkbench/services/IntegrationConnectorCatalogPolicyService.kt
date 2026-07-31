@@ -20,7 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
  * boundary. Catalog presets are constraints, not browser-authored defaults.
  */
 @Service(Service.Level.PROJECT)
-class IntegrationConnectorCatalogPolicyService(
+class IntegrationConnectorCatalogPolicyService @JvmOverloads constructor(
     private val project: Project,
     private val clock: Clock = Clock.systemUTC(),
 ) {
