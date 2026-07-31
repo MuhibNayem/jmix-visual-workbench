@@ -1200,9 +1200,20 @@ export interface ProjectApplicationProfileSnapshot {
   locator: GraphSourceLocator
   serverPort?: string
   contextPath?: string
+  activeProfiles: string[]
   availableLocales: string[]
   stores: ProjectDataStorePropertySnapshot[]
   properties: ProjectApplicationPropertySnapshot[]
+}
+
+export interface ProjectApplicationPropertyUpdate {
+  key: string
+  value: string
+}
+
+export interface ProjectApplicationPropertiesChangeRequest {
+  profileLocator: GraphSourceLocator
+  updates: ProjectApplicationPropertyUpdate[]
 }
 
 export interface JmixProjectPropertiesWorkspace {

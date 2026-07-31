@@ -164,6 +164,27 @@ class VerifyPluginZipContentsTaskTest {
     }
 
     @Test
+    void rejectsAPluginWhoseWebBundleOmitsProjectProfileMutationActions() throws Exception {
+        byte[] pluginJar = validPluginJar();
+        byte[] withoutProfileMutation = rewriteNestedEntry(
+                pluginJar,
+                "webui/assets/app-abcdef.js",
+                text(pluginJar, "webui/assets/app-abcdef.js")
+                        .replace("previewProjectProfileChange", "missingPreviewAction")
+                        .replace("applyProjectProfileChange", "missingApplyAction")
+        );
+        Path archive = writeArchive("missing-profile-mutation.zip", Map.of(
+                "plugin/lib/main.jar", withoutProfileMutation
+        ));
+
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> VerifyPluginZipContentsTask.inspectArchive(archive, "idea253")
+        );
+        assertTrue(error.getMessage().contains("previewProjectProfileChange"));
+    }
+
+    @Test
     void rejectsAPluginWhosePackagedDescriptorOmitsRepositoryMethodRefactoring() throws Exception {
         byte[] pluginJar = validPluginJar();
         byte[] withoutRefactorService = rewriteNestedEntry(
@@ -249,7 +270,10 @@ class VerifyPluginZipContentsTaskTest {
                 "<script src=\"./assets/app-abcdef.js\"></script>"
                         + "<link href=\"./assets/app-abcdef.css\" rel=\"stylesheet\">"
         ));
-        entries.put("webui/assets/app-abcdef.js", bytes("console.log('safe')"));
+        entries.put(
+                "webui/assets/app-abcdef.js",
+                bytes("previewProjectProfileChange();applyProjectProfileChange();")
+        );
         entries.put("webui/assets/app-abcdef.css", bytes("body{}"));
         entries.put("webui/build-info.json", bytes("{\"inputSha256\":\"" + DIGEST + "\"}"));
         entries.put("icons/workbench.svg", bytes("<svg/>"));
@@ -300,6 +324,18 @@ class VerifyPluginZipContentsTaskTest {
         );
         entries.put(
                 "org/jmixworkbench/services/JmixProjectPropertiesService.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/JmixApplicationPropertiesChangeRequest.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/JmixApplicationPropertiesChangeApplyRequest.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/bridge/JcefBridge.class",
                 new byte[]{0, 1, 2}
         );
         entries.put(

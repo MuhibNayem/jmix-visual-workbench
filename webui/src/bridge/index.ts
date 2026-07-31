@@ -41,6 +41,7 @@ import type {
   GraphSourceLocator,
   IntegrationConnectorModel,
   IntegrationConnectorWorkspaceResponse,
+  ProjectApplicationPropertiesChangeRequest,
   JmixProjectPropertiesWorkspace,
   JmixFlowUiHotDeployRequest,
   JmixRuntimeActionResponse,
@@ -223,6 +224,113 @@ class Bridge {
                 return developmentApplicationGraph
               case 'getProjectPropertiesWorkspace':
                 return developmentProjectPropertiesWorkspace
+              case 'previewProjectProfileChange': {
+                const change = payload as ProjectApplicationPropertiesChangeRequest
+                const profile = developmentProjectPropertiesWorkspace.profiles.find(
+                  candidate => candidate.locator.relativePath === change.profileLocator.relativePath,
+                )
+                if (!profile || change.updates.length === 0) {
+                  return {
+                    accepted: false,
+                    changeSetId: 'project-profile:development-rejected',
+                    label: 'Project profile change rejected',
+                    planDigest: null,
+                    files: [],
+                    issues: [{
+                      code: 'JVW-PROJECT-PROPERTIES-DEVELOPMENT-REQUEST-INVALID',
+                      message: 'Select at least one profile value to change.',
+                    }],
+                  }
+                }
+                const current = new Map(profile.properties.map(property => [
+                  property.key,
+                  property.displayValue,
+                ]))
+                if (profile.serverPort !== undefined) current.set('server.port', profile.serverPort)
+                if (profile.contextPath !== undefined) {
+                  current.set('server.servlet.context-path', profile.contextPath)
+                }
+                const keys = [...change.updates].sort((left, right) => left.key.localeCompare(right.key))
+                const render = (after: boolean) => [
+                  '# Credential-safe focused preview; unrelated properties are intentionally omitted.',
+                  ...keys.map(update => {
+                    const value = after ? update.value : current.get(update.key)
+                    return value === undefined
+                      ? `# ${update.key} is not configured`
+                      : `${update.key}=${value}`
+                  }),
+                  '',
+                ].join('\n')
+                return {
+                  accepted: true,
+                  changeSetId: 'project-profile:development',
+                  label: `Update ${profile.profile} project configuration`,
+                  planDigest: 'development-project-profile-digest',
+                  files: [{
+                    relativePath: profile.locator.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: profile.locator.revisionFingerprint,
+                    afterFingerprint: 'development-project-profile-after',
+                    originalContent: render(false),
+                    resultContent: render(true),
+                    appliedEditCount: change.updates.length,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applyProjectProfileChange': {
+                const change = payload.change as ProjectApplicationPropertiesChangeRequest
+                const profile = developmentProjectPropertiesWorkspace.profiles.find(
+                  candidate => candidate.locator.relativePath === change.profileLocator.relativePath,
+                )
+                if (!profile || payload.expectedPlanDigest !== 'development-project-profile-digest') {
+                  return {
+                    success: false,
+                    changeSetId: 'project-profile:development-rejected',
+                    planDigest: null,
+                    filesChanged: [],
+                    issues: [{
+                      code: 'JVW-CHANGE-PREVIEW-STALE',
+                      message: 'The approved development preview is stale.',
+                    }],
+                  }
+                }
+                change.updates.forEach(update => {
+                  const existing = profile.properties.find(property => property.key === update.key)
+                  if (existing) {
+                    existing.displayValue = update.value
+                  } else {
+                    profile.properties.push({
+                      key: update.key,
+                      displayValue: update.value,
+                      secret: update.key.toLowerCase().includes('password'),
+                    })
+                  }
+                  if (update.key === 'server.port') profile.serverPort = update.value
+                  if (update.key === 'server.servlet.context-path') profile.contextPath = update.value
+                  if (update.key === 'spring.profiles.active') {
+                    profile.activeProfiles = update.value
+                      .split(',')
+                      .map(value => value.trim())
+                      .filter(Boolean)
+                  }
+                  if (update.key === 'jmix.core.available-locales') {
+                    profile.availableLocales = update.value
+                      .split(',')
+                      .map(value => value.split('|')[0].trim())
+                      .filter(Boolean)
+                  }
+                })
+                profile.locator.revisionFingerprint = `development-profile-${Date.now()}`
+                developmentProjectPropertiesWorkspace.snapshotDigest = profile.locator.revisionFingerprint
+                return {
+                  success: true,
+                  changeSetId: 'project-profile:development',
+                  planDigest: 'development-project-profile-digest',
+                  filesChanged: [profile.locator.relativePath],
+                  issues: [],
+                }
+              }
               case 'getScenarioWorkspace':
                 return developmentScenarioWorkspace
               case 'getVisualLogicWorkspace':
@@ -2659,6 +2767,20 @@ ${javaMethods}
 
   getProjectPropertiesWorkspace() {
     return this.request<JmixProjectPropertiesWorkspace>('getProjectPropertiesWorkspace')
+  }
+
+  previewProjectProfileChange(change: ProjectApplicationPropertiesChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewProjectProfileChange', change)
+  }
+
+  applyProjectProfileChange(
+    change: ProjectApplicationPropertiesChangeRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>('applyProjectProfileChange', {
+      change,
+      expectedPlanDigest,
+    })
   }
 
   getApplicationGraph(forceRefresh: boolean = false) {

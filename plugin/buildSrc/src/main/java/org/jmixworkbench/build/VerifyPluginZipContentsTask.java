@@ -224,6 +224,21 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         );
         requireEntry(
                 contents,
+                "org/jmixworkbench/services/JmixApplicationPropertiesChangeRequest.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/services/JmixApplicationPropertiesChangeApplyRequest.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/bridge/JcefBridge.class",
+                archive
+        );
+        requireEntry(
+                contents,
                 "org/jmixworkbench/actions/OpenProjectPropertiesAction.class",
                 archive
         );
@@ -341,12 +356,16 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         String index = text(contents.get("webui/index.html"));
         Matcher assets = ASSET_PATTERN.matcher(index);
         int referencedAssets = 0;
+        StringBuilder bundledJavaScript = new StringBuilder();
         while (assets.find()) {
             String relativePath = assets.group(1);
             if (relativePath.contains("://") || relativePath.startsWith("data:")) {
                 continue;
             }
             requireEntry(contents, "webui/" + relativePath, archive);
+            if (relativePath.endsWith(".js")) {
+                bundledJavaScript.append(text(contents.get("webui/" + relativePath)));
+            }
             if (relativePath.startsWith("assets/")) {
                 if (!HASHED_ASSET_PATTERN.matcher(relativePath).matches()) {
                     throw new IllegalStateException(
@@ -359,6 +378,8 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         if (referencedAssets == 0) {
             throw new IllegalStateException(archive + " webui/index.html references no hashed assets");
         }
+        requireContains(bundledJavaScript.toString(), "previewProjectProfileChange", archive);
+        requireContains(bundledJavaScript.toString(), "applyProjectProfileChange", archive);
 
         String buildInfo = text(contents.get("webui/build-info.json"));
         Matcher digest = DIGEST_PATTERN.matcher(buildInfo);

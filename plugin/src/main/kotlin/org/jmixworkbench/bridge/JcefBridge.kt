@@ -95,6 +95,8 @@ import org.jmixworkbench.services.JmixFlowUiHotDeployRequest
 import org.jmixworkbench.services.JmixRuntimeInspectionRequest
 import org.jmixworkbench.services.JmixRuntimeOpenPreviewRequest
 import org.jmixworkbench.services.JmixRuntimeService
+import org.jmixworkbench.services.JmixApplicationPropertiesChangeApplyRequest
+import org.jmixworkbench.services.JmixApplicationPropertiesChangeRequest
 import org.jmixworkbench.services.JmixProjectPropertiesService
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
@@ -250,6 +252,14 @@ class JcefBridge(
             }
             if (action == "getProjectPropertiesWorkspace") {
                 handleGetProjectPropertiesWorkspace(action, requestId)
+                return
+            }
+            if (action == "previewProjectProfileChange") {
+                handlePreviewProjectProfileChange(action, requestId, payload)
+                return
+            }
+            if (action == "applyProjectProfileChange") {
+                handleApplyProjectProfileChange(action, requestId, payload)
                 return
             }
             if (action == "getMenuWorkspace") {
@@ -786,6 +796,104 @@ class JcefBridge(
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { result ->
                 sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewProjectProfileChange(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixApplicationPropertiesChangeRequest::class.java).also { parsed ->
+                require(parsed.profileLocator.relativePath.isNotBlank())
+                require(parsed.profileLocator.revisionFingerprint.isNotBlank())
+                require(parsed.updates.size <= 100)
+                parsed.updates.forEach { update ->
+                    require(update.key.length <= 200)
+                    require(update.value.length <= 4_096)
+                }
+            }
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangePreviewResponse(
+                        accepted = false,
+                        changeSetId = "project-profile:rejected",
+                        label = "Project profile change rejected",
+                        planDigest = null,
+                        files = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-PROJECT-PROPERTIES-REQUEST-INVALID",
+                                message = error.message ?: "The profile change request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
+            JmixProjectPropertiesService.getInstance(project).previewProfileChange(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { preview ->
+                sendResponse(action, requestId, gson.toJson(preview))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyProjectProfileChange(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixApplicationPropertiesChangeApplyRequest::class.java).also { parsed ->
+                require(parsed.expectedPlanDigest.isNotBlank())
+                require(parsed.expectedPlanDigest.length <= 128)
+                require(parsed.change.profileLocator.relativePath.isNotBlank())
+                require(parsed.change.profileLocator.revisionFingerprint.isNotBlank())
+                require(parsed.change.updates.size <= 100)
+                parsed.change.updates.forEach { update ->
+                    require(update.key.length <= 200)
+                    require(update.value.length <= 4_096)
+                }
+            }
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangeApplyResponse(
+                        success = false,
+                        changeSetId = "project-profile:rejected",
+                        planDigest = null,
+                        filesChanged = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-PROJECT-PROPERTIES-REQUEST-INVALID",
+                                message = error.message ?: "The profile apply request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            JmixProjectPropertiesService.getInstance(project).prepareProfileChange(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

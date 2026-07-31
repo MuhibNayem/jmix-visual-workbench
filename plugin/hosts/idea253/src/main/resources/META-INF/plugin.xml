@@ -216,7 +216,7 @@
         <action id="JmixWorkbench.OpenProjectProperties"
                 class="org.jmixworkbench.actions.OpenProjectPropertiesAction"
                 text="Jmix Project Configuration"
-                description="Inspect the effective Jmix project, profiles, locales, add-ons and data stores">
+                description="Inspect and safely edit Jmix profiles, locales, server settings and data stores">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
 

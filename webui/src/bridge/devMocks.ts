@@ -54,6 +54,7 @@ export const developmentProjectPropertiesWorkspace: JmixProjectPropertiesWorkspa
       locator: locator('src/main/resources/application.properties'),
       serverPort: '8080',
       contextPath: '/payroll',
+      activeProfiles: ['dev'],
       availableLocales: ['en', 'bn'],
       stores: [
         {
@@ -67,6 +68,11 @@ export const developmentProjectPropertiesWorkspace: JmixProjectPropertiesWorkspa
         },
       ],
       properties: [
+        {
+          key: 'spring.profiles.active',
+          displayValue: 'dev',
+          secret: false,
+        },
         {
           key: 'main.datasource.password',
           displayValue: '${DB_PASSWORD:••••••••}',
