@@ -75,6 +75,28 @@ This intentionally strengthens the public Studio placeholder workflow:
 non-secret properties can use placeholders, while password editing does not
 permit a literal fallback secret to traverse JCEF.
 
+## Implemented profile lifecycle and comparison
+
+The same workspace now completes the safe profile lifecycle inside the IDE:
+
+- create a named `application-<profile>.properties` beside an indexed module
+  default without cloning credentials or unknown source;
+- compare a profile against its module default, including explicit overrides,
+  environment-only values and effective inherited fallback;
+- remove non-default profiles through a credential-safe summary that never
+  sends the deleted document's property values to JCEF;
+- block removal of the default profile and any profile still selected by
+  indexed active/include/group configuration; dynamic activation references
+  fail closed;
+- preserve exact deleted bytes for rollback and visual undo/redo.
+
+Profile creation, modification and deletion use the same backend-recomputed
+approval digest. The shared workspace mutation engine now treats deletion as a
+first-class exact-revision operation: outer and under-write-lock preflight,
+post-write absence verification, injected-failure rollback, undo recreation,
+redo deletion and stale restored-source rejection are enforced for all future
+visual features, not only Project Configuration.
+
 ## Current verification
 
 - Pure parser tests cover profiles, locales, multi-store discovery, undeclared
@@ -85,33 +107,33 @@ permit a literal fallback secret to traverse JCEF.
   Mutation fixtures additionally prove focused secret-safe preview, exact
   formatting preservation, deterministic append, validation, indexed-target
   ownership, stale/digest rejection, atomic apply and exact undo/redo.
-- Thirteen focused parser/integration tests pass independently on IDEA 2025.3
+- Seventeen focused parser/integration tests pass independently on IDEA 2025.3
   and IDEA 2026.2 with zero skips/failures/errors.
 - Build-owned package-contract tests require the profile request/apply models,
   backend bridge, service, native Tools action and both frontend action names
   in every installable ZIP.
-- The final clean release gate passes 367 regression tests plus 3 host smoke
+- The final clean release gate passes 371 regression tests plus 3 host smoke
   tests independently on IDEA 2025.3 and IDEA 2026.2 with zero
   failures/errors/skips. Both Plugin Verifier lanes report `Compatible`, and
   exact nested-ZIP inspection passes.
 - The production TypeScript/Vite build passes.
 - Browser inspection at 1280, 640, 440 and 320 CSS pixels proves zero document
-  or body overflow, no overflowing inputs and no clipped workspace buttons.
-  Visible workspace controls have a minimum 40-pixel keyboard/touch target and
-  visible
-  focus styling.
+  or body overflow, no overflowing workspace regions or controls, and at least
+  40-pixel visible workspace controls. Default/environment comparison, create
+  review/apply, deletion review/apply, active-profile protection and completion
+  feedback work at 320 pixels with no console warning or error.
 - The build-owned Node runtime and immutable web-input fingerprint produce the
   packaged UI; no system Node installation is required.
 
 Release ZIP SHA-256:
 
 - IDEA 2025.3:
-  `fce62a327212ce51a1c7bacc225529841c77afa3801cd37925ffff0e7e5e4d43`
+  `c3f7d266eb9757c28847c3a39814fd9db69eb2a5e7bea363f18a09ec40983203`
 - IDEA 2026.2:
-  `4e34357663d0cb0a75101cfdb00de9d75450efd70ba9142b2cdb6135ec5d2ef8`
+  `fcf9f168cb8001229dd6eb1b55fddc2d5bba902ff490702575d481df22d8b59f`
 
 Both archives contain web input SHA-256
-`77e05abe10d66550cfeb7d5705c851edea56a2090803983938bdc8b074af912b`.
+`2db1f41b4f6cccf583f019a3d153cc016aede3c782db27b7cf6ffa9edfe53564`.
 
 ## Required before STRONG
 
@@ -127,8 +149,8 @@ rollback and IntelliJ undo:
    convention plugins, version catalogs and composite builds;
 4. complete locale matrix, fallback and format-string editing beyond the
    implemented profile locale list;
-5. profile comparison, creation/removal and external `.env` mutation beyond
-   the implemented active/profile-specific properties editing;
+5. external `.env` mutation, runtime activation validation and profile-group
+   semantics beyond the implemented profile editing, comparison and lifecycle;
 6. main/additional/generic data-store create and removal, dependency and
    configuration-class changes, schema-management modes, multi-DB identifier
    policies and protected secret references beyond the implemented

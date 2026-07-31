@@ -200,6 +200,228 @@ class JmixProjectPropertiesService(
         )
     }
 
+    fun previewProfileLifecycleChange(
+        request: JmixApplicationProfileLifecycleRequest,
+    ): WorkspaceChangePreviewResponse {
+        val proposal = proposeProfileLifecycleChange(request)
+        return proposal.changeSet
+            ?.let { WorkspaceChangeService.getInstance(project).preview(it) }
+            ?.let { preview -> secretSafeLifecyclePreview(preview, request) }
+            ?: proposal.rejectedPreview()
+    }
+
+    fun prepareProfileLifecycleChange(
+        request: JmixApplicationProfileLifecycleApplyRequest,
+    ): PreparedWorkspaceChange {
+        val proposal = proposeProfileLifecycleChange(request.change)
+        val changeSet = proposal.changeSet ?: return proposal.rejectedPrepared()
+        return WorkspaceChangeService.getInstance(project).prepareApply(
+            WorkspaceChangeApplyRequest(
+                changeSet = changeSet,
+                expectedPlanDigest = request.expectedPlanDigest,
+            ),
+        )
+    }
+
+    private fun proposeProfileLifecycleChange(
+        request: JmixApplicationProfileLifecycleRequest,
+    ): ProjectPropertiesChangeProposal {
+        val path = request.profileLocator.relativePath
+        val indexedWorkspace = inspect()
+        val indexed = indexedWorkspace.profiles.singleOrNull { profile ->
+            profile.locator.relativePath == path
+        } ?: return ProjectPropertiesChangeProposal.rejected(
+            code = "JVW-PROJECT-PROFILE-LIFECYCLE-UNINDEXED",
+            message = "The selected profile is not indexed in the current IntelliJ project model.",
+            relativePath = path,
+        )
+        if (indexed.locator.revisionFingerprint != request.profileLocator.revisionFingerprint) {
+            return ProjectPropertiesChangeProposal.rejected(
+                code = "JVW-PROJECT-PROFILE-LIFECYCLE-STALE",
+                message = "The selected profile changed after it was loaded. Refresh and review again.",
+                relativePath = path,
+            )
+        }
+        val resolver = ProjectFileResolver.getInstance(project)
+        val source = resolver.resolveFile(path)?.file
+            ?: return ProjectPropertiesChangeProposal.rejected(
+                code = "JVW-PROJECT-PROFILE-LIFECYCLE-MISSING",
+                message = "The selected profile no longer exists.",
+                relativePath = path,
+            )
+        if (source.isDirectory || !APPLICATION_PROPERTIES_FILE.matches(source.name)) {
+            return ProjectPropertiesChangeProposal.rejected(
+                code = "JVW-PROJECT-PROFILE-LIFECYCLE-TYPE",
+                message = "Only indexed application[-profile].properties files support profile lifecycle changes.",
+                relativePath = path,
+            )
+        }
+        val content = runCatching { ProjectSourceText.read(source) }.getOrElse { failure ->
+            return ProjectPropertiesChangeProposal.rejected(
+                code = "JVW-PROJECT-PROFILE-LIFECYCLE-UNREADABLE",
+                message = failure.message ?: "The selected profile cannot be read.",
+                relativePath = path,
+            )
+        }
+        val fingerprint = CanonicalDiscoveryJson.sha256(content)
+        if (fingerprint != request.profileLocator.revisionFingerprint) {
+            return ProjectPropertiesChangeProposal.rejected(
+                code = "JVW-PROJECT-PROFILE-LIFECYCLE-STALE",
+                message = "The selected profile changed after it was loaded. Refresh and review again.",
+                relativePath = path,
+            )
+        }
+
+        return when (request.mode) {
+            JmixApplicationProfileLifecycleMode.CREATE -> {
+                if (source.name != "application.properties" || indexed.profile != "default") {
+                    return ProjectPropertiesChangeProposal.rejected(
+                        code = "JVW-PROJECT-PROFILE-CREATE-ANCHOR",
+                        message = "Create a profile from its module's default application.properties file.",
+                        relativePath = path,
+                    )
+                }
+                val profileName = request.profileName?.trim().orEmpty()
+                if (!SPRING_PROFILE_NAME.matches(profileName) || profileName.equals("default", ignoreCase = true)) {
+                    return ProjectPropertiesChangeProposal.rejected(
+                        code = "JVW-PROJECT-PROFILE-NAME",
+                        message = "Profile names must use 1–100 letters, numbers, underscores or hyphens.",
+                        relativePath = path,
+                    )
+                }
+                val targetPath = siblingPath(path, "application-$profileName.properties")
+                val conflictingYaml = listOf(
+                    siblingPath(path, "application-$profileName.yml"),
+                    siblingPath(path, "application-$profileName.yaml"),
+                ).firstOrNull { candidate -> resolver.resolveFile(candidate) != null }
+                if (
+                    resolver.resolveFile(targetPath) != null ||
+                    indexedWorkspace.profiles.any { profile ->
+                        profile.locator.relativePath == targetPath ||
+                            (
+                                profile.modulePath == indexed.modulePath &&
+                                    profile.profile.equals(profileName, ignoreCase = true)
+                                )
+                    } ||
+                    conflictingYaml != null
+                ) {
+                    return ProjectPropertiesChangeProposal.rejected(
+                        code = "JVW-PROJECT-PROFILE-CREATE-CONFLICT",
+                        message = "A '$profileName' profile already exists in this module.",
+                        relativePath = conflictingYaml ?: targetPath,
+                    )
+                }
+                val generated = "# Profile-specific Jmix configuration for $profileName.\n"
+                ProjectPropertiesChangeProposal(
+                    changeSet = WorkspaceChangeSet(
+                        id = "project-profile-create:${
+                            CanonicalDiscoveryJson.sha256("$path\u0000$fingerprint\u0000$profileName").take(24)
+                        }",
+                        label = "Create application-$profileName.properties",
+                        files = listOf(
+                            WorkspaceFileChange(
+                                relativePath = targetPath,
+                                mode = WorkspaceFileChangeMode.CREATE,
+                                baseRevisionFingerprint = null,
+                                createContent = generated,
+                            ),
+                        ),
+                    ),
+                    issues = emptyList(),
+                )
+            }
+
+            JmixApplicationProfileLifecycleMode.REMOVE -> {
+                if (indexed.profile == "default" || source.name == "application.properties") {
+                    return ProjectPropertiesChangeProposal.rejected(
+                        code = "JVW-PROJECT-PROFILE-REMOVE-DEFAULT",
+                        message = "The module's default application.properties file cannot be removed.",
+                        relativePath = path,
+                    )
+                }
+                if (!request.profileName.isNullOrBlank() && request.profileName != indexed.profile) {
+                    return ProjectPropertiesChangeProposal.rejected(
+                        code = "JVW-PROJECT-PROFILE-REMOVE-MISMATCH",
+                        message = "The requested profile name does not match the selected source.",
+                        relativePath = path,
+                    )
+                }
+                val sameDirectoryDefault = indexedWorkspace.profiles.firstOrNull { profile ->
+                    profile.profile == "default" &&
+                        profile.locator.relativePath.substringBeforeLast('/', "") ==
+                        path.substringBeforeLast('/', "")
+                }
+                if (sameDirectoryDefault?.activeProfiles?.any { active ->
+                        active.equals(indexed.profile, ignoreCase = true)
+                    } == true
+                ) {
+                    return ProjectPropertiesChangeProposal.rejected(
+                        code = "JVW-PROJECT-PROFILE-REMOVE-ACTIVE",
+                        message =
+                            "The default profile activates '${indexed.profile}'. Remove it from " +
+                                "spring.profiles.active and review that change before deleting this file.",
+                        relativePath = sameDirectoryDefault.locator.relativePath,
+                    )
+                }
+                val relatedProfiles = indexedWorkspace.profiles.filter { profile ->
+                    profileDirectory(profile.locator.relativePath) ==
+                        profileDirectory(indexed.locator.relativePath)
+                }
+                val dynamicReference = relatedProfiles
+                    .asSequence()
+                    .flatMap { profile ->
+                        profile.properties.asSequence().map { property -> profile to property }
+                    }
+                    .firstOrNull { (_, property) ->
+                        isProfileReferenceProperty(property.key) &&
+                            PLACEHOLDER.containsMatchIn(property.displayValue)
+                    }
+                if (dynamicReference != null) {
+                    return ProjectPropertiesChangeProposal.rejected(
+                        code = "JVW-PROJECT-PROFILE-REMOVE-DYNAMIC-REFERENCE",
+                        message =
+                            "Profile activation or grouping uses a dynamic placeholder in " +
+                                "${dynamicReference.second.key}. Resolve it before deletion can be proven safe.",
+                        relativePath = dynamicReference.first.locator.relativePath,
+                    )
+                }
+                val explicitReference = relatedProfiles
+                    .asSequence()
+                    .flatMap { profile ->
+                        profile.properties.asSequence().map { property -> profile to property }
+                    }
+                    .firstOrNull { (_, property) ->
+                        referencesProfile(property.key, property.displayValue, indexed.profile)
+                    }
+                if (explicitReference != null) {
+                    return ProjectPropertiesChangeProposal.rejected(
+                        code = "JVW-PROJECT-PROFILE-REMOVE-REFERENCED",
+                        message =
+                            "'${indexed.profile}' is still referenced by ${explicitReference.second.key}. " +
+                                "Remove that reference and review it before deleting this profile.",
+                        relativePath = explicitReference.first.locator.relativePath,
+                    )
+                }
+                ProjectPropertiesChangeProposal(
+                    changeSet = WorkspaceChangeSet(
+                        id = "project-profile-remove:${
+                            CanonicalDiscoveryJson.sha256("$path\u0000$fingerprint").take(24)
+                        }",
+                        label = "Remove ${source.name}",
+                        files = listOf(
+                            WorkspaceFileChange(
+                                relativePath = path,
+                                mode = WorkspaceFileChangeMode.DELETE,
+                                baseRevisionFingerprint = fingerprint,
+                            ),
+                        ),
+                    ),
+                    issues = emptyList(),
+                )
+            }
+        }
+    }
+
     private fun proposeProfileChange(
         request: JmixApplicationPropertiesChangeRequest,
     ): ProjectPropertiesChangeProposal {
@@ -448,6 +670,47 @@ class JmixProjectPropertiesService(
         }
     }
 
+    private fun secretSafeLifecyclePreview(
+        preview: WorkspaceChangePreviewResponse,
+        request: JmixApplicationProfileLifecycleRequest,
+    ): WorkspaceChangePreviewResponse {
+        if (!preview.accepted || request.mode == JmixApplicationProfileLifecycleMode.CREATE) {
+            return preview
+        }
+        return runCatching {
+            preview.copy(
+                files = preview.files.map { file ->
+                    val document = parseEditablePropertiesDocument(file.originalContent.orEmpty())
+                    val secretCount = document.entries.count { entry -> isSecretKey(entry.key) }
+                    file.copy(
+                        originalContent = buildString {
+                            append("# Credential-safe deletion preview; property values are intentionally omitted.\n")
+                            append("# Profile: ").append(file.relativePath.substringAfterLast('/')).append('\n')
+                            append("# Properties: ").append(document.entries.size).append('\n')
+                            append("# Secret-bearing properties: ").append(secretCount).append('\n')
+                        },
+                        resultContent = "# The profile file will be removed after approval.\n",
+                    )
+                },
+            )
+        }.getOrElse {
+            WorkspaceChangePreviewResponse(
+                accepted = false,
+                changeSetId = preview.changeSetId,
+                label = preview.label,
+                planDigest = null,
+                files = emptyList(),
+                issues = listOf(
+                    WorkspaceChangeIssue(
+                        code = "JVW-PROJECT-PROFILE-LIFECYCLE-PREVIEW-FAILED",
+                        message = "The profile lifecycle operation could not be converted to a credential-safe preview.",
+                        relativePath = request.profileLocator.relativePath,
+                    ),
+                ),
+            )
+        }
+    }
+
     private fun focusedProfilePreview(
         content: String,
         selectedKeys: Set<String>,
@@ -481,6 +744,37 @@ class JmixProjectPropertiesService(
         resolver: ProjectFileResolver,
         relativePath: String,
     ): VirtualFile? = resolver.resolveFile(relativePath)?.file?.takeIf(VirtualFile::isDirectory)
+
+    private fun siblingPath(path: String, fileName: String): String =
+        path.substringBeforeLast('/', "").let { parent ->
+            if (parent.isBlank()) fileName else "$parent/$fileName"
+        }
+
+    private fun profileDirectory(path: String): String =
+        path.substringBeforeLast('/', "")
+
+    private fun isProfileReferenceProperty(key: String): Boolean =
+        key == "spring.profiles.active" ||
+            key == "spring.profiles.include" ||
+            key.startsWith("spring.profiles.group.")
+
+    private fun referencesProfile(
+        key: String,
+        value: String,
+        profileName: String,
+    ): Boolean {
+        if (!isProfileReferenceProperty(key)) return false
+        if (
+            key.startsWith("spring.profiles.group.") &&
+            key.substringAfterLast('.').equals(profileName, ignoreCase = true)
+        ) {
+            return true
+        }
+        return value
+            .split(',')
+            .map(String::trim)
+            .any { candidate -> candidate.equals(profileName, ignoreCase = true) }
+    }
 
     companion object {
         private val BUILD_FILES = setOf("build.gradle", "build.gradle.kts")
@@ -984,6 +1278,22 @@ data class JmixApplicationPropertiesChangeRequest(
 
 data class JmixApplicationPropertiesChangeApplyRequest(
     val change: JmixApplicationPropertiesChangeRequest,
+    val expectedPlanDigest: String,
+)
+
+enum class JmixApplicationProfileLifecycleMode {
+    CREATE,
+    REMOVE,
+}
+
+data class JmixApplicationProfileLifecycleRequest(
+    val mode: JmixApplicationProfileLifecycleMode,
+    val profileLocator: SourceLocator,
+    val profileName: String? = null,
+)
+
+data class JmixApplicationProfileLifecycleApplyRequest(
+    val change: JmixApplicationProfileLifecycleRequest,
     val expectedPlanDigest: String,
 )
 

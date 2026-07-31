@@ -3,6 +3,7 @@ import { bridge } from '../../bridge'
 import type {
   GraphSourceLocator,
   JmixProjectPropertiesWorkspace,
+  ProjectApplicationProfileLifecycleRequest,
   ProjectApplicationPropertiesChangeRequest,
   ProjectApplicationProfileSnapshot,
   ProjectDataStorePropertySnapshot,
@@ -37,6 +38,41 @@ function sourceLabel(locator: GraphSourceLocator): string {
 function profileLabel(profile: ProjectApplicationProfileSnapshot): string {
   const module = profile.modulePath || 'root'
   return `${module} · ${profile.profile}`
+}
+
+function profileDirectory(profile: ProjectApplicationProfileSnapshot): string {
+  const separator = profile.locator.relativePath.lastIndexOf('/')
+  return separator < 0 ? '' : profile.locator.relativePath.slice(0, separator)
+}
+
+function siblingProfilePath(anchor: ProjectApplicationProfileSnapshot, profileName: string): string {
+  const directory = profileDirectory(anchor)
+  const fileName = `application-${profileName}.properties`
+  return directory ? `${directory}/${fileName}` : fileName
+}
+
+function isProfileReferenceKey(key: string): boolean {
+  return key === 'spring.profiles.active' ||
+    key === 'spring.profiles.include' ||
+    key.startsWith('spring.profiles.group.')
+}
+
+function propertyReferencesProfile(
+  key: string,
+  value: string,
+  profileName: string,
+): boolean {
+  if (!isProfileReferenceKey(key)) return false
+  if (
+    key.startsWith('spring.profiles.group.') &&
+    key.split('.').pop()?.toLowerCase() === profileName.toLowerCase()
+  ) {
+    return true
+  }
+  return value
+    .split(',')
+    .map(candidate => candidate.trim().toLowerCase())
+    .includes(profileName.toLowerCase())
 }
 
 function propertyValue(
@@ -164,7 +200,12 @@ export default function ProjectProperties() {
   const [draft, setDraft] = useState<ProfileDraft | null>(null)
   const [pendingChange, setPendingChange] =
     useState<ProjectApplicationPropertiesChangeRequest | null>(null)
+  const [pendingLifecycle, setPendingLifecycle] =
+    useState<ProjectApplicationProfileLifecycleRequest | null>(null)
   const [preview, setPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
+  const [lifecyclePreview, setLifecyclePreview] =
+    useState<WorkspaceChangePreviewResponse | null>(null)
+  const [newProfileName, setNewProfileName] = useState('')
   const [loading, setLoading] = useState(true)
   const [reviewing, setReviewing] = useState(false)
   const [applying, setApplying] = useState(false)
@@ -205,8 +246,9 @@ export default function ProjectProperties() {
   useEffect(() => {
     setDraft(selectedProfile ? createDraft(selectedProfile) : null)
     setPendingChange(null)
+    setPendingLifecycle(null)
     setPreview(null)
-    setNotice(null)
+    setLifecyclePreview(null)
   }, [selectedProfile?.locator.relativePath, selectedProfile?.locator.revisionFingerprint])
 
   const navigate = (locator: GraphSourceLocator) => {
@@ -216,7 +258,9 @@ export default function ProjectProperties() {
   const mutateDraft = (mutation: (current: ProfileDraft) => ProfileDraft) => {
     setDraft(current => current ? mutation(current) : current)
     setPendingChange(null)
+    setPendingLifecycle(null)
     setPreview(null)
+    setLifecyclePreview(null)
     setNotice(null)
   }
 
@@ -244,7 +288,9 @@ export default function ProjectProperties() {
     if (!selectedProfile) return
     setDraft(createDraft(selectedProfile))
     setPendingChange(null)
+    setPendingLifecycle(null)
     setPreview(null)
+    setLifecyclePreview(null)
     setError(null)
     setNotice('Draft reset to the indexed source revision.')
   }
@@ -285,6 +331,148 @@ export default function ProjectProperties() {
       setError(failure instanceof Error ? failure.message : String(failure))
     } finally {
       setReviewing(false)
+    }
+  }
+
+  const creationAnchor = useMemo(() => {
+    if (!workspace) return undefined
+    const selectedDirectory = selectedProfile ? profileDirectory(selectedProfile) : undefined
+    return workspace.profiles.find(profile =>
+      profile.profile === 'default' &&
+      (
+        selectedDirectory === undefined ||
+        profileDirectory(profile) === selectedDirectory
+      ),
+    ) ?? workspace.profiles.find(profile => profile.profile === 'default')
+  }, [selectedProfile, workspace])
+
+  const sameDirectoryDefault = useMemo(() => {
+    if (!workspace || !selectedProfile) return undefined
+    return workspace.profiles.find(profile =>
+      profile.profile === 'default' &&
+      profileDirectory(profile) === profileDirectory(selectedProfile),
+    )
+  }, [selectedProfile, workspace])
+
+  const selectedProfileRemovalBlocker = useMemo(() => {
+    if (!workspace || !selectedProfile || selectedProfile.profile === 'default') {
+      return undefined
+    }
+    if (sameDirectoryDefault?.activeProfiles.some(active =>
+      active.toLowerCase() === selectedProfile.profile.toLowerCase(),
+    )) {
+      return `The default configuration activates '${selectedProfile.profile}'.`
+    }
+    const related = workspace.profiles.filter(profile =>
+      profileDirectory(profile) === profileDirectory(selectedProfile),
+    )
+    for (const profile of related) {
+      for (const property of profile.properties) {
+        if (
+          isProfileReferenceKey(property.key) &&
+          /\$\{[^}]+}/.test(property.displayValue)
+        ) {
+          return `${property.key} uses a dynamic placeholder in ${profile.locator.relativePath}.`
+        }
+        if (
+          propertyReferencesProfile(
+            property.key,
+            property.displayValue,
+            selectedProfile.profile,
+          )
+        ) {
+          return `${property.key} still references '${selectedProfile.profile}'.`
+        }
+      }
+    }
+    return undefined
+  }, [sameDirectoryDefault, selectedProfile, workspace])
+
+  const reviewLifecycle = async (
+    mode: ProjectApplicationProfileLifecycleRequest['mode'],
+  ) => {
+    const anchor = mode === 'CREATE' ? creationAnchor : selectedProfile
+    if (!anchor) {
+      setError('No revision-bound application.properties source is available for this operation.')
+      return
+    }
+    const profileName = mode === 'CREATE' ? newProfileName.trim() : selectedProfile?.profile
+    if (mode === 'CREATE' && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(profileName ?? '')) {
+      setError('Profile names must start with a letter or number and use only letters, numbers, underscores or hyphens.')
+      return
+    }
+    if (mode === 'REMOVE' && selectedProfileRemovalBlocker) {
+      setError(
+        `${selectedProfileRemovalBlocker} Remove the reference and apply that change first.`,
+      )
+      return
+    }
+    const change: ProjectApplicationProfileLifecycleRequest = {
+      mode,
+      profileLocator: anchor.locator,
+      profileName,
+    }
+    setReviewing(true)
+    setError(null)
+    setNotice(null)
+    setPreview(null)
+    setPendingChange(null)
+    try {
+      const response = await bridge.previewProjectProfileLifecycle(change)
+      setLifecyclePreview(response)
+      if (!response.accepted || !response.planDigest) {
+        setPendingLifecycle(null)
+        setError(issueMessage(response) || 'The profile lifecycle change was rejected.')
+        return
+      }
+      setPendingLifecycle(change)
+      setNotice(
+        mode === 'CREATE'
+          ? `Creation of application-${profileName}.properties is ready for approval.`
+          : `Removal of ${anchor.locator.relativePath} is ready for approval.`,
+      )
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setReviewing(false)
+    }
+  }
+
+  const applyLifecycle = async () => {
+    if (!pendingLifecycle || !lifecyclePreview?.planDigest) return
+    setApplying(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const preferredPath = pendingLifecycle.mode === 'CREATE'
+        ? siblingProfilePath(
+          creationAnchor ?? selectedProfile!,
+          pendingLifecycle.profileName ?? '',
+        )
+        : sameDirectoryDefault?.locator.relativePath
+      const response = await bridge.applyProjectProfileLifecycle(
+        pendingLifecycle,
+        lifecyclePreview.planDigest,
+      )
+      if (!response.success) {
+        setError(
+          response.issues.map(issue => `${issue.code}: ${issue.message}`).join(' · ') ||
+          'The profile lifecycle change was not applied.',
+        )
+        return
+      }
+      const operation = pendingLifecycle.mode === 'CREATE' ? 'Created' : 'Removed'
+      setLifecyclePreview(null)
+      setPendingLifecycle(null)
+      setNewProfileName('')
+      await load(preferredPath)
+      setNotice(
+        `${operation} ${response.filesChanged[0]}. The complete operation is available in visual undo history.`,
+      )
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setApplying(false)
     }
   }
 
@@ -408,7 +596,11 @@ export default function ProjectProperties() {
                   <button
                     key={profile.locator.relativePath}
                     type="button"
-                    onClick={() => setSelectedProfilePath(profile.locator.relativePath)}
+                    onClick={() => {
+                      setSelectedProfilePath(profile.locator.relativePath)
+                      setError(null)
+                      setNotice(null)
+                    }}
                     aria-current={selectedProfile?.locator.relativePath === profile.locator.relativePath ? 'true' : undefined}
                     className={`block min-h-10 w-full min-w-0 rounded px-2 py-2 text-left text-[11px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-jmix-400 ${
                       selectedProfile?.locator.relativePath === profile.locator.relativePath
@@ -424,6 +616,41 @@ export default function ProjectProperties() {
                   </button>
                 ))}
               </div>
+
+              {creationAnchor && (
+                <section className="mt-4 rounded border border-surface-border bg-surface p-2" aria-label="Create application profile">
+                  <label className="block text-[10px] font-medium text-gray-400" htmlFor="new-profile-name">
+                    New profile
+                  </label>
+                  <div className="mt-1 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] xl:grid-cols-1">
+                    <input
+                      id="new-profile-name"
+                      value={newProfileName}
+                      onChange={event => {
+                        setNewProfileName(event.target.value)
+                        setLifecyclePreview(null)
+                        setPendingLifecycle(null)
+                        setError(null)
+                      }}
+                      className={inputClass}
+                      placeholder="staging"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void reviewLifecycle('CREATE')}
+                      disabled={reviewing || applying || !newProfileName.trim()}
+                      className="min-h-10 rounded border border-jmix-700 bg-jmix-950/30 px-3 py-2 text-[11px] text-jmix-300 hover:border-jmix-500 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-jmix-400 disabled:opacity-50"
+                    >
+                      Review creation
+                    </button>
+                  </div>
+                  <p className="mt-1.5 text-[9px] leading-4 text-gray-600">
+                    Creates an empty profile beside {creationAnchor.locator.relativePath.split('/').pop()}.
+                  </p>
+                </section>
+              )}
 
               <details className="mt-4 rounded border border-surface-border bg-surface">
                 <summary className="min-h-10 cursor-pointer px-2 py-2.5 text-xs font-semibold text-gray-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-jmix-400">
@@ -458,14 +685,35 @@ export default function ProjectProperties() {
                           {selectedProfile.locator.relativePath}
                         </p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => navigate(selectedProfile.locator)}
-                        className="min-h-10 shrink-0 rounded border border-surface-border px-3 py-2 text-[11px] text-gray-300 hover:border-jmix-500 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-jmix-400"
-                      >
-                        Open source
-                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => navigate(selectedProfile.locator)}
+                          className="min-h-10 shrink-0 rounded border border-surface-border px-3 py-2 text-[11px] text-gray-300 hover:border-jmix-500 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-jmix-400"
+                        >
+                          Open source
+                        </button>
+                        {selectedProfile.profile !== 'default' && (
+                          <button
+                            type="button"
+                            onClick={() => void reviewLifecycle('REMOVE')}
+                            disabled={reviewing || applying || Boolean(selectedProfileRemovalBlocker)}
+                            title={selectedProfileRemovalBlocker
+                              ? `${selectedProfileRemovalBlocker} Remove the reference first.`
+                              : 'Review a revision-bound, undoable profile removal.'}
+                            className="min-h-10 shrink-0 rounded border border-red-800/80 px-3 py-2 text-[11px] text-red-300 hover:border-red-600 hover:text-red-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-45"
+                          >
+                            Review removal
+                          </button>
+                        )}
+                      </div>
                     </div>
+
+                    {selectedProfileRemovalBlocker && (
+                      <p className="mt-2 rounded border border-amber-800/60 bg-amber-950/20 px-3 py-2 text-[10px] leading-4 text-amber-200">
+                        {selectedProfileRemovalBlocker} Apply a revision-bound reference update before removing this profile.
+                      </p>
+                    )}
 
                     <fieldset className="mt-4 min-w-0">
                       <legend className="text-xs font-semibold text-gray-200">Runtime profile</legend>
@@ -540,6 +788,13 @@ export default function ProjectProperties() {
                       </div>
                     </section>
 
+                    {workspace && (
+                      <ProfileComparison
+                        profiles={workspace.profiles}
+                        selected={selectedProfile}
+                      />
+                    )}
+
                     <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-surface-border pt-4">
                       <button
                         type="button"
@@ -574,6 +829,18 @@ export default function ProjectProperties() {
                         }}
                       />
                     )}
+                    {lifecyclePreview && (
+                      <ProfileChangeReview
+                        preview={lifecyclePreview}
+                        applying={applying}
+                        onApply={() => void applyLifecycle()}
+                        onDiscard={() => {
+                          setLifecyclePreview(null)
+                          setPendingLifecycle(null)
+                          setNotice(null)
+                        }}
+                      />
+                    )}
                   </>
                 )
                 : (
@@ -586,6 +853,142 @@ export default function ProjectProperties() {
         </div>
       )}
     </section>
+  )
+}
+
+function ProfileComparison({
+  profiles,
+  selected,
+}: {
+  profiles: ProjectApplicationProfileSnapshot[]
+  selected: ProjectApplicationProfileSnapshot
+}) {
+  const peers = profiles.filter(profile =>
+    profile.locator.relativePath !== selected.locator.relativePath &&
+    profileDirectory(profile) === profileDirectory(selected),
+  )
+  const defaultProfile = profiles.find(profile =>
+    profile.profile === 'default' &&
+    profileDirectory(profile) === profileDirectory(selected),
+  )
+  const [comparisonPath, setComparisonPath] = useState('')
+  const preferredComparison = selected.profile === 'default'
+    ? peers.find(profile => profile.locator.relativePath === comparisonPath) ?? peers[0]
+    : selected
+  const baseline = selected.profile === 'default' ? selected : defaultProfile
+  const comparison = selected.profile === 'default' ? preferredComparison : selected
+
+  if (!baseline || !comparison || baseline.locator.relativePath === comparison.locator.relativePath) {
+    return null
+  }
+
+  const baselineValues = new Map(
+    baseline.properties.map(property => [property.key, property.displayValue]),
+  )
+  const comparisonValues = new Map(
+    comparison.properties.map(property => [property.key, property.displayValue]),
+  )
+  const keys = [...new Set([...baselineValues.keys(), ...comparisonValues.keys()])].sort()
+
+  return (
+    <section className="mt-5 min-w-0 rounded border border-surface-border bg-surface p-3 sm:p-4" aria-label="Environment profile comparison">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <h4 className="text-xs font-semibold text-gray-200">Environment comparison</h4>
+          <p className="mt-0.5 text-[10px] leading-4 text-gray-500">
+            Raw overrides and effective fallback against the module default. Secret values remain redacted.
+          </p>
+        </div>
+        {selected.profile === 'default' && peers.length > 1 && (
+          <label className="min-w-0 sm:w-56">
+            <span className="sr-only">Comparison profile</span>
+            <select
+              value={comparison.locator.relativePath}
+              onChange={event => setComparisonPath(event.target.value)}
+              className={inputClass}
+            >
+              {peers.map(profile => (
+                <option key={profile.locator.relativePath} value={profile.locator.relativePath}>
+                  {profile.profile}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+
+      <div className="mt-3 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
+        <ComparisonIdentity label="Baseline" profile={baseline} />
+        <ComparisonIdentity label="Environment" profile={comparison} />
+      </div>
+
+      {keys.length > 0
+        ? (
+          <div className="mt-3 max-h-80 min-w-0 space-y-1.5 overflow-y-auto pr-0.5">
+            {keys.map(key => {
+              const base = baselineValues.get(key)
+              const override = comparisonValues.get(key)
+              const status = override === undefined
+                ? 'Inherited'
+                : base === undefined
+                  ? 'Environment only'
+                  : base === override
+                    ? 'Same'
+                    : 'Override'
+              return (
+                <article
+                  key={key}
+                  className="grid min-w-0 grid-cols-1 gap-1 rounded border border-surface-border/80 bg-surface-light px-2.5 py-2 sm:grid-cols-[minmax(9rem,1.25fr)_minmax(7rem,1fr)_minmax(7rem,1fr)_auto] sm:items-center sm:gap-2"
+                >
+                  <code className="break-all text-[10px] text-gray-300">{key}</code>
+                  <ComparisonValue label="Default" value={base} />
+                  <ComparisonValue label="Effective" value={override ?? base} />
+                  <span className={`w-fit rounded px-1.5 py-0.5 text-[9px] ${
+                    status === 'Override'
+                      ? 'bg-jmix-500/15 text-jmix-300'
+                      : status === 'Environment only'
+                        ? 'bg-violet-500/15 text-violet-300'
+                        : 'bg-surface text-gray-500'
+                  }`}>
+                    {status}
+                  </span>
+                </article>
+              )
+            })}
+          </div>
+        )
+        : (
+          <p className="mt-3 rounded border border-dashed border-surface-border p-3 text-[10px] text-gray-500">
+            Neither profile declares properties yet.
+          </p>
+        )}
+    </section>
+  )
+}
+
+function ComparisonIdentity({
+  label,
+  profile,
+}: {
+  label: string
+  profile: ProjectApplicationProfileSnapshot
+}) {
+  return (
+    <div className="min-w-0 rounded bg-surface-light px-2.5 py-2">
+      <span className="block text-[9px] uppercase tracking-wide text-gray-600">{label}</span>
+      <span className="mt-0.5 block truncate text-[11px] font-medium text-gray-300">
+        {profile.profile}
+      </span>
+    </div>
+  )
+}
+
+function ComparisonValue({ label, value }: { label: string; value?: string }) {
+  return (
+    <span className="min-w-0 text-[10px] text-gray-400">
+      <span className="mr-1 text-[9px] text-gray-600 sm:hidden">{label}:</span>
+      <span className="break-all">{value ?? '—'}</span>
+    </span>
   )
 }
 

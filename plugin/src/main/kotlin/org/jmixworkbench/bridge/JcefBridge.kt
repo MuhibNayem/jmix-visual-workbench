@@ -97,6 +97,8 @@ import org.jmixworkbench.services.JmixRuntimeOpenPreviewRequest
 import org.jmixworkbench.services.JmixRuntimeService
 import org.jmixworkbench.services.JmixApplicationPropertiesChangeApplyRequest
 import org.jmixworkbench.services.JmixApplicationPropertiesChangeRequest
+import org.jmixworkbench.services.JmixApplicationProfileLifecycleApplyRequest
+import org.jmixworkbench.services.JmixApplicationProfileLifecycleRequest
 import org.jmixworkbench.services.JmixProjectPropertiesService
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
@@ -260,6 +262,14 @@ class JcefBridge(
             }
             if (action == "applyProjectProfileChange") {
                 handleApplyProjectProfileChange(action, requestId, payload)
+                return
+            }
+            if (action == "previewProjectProfileLifecycle") {
+                handlePreviewProjectProfileLifecycle(action, requestId, payload)
+                return
+            }
+            if (action == "applyProjectProfileLifecycle") {
+                handleApplyProjectProfileLifecycle(action, requestId, payload)
                 return
             }
             if (action == "getMenuWorkspace") {
@@ -888,6 +898,98 @@ class JcefBridge(
         }
         ReadAction.nonBlocking<PreparedWorkspaceChange> {
             JmixProjectPropertiesService.getInstance(project).prepareProfileChange(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val response = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+                sendResponse(action, requestId, gson.toJson(response))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewProjectProfileLifecycle(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixApplicationProfileLifecycleRequest::class.java).also { parsed ->
+                require(parsed.mode.name in setOf("CREATE", "REMOVE"))
+                require(parsed.profileLocator.relativePath.isNotBlank())
+                require(parsed.profileLocator.revisionFingerprint.isNotBlank())
+                require((parsed.profileName?.length ?: 0) <= 100)
+            }
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangePreviewResponse(
+                        accepted = false,
+                        changeSetId = "project-profile-lifecycle:rejected",
+                        label = "Project profile lifecycle change rejected",
+                        planDigest = null,
+                        files = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-PROJECT-PROFILE-LIFECYCLE-REQUEST-INVALID",
+                                message = error.message ?: "The profile lifecycle request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
+            JmixProjectPropertiesService.getInstance(project).previewProfileLifecycleChange(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { preview ->
+                sendResponse(action, requestId, gson.toJson(preview))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyProjectProfileLifecycle(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixApplicationProfileLifecycleApplyRequest::class.java).also { parsed ->
+                require(parsed.expectedPlanDigest.isNotBlank())
+                require(parsed.expectedPlanDigest.length <= 128)
+                require(parsed.change.mode.name in setOf("CREATE", "REMOVE"))
+                require(parsed.change.profileLocator.relativePath.isNotBlank())
+                require(parsed.change.profileLocator.revisionFingerprint.isNotBlank())
+                require((parsed.change.profileName?.length ?: 0) <= 100)
+            }
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    WorkspaceChangeApplyResponse(
+                        success = false,
+                        changeSetId = "project-profile-lifecycle:rejected",
+                        planDigest = null,
+                        filesChanged = emptyList(),
+                        issues = listOf(
+                            org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                                code = "JVW-PROJECT-PROFILE-LIFECYCLE-REQUEST-INVALID",
+                                message = error.message ?: "The profile lifecycle apply request is malformed.",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            JmixProjectPropertiesService.getInstance(project).prepareProfileLifecycleChange(request)
         }
             .inSmartMode(project)
             .expireWith(project)

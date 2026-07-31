@@ -172,6 +172,8 @@ class VerifyPluginZipContentsTaskTest {
                 text(pluginJar, "webui/assets/app-abcdef.js")
                         .replace("previewProjectProfileChange", "missingPreviewAction")
                         .replace("applyProjectProfileChange", "missingApplyAction")
+                        .replace("previewProjectProfileLifecycle", "missingLifecyclePreviewAction")
+                        .replace("applyProjectProfileLifecycle", "missingLifecycleApplyAction")
         );
         Path archive = writeArchive("missing-profile-mutation.zip", Map.of(
                 "plugin/lib/main.jar", withoutProfileMutation
@@ -272,7 +274,8 @@ class VerifyPluginZipContentsTaskTest {
         ));
         entries.put(
                 "webui/assets/app-abcdef.js",
-                bytes("previewProjectProfileChange();applyProjectProfileChange();")
+                bytes("previewProjectProfileChange();applyProjectProfileChange();"
+                        + "previewProjectProfileLifecycle();applyProjectProfileLifecycle();")
         );
         entries.put("webui/assets/app-abcdef.css", bytes("body{}"));
         entries.put("webui/build-info.json", bytes("{\"inputSha256\":\"" + DIGEST + "\"}"));
@@ -332,6 +335,14 @@ class VerifyPluginZipContentsTaskTest {
         );
         entries.put(
                 "org/jmixworkbench/services/JmixApplicationPropertiesChangeApplyRequest.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/JmixApplicationProfileLifecycleRequest.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/JmixApplicationProfileLifecycleApplyRequest.class",
                 new byte[]{0, 1, 2}
         );
         entries.put(

@@ -234,6 +234,16 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         );
         requireEntry(
                 contents,
+                "org/jmixworkbench/services/JmixApplicationProfileLifecycleRequest.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/services/JmixApplicationProfileLifecycleApplyRequest.class",
+                archive
+        );
+        requireEntry(
+                contents,
                 "org/jmixworkbench/bridge/JcefBridge.class",
                 archive
         );
@@ -380,6 +390,8 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         }
         requireContains(bundledJavaScript.toString(), "previewProjectProfileChange", archive);
         requireContains(bundledJavaScript.toString(), "applyProjectProfileChange", archive);
+        requireContains(bundledJavaScript.toString(), "previewProjectProfileLifecycle", archive);
+        requireContains(bundledJavaScript.toString(), "applyProjectProfileLifecycle", archive);
 
         String buildInfo = text(contents.get("webui/build-info.json"));
         Matcher digest = DIGEST_PATTERN.matcher(buildInfo);

@@ -284,6 +284,7 @@ class WorkspaceHistoryService(
             val file = target.root.findFileByRelativePath(target.relativePath)
             val expected = when {
                 direction == Direction.UNDO && planned.mode == WorkspaceFileChangeMode.CREATE -> null
+                direction == Direction.REDO && planned.mode == WorkspaceFileChangeMode.DELETE -> null
                 direction == Direction.UNDO -> planned.originalContent
                 else -> planned.resultContent
             }
@@ -369,6 +370,38 @@ class WorkspaceHistoryService(
                         )
                     }
                 }
+                WorkspaceFileChangeMode.DELETE -> {
+                    if (direction == Direction.UNDO) {
+                        if (file != null) {
+                            return WorkspaceChangeIssue(
+                                "JVW-HISTORY-UNDO-CONFLICT",
+                                "Cannot undo because the deleted target was recreated.",
+                                planned.relativePath,
+                            )
+                        }
+                    } else {
+                        if (
+                            !target.root.isValid ||
+                            file == null ||
+                            file.isDirectory ||
+                            !VfsUtilCore.isAncestor(target.root, file, false)
+                        ) {
+                            return WorkspaceChangeIssue(
+                                "JVW-HISTORY-SOURCE-MISSING",
+                                "Cannot redo because ${planned.relativePath} is unavailable.",
+                                planned.relativePath,
+                            )
+                        }
+                        val current = CanonicalDiscoveryJson.sha256(ProjectSourceText.read(file))
+                        if (current != planned.beforeFingerprint) {
+                            return WorkspaceChangeIssue(
+                                "JVW-HISTORY-SOURCE-STALE",
+                                "Cannot redo because the restored source was edited afterward.",
+                                planned.relativePath,
+                            )
+                        }
+                    }
+                }
             }
         }
         return null
@@ -396,6 +429,18 @@ class WorkspaceHistoryService(
                         ?.delete(this)
                 } else {
                     createFile(target, planned.relativePath, planned.resultContent)
+                }
+            }
+            WorkspaceFileChangeMode.DELETE -> {
+                if (direction == Direction.UNDO) {
+                    createFile(
+                        target,
+                        planned.relativePath,
+                        planned.originalContent ?: error("Deleted source content is unavailable."),
+                    )
+                } else {
+                    target.root.findFileByRelativePath(target.relativePath)
+                        ?.delete(this)
                 }
             }
         }

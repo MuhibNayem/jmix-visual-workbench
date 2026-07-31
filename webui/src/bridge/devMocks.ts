@@ -80,6 +80,43 @@ export const developmentProjectPropertiesWorkspace: JmixProjectPropertiesWorkspa
         },
       ],
     },
+    {
+      modulePath: '',
+      profile: 'dev',
+      locator: locator('src/main/resources/application-dev.properties'),
+      serverPort: '8081',
+      contextPath: '/payroll',
+      activeProfiles: [],
+      availableLocales: ['en', 'bn'],
+      stores: [
+        {
+          name: 'main',
+          declaredAdditional: true,
+          url: 'jdbc:postgresql://localhost/payroll_dev',
+          username: 'payroll',
+          passwordConfigured: true,
+          passwordUsesPlaceholder: true,
+          liquibaseChangeLog: 'com/company/payroll/liquibase/changelog.xml',
+        },
+      ],
+      properties: [
+        {
+          key: 'server.port',
+          displayValue: '8081',
+          secret: false,
+        },
+        {
+          key: 'main.datasource.url',
+          displayValue: 'jdbc:postgresql://localhost/payroll_dev',
+          secret: false,
+        },
+        {
+          key: 'main.datasource.password',
+          displayValue: '${DB_PASSWORD}',
+          secret: true,
+        },
+      ],
+    },
   ],
   issues: [],
   snapshotDigest: 'development-project-properties',

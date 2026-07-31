@@ -42,6 +42,7 @@ import type {
   IntegrationConnectorModel,
   IntegrationConnectorWorkspaceResponse,
   ProjectApplicationPropertiesChangeRequest,
+  ProjectApplicationProfileLifecycleRequest,
   JmixProjectPropertiesWorkspace,
   JmixFlowUiHotDeployRequest,
   JmixRuntimeActionResponse,
@@ -328,6 +329,111 @@ class Bridge {
                   changeSetId: 'project-profile:development',
                   planDigest: 'development-project-profile-digest',
                   filesChanged: [profile.locator.relativePath],
+                  issues: [],
+                }
+              }
+              case 'previewProjectProfileLifecycle': {
+                const change = payload as ProjectApplicationProfileLifecycleRequest
+                const profile = developmentProjectPropertiesWorkspace.profiles.find(
+                  candidate => candidate.locator.relativePath === change.profileLocator.relativePath,
+                )
+                if (!profile) {
+                  return {
+                    accepted: false,
+                    changeSetId: 'project-profile-lifecycle:development-rejected',
+                    label: 'Project profile lifecycle change rejected',
+                    planDigest: null,
+                    files: [],
+                    issues: [{
+                      code: 'JVW-PROJECT-PROFILE-LIFECYCLE-UNINDEXED',
+                      message: 'The selected development profile is unavailable.',
+                    }],
+                  }
+                }
+                const parent = profile.locator.relativePath.includes('/')
+                  ? profile.locator.relativePath.slice(0, profile.locator.relativePath.lastIndexOf('/') + 1)
+                  : ''
+                const targetPath = change.mode === 'CREATE'
+                  ? `${parent}application-${change.profileName}.properties`
+                  : profile.locator.relativePath
+                return {
+                  accepted: true,
+                  changeSetId: `project-profile-lifecycle:development-${change.mode.toLowerCase()}`,
+                  label: change.mode === 'CREATE'
+                    ? `Create application-${change.profileName}.properties`
+                    : `Remove ${targetPath.split('/').pop()}`,
+                  planDigest: 'development-project-profile-lifecycle-digest',
+                  files: [{
+                    relativePath: targetPath,
+                    mode: change.mode === 'CREATE' ? 'CREATE' : 'DELETE',
+                    beforeFingerprint: change.mode === 'CREATE' ? null : profile.locator.revisionFingerprint,
+                    afterFingerprint: 'development-project-profile-lifecycle-after',
+                    originalContent: change.mode === 'CREATE'
+                      ? null
+                      : [
+                        '# Credential-safe deletion preview; property values are intentionally omitted.',
+                        `# Properties: ${profile.properties.length}`,
+                        `# Secret-bearing properties: ${profile.properties.filter(property => property.secret).length}`,
+                        '',
+                      ].join('\n'),
+                    resultContent: change.mode === 'CREATE'
+                      ? `# Profile-specific Jmix configuration for ${change.profileName}.\n`
+                      : '# The profile file will be removed after approval.\n',
+                    appliedEditCount: 0,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applyProjectProfileLifecycle': {
+                const change = payload.change as ProjectApplicationProfileLifecycleRequest
+                const profileIndex = developmentProjectPropertiesWorkspace.profiles.findIndex(
+                  candidate => candidate.locator.relativePath === change.profileLocator.relativePath,
+                )
+                if (
+                  profileIndex < 0 ||
+                  payload.expectedPlanDigest !== 'development-project-profile-lifecycle-digest'
+                ) {
+                  return {
+                    success: false,
+                    changeSetId: 'project-profile-lifecycle:development-rejected',
+                    planDigest: null,
+                    filesChanged: [],
+                    issues: [{
+                      code: 'JVW-CHANGE-PREVIEW-STALE',
+                      message: 'The approved development lifecycle preview is stale.',
+                    }],
+                  }
+                }
+                const selected = developmentProjectPropertiesWorkspace.profiles[profileIndex]
+                let changedPath = selected.locator.relativePath
+                if (change.mode === 'CREATE') {
+                  const separator = selected.locator.relativePath.lastIndexOf('/')
+                  const parent = separator >= 0
+                    ? selected.locator.relativePath.slice(0, separator + 1)
+                    : ''
+                  changedPath = `${parent}application-${change.profileName}.properties`
+                  developmentProjectPropertiesWorkspace.profiles.push({
+                    modulePath: selected.modulePath,
+                    profile: change.profileName ?? 'profile',
+                    locator: {
+                      relativePath: changedPath,
+                      revisionFingerprint: `development-profile-${Date.now()}`,
+                    },
+                    activeProfiles: [],
+                    availableLocales: [],
+                    stores: [],
+                    properties: [],
+                  })
+                } else {
+                  developmentProjectPropertiesWorkspace.profiles.splice(profileIndex, 1)
+                }
+                developmentProjectPropertiesWorkspace.snapshotDigest =
+                  `development-project-properties-${Date.now()}`
+                return {
+                  success: true,
+                  changeSetId: `project-profile-lifecycle:development-${change.mode.toLowerCase()}`,
+                  planDigest: 'development-project-profile-lifecycle-digest',
+                  filesChanged: [changedPath],
                   issues: [],
                 }
               }
@@ -2778,6 +2884,20 @@ ${javaMethods}
     expectedPlanDigest: string,
   ) {
     return this.request<WorkspaceChangeApplyResponse>('applyProjectProfileChange', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewProjectProfileLifecycle(change: ProjectApplicationProfileLifecycleRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewProjectProfileLifecycle', change)
+  }
+
+  applyProjectProfileLifecycle(
+    change: ProjectApplicationProfileLifecycleRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>('applyProjectProfileLifecycle', {
       change,
       expectedPlanDigest,
     })

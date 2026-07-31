@@ -6,6 +6,7 @@ import org.jmixworkbench.discovery.model.SourceLocator
 enum class WorkspaceFileChangeMode {
     CREATE,
     MODIFY,
+    DELETE,
 }
 
 data class WorkspaceTextEdit(
@@ -145,6 +146,7 @@ object WorkspaceChangePlanner {
         return when (change.mode) {
             WorkspaceFileChangeMode.CREATE -> planCreate(change, current, issues)
             WorkspaceFileChangeMode.MODIFY -> planModify(change, current, issues)
+            WorkspaceFileChangeMode.DELETE -> planDelete(change, current, issues)
         }
     }
 
@@ -271,6 +273,52 @@ object WorkspaceChangePlanner {
             originalContent = current,
             resultContent = result,
             appliedEditCount = ordered.size,
+        )
+    }
+
+    private fun planDelete(
+        change: WorkspaceFileChange,
+        current: String?,
+        issues: MutableList<WorkspaceChangeIssue>,
+    ): PlannedWorkspaceFile? {
+        if (current == null) {
+            issues += issue(
+                "JVW-CHANGE-SOURCE-MISSING",
+                "Deletion was rejected because the indexed source no longer exists.",
+                change.relativePath,
+            )
+            return null
+        }
+        val currentFingerprint = CanonicalDiscoveryJson.sha256(current)
+        if (
+            change.baseRevisionFingerprint.isNullOrBlank() ||
+            change.baseRevisionFingerprint != currentFingerprint
+        ) {
+            issues += issue(
+                "JVW-CHANGE-STALE",
+                "The source changed after the visual model was created. Refresh and review the deletion again.",
+                change.relativePath,
+            )
+            return null
+        }
+        if (change.edits.isNotEmpty() || change.createContent != null) {
+            issues += issue(
+                "JVW-CHANGE-DELETE-MALFORMED",
+                "A deletion requires only the exact source revision and cannot contain content or text edits.",
+                change.relativePath,
+            )
+            return null
+        }
+        return PlannedWorkspaceFile(
+            relativePath = change.relativePath,
+            mode = WorkspaceFileChangeMode.DELETE,
+            beforeFingerprint = currentFingerprint,
+            // The digest remains non-null for backwards-compatible previews;
+            // DELETE verification is based on target absence, not this value.
+            afterFingerprint = CanonicalDiscoveryJson.sha256(""),
+            originalContent = current,
+            resultContent = "",
+            appliedEditCount = 0,
         )
     }
 

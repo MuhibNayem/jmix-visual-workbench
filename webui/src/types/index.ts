@@ -1216,6 +1216,14 @@ export interface ProjectApplicationPropertiesChangeRequest {
   updates: ProjectApplicationPropertyUpdate[]
 }
 
+export type ProjectApplicationProfileLifecycleMode = 'CREATE' | 'REMOVE'
+
+export interface ProjectApplicationProfileLifecycleRequest {
+  mode: ProjectApplicationProfileLifecycleMode
+  profileLocator: GraphSourceLocator
+  profileName?: string
+}
+
 export interface JmixProjectPropertiesWorkspace {
   jmixVersion?: string
   jmixVersionConfidence: ProjectEvidenceConfidence

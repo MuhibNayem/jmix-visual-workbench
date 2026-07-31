@@ -139,6 +139,12 @@ class WorkspaceChangeService(
                                         ?: error("Source disappeared during write: ${planned.relativePath}")
                                     ProjectSourceText.write(project, file, planned.resultContent)
                                 }
+                                WorkspaceFileChangeMode.DELETE -> {
+                                    val target = requireNotNull(prepared.targets[planned.relativePath])
+                                    val file = target.root.findFileByRelativePath(target.relativePath)
+                                        ?: error("Source disappeared during deletion: ${planned.relativePath}")
+                                    file.delete(this)
+                                }
                             }
                             mutationProbe.observe(
                                 WorkspaceMutationEvent(
@@ -262,11 +268,19 @@ class WorkspaceChangeService(
         plan.files.forEach { planned ->
             val target = requireNotNull(targets[planned.relativePath])
             val file = target.root.findFileByRelativePath(target.relativePath)
-                ?: error("Mutation verification failed: ${planned.relativePath} is missing.")
+            if (planned.mode == WorkspaceFileChangeMode.DELETE) {
+                check(file == null) {
+                    "Mutation verification failed: ${planned.relativePath} still exists."
+                }
+                return@forEach
+            }
+            check(file != null) {
+                "Mutation verification failed: ${planned.relativePath} is missing."
+            }
             check(!file.isDirectory) {
                 "Mutation verification failed: ${planned.relativePath} is a directory."
             }
-            check(ProjectSourceText.read(file) == planned.resultContent) {
+            check(ProjectSourceText.read(requireNotNull(file)) == planned.resultContent) {
                 "Mutation verification failed: ${planned.relativePath} does not match the approved result."
             }
         }
@@ -439,6 +453,29 @@ class WorkspaceChangeService(
                         return WorkspaceChangeIssue(
                             "JVW-CHANGE-STALE",
                             "A source file changed after preview.",
+                            planned.relativePath,
+                        )
+                    }
+                }
+                WorkspaceFileChangeMode.DELETE -> {
+                    if (
+                        file == null ||
+                        file.isDirectory ||
+                        !VfsUtilCore.isAncestor(target.root, file, false)
+                    ) {
+                        return WorkspaceChangeIssue(
+                            "JVW-CHANGE-SOURCE-MISSING",
+                            "A source selected for deletion disappeared after preview.",
+                            planned.relativePath,
+                        )
+                    }
+                    val fingerprint = runCatching {
+                        CanonicalDiscoveryJson.sha256(ProjectSourceText.read(file))
+                    }.getOrNull()
+                    if (fingerprint == null || fingerprint != planned.beforeFingerprint) {
+                        return WorkspaceChangeIssue(
+                            "JVW-CHANGE-STALE",
+                            "A source selected for deletion changed after preview.",
                             planned.relativePath,
                         )
                     }

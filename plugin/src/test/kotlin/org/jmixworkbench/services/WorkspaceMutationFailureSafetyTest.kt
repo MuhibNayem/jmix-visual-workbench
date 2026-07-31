@@ -27,7 +27,7 @@ class WorkspaceMutationFailureSafetyTest : HeavyPlatformTestCase() {
             WorkspaceMutationProbe { event ->
                 if (
                     event.phase == WorkspaceMutationPhase.AFTER_FILE_MUTATION &&
-                    event.fileIndex == 1
+                    event.relativePath == fixture.deletedPath
                 ) {
                     throw IOException("Injected one-shot disk write failure")
                 }
@@ -137,12 +137,15 @@ class WorkspaceMutationFailureSafetyTest : HeavyPlatformTestCase() {
         val pathA = "src/main/java/com/company/loan/AtomicA.java"
         val createdPath = "src/main/resources/certification/$id/deep/generated.txt"
         val pathC = "src/main/resources/com/company/loan/atomic-c.properties"
+        val deletedPath = "src/main/resources/com/company/loan/obsolete-profile.properties"
         val originalA = "class AtomicA { String state = \"before\"; }\n"
         val changedA = originalA.replace("before", "after")
         val originalC = "state=before\n"
         val changedC = "state=after\n"
+        val deletedOriginal = "must=be-restored-byte-for-byte\n"
         val fileA = createFile(root, pathA, originalA)
         val fileC = createFile(root, pathC, originalC)
+        createFile(root, deletedPath, deletedOriginal)
         val changeSet = WorkspaceChangeSet(
             id = "failure-safety-$id",
             label = "Certify atomic workspace mutation $id",
@@ -153,6 +156,11 @@ class WorkspaceMutationFailureSafetyTest : HeavyPlatformTestCase() {
                     mode = WorkspaceFileChangeMode.CREATE,
                     baseRevisionFingerprint = null,
                     createContent = "generated-after\n",
+                ),
+                WorkspaceFileChange(
+                    relativePath = deletedPath,
+                    mode = WorkspaceFileChangeMode.DELETE,
+                    baseRevisionFingerprint = CanonicalDiscoveryJson.sha256(deletedOriginal),
                 ),
                 replacement(pathC, originalC, "before", "after"),
             ),
@@ -167,6 +175,8 @@ class WorkspaceMutationFailureSafetyTest : HeavyPlatformTestCase() {
             changedC = changedC,
             createdPath = createdPath,
             createdTopDirectory = "src/main/resources/certification",
+            deletedPath = deletedPath,
+            deletedOriginal = deletedOriginal,
             changeSet = changeSet,
             service = WorkspaceChangeService.getInstance(project),
         )
@@ -212,6 +222,8 @@ class WorkspaceMutationFailureSafetyTest : HeavyPlatformTestCase() {
         val changedC: String,
         val createdPath: String,
         val createdTopDirectory: String,
+        val deletedPath: String,
+        val deletedOriginal: String,
         val changeSet: WorkspaceChangeSet,
         val service: WorkspaceChangeService,
     ) {
@@ -230,6 +242,10 @@ class WorkspaceMutationFailureSafetyTest : HeavyPlatformTestCase() {
             assertEquals(originalC, VfsUtil.loadText(fileC))
             assertNull(root.findFileByRelativePath(createdPath))
             assertNull(root.findFileByRelativePath(createdTopDirectory))
+            assertEquals(
+                deletedOriginal,
+                VfsUtil.loadText(requireNotNull(root.findFileByRelativePath(deletedPath))),
+            )
         }
 
         fun assertAppliedWorkspace() {
@@ -239,6 +255,7 @@ class WorkspaceMutationFailureSafetyTest : HeavyPlatformTestCase() {
                 "generated-after\n",
                 VfsUtil.loadText(requireNotNull(root.findFileByRelativePath(createdPath))),
             )
+            assertNull(root.findFileByRelativePath(deletedPath))
         }
     }
 }

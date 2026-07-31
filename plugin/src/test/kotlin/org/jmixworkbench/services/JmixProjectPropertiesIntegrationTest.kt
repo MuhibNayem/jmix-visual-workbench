@@ -349,4 +349,190 @@ class JmixProjectPropertiesIntegrationTest : BasePlatformTestCase() {
         assertFalse(preview.accepted)
         assertEquals("JVW-PROJECT-PROPERTIES-ACTIVE-PROFILE-OWNER", preview.issues.single().code)
     }
+
+    fun testProfileCreationIsRevisionBoundAndUndoable() {
+        myFixture.addFileToProject(
+            "src/main/resources/application.properties",
+            "server.port=8080\n",
+        )
+        val service = JmixProjectPropertiesService.getInstance(project)
+        val anchor = service.inspect().profiles.single()
+        val change = JmixApplicationProfileLifecycleRequest(
+            mode = JmixApplicationProfileLifecycleMode.CREATE,
+            profileLocator = anchor.locator,
+            profileName = "staging",
+        )
+
+        val preview = service.previewProfileLifecycleChange(change)
+
+        assertTrue(preview.issues.joinToString { it.message }, preview.accepted)
+        assertEquals("CREATE", preview.files.single().mode.name)
+        assertTrue(preview.files.single().resultContent.contains("staging"))
+        val prepared = service.prepareProfileLifecycleChange(
+            JmixApplicationProfileLifecycleApplyRequest(
+                change = change,
+                expectedPlanDigest = requireNotNull(preview.planDigest),
+            ),
+        )
+        val applied = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+        assertTrue(applied.issues.joinToString { it.message }, applied.success)
+        val targetPath = preview.files.single().relativePath
+        val target = requireNotNull(ProjectFileResolver.getInstance(project).resolveFile(targetPath)?.file)
+        assertEquals(
+            "# Profile-specific Jmix configuration for staging.\n",
+            ProjectSourceText.read(target),
+        )
+        assertTrue(service.inspect().profiles.any { it.profile == "staging" })
+
+        val undone = WorkspaceHistoryService.getInstance(project).undo()
+        assertTrue(undone.issues.joinToString { it.message }, undone.success)
+        assertNull(ProjectFileResolver.getInstance(project).resolveFile(targetPath))
+
+        val redone = WorkspaceHistoryService.getInstance(project).redo()
+        assertTrue(redone.issues.joinToString { it.message }, redone.success)
+        assertEquals(
+            "# Profile-specific Jmix configuration for staging.\n",
+            ProjectSourceText.read(
+                requireNotNull(ProjectFileResolver.getInstance(project).resolveFile(targetPath)?.file),
+            ),
+        )
+    }
+
+    fun testProfileRemovalDoesNotExposeSecretsAndRestoresExactSourceOnUndo() {
+        myFixture.addFileToProject(
+            "src/main/resources/application.properties",
+            "server.port=8080\n",
+        )
+        val original =
+            "# development profile\r\n" +
+                "server.port=8181\r\n" +
+                "main.datasource.password=must-never-cross-jcef\r\n"
+        myFixture.addFileToProject(
+            "src/main/resources/application-dev.properties",
+            original,
+        )
+        val service = JmixProjectPropertiesService.getInstance(project)
+        val dev = service.inspect().profiles.single { it.profile == "dev" }
+        val change = JmixApplicationProfileLifecycleRequest(
+            mode = JmixApplicationProfileLifecycleMode.REMOVE,
+            profileLocator = dev.locator,
+            profileName = "dev",
+        )
+
+        val preview = service.previewProfileLifecycleChange(change)
+
+        assertTrue(preview.issues.joinToString { it.message }, preview.accepted)
+        assertEquals("DELETE", preview.files.single().mode.name)
+        val serialized = preview.files.joinToString {
+            "${it.originalContent}\n${it.resultContent}"
+        }
+        assertTrue(serialized.contains("Credential-safe deletion preview"))
+        assertTrue(serialized.contains("Properties: 2"))
+        assertTrue(serialized.contains("Secret-bearing properties: 1"))
+        assertFalse(serialized.contains("must-never-cross-jcef"))
+        val prepared = service.prepareProfileLifecycleChange(
+            JmixApplicationProfileLifecycleApplyRequest(
+                change = change,
+                expectedPlanDigest = requireNotNull(preview.planDigest),
+            ),
+        )
+        val applied = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
+        assertTrue(applied.issues.joinToString { it.message }, applied.success)
+        val targetPath = preview.files.single().relativePath
+        assertNull(ProjectFileResolver.getInstance(project).resolveFile(targetPath))
+
+        val undone = WorkspaceHistoryService.getInstance(project).undo()
+        assertTrue(undone.issues.joinToString { it.message }, undone.success)
+        assertEquals(
+            original,
+            ProjectSourceText.read(
+                requireNotNull(ProjectFileResolver.getInstance(project).resolveFile(targetPath)?.file),
+            ),
+        )
+
+        val redone = WorkspaceHistoryService.getInstance(project).redo()
+        assertTrue(redone.issues.joinToString { it.message }, redone.success)
+        assertNull(ProjectFileResolver.getInstance(project).resolveFile(targetPath))
+    }
+
+    fun testProfileRemovalRejectsDefaultActiveAndStaleProfiles() {
+        val defaultSource = myFixture.addFileToProject(
+            "src/main/resources/application.properties",
+            "spring.profiles.active=dev\n",
+        ).virtualFile
+        val devSource = myFixture.addFileToProject(
+            "src/main/resources/application-dev.properties",
+            "server.port=8181\n",
+        ).virtualFile
+        val service = JmixProjectPropertiesService.getInstance(project)
+        val profiles = service.inspect().profiles
+        val defaultProfile = profiles.single { it.profile == "default" }
+        val dev = profiles.single { it.profile == "dev" }
+
+        val removeDefault = service.previewProfileLifecycleChange(
+            JmixApplicationProfileLifecycleRequest(
+                JmixApplicationProfileLifecycleMode.REMOVE,
+                defaultProfile.locator,
+                "default",
+            ),
+        )
+        assertFalse(removeDefault.accepted)
+        assertEquals("JVW-PROJECT-PROFILE-REMOVE-DEFAULT", removeDefault.issues.single().code)
+
+        val removeActive = service.previewProfileLifecycleChange(
+            JmixApplicationProfileLifecycleRequest(
+                JmixApplicationProfileLifecycleMode.REMOVE,
+                dev.locator,
+                "dev",
+            ),
+        )
+        assertFalse(removeActive.accepted)
+        assertEquals("JVW-PROJECT-PROFILE-REMOVE-ACTIVE", removeActive.issues.single().code)
+
+        WriteCommandAction.runWriteCommandAction(project) {
+            VfsUtil.saveText(defaultSource, "spring.profiles.active=test\n")
+            VfsUtil.saveText(devSource, "server.port=8282\n")
+        }
+        val stale = service.previewProfileLifecycleChange(
+            JmixApplicationProfileLifecycleRequest(
+                JmixApplicationProfileLifecycleMode.REMOVE,
+                dev.locator,
+                "dev",
+            ),
+        )
+        assertFalse(stale.accepted)
+        assertEquals("JVW-PROJECT-PROFILE-LIFECYCLE-STALE", stale.issues.single().code)
+    }
+
+    fun testProfileRemovalRejectsExplicitAndDynamicProfileReferences() {
+        val defaultSource = myFixture.addFileToProject(
+            "src/main/resources/application.properties",
+            "spring.profiles.include=dev\n",
+        ).virtualFile
+        myFixture.addFileToProject(
+            "src/main/resources/application-dev.properties",
+            "server.port=8181\n",
+        )
+        val service = JmixProjectPropertiesService.getInstance(project)
+        val dev = service.inspect().profiles.single { it.profile == "dev" }
+        val change = JmixApplicationProfileLifecycleRequest(
+            JmixApplicationProfileLifecycleMode.REMOVE,
+            dev.locator,
+            "dev",
+        )
+
+        val referenced = service.previewProfileLifecycleChange(change)
+        assertFalse(referenced.accepted)
+        assertEquals("JVW-PROJECT-PROFILE-REMOVE-REFERENCED", referenced.issues.single().code)
+
+        WriteCommandAction.runWriteCommandAction(project) {
+            VfsUtil.saveText(defaultSource, "spring.profiles.include=\${PROFILE_INCLUDE}\n")
+        }
+        val dynamic = service.previewProfileLifecycleChange(change)
+        assertFalse(dynamic.accepted)
+        assertEquals(
+            "JVW-PROJECT-PROFILE-REMOVE-DYNAMIC-REFERENCE",
+            dynamic.issues.single().code,
+        )
+    }
 }
