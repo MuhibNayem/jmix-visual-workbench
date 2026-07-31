@@ -38,13 +38,13 @@ class JmixTemplateCatalogConfigurable : Configurable {
     private val model = CatalogTableModel()
     private val table = JBTable(model)
 
-    override fun getDisplayName(): String = "Jmix Organization Templates"
+    override fun getDisplayName(): String = "Jmix Organization Catalogs"
 
     override fun createComponent(): JComponent {
         if (component == null) {
             table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
-            table.emptyText.text = "No organization template catalogs configured"
-            table.accessibleContext.accessibleName = "Organization template catalogs"
+            table.emptyText.text = "No organization catalogs configured"
+            table.accessibleContext.accessibleName = "Organization project and connector catalogs"
             table.addMouseListener(
                 object : MouseAdapter() {
                     override fun mouseClicked(event: MouseEvent) {
@@ -69,13 +69,20 @@ class JmixTemplateCatalogConfigurable : Configurable {
                         "Compare a customized project to a certified base, review every change, then sign and export"
                     it.addActionListener { createSignedBundle() }
                 })
+                add(JButton("Create Signed Connector Catalog…").also {
+                    it.toolTipText =
+                        "Author, review, sign and self-verify a declarative organization connector policy"
+                    it.addActionListener { createSignedConnectorCatalog() }
+                })
             }
             component = JPanel(BorderLayout(0, 10)).apply {
                 add(
                     JPanel(BorderLayout()).apply {
                         add(
                             JBLabel(
-                                "<html>Only Ed25519-signed, SHA-256-pinned declarative bundles are accepted. " +
+                                "<html>Only Ed25519-signed, SHA-256-pinned declarative project and connector " +
+                                    "bundles are accepted. Connector catalogs can select reviewed adapters and " +
+                                    "tighten policy, but cannot carry executable generator code, endpoints or secrets. " +
                                     "Public keys are trust anchors, not secrets.</html>",
                             ),
                             BorderLayout.NORTH,
@@ -141,7 +148,7 @@ class JmixTemplateCatalogConfigurable : Configurable {
             Messages.showYesNoDialog(
                 "Remove '${draft.displayName.ifBlank { draft.catalogId }}' from configuration? " +
                     "Its immutable offline cache is retained for recovery.",
-                "Remove Organization Template Catalog",
+                "Remove Organization Catalog",
                 Messages.getQuestionIcon(),
             ) == Messages.YES
         ) {
@@ -152,18 +159,25 @@ class JmixTemplateCatalogConfigurable : Configurable {
     private fun importSelected() {
         val draft = selectedDraft() ?: return
         val descriptor = FileChooserDescriptor(true, false, false, false, false, false)
-            .withTitle("Import Signed Jmix Template Catalog")
-            .withFileFilter { it.extension == "jmix-template-catalog" || it.extension == "zip" }
+            .withTitle("Import Signed Jmix Organization Catalog")
+            .withFileFilter {
+                it.extension in setOf(
+                    "jmix-template-catalog",
+                    "jmix-connector-catalog",
+                    "jmix-organization-catalog",
+                    "zip",
+                )
+            }
         val selected = FileChooser.chooseFile(descriptor, null, null) ?: return
         if (!selected.isInLocalFileSystem) {
             Messages.showErrorDialog(
                 "Choose a bundle from the local filesystem.",
-                "Cannot Import Organization Template Catalog",
+                "Cannot Import Organization Catalog",
             )
             return
         }
         val path = selected.toNioPath()
-        runCatalogOperation("Importing signed organization template catalog") {
+        runCatalogOperation("Importing signed organization catalog") {
             JmixTemplateCatalogManager.getInstance().importBundle(draft.toState(), path)
         }
     }
@@ -173,11 +187,11 @@ class JmixTemplateCatalogConfigurable : Configurable {
         if (offlineMode.isSelected) {
             Messages.showWarningDialog(
                 "Disable offline mode before refreshing. Cached catalogs remain available offline.",
-                "Organization Templates Are Offline",
+                "Organization Catalogs Are Offline",
             )
             return
         }
-        runCatalogOperation("Refreshing organization template catalog") {
+        runCatalogOperation("Refreshing organization catalog") {
             JmixTemplateCatalogManager.getInstance().refresh(
                 configured = draft.toState(),
                 offlineMode = false,
@@ -252,6 +266,45 @@ class JmixTemplateCatalogConfigurable : Configurable {
         )
     }
 
+    private fun createSignedConnectorCatalog() {
+        val dialog = runCatching { JmixConnectorCatalogAuthoringDialog() }.getOrElse { failure ->
+            Messages.showErrorDialog(
+                failure.message ?: "Installed enterprise signing providers could not be loaded safely.",
+                "Cannot Author Connector Catalog",
+            )
+            return
+        }
+        val input = dialog.showAndGetInput() ?: return
+        if (!JmixConnectorCatalogReviewDialog(input).showAndGet()) return
+        val exportResult = runProgress("Signing and self-verifying Jmix connector catalog") {
+            val signer = dialog.resolveSigner(input)
+            val bundle = JmixTemplateCatalogAuthoring.createSignedBundle(
+                draft = input.draft(),
+                signer = signer,
+            )
+            JmixTemplateCatalogAuthoring.writeCreateOnly(input.output, bundle)
+            HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(bundle),
+            )
+        } ?: return
+        exportResult.fold(
+            onSuccess = { digest ->
+                LocalFileSystem.getInstance().refreshAndFindFileByNioFile(input.output)
+                Messages.showInfoMessage(
+                    "Signed, self-verified connector catalog created without storing the private key.\n\n" +
+                        "${input.output}\nSHA-256: $digest",
+                    "Jmix Connector Catalog Created",
+                )
+            },
+            onFailure = { failure ->
+                Messages.showErrorDialog(
+                    failure.message ?: "Connector catalog signing or export failed.",
+                    "Cannot Export Signed Connector Catalog",
+                )
+            },
+        )
+    }
+
     private fun <T> runProgress(
         title: String,
         operation: () -> T,
@@ -285,13 +338,13 @@ class JmixTemplateCatalogConfigurable : Configurable {
                 Messages.showInfoMessage(
                     "Verified and cached ${cached.catalogId}:${cached.catalogVersion}\n" +
                         "SHA-256: ${cached.bundleSha256}",
-                    "Organization Template Catalog Ready",
+                    "Organization Catalog Ready",
                 )
             },
             onFailure = { failure ->
                 Messages.showErrorDialog(
                     failure.message ?: "Catalog verification failed.",
-                    "Cannot Use Organization Template Catalog",
+                    "Cannot Use Organization Catalog",
                 )
             },
         )
@@ -436,9 +489,9 @@ class JmixTemplateCatalogConfigurable : Configurable {
 
         init {
             title = if (initial == null) {
-                "Add Organization Template Catalog"
+                "Add Organization Catalog"
             } else {
-                "Edit Organization Template Catalog"
+                "Edit Organization Catalog"
             }
             init()
         }

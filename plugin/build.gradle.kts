@@ -813,7 +813,9 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
         ).readText()
         listOf(
             "JmixTemplateCatalogVerifier.verify(",
-            "addProperty(\"schemaVersion\", 2)",
+            "addProperty(\"schemaVersion\", if (connectorTemplates.isEmpty()) 2 else 3)",
+            "\"connectors\"",
+            "connectorTemplateJson(template)",
             "StandardOpenOption.CREATE_NEW",
             "Refusing to replace existing catalog bundle",
             "StandardCopyOption.ATOMIC_MOVE",

@@ -17,6 +17,7 @@ import type {
   IntegrationConnectorModel,
   IntegrationDeliveryGuarantee,
   IntegrationHttpMethod,
+  IntegrationOrganizationConnectorTemplateSnapshot,
   IntegrationRetryMode,
   IntegrationConnectorWorkspaceResponse,
   SchemaDataStoreSnapshot,
@@ -221,6 +222,130 @@ function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: In
   return model
 }
 
+function modelFromCatalog(
+  workspace: IntegrationConnectorWorkspaceResponse,
+  catalog: IntegrationOrganizationConnectorTemplateSnapshot,
+  selectedDestinationId?: string,
+): IntegrationConnectorModel {
+  const template = catalog.template
+  const model = defaultModel(workspace, template.kind)
+  const destination = workspace.destinations.find((candidate) => candidate.id === selectedDestinationId)
+    ?? workspace.destinations.find((candidate) => candidate.id === model.destinationId)
+    ?? workspace.destinations[0]
+  const prefix = `app.integration.${template.configurationPrefixSuffix}`
+  const classStem = template.id
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join('')
+  model.name = template.name
+  model.description = template.description
+  model.destinationId = destination?.id ?? model.destinationId
+  model.packageName = destination?.defaultPackage ?? model.packageName
+  model.className = `${classStem || classNameFor(template.kind)}Connector`
+  model.beanName = beanNameFor(model.className)
+  model.configurationPrefix = prefix
+  model.addressProperty = `${prefix}.${template.addressPropertySuffix}`
+  model.headers = template.headers.map((header) => ({
+    name: header.name,
+    valueProperty: `${prefix}.${header.propertySuffix}`,
+    sensitive: header.sensitive,
+  }))
+  if (template.policy.requiredAuthentication) {
+    model.authentication = {
+      kind: template.policy.requiredAuthentication,
+      evictInvalidAuthorizedClient: true,
+      scopes: [],
+      authorizedClientManagerBeanName: template.policy.requiredAuthentication === 'OAUTH2_CLIENT_CREDENTIALS'
+        ? workspace.oauth2Managers[0]?.beanName
+        : undefined,
+      authorizedClientServiceBeanName: template.policy.requiredAuthentication === 'OAUTH2_CLIENT_CREDENTIALS'
+        ? workspace.oauth2Services[0]?.beanName
+        : undefined,
+      clientRegistrationIdProperty: template.policy.requiredAuthentication === 'OAUTH2_CLIENT_CREDENTIALS'
+        ? `${prefix}.client-registration-id`
+        : undefined,
+      principalNameProperty: template.policy.requiredAuthentication === 'OAUTH2_CLIENT_CREDENTIALS'
+        ? `${prefix}.principal-name`
+        : undefined,
+    }
+  }
+  model.transportSecurity = {
+    mutualTlsEnabled: template.policy.requireMutualTls,
+    sslBundleNameProperty: template.policy.requireMutualTls ? `${prefix}.ssl-bundle` : undefined,
+  }
+  model.reliability.connectTimeoutMs = Math.min(
+    model.reliability.connectTimeoutMs,
+    template.policy.maximumConnectTimeoutMs,
+  )
+  model.reliability.requestTimeoutMs = Math.min(
+    model.reliability.requestTimeoutMs,
+    template.policy.maximumRequestTimeoutMs,
+  )
+  if (template.policy.minimumRetryAttempts > 1) {
+    model.reliability.retry.mode = 'BLOCKING'
+    model.reliability.retry.attempts = Math.max(
+      model.reliability.retry.attempts,
+      template.policy.minimumRetryAttempts,
+    )
+  }
+  model.reliability.transactional ||= template.policy.requireTransactional
+  model.reliability.idempotency.enabled ||= template.policy.requireIdempotency
+  model.reliability.outboxEnabled ||= template.policy.requireOutbox
+  model.reliability.inboxEnabled ||= template.policy.requireInbox
+  const store = workspace.dataStores.find((candidate) => (
+    candidate.moduleId === destination?.moduleId &&
+    candidate.rootChangelogPath &&
+    candidate.generatedDirectory
+  ))
+  if (template.policy.requireOutbox) {
+    model.reliability.outbox = {
+      storeId: store?.id ?? '',
+      tableName: outboxTableName(model.beanName),
+      jsonApi: destination?.jsonApi,
+      batchSize: 100,
+      pollDelayMs: 1000,
+      leaseDurationMs: Math.max(60000, model.reliability.requestTimeoutMs),
+      maxAttempts: 12,
+      initialBackoffMs: 1000,
+      maximumBackoffMs: 900000,
+      retentionDays: 30,
+      replayPermission: 'jvw.integration.outbox.replay',
+      maintenancePermission: 'jvw.integration.outbox.maintain',
+    }
+  }
+  if (template.policy.requireInbox) {
+    model.reliability.inbox = {
+      storeId: store?.id ?? '',
+      tableName: inboxTableName(model.beanName),
+      jsonApi: destination?.jsonApi,
+      messageIdHeader: 'jvw-outbox-id',
+      maximumPayloadBytes: 1048576,
+      maintenanceBatchSize: 1000,
+      retentionDays: 90,
+      replayPermission: 'jvw.integration.inbox.replay',
+      maintenancePermission: 'jvw.integration.inbox.maintain',
+    }
+  }
+  model.observability.metricsEnabled ||= template.policy.requireMetrics
+  model.observability.tracingEnabled ||= template.policy.requireTracing
+  model.observability.structuredLoggingEnabled ||= template.policy.requireStructuredLogging
+  model.observability.auditEnabled ||= template.policy.requireAudit
+  model.observability.runtimeApi = template.policy.requiredObservabilityApi
+    ?? destination?.observabilityApi
+    ?? model.observability.runtimeApi
+  model.runtimeJsonApi = destination?.jsonApi
+  model.runtimeSpringBootApi = destination?.springBootApi
+  model.catalogBinding = {
+    catalogId: catalog.catalogId,
+    catalogVersion: catalog.catalogVersion,
+    bundleSha256: catalog.bundleSha256,
+    templateId: template.id,
+    templateVersion: template.version,
+  }
+  return model
+}
+
 function requiredCapabilities(model: IntegrationConnectorModel): IntegrationCapability[] {
   const definition = definitions.find((candidate) => candidate.kind === model.kind)
   const result = new Set<IntegrationCapability>()
@@ -362,6 +487,7 @@ export default function IntegrationDesigner() {
   const [preview, setPreview] = useState<WorkspaceChangePreviewResponse | null>(null)
   const [previewing, setPreviewing] = useState(false)
   const [applying, setApplying] = useState(false)
+  const [approvingCatalog, setApprovingCatalog] = useState(false)
   const [activePreviewFile, setActivePreviewFile] = useState(0)
   const historyRef = useRef<IntegrationConnectorModel[]>([])
   const futureRef = useRef<IntegrationConnectorModel[]>([])
@@ -432,12 +558,29 @@ export default function IntegrationDesigner() {
   const handlers = workspace?.contextArtifacts.filter((artifact) => (
     ['SERVICE', 'BUSINESS_RULE', 'REPOSITORY', 'VALIDATOR', 'SOURCE_TYPE'].includes(artifact.kind)
   )) ?? []
+  const selectedCatalogTemplate = workspace?.organizationConnectorTemplates.find((candidate) => (
+    candidate.catalogId === model?.catalogBinding?.catalogId &&
+    candidate.catalogVersion === model?.catalogBinding?.catalogVersion &&
+    candidate.bundleSha256 === model?.catalogBinding?.bundleSha256 &&
+    candidate.template.id === model?.catalogBinding?.templateId &&
+    candidate.template.version === model?.catalogBinding?.templateVersion
+  ))
   const blockers = model ? localBlockers(
     model,
     destination?.capabilities ?? [],
     workspace?.dataStores ?? [],
     destination?.moduleId,
   ) : []
+  if (model?.catalogBinding && !selectedCatalogTemplate) {
+    blockers.push('The bound organization connector template is no longer available. Refresh the signed catalog.')
+  }
+  if (
+    selectedCatalogTemplate &&
+    selectedCatalogTemplate.template.policy.risk !== 'STANDARD' &&
+    !model?.catalogBinding?.approvalCapability
+  ) {
+    blockers.push('This organization connector requires explicit native IntelliJ approval.')
+  }
   const groups = [...new Set(definitions.map((candidate) => candidate.group))]
   const normalizedQuery = query.trim().toLowerCase()
   const visibleDefinitions = definitions.filter((candidate) => (
@@ -454,6 +597,40 @@ export default function IntegrationDesigner() {
       next.packageName = destination.defaultPackage
     }
     replaceModel(next)
+  }
+
+  const chooseCatalogTemplate = (catalog: IntegrationOrganizationConnectorTemplateSnapshot) => {
+    if (!workspace) return
+    replaceModel(modelFromCatalog(workspace, catalog, destination?.id))
+  }
+
+  const approveCatalogTemplate = async () => {
+    if (!model?.catalogBinding) return
+    setApprovingCatalog(true)
+    setError(null)
+    try {
+      const result = await bridge.approveIntegrationConnectorCatalogTemplate(
+        model.catalogBinding,
+        model.destinationId,
+      )
+      if (!result.approved || !result.approval) {
+        setError(result.message ?? 'Organization connector approval was not granted.')
+        return
+      }
+      commit((draft) => {
+        if (draft.catalogBinding) {
+          draft.catalogBinding.approvalCapability = result.approval?.capability
+        }
+      })
+      addToast(
+        `Approved ${selectedCatalogTemplate?.template.name ?? 'organization connector'} until ${new Date(result.approval.expiresAt).toLocaleTimeString()}.`,
+        'success',
+      )
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Organization connector approval failed.')
+    } finally {
+      setApprovingCatalog(false)
+    }
   }
 
   const previewChanges = async () => {
@@ -553,6 +730,70 @@ export default function IntegrationDesigner() {
             />
           </div>
           <div className="p-2">
+            {workspace.organizationConnectorTemplates.length > 0 && (
+              <section className="mb-3" aria-label="Organization connector catalog">
+                <h3 className="px-1 pb-1.5 text-[9px] font-semibold uppercase tracking-widest text-emerald-500">
+                  Signed organization catalog
+                </h3>
+                <div className="space-y-1">
+                  {workspace.organizationConnectorTemplates
+                    .filter((catalog) => (
+                      !normalizedQuery ||
+                      `${catalog.catalogDisplayName} ${catalog.template.name} ${catalog.template.provider} ${catalog.template.description}`
+                        .toLowerCase()
+                        .includes(normalizedQuery)
+                    ))
+                    .map((catalog) => {
+                      const compatible = Boolean(
+                        destination &&
+                        catalog.template.springBootApis.includes(destination.springBootApi) &&
+                        catalog.template.requiredCapabilities.every((capability) => (
+                          destination.capabilities.includes(capability)
+                        )),
+                      )
+                      const selected = selectedCatalogTemplate === catalog
+                      return (
+                        <button
+                          key={`${catalog.catalogId}:${catalog.catalogVersion}:${catalog.template.id}:${catalog.template.version}:${catalog.bundleSha256}`}
+                          onClick={() => compatible && chooseCatalogTemplate(catalog)}
+                          disabled={!compatible}
+                          className={`w-full rounded-md border p-2 text-left transition ${
+                            selected
+                              ? 'border-emerald-400/60 bg-emerald-500/10'
+                              : compatible
+                                ? 'border-emerald-500/20 bg-emerald-500/[0.04] hover:border-emerald-400/45 hover:bg-emerald-500/[0.08]'
+                                : 'cursor-not-allowed border-surface-border bg-surface/30 opacity-55'
+                          }`}
+                        >
+                          <span className="flex min-w-0 items-center justify-between gap-2">
+                            <span className="truncate text-[11px] font-semibold text-gray-100">
+                              {catalog.template.name}
+                            </span>
+                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[8px] font-semibold ${
+                              catalog.template.policy.risk === 'STANDARD'
+                                ? 'bg-emerald-500/10 text-emerald-300'
+                                : catalog.template.policy.risk === 'SENSITIVE'
+                                  ? 'bg-amber-500/10 text-amber-300'
+                                  : 'bg-red-500/10 text-red-300'
+                            }`}>
+                              {catalog.template.policy.risk}
+                            </span>
+                          </span>
+                          <span className="mt-0.5 block truncate text-[9px] text-emerald-300/80">
+                            {catalog.template.provider} · {catalog.catalogDisplayName}
+                          </span>
+                          <span className="mt-1 block text-[9px] leading-3.5 text-gray-500">
+                            {compatible ? catalog.template.description : 'Not compatible with the selected module capabilities.'}
+                          </span>
+                          <span className="mt-1 block truncate font-mono text-[8px] text-gray-600">
+                            {catalog.catalogId}:{catalog.catalogVersion} · {catalog.template.version}
+                          </span>
+                        </button>
+                      )
+                    })}
+                </div>
+              </section>
+            )}
             {workspace.existingDocuments.length > 0 && (
               <section className="mb-3">
                 <h3 className="px-1 pb-1.5 text-[9px] font-semibold uppercase tracking-widest text-gray-600">Existing connectors</h3>
@@ -638,6 +879,43 @@ export default function IntegrationDesigner() {
               <ChevronRight size={14} className="integration-flow-arrow" />
               <div className="integration-flow-node"><Network size={15} /><span>{definition?.direction === 'Inbound' ? 'Handler' : 'External system'}</span></div>
             </div>
+            {selectedCatalogTemplate && (
+              <div className={`mt-3 rounded-lg border p-2.5 ${
+                selectedCatalogTemplate.template.policy.risk === 'STANDARD'
+                  ? 'border-emerald-500/25 bg-emerald-500/5'
+                  : model.catalogBinding?.approvalCapability
+                    ? 'border-emerald-500/25 bg-emerald-500/5'
+                    : 'border-amber-500/30 bg-amber-500/[0.07]'
+              }`}>
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <ShieldCheck size={14} className="shrink-0 text-emerald-300" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[10px] font-semibold text-gray-100">
+                      Signed policy · {selectedCatalogTemplate.catalogDisplayName}
+                    </p>
+                    <p className="truncate font-mono text-[8px] text-gray-500">
+                      {selectedCatalogTemplate.template.policy.approvalPolicyId ?? 'standard-policy'} · {selectedCatalogTemplate.bundleSha256.slice(0, 12)}
+                    </p>
+                  </div>
+                  {selectedCatalogTemplate.template.policy.risk !== 'STANDARD' && (
+                    model.catalogBinding?.approvalCapability ? (
+                      <span className="rounded bg-emerald-500/10 px-2 py-1 text-[9px] font-semibold text-emerald-300">
+                        Native approval active
+                      </span>
+                    ) : (
+                      <button
+                        className="btn-secondary flex items-center gap-1.5 border-amber-500/30 text-amber-200"
+                        disabled={approvingCatalog}
+                        onClick={() => void approveCatalogTemplate()}
+                      >
+                        {approvingCatalog ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
+                        Approve in IntelliJ
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="integration-canvas-scroll p-3">
@@ -652,6 +930,9 @@ export default function IntegrationDesigner() {
                       const nextDestination = workspace.destinations.find((candidate) => candidate.id === event.target.value)
                       commit((draft) => {
                         draft.destinationId = event.target.value
+                        if (draft.catalogBinding) {
+                          draft.catalogBinding.approvalCapability = undefined
+                        }
                         if (!draft.sourceLocator && nextDestination) {
                           draft.packageName = nextDestination.defaultPackage
                           if (draft.reliability.outboxEnabled) {

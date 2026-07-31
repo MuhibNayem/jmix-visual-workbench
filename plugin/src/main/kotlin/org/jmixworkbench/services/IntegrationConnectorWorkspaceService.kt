@@ -30,6 +30,8 @@ import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationObservabilityApi
 import org.jmixworkbench.model.IntegrationSpringBootApi
 import org.jmixworkbench.model.IntegrationTransportSecurityModel
+import org.jmixworkbench.project.JmixOrganizationConnectorTemplate
+import org.jmixworkbench.project.JmixTemplateCatalogManager
 import java.util.Base64
 
 /**
@@ -48,6 +50,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh)
         val destinations = destinations(graph)
         val schema = SchemaWorkspaceService.getInstance(project).load(forceRefresh)
+        val connectorCatalogs = JmixTemplateCatalogManager.getInstance().connectorInventory()
         return IntegrationConnectorWorkspaceResponse(
             graphDigest = graph.snapshotDigest,
             destinations = destinations,
@@ -56,6 +59,15 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             oauth2Managers = oauth2Managers(graph),
             oauth2Services = oauth2Services(graph),
             dataStores = schema.stores,
+            organizationConnectorTemplates = connectorCatalogs.options.map {
+                IntegrationOrganizationConnectorTemplateSnapshot(
+                    catalogId = it.catalogId,
+                    catalogVersion = it.catalogVersion,
+                    bundleSha256 = it.bundleSha256,
+                    catalogDisplayName = it.catalogDisplayName,
+                    template = it.template,
+                )
+            },
             existingDocuments = discoverExisting(destinations),
             issues = buildList {
                 if (!graph.indexHealth.complete) {
@@ -71,6 +83,14 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                         WorkspaceChangeIssue(
                             "JVW-INTEGRATION-DESTINATION-MISSING",
                             "No module has both a production Java root and a production resource root.",
+                        ),
+                    )
+                }
+                connectorCatalogs.issues.forEach { issue ->
+                    add(
+                        WorkspaceChangeIssue(
+                            "JVW-INTEGRATION-CATALOG-UNAVAILABLE",
+                            "${issue.configuredName}: ${issue.message}",
                         ),
                     )
                 }
@@ -112,6 +132,50 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         )
     }
 
+    fun catalogApprovalReview(
+        request: IntegrationConnectorCatalogApprovalRequest,
+    ): IntegrationConnectorCatalogApprovalReview {
+        val graph = ApplicationGraphService.getInstance(project).graph()
+        val destination = destinations(graph).singleOrNull { it.id == request.destinationId }
+            ?: throw IllegalArgumentException(
+                "The selected module destination is no longer available. Refresh the workspace.",
+            )
+        val option = JmixTemplateCatalogManager.getInstance().resolveConnector(request.binding)
+        require(option.template.supports(destination.springBootApi, destination.capabilities)) {
+            "The connector template is not compatible with the selected module."
+        }
+        require(
+            option.template.policy.risk !=
+                org.jmixworkbench.project.JmixOrganizationConnectorRisk.STANDARD
+        ) {
+            "This organization connector template does not require native approval."
+        }
+        return IntegrationConnectorCatalogApprovalReview(
+            catalogDisplayName = option.catalogDisplayName,
+            templateName = option.template.name,
+            provider = option.template.provider,
+            risk = option.template.policy.risk.name,
+            approvalPolicyId = requireNotNull(option.template.policy.approvalPolicyId),
+            destinationModuleId = destination.moduleId,
+            requireMutualTls = option.template.policy.requireMutualTls,
+            requireTransactional = option.template.policy.requireTransactional,
+            requireIdempotency = option.template.policy.requireIdempotency,
+            requireOutbox = option.template.policy.requireOutbox,
+            requireInbox = option.template.policy.requireInbox,
+        )
+    }
+
+    fun issueCatalogApproval(
+        request: IntegrationConnectorCatalogApprovalRequest,
+    ): IntegrationConnectorCatalogApproval {
+        catalogApprovalReview(request)
+        val option = JmixTemplateCatalogManager.getInstance().resolveConnector(request.binding)
+        return IntegrationConnectorCatalogPolicyService.getInstance(project).issueApproval(
+            option = option,
+            destinationId = request.destinationId,
+        )
+    }
+
     internal fun propose(model: IntegrationConnectorModel): IntegrationConnectorProposal {
         val graph = ApplicationGraphService.getInstance(project).graph()
         val destination = destinations(graph).firstOrNull { it.id == model.destinationId }
@@ -134,6 +198,25 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             .filter { it.severity == IntegrationDiagnosticSeverity.ERROR }
             .map { WorkspaceChangeIssue(it.code, it.message) }
             .toMutableList()
+        normalized.catalogBinding?.let { binding ->
+            val resolution = runCatching {
+                JmixTemplateCatalogManager.getInstance().resolveConnector(binding)
+            }
+            resolution.exceptionOrNull()?.let { failure ->
+                issues += WorkspaceChangeIssue(
+                    "JVW-INTEGRATION-CATALOG-BINDING-INVALID",
+                    failure.message ?: "The signed organization connector template is unavailable.",
+                )
+            }
+            val option = resolution.getOrNull()
+            if (option != null) {
+                issues += IntegrationConnectorCatalogPolicyService.getInstance(project).validate(
+                    model = normalized,
+                    option = option,
+                    destination = destination,
+                )
+            }
+        }
         if (
             normalized.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS &&
             oauth2Managers(graph).none { it.beanName == normalized.authentication.authorizedClientManagerBeanName }
@@ -886,8 +969,17 @@ data class IntegrationConnectorWorkspaceResponse(
     val oauth2Managers: List<IntegrationOAuth2ManagerSnapshot>,
     val oauth2Services: List<IntegrationOAuth2ServiceSnapshot>,
     val dataStores: List<SchemaDataStoreSnapshot>,
+    val organizationConnectorTemplates: List<IntegrationOrganizationConnectorTemplateSnapshot> = emptyList(),
     val existingDocuments: List<IntegrationConnectorDocumentSnapshot>,
     val issues: List<WorkspaceChangeIssue>,
+)
+
+data class IntegrationOrganizationConnectorTemplateSnapshot(
+    val catalogId: String,
+    val catalogVersion: String,
+    val bundleSha256: String,
+    val catalogDisplayName: String,
+    val template: JmixOrganizationConnectorTemplate,
 )
 
 data class IntegrationOAuth2ManagerSnapshot(
@@ -907,6 +999,31 @@ data class IntegrationOAuth2ServiceSnapshot(
 data class IntegrationConnectorApplyRequest(
     val model: IntegrationConnectorModel,
     val expectedPlanDigest: String,
+)
+
+data class IntegrationConnectorCatalogApprovalRequest(
+    val binding: org.jmixworkbench.model.IntegrationConnectorCatalogBinding,
+    val destinationId: String,
+)
+
+data class IntegrationConnectorCatalogApprovalReview(
+    val catalogDisplayName: String,
+    val templateName: String,
+    val provider: String,
+    val risk: String,
+    val approvalPolicyId: String,
+    val destinationModuleId: String,
+    val requireMutualTls: Boolean,
+    val requireTransactional: Boolean,
+    val requireIdempotency: Boolean,
+    val requireOutbox: Boolean,
+    val requireInbox: Boolean,
+)
+
+data class IntegrationConnectorCatalogApprovalResponse(
+    val approved: Boolean,
+    val approval: IntegrationConnectorCatalogApproval?,
+    val message: String?,
 )
 
 data class IntegrationConnectorProposal(

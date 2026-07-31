@@ -556,7 +556,12 @@ object IntegrationConnectorGenerator {
 
     fun encode(model: IntegrationConnectorModel): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(
-            gson.toJson(model.copy(sourceLocator = null)).toByteArray(Charsets.UTF_8),
+            gson.toJson(
+                model.copy(
+                    sourceLocator = null,
+                    catalogBinding = model.catalogBinding?.copy(approvalCapability = null),
+                ),
+            ).toByteArray(Charsets.UTF_8),
         )
 
     private fun renderJava(model: IntegrationConnectorModel, encodedModel: String): String {

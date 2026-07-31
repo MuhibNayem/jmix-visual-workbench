@@ -121,6 +121,26 @@ data class IntegrationTransportSecurityModel(
     val sslBundleNameProperty: String? = null,
 )
 
+/**
+ * Immutable organization-catalog coordinates.
+ *
+ * The backend reopens the signed cached bundle and resolves these exact
+ * coordinates before preview or apply. A browser cannot invent a catalog
+ * policy, weaken it, or redirect the binding to mutable catalog content.
+ */
+data class IntegrationConnectorCatalogBinding(
+    val catalogId: String,
+    val catalogVersion: String,
+    val bundleSha256: String,
+    val templateId: String,
+    val templateVersion: String,
+    /**
+     * Short-lived native IntelliJ approval. It is never persisted in the
+     * generated source marker.
+     */
+    val approvalCapability: String? = null,
+)
+
 data class IntegrationRetryPolicyModel(
     val mode: IntegrationRetryMode = IntegrationRetryMode.NONE,
     val attempts: Int = 1,
@@ -267,6 +287,7 @@ data class IntegrationConnectorModel(
     val runtimeSpringBootApi: IntegrationSpringBootApi? = null,
     val profiles: List<String> = emptyList(),
     val enabled: Boolean = true,
+    val catalogBinding: IntegrationConnectorCatalogBinding? = null,
     val sourceLocator: SourceLocator? = null,
 )
 

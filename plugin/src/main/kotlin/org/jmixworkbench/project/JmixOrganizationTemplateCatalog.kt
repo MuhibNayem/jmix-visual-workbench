@@ -7,6 +7,11 @@ import com.google.gson.JsonParser
 import com.google.gson.Strictness
 import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonToken
+import org.jmixworkbench.model.IntegrationAuthenticationKind
+import org.jmixworkbench.model.IntegrationCapability
+import org.jmixworkbench.model.IntegrationConnectorKind
+import org.jmixworkbench.model.IntegrationObservabilityApi
+import org.jmixworkbench.model.IntegrationSpringBootApi
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.StringReader
@@ -55,6 +60,7 @@ data class JmixOrganizationTemplateCatalog(
     val expiresAt: Instant?,
     val signingKeyId: String,
     val templates: List<JmixOrganizationProjectTemplate>,
+    val connectorTemplates: List<JmixOrganizationConnectorTemplate> = emptyList(),
 )
 
 data class JmixOrganizationProjectTemplate(
@@ -77,6 +83,67 @@ data class JmixOrganizationProjectTemplate(
             request.jmixVersion in jmixVersions &&
             request.javaVersion in javaVersions
 }
+
+/**
+ * Declarative organization-owned connector preset.
+ *
+ * Catalogs never carry executable generator code, endpoints, credentials or
+ * certificate material. They select one of the plugin's reviewed connector
+ * implementations and constrain the model accepted by the backend.
+ */
+data class JmixOrganizationConnectorTemplate(
+    val id: String,
+    val version: String,
+    val name: String,
+    val description: String,
+    val order: Int,
+    val provider: String,
+    val kind: IntegrationConnectorKind,
+    val springBootApis: Set<IntegrationSpringBootApi>,
+    val requiredCapabilities: Set<IntegrationCapability>,
+    val configurationPrefixSuffix: String,
+    val addressPropertySuffix: String,
+    val headers: List<JmixOrganizationConnectorHeader>,
+    val policy: JmixOrganizationConnectorPolicy,
+) {
+    fun supports(
+        springBootApi: IntegrationSpringBootApi,
+        capabilities: Set<IntegrationCapability>,
+    ): Boolean =
+        springBootApi in springBootApis &&
+            requiredCapabilities.all(capabilities::contains)
+}
+
+data class JmixOrganizationConnectorHeader(
+    val name: String,
+    val propertySuffix: String,
+    val sensitive: Boolean,
+)
+
+enum class JmixOrganizationConnectorRisk {
+    STANDARD,
+    SENSITIVE,
+    RESTRICTED,
+}
+
+data class JmixOrganizationConnectorPolicy(
+    val risk: JmixOrganizationConnectorRisk,
+    val approvalPolicyId: String?,
+    val requiredAuthentication: IntegrationAuthenticationKind?,
+    val requireMutualTls: Boolean,
+    val requireTransactional: Boolean,
+    val requireIdempotency: Boolean,
+    val requireOutbox: Boolean,
+    val requireInbox: Boolean,
+    val maximumConnectTimeoutMs: Long,
+    val maximumRequestTimeoutMs: Long,
+    val minimumRetryAttempts: Int,
+    val requireMetrics: Boolean,
+    val requireTracing: Boolean,
+    val requireStructuredLogging: Boolean,
+    val requireAudit: Boolean,
+    val requiredObservabilityApi: IntegrationObservabilityApi?,
+)
 
 enum class JmixOrganizationTemplateChangeAction {
     ADD,
@@ -311,6 +378,9 @@ object JmixTemplateCatalogVerifier {
     private val identifierPattern = Regex("[a-z][a-z0-9.-]{0,95}")
     private val versionPattern = Regex("[0-9]+(?:\\.[0-9]+){1,3}(?:[-+][A-Za-z0-9.-]+)?")
     private val archivePathSegment = Regex("[A-Za-z0-9._@+ -]+")
+    private val connectorPropertySuffixPattern = Regex("[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*")
+    private val connectorHeaderPattern = Regex("[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}")
+    private val connectorApprovalPolicyPattern = Regex("[a-z][a-z0-9.-]{2,127}")
 
     fun verify(
         bundle: Path,
@@ -433,10 +503,11 @@ object JmixTemplateCatalogVerifier {
             "expiresAt",
             "signingKeyId",
             "templates",
+            "connectors",
         )
         val schemaVersion = root.requiredInt("schemaVersion")
-        require(schemaVersion in 1..2) {
-            "Unsupported template catalog schema; expected version 1 or 2."
+        require(schemaVersion in 1..3) {
+            "Unsupported organization catalog schema; expected version 1, 2 or 3."
         }
         val catalogId = root.requiredString("catalogId").also(::requireIdentifier)
         val catalogVersion = root.requiredString("catalogVersion").also(::requireVersion)
@@ -446,17 +517,39 @@ object JmixTemplateCatalogVerifier {
         val issuedAt = root.requiredInstant("issuedAt")
         val expiresAt = root.optionalInstant("expiresAt")
         val signingKeyId = root.requiredString("signingKeyId").also(::requireIdentifier)
-        val templates = root.requiredArray("templates").mapIndexed { index, element ->
+        val templates = (root.optionalArray("templates") ?: JsonArray()).mapIndexed { index, element ->
             parseTemplate(element.asObject("templates[$index]"), schemaVersion)
         }
-        require(templates.isNotEmpty() && templates.size <= 500) {
-            "Template catalog must contain 1-500 templates."
+        val connectorTemplates =
+            (root.optionalArray("connectors") ?: JsonArray()).mapIndexed { index, element ->
+            require(schemaVersion >= 3) {
+                "Connector templates require organization catalog schema version 3."
+            }
+            parseConnectorTemplate(element.asObject("connectors[$index]"))
+        }
+        require(templates.size <= 500) {
+            "Organization catalog cannot contain more than 500 project templates."
+        }
+        require(connectorTemplates.size <= 500) {
+            "Organization catalog cannot contain more than 500 connector templates."
+        }
+        require(templates.isNotEmpty() || connectorTemplates.isNotEmpty()) {
+            "Organization catalog must contain at least one project or connector template."
         }
         require(templates.map { it.id }.distinct().size == templates.size) {
             "Template IDs must be unique within a catalog."
         }
         require(templates.map { it.id.lowercase(Locale.ROOT) }.distinct().size == templates.size) {
             "Template IDs must not collide by case."
+        }
+        require(connectorTemplates.map { it.id }.distinct().size == connectorTemplates.size) {
+            "Connector template IDs must be unique within a catalog."
+        }
+        require(
+            connectorTemplates.map { it.id.lowercase(Locale.ROOT) }.distinct().size ==
+                connectorTemplates.size
+        ) {
+            "Connector template IDs must not collide by case."
         }
         require(expiresAt == null || expiresAt > issuedAt) {
             "Catalog expiresAt must be later than issuedAt."
@@ -469,6 +562,200 @@ object JmixTemplateCatalogVerifier {
             expiresAt = expiresAt,
             signingKeyId = signingKeyId,
             templates = templates,
+            connectorTemplates = connectorTemplates,
+        )
+    }
+
+    private fun parseConnectorTemplate(json: JsonObject): JmixOrganizationConnectorTemplate {
+        json.requireOnly(
+            "id",
+            "version",
+            "name",
+            "description",
+            "order",
+            "provider",
+            "kind",
+            "springBootApis",
+            "requiredCapabilities",
+            "configurationPrefixSuffix",
+            "addressPropertySuffix",
+            "headers",
+            "policy",
+        )
+        val id = json.requiredString("id").also(::requireIdentifier)
+        val version = json.requiredString("version").also(::requireVersion)
+        val name = json.requiredString("name").also {
+            require(it.isNotBlank() && it.length <= 120) {
+                "Connector template name must be 1-120 characters."
+            }
+        }
+        val description = json.requiredString("description").also {
+            require(it.length <= 1_000) {
+                "Connector template description exceeds 1,000 characters."
+            }
+        }
+        val order = json.requiredInt("order").also {
+            require(it in -100_000..100_000) {
+                "Connector template order is outside the supported range."
+            }
+        }
+        val provider = json.requiredString("provider").trim().also {
+            require(it.isNotEmpty() && it.length <= 120) {
+                "Connector provider must be 1-120 characters."
+            }
+        }
+        val kind = json.requiredEnum<IntegrationConnectorKind>("kind")
+        val bootApis = json.requiredEnumSet<IntegrationSpringBootApi>("springBootApis")
+        val capabilities = json.requiredEnumSet<IntegrationCapability>("requiredCapabilities")
+        val prefixSuffix = json.requiredString("configurationPrefixSuffix").also {
+            require(connectorPropertySuffixPattern.matches(it)) {
+                "Connector configurationPrefixSuffix must be a safe lowercase property suffix."
+            }
+        }
+        val addressSuffix = json.requiredString("addressPropertySuffix").also {
+            require(connectorPropertySuffixPattern.matches(it)) {
+                "Connector addressPropertySuffix must be a safe lowercase property suffix."
+            }
+        }
+        val headers = json.requiredArray("headers").mapIndexed { index, element ->
+            parseConnectorHeader(element.asObject("headers[$index]"))
+        }
+        require(headers.size <= 64) {
+            "Connector template '$id' cannot declare more than 64 headers."
+        }
+        require(headers.map { it.name.lowercase(Locale.ROOT) }.distinct().size == headers.size) {
+            "Connector template '$id' contains duplicate header names."
+        }
+        val policy = parseConnectorPolicy(json.requiredObject("policy"))
+        require(
+            policy.requiredAuthentication != IntegrationAuthenticationKind.SSH_KEY ||
+                kind in setOf(
+                    IntegrationConnectorKind.SFTP_UPLOAD,
+                    IntegrationConnectorKind.SFTP_DOWNLOAD,
+                )
+        ) {
+            "SSH-key policy is supported only for SFTP connector templates."
+        }
+        require(
+            !policy.requireOutbox ||
+                kind in setOf(
+                    IntegrationConnectorKind.KAFKA_PUBLISHER,
+                    IntegrationConnectorKind.RABBIT_PUBLISHER,
+                )
+        ) {
+            "Outbox policy is supported only for broker publisher templates."
+        }
+        require(
+            !policy.requireInbox ||
+                kind in setOf(
+                    IntegrationConnectorKind.KAFKA_CONSUMER,
+                    IntegrationConnectorKind.RABBIT_CONSUMER,
+                )
+        ) {
+            "Inbox policy is supported only for broker consumer templates."
+        }
+        return JmixOrganizationConnectorTemplate(
+            id = id,
+            version = version,
+            name = name,
+            description = description,
+            order = order,
+            provider = provider,
+            kind = kind,
+            springBootApis = bootApis,
+            requiredCapabilities = capabilities,
+            configurationPrefixSuffix = prefixSuffix,
+            addressPropertySuffix = addressSuffix,
+            headers = headers,
+            policy = policy,
+        )
+    }
+
+    private fun parseConnectorHeader(json: JsonObject): JmixOrganizationConnectorHeader {
+        json.requireOnly("name", "propertySuffix", "sensitive")
+        val name = json.requiredString("name").also {
+            require(connectorHeaderPattern.matches(it)) {
+                "Connector header name '$it' is invalid."
+            }
+        }
+        val suffix = json.requiredString("propertySuffix").also {
+            require(connectorPropertySuffixPattern.matches(it)) {
+                "Connector header propertySuffix must be a safe lowercase property suffix."
+            }
+        }
+        return JmixOrganizationConnectorHeader(
+            name = name,
+            propertySuffix = suffix,
+            sensitive = json.requiredBoolean("sensitive"),
+        )
+    }
+
+    private fun parseConnectorPolicy(json: JsonObject): JmixOrganizationConnectorPolicy {
+        json.requireOnly(
+            "risk",
+            "approvalPolicyId",
+            "requiredAuthentication",
+            "requireMutualTls",
+            "requireTransactional",
+            "requireIdempotency",
+            "requireOutbox",
+            "requireInbox",
+            "maximumConnectTimeoutMs",
+            "maximumRequestTimeoutMs",
+            "minimumRetryAttempts",
+            "requireMetrics",
+            "requireTracing",
+            "requireStructuredLogging",
+            "requireAudit",
+            "requiredObservabilityApi",
+        )
+        val risk = json.requiredEnum<JmixOrganizationConnectorRisk>("risk")
+        val approvalPolicyId = json.optionalString("approvalPolicyId")
+        if (risk == JmixOrganizationConnectorRisk.STANDARD) {
+            require(approvalPolicyId == null) {
+                "STANDARD connector policy cannot require native approval."
+            }
+        } else {
+            require(
+                approvalPolicyId != null &&
+                    connectorApprovalPolicyPattern.matches(approvalPolicyId)
+            ) {
+                "$risk connector policy requires a safe approvalPolicyId."
+            }
+        }
+        val maximumConnectTimeoutMs = json.requiredLong("maximumConnectTimeoutMs")
+        val maximumRequestTimeoutMs = json.requiredLong("maximumRequestTimeoutMs")
+        val minimumRetryAttempts = json.requiredInt("minimumRetryAttempts")
+        require(maximumConnectTimeoutMs in 100..120_000) {
+            "Connector maximumConnectTimeoutMs must be between 100 and 120000."
+        }
+        require(maximumRequestTimeoutMs in 100..600_000) {
+            "Connector maximumRequestTimeoutMs must be between 100 and 600000."
+        }
+        require(minimumRetryAttempts in 1..20) {
+            "Connector minimumRetryAttempts must be between 1 and 20."
+        }
+        return JmixOrganizationConnectorPolicy(
+            risk = risk,
+            approvalPolicyId = approvalPolicyId,
+            requiredAuthentication = json.optionalEnum<IntegrationAuthenticationKind>(
+                "requiredAuthentication",
+            ),
+            requireMutualTls = json.requiredBoolean("requireMutualTls"),
+            requireTransactional = json.requiredBoolean("requireTransactional"),
+            requireIdempotency = json.requiredBoolean("requireIdempotency"),
+            requireOutbox = json.requiredBoolean("requireOutbox"),
+            requireInbox = json.requiredBoolean("requireInbox"),
+            maximumConnectTimeoutMs = maximumConnectTimeoutMs,
+            maximumRequestTimeoutMs = maximumRequestTimeoutMs,
+            minimumRetryAttempts = minimumRetryAttempts,
+            requireMetrics = json.requiredBoolean("requireMetrics"),
+            requireTracing = json.requiredBoolean("requireTracing"),
+            requireStructuredLogging = json.requiredBoolean("requireStructuredLogging"),
+            requireAudit = json.requiredBoolean("requireAudit"),
+            requiredObservabilityApi = json.optionalEnum<IntegrationObservabilityApi>(
+                "requiredObservabilityApi",
+            ),
         )
     }
 
@@ -844,6 +1131,18 @@ object JmixTemplateCatalogVerifier {
         }?.asString?.toIntOrNull()
             ?: throw JmixTemplateCatalogException("Manifest property '$name' must be an integer.")
 
+    private fun JsonObject.requiredLong(name: String): Long =
+        get(name)?.takeIf {
+            it.isJsonPrimitive &&
+                it.asJsonPrimitive.isNumber &&
+                Regex("-?(?:0|[1-9][0-9]*)").matches(it.asString)
+        }?.asString?.toLongOrNull()
+            ?: throw JmixTemplateCatalogException("Manifest property '$name' must be an integer.")
+
+    private fun JsonObject.requiredBoolean(name: String): Boolean =
+        get(name)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }?.asBoolean
+            ?: throw JmixTemplateCatalogException("Manifest property '$name' must be a boolean.")
+
     private fun JsonObject.optionalBoolean(name: String): Boolean? {
         val value = get(name) ?: return null
         if (value.isJsonNull) return null
@@ -856,6 +1155,18 @@ object JmixTemplateCatalogVerifier {
     private fun JsonObject.requiredArray(name: String): JsonArray =
         get(name)?.takeIf(JsonElement::isJsonArray)?.asJsonArray
             ?: throw JmixTemplateCatalogException("Manifest property '$name' must be an array.")
+
+    private fun JsonObject.optionalArray(name: String): JsonArray? {
+        val value = get(name) ?: return null
+        require(value.isJsonArray) {
+            "Manifest property '$name' must be an array."
+        }
+        return value.asJsonArray
+    }
+
+    private fun JsonObject.requiredObject(name: String): JsonObject =
+        get(name)?.takeIf(JsonElement::isJsonObject)?.asJsonObject
+            ?: throw JmixTemplateCatalogException("Manifest property '$name' must be an object.")
 
     private inline fun <reified T : Enum<T>> JsonObject.requiredEnum(name: String): T {
         val value = requiredString(name)

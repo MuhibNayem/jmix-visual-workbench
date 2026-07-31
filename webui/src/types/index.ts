@@ -1840,6 +1840,78 @@ export interface IntegrationTransportSecurityModel {
   sslBundleNameProperty?: string
 }
 
+export interface IntegrationConnectorCatalogBinding {
+  catalogId: string
+  catalogVersion: string
+  bundleSha256: string
+  templateId: string
+  templateVersion: string
+  approvalCapability?: string
+}
+
+export type IntegrationOrganizationConnectorRisk = 'STANDARD' | 'SENSITIVE' | 'RESTRICTED'
+
+export interface IntegrationOrganizationConnectorHeader {
+  name: string
+  propertySuffix: string
+  sensitive: boolean
+}
+
+export interface IntegrationOrganizationConnectorPolicy {
+  risk: IntegrationOrganizationConnectorRisk
+  approvalPolicyId?: string
+  requiredAuthentication?: IntegrationAuthenticationKind
+  requireMutualTls: boolean
+  requireTransactional: boolean
+  requireIdempotency: boolean
+  requireOutbox: boolean
+  requireInbox: boolean
+  maximumConnectTimeoutMs: number
+  maximumRequestTimeoutMs: number
+  minimumRetryAttempts: number
+  requireMetrics: boolean
+  requireTracing: boolean
+  requireStructuredLogging: boolean
+  requireAudit: boolean
+  requiredObservabilityApi?: IntegrationObservabilityApi
+}
+
+export interface IntegrationOrganizationConnectorTemplate {
+  id: string
+  version: string
+  name: string
+  description: string
+  order: number
+  provider: string
+  kind: IntegrationConnectorKind
+  springBootApis: IntegrationSpringBootApi[]
+  requiredCapabilities: IntegrationCapability[]
+  configurationPrefixSuffix: string
+  addressPropertySuffix: string
+  headers: IntegrationOrganizationConnectorHeader[]
+  policy: IntegrationOrganizationConnectorPolicy
+}
+
+export interface IntegrationOrganizationConnectorTemplateSnapshot {
+  catalogId: string
+  catalogVersion: string
+  bundleSha256: string
+  catalogDisplayName: string
+  template: IntegrationOrganizationConnectorTemplate
+}
+
+export interface IntegrationConnectorCatalogApproval {
+  capability: string
+  expiresAt: string
+  approvalPolicyId: string
+}
+
+export interface IntegrationConnectorCatalogApprovalResponse {
+  approved: boolean
+  approval?: IntegrationConnectorCatalogApproval
+  message?: string
+}
+
 export interface IntegrationRetryPolicyModel {
   mode: IntegrationRetryMode
   attempts: number
@@ -1958,6 +2030,7 @@ export interface IntegrationConnectorModel {
   runtimeSpringBootApi?: IntegrationSpringBootApi
   profiles: string[]
   enabled: boolean
+  catalogBinding?: IntegrationConnectorCatalogBinding
   sourceLocator?: GraphSourceLocator
 }
 
@@ -1989,6 +2062,7 @@ export interface IntegrationConnectorWorkspaceResponse {
   oauth2Managers: IntegrationOAuth2ManagerSnapshot[]
   oauth2Services: IntegrationOAuth2ServiceSnapshot[]
   dataStores: SchemaDataStoreSnapshot[]
+  organizationConnectorTemplates: IntegrationOrganizationConnectorTemplateSnapshot[]
   existingDocuments: IntegrationConnectorDocumentSnapshot[]
   issues: WorkspaceChangeIssue[]
   error?: string

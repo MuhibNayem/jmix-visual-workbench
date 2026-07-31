@@ -97,6 +97,8 @@ host toolchains and runs the shared IDEA 253/262 test lanes.
 - [Native FlowUI Design/XML editor and round-trip contract](docs/NATIVE-FLOWUI-EDITOR.md)
 - [Native persistent-index, cache-isolation, and threading contract](docs/NATIVE-INDEX-ARCHITECTURE.md)
 - [Native REST service, configuration, and event intelligence](docs/NATIVE-SERVICE-EVENT-CONFIGURATION-INTELLIGENCE.md)
+- [Signed organization project-template catalogs](docs/ORGANIZATION-TEMPLATE-CATALOGS.md)
+- [Signed organization connector catalogs and native approval](docs/ORGANIZATION-CONNECTOR-CATALOGS.md)
 - [Dependency, checksum, CI, and future signing/SBOM policy](docs/RELEASE-INTEGRITY.md)
 
 Java 17, Java 21 and current-JDK target projects are the compatibility

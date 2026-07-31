@@ -17,6 +17,11 @@ import java.util.Base64
 import java.util.HexFormat
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import org.jmixworkbench.model.IntegrationAuthenticationKind
+import org.jmixworkbench.model.IntegrationCapability
+import org.jmixworkbench.model.IntegrationConnectorKind
+import org.jmixworkbench.model.IntegrationObservabilityApi
+import org.jmixworkbench.model.IntegrationSpringBootApi
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertContains
@@ -457,6 +462,131 @@ class JmixOrganizationTemplateCatalogTest {
         }
     }
 
+    @Test
+    fun `authors and verifies declarative connector catalogs without executable payloads`() {
+        val signer = JmixTemplateCatalogSigner.fromPkcs8Base64(
+            keyId = "acme-release",
+            privateKeyPkcs8Base64 = Base64.getEncoder().encodeToString(keyPair.private.encoded),
+            publicKeyX509Base64 = publicKey(),
+        )
+        val connector = connectorTemplate()
+        val draft = JmixTemplateCatalogDraft(
+            catalogId = "acme.enterprise",
+            catalogVersion = "1.4.0",
+            displayName = "Acme enterprise connectors",
+            issuedAt = Instant.parse("2026-07-30T00:00:00Z"),
+            expiresAt = Instant.parse("2027-07-31T00:00:00Z"),
+            templates = emptyList(),
+            connectorTemplates = listOf(connector),
+        )
+
+        val first = JmixTemplateCatalogAuthoring.createSignedBundle(draft, signer, clock)
+        val second = JmixTemplateCatalogAuthoring.createSignedBundle(draft, signer, clock)
+        assertTrue(first.contentEquals(second))
+        val verified = JmixTemplateCatalogVerifier.verify(first, policy(), clock)
+        assertTrue(verified.manifest.templates.isEmpty())
+        assertEquals(listOf(connector), verified.manifest.connectorTemplates)
+        assertTrue(
+            verified.manifest.connectorTemplates.single().supports(
+                IntegrationSpringBootApi.BOOT_3,
+                setOf(
+                    IntegrationCapability.SPRING_WEB,
+                    IntegrationCapability.OAUTH2_CLIENT,
+                    IntegrationCapability.SPRING_BOOT_SSL_BUNDLES,
+                ),
+            ),
+        )
+        assertTrue(
+            readEntries(first).keys == setOf(
+                JmixTemplateCatalogVerifier.MANIFEST_PATH,
+                JmixTemplateCatalogVerifier.SIGNATURE_PATH,
+            ),
+        )
+
+        val tampered = rewriteEntry(
+            first,
+            JmixTemplateCatalogVerifier.MANIFEST_PATH,
+            readEntry(first, JmixTemplateCatalogVerifier.MANIFEST_PATH)
+                .toString(Charsets.UTF_8)
+                .replace("\"maximumRequestTimeoutMs\":15000", "\"maximumRequestTimeoutMs\":600000")
+                .toByteArray(),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            JmixTemplateCatalogVerifier.verify(tampered, policy(), clock)
+        }.also { assertContains(it.message.orEmpty(), "signature verification failed") }
+
+        val forbiddenEndpoint = rewriteEntry(
+            first,
+            JmixTemplateCatalogVerifier.MANIFEST_PATH,
+            readEntry(first, JmixTemplateCatalogVerifier.MANIFEST_PATH)
+                .toString(Charsets.UTF_8)
+                .replace(
+                    "\"provider\":\"Acme IAM\"",
+                    "\"provider\":\"Acme IAM\",\"endpoint\":\"https://attacker.invalid\"",
+                )
+                .toByteArray(),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            JmixTemplateCatalogVerifier.verify(forbiddenEndpoint, policy(), clock)
+        }.also { assertContains(it.message.orEmpty(), "Unknown template catalog properties") }
+
+        val forbiddenSecret = rewriteEntry(
+            first,
+            JmixTemplateCatalogVerifier.MANIFEST_PATH,
+            readEntry(first, JmixTemplateCatalogVerifier.MANIFEST_PATH)
+                .toString(Charsets.UTF_8)
+                .replace(
+                    "\"propertySuffix\":\"correlation-id\",\"sensitive\":false",
+                    "\"propertySuffix\":\"correlation-id\",\"sensitive\":false,\"value\":\"secret\"",
+                )
+                .toByteArray(),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            JmixTemplateCatalogVerifier.verify(forbiddenSecret, policy(), clock)
+        }.also { assertContains(it.message.orEmpty(), "Unknown template catalog properties") }
+
+        assertFailsWith<IllegalArgumentException> {
+            JmixTemplateCatalogAuthoring.createSignedBundle(
+                draft.copy(
+                    connectorTemplates = listOf(
+                        connector.copy(configurationPrefixSuffix = "unsafe/\${SECRET}"),
+                    ),
+                ),
+                signer,
+                clock,
+            )
+        }.also { assertContains(it.message.orEmpty(), "safe lowercase property suffix") }
+
+        assertFailsWith<IllegalArgumentException> {
+            JmixTemplateCatalogAuthoring.createSignedBundle(
+                draft.copy(
+                    connectorTemplates = listOf(
+                        connector.copy(
+                            policy = connector.policy.copy(approvalPolicyId = null),
+                        ),
+                    ),
+                ),
+                signer,
+                clock,
+            )
+        }.also { assertContains(it.message.orEmpty(), "requires a safe approvalPolicyId") }
+
+        assertFailsWith<IllegalArgumentException> {
+            JmixTemplateCatalogAuthoring.createSignedBundle(
+                draft.copy(
+                    connectorTemplates = listOf(
+                        connector.copy(
+                            kind = IntegrationConnectorKind.HTTP_CLIENT,
+                            policy = connector.policy.copy(requireOutbox = true),
+                        ),
+                    ),
+                ),
+                signer,
+                clock,
+            )
+        }.also { assertContains(it.message.orEmpty(), "broker publisher") }
+    }
+
     private fun policy(
         allowedCatalogIds: Set<String> = setOf("acme.enterprise"),
         minimumCatalogVersions: Map<String, String> = emptyMap(),
@@ -467,6 +597,53 @@ class JmixOrganizationTemplateCatalogTest {
     )
 
     private fun publicKey(): String = Base64.getEncoder().encodeToString(keyPair.public.encoded)
+
+    private fun connectorTemplate(): JmixOrganizationConnectorTemplate =
+        JmixOrganizationConnectorTemplate(
+            id = "acme-identity",
+            version = "1.0.0",
+            name = "Acme Identity",
+            description = "Governed OAuth2 and mTLS identity connector.",
+            order = 10,
+            provider = "Acme IAM",
+            kind = IntegrationConnectorKind.IDENTITY_PROVIDER,
+            springBootApis = setOf(
+                IntegrationSpringBootApi.BOOT_3,
+                IntegrationSpringBootApi.BOOT_4,
+            ),
+            requiredCapabilities = setOf(
+                IntegrationCapability.SPRING_WEB,
+                IntegrationCapability.OAUTH2_CLIENT,
+                IntegrationCapability.SPRING_BOOT_SSL_BUNDLES,
+            ),
+            configurationPrefixSuffix = "acme.identity",
+            addressPropertySuffix = "base-url",
+            headers = listOf(
+                JmixOrganizationConnectorHeader(
+                    name = "X-Correlation-ID",
+                    propertySuffix = "correlation-id",
+                    sensitive = false,
+                ),
+            ),
+            policy = JmixOrganizationConnectorPolicy(
+                risk = JmixOrganizationConnectorRisk.SENSITIVE,
+                approvalPolicyId = "acme.integration.sensitive",
+                requiredAuthentication = IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS,
+                requireMutualTls = true,
+                requireTransactional = false,
+                requireIdempotency = true,
+                requireOutbox = false,
+                requireInbox = false,
+                maximumConnectTimeoutMs = 5_000,
+                maximumRequestTimeoutMs = 15_000,
+                minimumRetryAttempts = 3,
+                requireMetrics = true,
+                requireTracing = true,
+                requireStructuredLogging = true,
+                requireAudit = true,
+                requiredObservabilityApi = IntegrationObservabilityApi.MICROMETER_OBSERVATION,
+            ),
+        )
 
     private data class TestChange(
         val path: String,

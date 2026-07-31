@@ -28,7 +28,7 @@ The implementation deliberately exceeds a plain Maven-template override:
 
 Open:
 
-**Settings → Tools → Jmix Organization Templates**
+**Settings → Tools → Jmix Organization Catalogs**
 
 Each catalog configuration contains:
 
@@ -102,11 +102,14 @@ templates/
 `catalog.json` bytes. Each non-delete change in the manifest contains the
 SHA-256 digest of its payload.
 
-Current publishers emit schema version 2. Version 2 declares every non-delete
-payload as `TEXT` or `BINARY`; text is strict UTF-8 and may expand the safe
-variables below, while binary bytes are preserved exactly and never expanded.
-Legacy schema version 1 catalogs remain accepted as text-only catalogs so
-existing immutable offline cache coordinates do not break during upgrade.
+Project-only publishers emit schema version 2. Bundles containing declarative
+connector policies emit schema version 3; see
+`ORGANIZATION-CONNECTOR-CATALOGS.md`. Version 2 declares every non-delete
+project payload as `TEXT` or `BINARY`; text is strict UTF-8 and may expand the
+safe variables below, while binary bytes are preserved exactly and never
+expanded. Legacy schema version 1 catalogs remain accepted as text-only
+catalogs so existing immutable offline cache coordinates do not break during
+upgrade.
 
 Both schemas reject unknown properties. They also reject duplicate JSON
 properties, duplicate or case-colliding paths and IDs, traversal, absolute

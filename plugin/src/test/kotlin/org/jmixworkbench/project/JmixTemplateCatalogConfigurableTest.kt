@@ -40,7 +40,7 @@ class JmixTemplateCatalogConfigurableTest : BasePlatformTestCase() {
             val table = descendants.filterIsInstance<JTable>().singleOrNull()
             assertNotNull(table)
             assertEquals(
-                "Organization template catalogs",
+                "Organization project and connector catalogs",
                 requireNotNull(table).accessibleContext.accessibleName,
             )
             val buttons = descendants.filterIsInstance<AbstractButton>()
@@ -52,6 +52,7 @@ class JmixTemplateCatalogConfigurableTest : BasePlatformTestCase() {
                 "Import Signed Bundle…",
                 "Refresh Selected",
                 "Create Signed Bundle…",
+                "Create Signed Connector Catalog…",
             ).forEach { label ->
                 val button = buttons[label]
                 assertNotNull(button, "Missing native settings action '$label'.")
@@ -80,6 +81,18 @@ class JmixTemplateCatalogConfigurableTest : BasePlatformTestCase() {
         )
         assertTrue(
             authoringComponent.descendants()
+                .filterIsInstance<AbstractButton>()
+                .filter { it.text == "Choose…" }
+                .all(AbstractButton::isFocusable),
+        )
+        val connectorAuthoring = JmixConnectorCatalogAuthoringDialog(clock)
+        val connectorAuthoringComponent = connectorAuthoring.createCenterPanel()
+        assertEquals(
+            "Signed Jmix connector catalog authoring form",
+            connectorAuthoringComponent.accessibleContext.accessibleName,
+        )
+        assertTrue(
+            connectorAuthoringComponent.descendants()
                 .filterIsInstance<AbstractButton>()
                 .filter { it.text == "Choose…" }
                 .all(AbstractButton::isFocusable),

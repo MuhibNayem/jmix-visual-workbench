@@ -7,6 +7,7 @@ import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 import com.intellij.openapi.components.service
 import com.intellij.util.xmlb.XmlSerializerUtil
+import org.jmixworkbench.model.IntegrationConnectorCatalogBinding
 import java.nio.file.Path
 
 @State(
@@ -83,6 +84,22 @@ data class JmixTemplateCatalogInventory(
     val issues: List<JmixTemplateCatalogLoadIssue>,
 )
 
+data class JmixConnectorCatalogOption(
+    val catalogId: String,
+    val catalogVersion: String,
+    val bundleSha256: String,
+    val catalogDisplayName: String,
+    val template: JmixOrganizationConnectorTemplate,
+) {
+    val stableId: String =
+        "$catalogId:$catalogVersion:${template.id}:${template.version}:$bundleSha256"
+}
+
+data class JmixConnectorCatalogInventory(
+    val options: List<JmixConnectorCatalogOption>,
+    val issues: List<JmixTemplateCatalogLoadIssue>,
+)
+
 data class JmixTemplateCatalogRefreshResult(
     val configuredName: String,
     val cached: JmixCachedTemplateCatalog?,
@@ -134,6 +151,66 @@ class JmixTemplateCatalogManager {
                     ),
                 ),
             issues = issues,
+        )
+    }
+
+    fun connectorInventory(): JmixConnectorCatalogInventory {
+        val settings = JmixTemplateCatalogSettings.getInstance().state
+        val options = mutableListOf<JmixConnectorCatalogOption>()
+        val issues = mutableListOf<JmixTemplateCatalogLoadIssue>()
+        settings.catalogs.filter(JmixTemplateCatalogSettings.CatalogState::enabled).forEach { configured ->
+            runCatching {
+                val verified = openConfigured(configured)
+                verified.manifest.connectorTemplates.forEach { template ->
+                    options += JmixConnectorCatalogOption(
+                        catalogId = verified.manifest.catalogId,
+                        catalogVersion = verified.manifest.catalogVersion,
+                        bundleSha256 = verified.bundleSha256,
+                        catalogDisplayName = verified.manifest.displayName,
+                        template = template,
+                    )
+                }
+            }.onFailure { failure ->
+                issues += JmixTemplateCatalogLoadIssue(
+                    configuredName = configured.displayName.ifBlank { configured.catalogId },
+                    message = failure.message ?: "Catalog verification failed.",
+                )
+            }
+        }
+        return JmixConnectorCatalogInventory(
+            options = options
+                .distinctBy(JmixConnectorCatalogOption::stableId)
+                .sortedWith(
+                    compareBy(
+                        { it.template.order },
+                        JmixConnectorCatalogOption::catalogDisplayName,
+                        { it.template.name },
+                    ),
+                ),
+            issues = issues,
+        )
+    }
+
+    fun resolveConnector(
+        binding: IntegrationConnectorCatalogBinding,
+    ): JmixConnectorCatalogOption {
+        val configured = configuredCatalog(binding.catalogId, binding.catalogVersion)
+        val verified = openConfigured(configured)
+        require(verified.bundleSha256 == binding.bundleSha256) {
+            "The organization connector catalog changed after selection; refresh the workspace."
+        }
+        val template = verified.manifest.connectorTemplates.singleOrNull {
+            it.id == binding.templateId && it.version == binding.templateVersion
+        } ?: throw JmixTemplateCatalogException(
+            "Connector template '${binding.templateId}:${binding.templateVersion}' is not present in " +
+                "${binding.catalogId}:${binding.catalogVersion}.",
+        )
+        return JmixConnectorCatalogOption(
+            catalogId = verified.manifest.catalogId,
+            catalogVersion = verified.manifest.catalogVersion,
+            bundleSha256 = verified.bundleSha256,
+            catalogDisplayName = verified.manifest.displayName,
+            template = template,
         )
     }
 

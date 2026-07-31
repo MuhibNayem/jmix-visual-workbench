@@ -39,6 +39,7 @@ import type {
   EntityAttributeTypeMappingCutoverRequest,
   GenerationResult,
   GraphSourceLocator,
+  IntegrationConnectorCatalogApprovalResponse,
   IntegrationConnectorModel,
   IntegrationConnectorWorkspaceResponse,
   EnvironmentChangeRequest,
@@ -728,6 +729,15 @@ ${model.reliability.outboxEnabled ? '# durable at-least-once outbox; deduplicate
                   ],
                   issues: [],
                 } satisfies WorkspaceChangeApplyResponse
+              case 'approveIntegrationConnectorCatalogTemplate':
+                return {
+                  approved: true,
+                  approval: {
+                    capability: 'development-native-catalog-approval',
+                    expiresAt: new Date(Date.now() + 300_000).toISOString(),
+                    approvalPolicyId: 'brac.integration.sensitive',
+                  },
+                } satisfies IntegrationConnectorCatalogApprovalResponse
               case 'previewVisualRule': {
                 const model = payload as VisualRuleModel
                 const destination = developmentVisualRuleWorkspace.destinations.find(
@@ -3152,6 +3162,16 @@ ${javaMethods}
       model,
       expectedPlanDigest,
     })
+  }
+
+  approveIntegrationConnectorCatalogTemplate(
+    binding: NonNullable<IntegrationConnectorModel['catalogBinding']>,
+    destinationId: string,
+  ) {
+    return this.request<IntegrationConnectorCatalogApprovalResponse>(
+      'approveIntegrationConnectorCatalogTemplate',
+      { binding, destinationId },
+    )
   }
 
   previewVisualLogic(model: VisualLogicClassModel) {

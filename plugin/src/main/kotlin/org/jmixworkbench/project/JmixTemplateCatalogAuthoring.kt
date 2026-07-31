@@ -32,6 +32,7 @@ data class JmixTemplateCatalogDraft(
     val issuedAt: Instant,
     val expiresAt: Instant?,
     val templates: List<JmixOrganizationProjectTemplateDraft>,
+    val connectorTemplates: List<JmixOrganizationConnectorTemplate> = emptyList(),
 )
 
 data class JmixOrganizationProjectTemplateDraft(
@@ -258,9 +259,10 @@ object JmixTemplateCatalogAuthoring {
         val signerKeyId = signer.keyId
         val signerPublicKey = signer.publicKeyX509Base64
         val templates = draft.templates.sortedBy(JmixOrganizationProjectTemplateDraft::id)
+        val connectorTemplates = draft.connectorTemplates.sortedBy(JmixOrganizationConnectorTemplate::id)
         val payloads = linkedMapOf<String, ByteArray>()
         val manifest = JsonObject().apply {
-            addProperty("schemaVersion", 2)
+            addProperty("schemaVersion", if (connectorTemplates.isEmpty()) 2 else 3)
             addProperty("catalogId", draft.catalogId)
             addProperty("catalogVersion", draft.catalogVersion)
             addProperty("displayName", draft.displayName)
@@ -280,6 +282,16 @@ object JmixTemplateCatalogAuthoring {
                     }
                 },
             )
+            if (connectorTemplates.isNotEmpty()) {
+                add(
+                    "connectors",
+                    JsonArray().apply {
+                        connectorTemplates.forEach { template ->
+                            add(connectorTemplateJson(template))
+                        }
+                    },
+                )
+            }
         }
         val manifestBytes = GSON.toJson(manifest).toByteArray(Charsets.UTF_8)
         val signature = signer.sign(manifestBytes.copyOf())
@@ -387,6 +399,87 @@ object JmixTemplateCatalogAuthoring {
                             }
                             addProperty("executable", change.executable)
                         },
+                    )
+                }
+            },
+        )
+    }
+
+    private fun connectorTemplateJson(
+        template: JmixOrganizationConnectorTemplate,
+    ): JsonObject = JsonObject().apply {
+        addProperty("id", template.id)
+        addProperty("version", template.version)
+        addProperty("name", template.name)
+        addProperty("description", template.description)
+        addProperty("order", template.order)
+        addProperty("provider", template.provider)
+        addProperty("kind", template.kind.name)
+        add("springBootApis", strings(template.springBootApis.map { it.name }.sorted()))
+        add(
+            "requiredCapabilities",
+            strings(template.requiredCapabilities.map { it.name }.sorted()),
+        )
+        addProperty("configurationPrefixSuffix", template.configurationPrefixSuffix)
+        addProperty("addressPropertySuffix", template.addressPropertySuffix)
+        add(
+            "headers",
+            JsonArray().apply {
+                template.headers.sortedBy { it.name.lowercase() }.forEach { header ->
+                    add(
+                        JsonObject().apply {
+                            addProperty("name", header.name)
+                            addProperty("propertySuffix", header.propertySuffix)
+                            addProperty("sensitive", header.sensitive)
+                        },
+                    )
+                }
+            },
+        )
+        add(
+            "policy",
+            JsonObject().apply {
+                addProperty("risk", template.policy.risk.name)
+                if (template.policy.approvalPolicyId == null) {
+                    add("approvalPolicyId", JsonNull.INSTANCE)
+                } else {
+                    addProperty("approvalPolicyId", template.policy.approvalPolicyId)
+                }
+                if (template.policy.requiredAuthentication == null) {
+                    add("requiredAuthentication", JsonNull.INSTANCE)
+                } else {
+                    addProperty(
+                        "requiredAuthentication",
+                        template.policy.requiredAuthentication.name,
+                    )
+                }
+                addProperty("requireMutualTls", template.policy.requireMutualTls)
+                addProperty("requireTransactional", template.policy.requireTransactional)
+                addProperty("requireIdempotency", template.policy.requireIdempotency)
+                addProperty("requireOutbox", template.policy.requireOutbox)
+                addProperty("requireInbox", template.policy.requireInbox)
+                addProperty(
+                    "maximumConnectTimeoutMs",
+                    template.policy.maximumConnectTimeoutMs,
+                )
+                addProperty(
+                    "maximumRequestTimeoutMs",
+                    template.policy.maximumRequestTimeoutMs,
+                )
+                addProperty("minimumRetryAttempts", template.policy.minimumRetryAttempts)
+                addProperty("requireMetrics", template.policy.requireMetrics)
+                addProperty("requireTracing", template.policy.requireTracing)
+                addProperty(
+                    "requireStructuredLogging",
+                    template.policy.requireStructuredLogging,
+                )
+                addProperty("requireAudit", template.policy.requireAudit)
+                if (template.policy.requiredObservabilityApi == null) {
+                    add("requiredObservabilityApi", JsonNull.INSTANCE)
+                } else {
+                    addProperty(
+                        "requiredObservabilityApi",
+                        template.policy.requiredObservabilityApi.name,
                     )
                 }
             },

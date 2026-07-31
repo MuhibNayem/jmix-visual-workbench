@@ -40,6 +40,13 @@ contracts. Jmix 3 additionally requires the modular Spring Boot 4 Kafka runtime
 capability rather than treating the lower-level `spring-kafka` library as
 sufficient auto-configuration.
 
+Signed organization connector presets declare their compatible
+`BOOT_3`/`BOOT_4` APIs and required indexed capabilities. The Integration
+Designer filters incompatible presets, and the backend repeats the check after
+reopening the exact signed bundle before preview/apply. Catalog selection
+cannot broaden the four certified generated-code cells or bypass a missing
+target dependency.
+
 | Exact Jmix | Target-project JDK | Languages | Generated artifacts | Current evidence |
 | --- | --- | --- | --- | --- |
 | 2.8.2 | 17 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 61 |

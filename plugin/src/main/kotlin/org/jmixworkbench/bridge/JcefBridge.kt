@@ -10,6 +10,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.wm.ToolWindowManager
@@ -138,6 +139,10 @@ import org.jmixworkbench.services.RestApiWorkspaceResponse
 import org.jmixworkbench.services.RestApiWorkspaceService
 import org.jmixworkbench.services.JmixProjectService
 import org.jmixworkbench.services.IntegrationConnectorApplyRequest
+import org.jmixworkbench.services.IntegrationConnectorCatalogApprovalRequest
+import org.jmixworkbench.services.IntegrationConnectorCatalogApproval
+import org.jmixworkbench.services.IntegrationConnectorCatalogApprovalReview
+import org.jmixworkbench.services.IntegrationConnectorCatalogApprovalResponse
 import org.jmixworkbench.services.IntegrationConnectorWorkspaceResponse
 import org.jmixworkbench.services.IntegrationConnectorWorkspaceService
 import org.jmixworkbench.services.MigrationJsonParser
@@ -350,6 +355,10 @@ class JcefBridge(
             }
             if (action == "applyIntegrationConnector") {
                 handleApplyIntegrationConnector(action, requestId, payload)
+                return
+            }
+            if (action == "approveIntegrationConnectorCatalogTemplate") {
+                handleApproveIntegrationConnectorCatalogTemplate(action, requestId, payload)
                 return
             }
             if (action == "getVisualRuleWorkspace") {
@@ -1441,6 +1450,127 @@ class JcefBridge(
         val prepared = IntegrationConnectorWorkspaceService.getInstance(project).prepare(request)
         val result = WorkspaceChangeService.getInstance(project).applyPrepared(prepared)
         sendResponse(action, requestId, gson.toJson(result))
+    }
+
+    private fun handleApproveIntegrationConnectorCatalogTemplate(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, IntegrationConnectorCatalogApprovalRequest::class.java)
+        }.getOrElse { failure ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    IntegrationConnectorCatalogApprovalResponse(
+                        approved = false,
+                        approval = null,
+                        message = failure.message ?: "Invalid connector approval request.",
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<Result<IntegrationConnectorCatalogApprovalReview>> {
+            runCatching {
+                IntegrationConnectorWorkspaceService.getInstance(project).catalogApprovalReview(request)
+            }
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { reviewResult ->
+                val review = reviewResult.getOrElse { failure ->
+                    sendIntegrationConnectorCatalogApprovalResponse(
+                        action = action,
+                        requestId = requestId,
+                        approved = false,
+                        message = failure.message ?: "The signed connector template could not be reviewed.",
+                    )
+                    return@finishOnUiThread
+                }
+                val requirements = buildList {
+                    if (review.requireMutualTls) add("mutual TLS")
+                    if (review.requireTransactional) add("transactional boundary")
+                    if (review.requireIdempotency) add("idempotency")
+                    if (review.requireOutbox) add("transactional outbox")
+                    if (review.requireInbox) add("persistent inbox")
+                }.joinToString().ifBlank { "catalog-enforced policy" }
+                val approved = Messages.showYesNoDialog(
+                    project,
+                    "Approve '${review.templateName}' from ${review.catalogDisplayName} for " +
+                        "module ${review.destinationModuleId}?\n\n" +
+                        "Provider: ${review.provider}\nRisk: ${review.risk}\n" +
+                        "Policy: ${review.approvalPolicyId}\nRequired controls: $requirements\n\n" +
+                        "The approval is bound to the exact signed bundle, template version and module " +
+                        "and expires after five minutes.",
+                    "Approve Organization Connector",
+                    "Approve",
+                    "Cancel",
+                    Messages.getWarningIcon(),
+                ) == Messages.YES
+                if (!approved) {
+                    sendIntegrationConnectorCatalogApprovalResponse(
+                        action = action,
+                        requestId = requestId,
+                        approved = false,
+                        message = "Approval cancelled.",
+                    )
+                    return@finishOnUiThread
+                }
+                ReadAction.nonBlocking<Result<IntegrationConnectorCatalogApproval>> {
+                    runCatching {
+                        IntegrationConnectorWorkspaceService.getInstance(project)
+                            .issueCatalogApproval(request)
+                    }
+                }
+                    .inSmartMode(project)
+                    .expireWith(project)
+                    .finishOnUiThread(ModalityState.any()) { approvalResult ->
+                        approvalResult.fold(
+                            onSuccess = { approval ->
+                                sendIntegrationConnectorCatalogApprovalResponse(
+                                    action = action,
+                                    requestId = requestId,
+                                    approved = true,
+                                    approval = approval,
+                                )
+                            },
+                            onFailure = { failure ->
+                                sendIntegrationConnectorCatalogApprovalResponse(
+                                    action = action,
+                                    requestId = requestId,
+                                    approved = false,
+                                    message = failure.message
+                                        ?: "The signed connector approval could not be issued.",
+                                )
+                            },
+                        )
+                    }
+                    .submit(AppExecutorUtil.getAppExecutorService())
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun sendIntegrationConnectorCatalogApprovalResponse(
+        action: String,
+        requestId: String?,
+        approved: Boolean,
+        approval: IntegrationConnectorCatalogApproval? = null,
+        message: String? = null,
+    ) {
+        sendResponse(
+            action,
+            requestId,
+            gson.toJson(
+                IntegrationConnectorCatalogApprovalResponse(
+                    approved = approved,
+                    approval = approval,
+                    message = message,
+                ),
+            ),
+        )
     }
 
     private fun handleGetVisualRuleWorkspace(action: String, requestId: String?, payload: JsonObject) {
