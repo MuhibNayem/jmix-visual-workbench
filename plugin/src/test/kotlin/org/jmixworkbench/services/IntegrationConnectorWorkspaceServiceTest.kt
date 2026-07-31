@@ -45,7 +45,7 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
             write(
                 root,
                 "src/main/resources/application.properties",
-                "main.liquibase.change-log=classpath:db/changelog/db.changelog-master.xml",
+                "payroll.liquibase.change-log=classpath:db/changelog/db.changelog-master.xml",
             )
             write(
                 root,
@@ -93,6 +93,8 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                 outbox = IntegrationOutboxModel(
                     storeId = store.id,
                     tableName = "jvw_loan_event_outbox",
+                    dataSourceBean = "forgedDataSource",
+                    transactionManagerBean = "forgedTransactionManager",
                 ),
             ),
         )
@@ -117,6 +119,14 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertContains(requireNotNull(java.createContent), "com.fasterxml.jackson.databind.ObjectMapper")
         assertContains(requireNotNull(java.createContent), "public String enqueue")
         assertContains(requireNotNull(java.createContent), "SpecificOperationAccessContext")
+        assertContains(requireNotNull(java.createContent), "@Qualifier(\"payrollDataSource\") DataSource dataSource")
+        assertContains(
+            requireNotNull(java.createContent),
+            "@Qualifier(\"payrollTransactionManager\") PlatformTransactionManager transactionManager",
+        )
+        assertContains(requireNotNull(java.createContent), "@Transactional(\"payrollTransactionManager\")")
+        assertFalse(requireNotNull(java.createContent).contains("forgedDataSource"))
+        assertFalse(requireNotNull(java.createContent).contains("forgedTransactionManager"))
         assertTrue(service.preview(model).accepted)
     }
 

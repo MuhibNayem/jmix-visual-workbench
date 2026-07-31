@@ -148,6 +148,12 @@ data class IntegrationOutboxModel(
     val migrationPath: String? = null,
     val tableName: String,
     val jsonApi: IntegrationJsonApi? = null,
+    /**
+     * Backend-owned Spring bean identities for the selected Jmix data store.
+     * Browser input is overwritten from the indexed store before validation.
+     */
+    val dataSourceBean: String = "dataSource",
+    val transactionManagerBean: String = "transactionManager",
     val batchSize: Int = 100,
     val pollDelayMs: Long = 1_000,
     val leaseDurationMs: Long = 60_000,

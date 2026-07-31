@@ -184,6 +184,26 @@ val targetCompatibilityCompileTasks = targetCompatibilityCells.flatMap { cell ->
         )
         add(
             sourceSet.implementationConfigurationName,
+            "org.springframework.amqp:spring-rabbit",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            "org.springframework.integration:spring-integration-sftp",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            "org.springframework:spring-web",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            if (cell.jmixVersion.startsWith("3.")) {
+                "io.github.resilience4j:resilience4j-spring-boot4:2.4.0"
+            } else {
+                "io.github.resilience4j:resilience4j-spring-boot3:2.4.0"
+            },
+        )
+        add(
+            sourceSet.implementationConfigurationName,
             "org.springframework:spring-jdbc",
         )
         add(

@@ -115,11 +115,11 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 "JVW-INTEGRATION-DESTINATION-INVALID",
                 "The selected module destination is no longer available. Refresh the workspace.",
             )
-        val normalized = normalizeBackendContracts(model, destination)
         val schema = SchemaWorkspaceService.getInstance(project).load()
-        val selectedStore = normalized.reliability.outbox
-            ?.takeIf { normalized.reliability.outboxEnabled }
+        val selectedStore = model.reliability.outbox
+            ?.takeIf { model.reliability.outboxEnabled }
             ?.let { outbox -> schema.stores.firstOrNull { it.id == outbox.storeId } }
+        val normalized = normalizeBackendContracts(model, destination, selectedStore)
         val validation = IntegrationConnectorGenerator.validate(normalized, destination.capabilities)
         val issues = validation.diagnostics
             .filter { it.severity == IntegrationDiagnosticSeverity.ERROR }
@@ -522,12 +522,23 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
     private fun normalizeBackendContracts(
         model: IntegrationConnectorModel,
         destination: IntegrationConnectorDestinationSnapshot,
+        selectedStore: SchemaDataStoreSnapshot?,
     ): IntegrationConnectorModel {
         val reliability = model.reliability
         val outbox = reliability.outbox
         val normalizedReliability = if (reliability.outboxEnabled && outbox != null) {
             reliability.copy(
-                    outbox = outbox.copy(jsonApi = destination.jsonApi),
+                outbox = outbox.copy(
+                    jsonApi = destination.jsonApi,
+                    dataSourceBean = selectedStore?.name
+                        ?.let { storeName -> if (storeName == "main") "dataSource" else "${storeName}DataSource" }
+                        ?: "",
+                    transactionManagerBean = selectedStore?.name
+                        ?.let { storeName ->
+                            if (storeName == "main") "transactionManager" else "${storeName}TransactionManager"
+                        }
+                        ?: "",
+                ),
             )
         } else {
             reliability

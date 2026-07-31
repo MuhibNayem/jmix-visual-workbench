@@ -24,6 +24,7 @@ class MigrationGeneratorTest {
                 ChangeSetModel(
                     id = "loan-1",
                     author = "team",
+                    comment = "Create the certified loan schema",
                     labels = "loan",
                     changes = mutableListOf(
                         DbChange.CreateTable(
@@ -58,6 +59,12 @@ class MigrationGeneratorTest {
         assertNotNull(dropTable)
         assertEquals("true", dropTable.getAttribute("cascadeConstraints"))
         assertTrue(xml.contains("""labels="loan""""))
+        val changeSet = document.getElementsByTagName("changeSet").item(0) as org.w3c.dom.Element
+        assertFalse(changeSet.hasAttribute("comment"))
+        assertEquals(
+            "Create the certified loan schema",
+            document.getElementsByTagName("comment").item(0).textContent.trim(),
+        )
     }
 
     private fun parse(xml: String): Document {

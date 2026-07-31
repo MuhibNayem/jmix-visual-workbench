@@ -42,7 +42,6 @@ object MigrationGenerator {
         parent.child("changeSet") {
             attr("id", cs.id)
             attr("author", cs.author)
-            cs.comment?.let { attr("comment", it) }
             cs.context?.let { attr("context", it) }
             cs.dbms?.let { attr("dbms", it) }
             if (cs.runOnChange) attr("runOnChange", "true")
@@ -58,6 +57,11 @@ object MigrationGenerator {
                     cs.preConditions.forEach { pc ->
                         generatePreCondition(this, pc)
                     }
+                }
+            }
+            cs.comment?.let { comment ->
+                child("comment") {
+                    text(comment)
                 }
             }
 

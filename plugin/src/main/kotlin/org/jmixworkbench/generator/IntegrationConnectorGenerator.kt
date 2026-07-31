@@ -459,7 +459,9 @@ object IntegrationConnectorGenerator {
             model.description.takeIf(String::isNotBlank)?.let {
                 append("/** ").append(safeComment(it)).append(" */\n")
             }
-            append("public final class ").append(model.className).append(" {\n")
+            // Spring transaction and Resilience4j annotations use class-based
+            // proxies when the generated adapter has no interface.
+            append("public class ").append(model.className).append(" {\n")
             if (model.observability.structuredLoggingEnabled) {
                 append("    private static final Logger log = LoggerFactory.getLogger(")
                     .append(model.className).append(".class);\n")
@@ -507,6 +509,7 @@ object IntegrationConnectorGenerator {
                 append("        this.fileStorage = fileStorageLocator.getByName(storageName);\n")
             }
             if (model.reliability.outboxEnabled) {
+                append("        this.jdbcTemplate = new JdbcTemplate(dataSource);\n")
                 append("        this.outboxTransactions = new TransactionTemplate(transactionManager);\n")
             }
             append("    }\n\n")
@@ -662,7 +665,7 @@ object IntegrationConnectorGenerator {
             append("     * Persists an event in the same database transaction as the caller's business change.\n")
             append("     * Delivery is durable at-least-once; consumers must deduplicate by the returned event ID.\n")
             append("     */\n")
-            append("    @Transactional\n")
+            append("    @Transactional(\"").append(escapeJava(outbox.transactionManagerBean)).append("\")\n")
             append("    public String enqueue(String orderingKey, ").append(model.payloadJavaType).append(" payload) {\n")
             append("        Objects.requireNonNull(payload, \"payload is required\");\n")
             if (model.reliability.orderingRequired) {
@@ -693,7 +696,7 @@ object IntegrationConnectorGenerator {
         val outbox = requireNotNull(model.reliability.outbox)
         val table = outbox.tableName
         val orderingPredicate = if (model.reliability.orderingRequired) {
-            " AND NOT EXISTS (SELECT 1 FROM $table earlier WHERE earlier.partition_key = candidate.partition_key AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.status NOT IN ('SENT', 'DEAD'))"
+            " AND NOT EXISTS (SELECT 1 FROM $table earlier WHERE earlier.partition_key = candidate.partition_key AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.status <> 'SENT')"
         } else {
             ""
         }
@@ -701,19 +704,25 @@ object IntegrationConnectorGenerator {
             append("    @Scheduled(fixedDelayString = \"\${").append(model.configurationPrefix)
                 .append(".outbox.poll-delay-ms:").append(outbox.pollDelayMs).append("}\")\n")
             append("    public void dispatchOutbox() {\n")
-            append("        Instant now = Instant.now(clock);\n")
-            append("        List<String> candidates = jdbcTemplate.query(connection -> {\n")
-            append("            PreparedStatement statement = connection.prepareStatement(\n")
-            append("                    \"SELECT candidate.id FROM ").append(table)
+            append("        int remaining = ").append(outbox.batchSize).append(";\n")
+            append("        while (remaining > 0) {\n")
+            append("            Instant now = Instant.now(clock);\n")
+            append("            int queryLimit = remaining;\n")
+            append("            List<String> candidates = jdbcTemplate.query(connection -> {\n")
+            append("                PreparedStatement statement = connection.prepareStatement(\n")
+            append("                        \"SELECT candidate.id FROM ").append(table)
                 .append(" candidate WHERE candidate.status IN ('PENDING', 'RETRY', 'IN_FLIGHT') AND candidate.available_at <= ? AND (candidate.locked_until IS NULL OR candidate.locked_until < ?)")
                 .append(orderingPredicate)
-                .append(" ORDER BY candidate.created_at\");\n")
-            append("            statement.setTimestamp(1, Timestamp.from(now));\n")
-            append("            statement.setTimestamp(2, Timestamp.from(now));\n")
-            append("            statement.setMaxRows(").append(outbox.batchSize).append(");\n")
-            append("            return statement;\n")
-            append("        }, (resultSet, rowNumber) -> resultSet.getString(1));\n")
-            append("        candidates.forEach(this::claimAndDispatch);\n")
+                .append(" ORDER BY candidate.created_at, candidate.id\");\n")
+            append("                statement.setTimestamp(1, Timestamp.from(now));\n")
+            append("                statement.setTimestamp(2, Timestamp.from(now));\n")
+            append("                statement.setMaxRows(queryLimit);\n")
+            append("                return statement;\n")
+            append("            }, (resultSet, rowNumber) -> resultSet.getString(1));\n")
+            append("            if (candidates.isEmpty()) break;\n")
+            append("            candidates.forEach(this::claimAndDispatch);\n")
+            append("            remaining -= candidates.size();\n")
+            append("        }\n")
             append("    }\n\n")
 
             append("    private void claimAndDispatch(String eventId) {\n")
@@ -723,7 +732,7 @@ object IntegrationConnectorGenerator {
                 append("            Long blockers = jdbcTemplate.queryForObject(\n")
                 append("                    \"SELECT COUNT(*) FROM ").append(table)
                     .append(" candidate WHERE candidate.id = ? AND EXISTS (SELECT 1 FROM ").append(table)
-                    .append(" earlier WHERE earlier.partition_key = candidate.partition_key AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.status NOT IN ('SENT', 'DEAD'))\",\n")
+                    .append(" earlier WHERE earlier.partition_key = candidate.partition_key AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.status <> 'SENT')\",\n")
                 append("                    Long.class, eventId);\n")
                 append("            if (value(blockers) != 0L) return false;\n")
             }
@@ -749,10 +758,11 @@ object IntegrationConnectorGenerator {
             append("            ").append(model.payloadJavaType).append(" payload = objectMapper.readValue(event.payload(), ")
                 .append(rawClassLiteral(model.payloadJavaType)).append(");\n")
             append("            deliver(event, payload);\n")
-            append("            outboxTransactions.executeWithoutResult(status -> jdbcTemplate.update(\n")
+            append("            Integer delivered = outboxTransactions.execute(status -> jdbcTemplate.update(\n")
             append("                    \"UPDATE ").append(table)
                 .append(" SET status = 'SENT', sent_at = ?, locked_by = NULL, locked_until = NULL, last_error = NULL, version = version + 1 WHERE id = ? AND locked_by = ?\",\n")
             append("                    Timestamp.from(Instant.now(clock)), event.id(), dispatcherId));\n")
+            append("            if (delivered == null || delivered != 1) throw new IllegalStateException(\"Outbox delivery acknowledgement could not be persisted\");\n")
             append("            recordMetric(\"delivered\");\n")
             if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
                 append("            if (observation != null) observation.lowCardinalityKeyValue(\"outcome\", \"delivered\");\n")
@@ -787,12 +797,26 @@ object IntegrationConnectorGenerator {
                     append("        }, correlation);\n")
                     append("        CorrelationData.Confirm confirm = correlation.getFuture().get(")
                         .append(model.reliability.requestTimeoutMs).append("L, TimeUnit.MILLISECONDS);\n")
-                    append("        if (!confirm.isAck()) throw new IllegalStateException(\"RabbitMQ publisher confirm was negative\");\n")
+                    append("        if (!rabbitAcknowledged(confirm)) throw new IllegalStateException(\"RabbitMQ publisher confirm was negative\");\n")
                     append("        if (correlation.getReturned() != null) throw new IllegalStateException(\"RabbitMQ returned the unroutable outbox message\");\n")
                 }
                 else -> error("Unsupported outbox kind ${model.kind}")
             }
             append("    }\n\n")
+            if (model.kind == IntegrationConnectorKind.RABBIT_PUBLISHER) {
+                append("    private static boolean rabbitAcknowledged(CorrelationData.Confirm confirm) {\n")
+                append("        for (String accessor : List.of(\"ack\", \"isAck\")) {\n")
+                append("            try {\n")
+                append("                return Boolean.TRUE.equals(confirm.getClass().getMethod(accessor).invoke(confirm));\n")
+                append("            } catch (NoSuchMethodException ignored) {\n")
+                append("                // Spring AMQP 3 exposes isAck(); Spring AMQP 4 adds ack().\n")
+                append("            } catch (ReflectiveOperationException exception) {\n")
+                append("                throw new IllegalStateException(\"RabbitMQ confirm state could not be read\", exception);\n")
+                append("            }\n")
+                append("        }\n")
+                append("        throw new IllegalStateException(\"Unsupported Spring AMQP confirm contract\");\n")
+                append("    }\n\n")
+            }
 
             append("    private void markDeliveryFailure(OutboxRecord event, Exception exception) {\n")
             append("        int attempts = event.attempts() + 1;\n")
@@ -802,10 +826,11 @@ object IntegrationConnectorGenerator {
                 .append("L, Math.multiplyExact(").append(outbox.initialBackoffMs)
                 .append("L, 1L << exponent));\n")
             append("        Instant availableAt = Instant.now(clock).plusMillis(delay);\n")
-            append("        outboxTransactions.executeWithoutResult(status -> jdbcTemplate.update(\n")
+            append("        Integer updated = outboxTransactions.execute(status -> jdbcTemplate.update(\n")
             append("                \"UPDATE ").append(table)
                 .append(" SET status = ?, attempts = ?, available_at = ?, locked_by = NULL, locked_until = NULL, last_error = ?, version = version + 1 WHERE id = ? AND locked_by = ?\",\n")
             append("                dead ? \"DEAD\" : \"RETRY\", attempts, Timestamp.from(availableAt), safeError(exception), event.id(), dispatcherId));\n")
+            append("        if (updated == null || updated != 1) throw new IllegalStateException(\"Outbox delivery failure could not be persisted\", exception);\n")
             append("        recordMetric(dead ? \"dead\" : \"retry\");\n")
             if (model.observability.structuredLoggingEnabled) {
                 append("        log.warn(\"Integration delivery failed connector=")
@@ -815,7 +840,7 @@ object IntegrationConnectorGenerator {
             append("    }\n\n")
 
             append("    /** Replays only terminal events and requires an explicit Jmix specific permission. */\n")
-            append("    @Transactional\n")
+            append("    @Transactional(\"").append(escapeJava(outbox.transactionManagerBean)).append("\")\n")
             append("    public void replay(String eventId, String reason) {\n")
             append("        requirePermission(\"").append(escapeJava(outbox.replayPermission)).append("\");\n")
             append("        String canonicalEventId = canonicalEventId(eventId);\n")
@@ -846,10 +871,18 @@ object IntegrationConnectorGenerator {
             append("        Timestamp oldest = jdbcTemplate.queryForObject(\"SELECT MIN(created_at) FROM ").append(table)
                 .append(" WHERE status IN ('PENDING', 'RETRY', 'IN_FLIGHT')\", Timestamp.class);\n")
             append("        long oldestAgeMs = oldest == null ? 0L : Math.max(0L, Duration.between(oldest.toInstant(), now).toMillis());\n")
-            append("        return new OutboxHealth(value(pending), value(dead), value(expiredLeases), oldestAgeMs);\n")
+            if (model.reliability.orderingRequired) {
+                append("        Long blocked = jdbcTemplate.queryForObject(\"SELECT COUNT(*) FROM ").append(table)
+                    .append(" candidate WHERE candidate.status IN ('PENDING', 'RETRY', 'IN_FLIGHT') AND EXISTS (SELECT 1 FROM ")
+                    .append(table)
+                    .append(" earlier WHERE earlier.partition_key = candidate.partition_key AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.status <> 'SENT')\", Long.class);\n")
+            } else {
+                append("        Long blocked = 0L;\n")
+            }
+            append("        return new OutboxHealth(value(pending), value(dead), value(expiredLeases), value(blocked), oldestAgeMs);\n")
             append("    }\n\n")
 
-            append("    @Transactional\n")
+            append("    @Transactional(\"").append(escapeJava(outbox.transactionManagerBean)).append("\")\n")
             append("    public int purgeDeliveredBefore(Instant cutoff, String reason) {\n")
             append("        requirePermission(\"").append(escapeJava(outbox.maintenancePermission)).append("\");\n")
             append("        if (reason == null || reason.isBlank() || reason.length() > 500) {\n")
@@ -859,8 +892,18 @@ object IntegrationConnectorGenerator {
             append("        if (cutoff == null || cutoff.isAfter(retentionFloor)) {\n")
             append("            throw new IllegalArgumentException(\"Purge cutoff must honor the configured retention period\");\n")
             append("        }\n")
-            append("        int deleted = jdbcTemplate.update(\"DELETE FROM ").append(table)
-                .append(" WHERE status = 'SENT' AND sent_at < ?\", Timestamp.from(cutoff));\n")
+            append("        List<String> candidates = jdbcTemplate.query(connection -> {\n")
+            append("            PreparedStatement statement = connection.prepareStatement(\"SELECT id FROM ").append(table)
+                .append(" WHERE status = 'SENT' AND sent_at < ? ORDER BY sent_at, id\");\n")
+            append("            statement.setTimestamp(1, Timestamp.from(cutoff));\n")
+            append("            statement.setMaxRows(").append(outbox.batchSize).append(");\n")
+            append("            return statement;\n")
+            append("        }, (resultSet, rowNumber) -> resultSet.getString(1));\n")
+            append("        int deleted = 0;\n")
+            append("        for (String eventId : candidates) {\n")
+            append("            deleted += jdbcTemplate.update(\"DELETE FROM ").append(table)
+                .append(" WHERE id = ? AND status = 'SENT' AND sent_at < ?\", eventId, Timestamp.from(cutoff));\n")
+            append("        }\n")
             append("        publishAudit(\"PURGE\", cutoff.toString(), reason, deleted);\n")
             append("        return deleted;\n")
             append("    }\n\n")
@@ -918,7 +961,7 @@ object IntegrationConnectorGenerator {
             append("        }\n")
             append("    }\n\n")
             append("    private record OutboxRecord(String id, String partitionKey, String payload, String payloadSha256, int attempts) {}\n")
-            append("    public record OutboxHealth(long pending, long dead, long expiredLeases, long oldestPendingAgeMs) {}\n")
+            append("    public record OutboxHealth(long pending, long dead, long expiredLeases, long orderingBlocked, long oldestPendingAgeMs) {}\n")
             append("    public record OutboxTelemetryEvent(String connector, String outcome, Instant occurredAt) {}\n")
             append("    public record OutboxAuditEvent(String connector, String action, String subject, String actor, String justificationSha256, long affected, Instant occurredAt) {}\n")
         }
@@ -934,25 +977,49 @@ object IntegrationConnectorGenerator {
     private fun renderSftpUpload(model: IntegrationConnectorModel): String = buildString {
         appendResilienceAnnotations(model)
         append("    public void upload(String remotePath, byte[] payload) {\n")
-        append("        String destination = address.endsWith(\"/\") ? address + remotePath : address + \"/\" + remotePath;\n")
+        append("        Objects.requireNonNull(payload, \"payload is required\");\n")
+        append("        String safePath = safeRemotePath(remotePath);\n")
+        append("        String destination = address.endsWith(\"/\") ? address + safePath : address + \"/\" + safePath;\n")
+        append("        String temporary = destination + \".jvw-\" + UUID.randomUUID() + \".writing\";\n")
         append("        sftpTemplate.execute(session -> {\n")
         append("            try (ByteArrayInputStream input = new ByteArrayInputStream(payload)) {\n")
-        append("                session.write(input, destination);\n")
+        append("                session.write(input, temporary);\n")
+        append("                session.rename(temporary, destination);\n")
         append("                return null;\n")
+        append("            } catch (Exception exception) {\n")
+        append("                try { session.remove(temporary); } catch (Exception cleanup) { exception.addSuppressed(cleanup); }\n")
+        append("                throw exception;\n")
         append("            }\n")
         append("        });\n")
-        append("    }\n")
+        append("    }\n\n")
+        appendSafeRemotePath()
     }
 
     private fun renderSftpDownload(model: IntegrationConnectorModel): String = buildString {
         appendResilienceAnnotations(model)
         append("    public byte[] download(String remotePath) {\n")
-        append("        String source = address.endsWith(\"/\") ? address + remotePath : address + \"/\" + remotePath;\n")
+        append("        String safePath = safeRemotePath(remotePath);\n")
+        append("        String source = address.endsWith(\"/\") ? address + safePath : address + \"/\" + safePath;\n")
         append("        return Objects.requireNonNull(sftpTemplate.execute(session -> {\n")
         append("            ByteArrayOutputStream output = new ByteArrayOutputStream();\n")
         append("            session.read(source, output);\n")
         append("            return output.toByteArray();\n")
         append("        }), \"SFTP response is required\");\n")
+        append("    }\n\n")
+        appendSafeRemotePath()
+    }
+
+    private fun StringBuilder.appendSafeRemotePath() {
+        append("    private static String safeRemotePath(String remotePath) {\n")
+        append("        if (remotePath == null || remotePath.isBlank() || remotePath.startsWith(\"/\") || remotePath.contains(\"\\\\\")) {\n")
+        append("            throw new IllegalArgumentException(\"remotePath must be a non-absolute POSIX path\");\n")
+        append("        }\n")
+        append("        for (String segment : remotePath.split(\"/\")) {\n")
+        append("            if (segment.isBlank() || segment.equals(\".\") || segment.equals(\"..\") || segment.chars().anyMatch(Character::isISOControl)) {\n")
+        append("                throw new IllegalArgumentException(\"remotePath contains an unsafe segment\");\n")
+        append("            }\n")
+        append("        }\n")
+        append("        return remotePath;\n")
         append("    }\n")
     }
 
@@ -1039,9 +1106,17 @@ object IntegrationConnectorGenerator {
             add(InjectedField("String", "address", model.addressProperty))
         }
         if (model.reliability.outboxEnabled) {
-            add(InjectedField("JdbcTemplate", "jdbcTemplate"))
+            val outbox = requireNotNull(model.reliability.outbox)
+            add(InjectedField("DataSource", "dataSource", qualifier = outbox.dataSourceBean))
+            add(InjectedField("JdbcTemplate", "jdbcTemplate", constructorParameter = false))
             add(InjectedField("ObjectMapper", "objectMapper"))
-            add(InjectedField("PlatformTransactionManager", "transactionManager"))
+            add(
+                InjectedField(
+                    "PlatformTransactionManager",
+                    "transactionManager",
+                    qualifier = outbox.transactionManagerBean,
+                ),
+            )
             add(InjectedField("AccessManager", "accessManager"))
             add(InjectedField("CurrentAuthentication", "currentAuthentication"))
             add(InjectedField("ApplicationEventPublisher", "eventPublisher"))
@@ -1149,6 +1224,8 @@ object IntegrationConnectorGenerator {
             add("java.util.Objects")
             add("java.util.UUID")
             add("java.util.concurrent.TimeUnit")
+            add("javax.sql.DataSource")
+            add("org.springframework.beans.factory.annotation.Qualifier")
             add("org.springframework.context.ApplicationEventPublisher")
             if (usesMicrometerObservation(model)) {
                 add("org.springframework.beans.factory.ObjectProvider")
@@ -1211,6 +1288,8 @@ object IntegrationConnectorGenerator {
                 add("org.springframework.amqp.rabbit.annotation.RabbitListener")
             IntegrationConnectorKind.SFTP_UPLOAD -> {
                 add("java.io.ByteArrayInputStream")
+                add("java.util.Objects")
+                add("java.util.UUID")
                 add("org.springframework.integration.sftp.session.SftpRemoteFileTemplate")
             }
             IntegrationConnectorKind.SFTP_DOWNLOAD -> {
@@ -1303,6 +1382,12 @@ object IntegrationConnectorGenerator {
                         append("# Broker acknowledgement is mandatory for durable dispatch.\n")
                         append("spring.kafka.producer.acks=all\n")
                         append("spring.kafka.producer.properties.enable.idempotence=true\n")
+                        append("spring.kafka.producer.properties.max.block.ms=")
+                            .append(model.reliability.requestTimeoutMs).append('\n')
+                        append("spring.kafka.producer.properties.request.timeout.ms=")
+                            .append(model.reliability.requestTimeoutMs).append('\n')
+                        append("spring.kafka.producer.properties.delivery.timeout.ms=")
+                            .append(model.reliability.requestTimeoutMs + 1_000).append('\n')
                     }
                     IntegrationConnectorKind.RABBIT_PUBLISHER -> {
                         append("# Correlated confirms plus returned-message detection are mandatory.\n")
@@ -1390,6 +1475,18 @@ object IntegrationConnectorGenerator {
             error(
                 "INTEGRATION_OUTBOX_JSON_API_REQUIRED",
                 "The backend must resolve the module's Jackson generation contract before outbox generation.",
+            )
+        }
+        if (!SPRING_BEAN_IDENTIFIER.matches(outbox.dataSourceBean)) {
+            error(
+                "INTEGRATION_OUTBOX_DATASOURCE_BEAN_INVALID",
+                "The backend must resolve a valid DataSource bean for the selected Jmix data store.",
+            )
+        }
+        if (!SPRING_BEAN_IDENTIFIER.matches(outbox.transactionManagerBean)) {
+            error(
+                "INTEGRATION_OUTBOX_TRANSACTION_MANAGER_BEAN_INVALID",
+                "The backend must resolve a valid transaction-manager bean for the selected Jmix data store.",
             )
         }
         if (model.payloadJavaType == "void" || model.payloadJavaType == "byte[]" || '<' in model.payloadJavaType) {

@@ -152,10 +152,25 @@ class IntegrationConnectorGeneratorTest {
         assertTrue(validation.valid, validation.diagnostics.joinToString())
         val generated = IntegrationConnectorGenerator.generate(model)
 
+        assertContains(generated.javaSource, "public class PartnerConnector")
+        assertFalse(generated.javaSource.contains("public final class PartnerConnector"))
         assertContains(generated.javaSource, "public String enqueue(String orderingKey, com.acme.loan.LoanEvent payload)")
+        assertContains(generated.javaSource, "@Qualifier(\"dataSource\") DataSource dataSource")
+        assertContains(
+            generated.javaSource,
+            "@Qualifier(\"transactionManager\") PlatformTransactionManager transactionManager",
+        )
+        assertContains(generated.javaSource, "@Transactional(\"transactionManager\")")
+        assertContains(generated.javaSource, "this.jdbcTemplate = new JdbcTemplate(dataSource)")
         assertContains(generated.javaSource, "INSERT INTO jvw_loan_event_outbox")
         assertContains(generated.javaSource, "PreparedStatement statement")
-        assertContains(generated.javaSource, "statement.setMaxRows(100)")
+        assertContains(generated.javaSource, "int remaining = 100")
+        assertContains(generated.javaSource, "while (remaining > 0)")
+        assertContains(generated.javaSource, "statement.setMaxRows(queryLimit)")
+        assertContains(generated.javaSource, "remaining -= candidates.size()")
+        assertContains(generated.javaSource, "ORDER BY candidate.created_at, candidate.id")
+        assertContains(generated.javaSource, "earlier.status <> 'SENT'")
+        assertFalse(generated.javaSource.contains("earlier.status NOT IN ('SENT', 'DEAD')"))
         assertContains(generated.javaSource, "jvw-outbox-id")
         assertContains(generated.javaSource, "ProducerRecord<String, com.acme.loan.LoanEvent>")
         assertFalse(generated.javaSource.contains("CorrelationData"))
@@ -169,6 +184,10 @@ class IntegrationConnectorGeneratorTest {
         assertContains(generated.javaSource, "Observation.start(\"jvw.integration.outbox.dispatch\"")
         assertContains(generated.javaSource, "lowCardinalityKeyValue(\"connector\"")
         assertContains(generated.javaSource, "public OutboxHealth reconcile()")
+        assertContains(generated.javaSource, "orderingBlocked")
+        assertContains(generated.javaSource, "Outbox delivery acknowledgement could not be persisted")
+        assertContains(generated.javaSource, "List<String> candidates = jdbcTemplate.query(connection ->")
+        assertContains(generated.javaSource, "DELETE FROM jvw_loan_event_outbox WHERE id = ?")
         assertContains(generated.javaSource, "status IN ('PENDING', 'RETRY', 'IN_FLIGHT')")
         assertFalse(generated.javaSource.contains("exactly-once", ignoreCase = true))
         assertContains(requireNotNull(generated.migrationXml), "<createTable tableName=\"jvw_loan_event_outbox\"")
@@ -177,6 +196,19 @@ class IntegrationConnectorGeneratorTest {
         assertContains(
             generated.reliabilityProperties,
             "Durable database-to-broker delivery is at-least-once",
+        )
+        assertContains(generated.reliabilityProperties, "spring.kafka.producer.acks=all")
+        assertContains(
+            generated.reliabilityProperties,
+            "spring.kafka.producer.properties.max.block.ms=30000",
+        )
+        assertContains(
+            generated.reliabilityProperties,
+            "spring.kafka.producer.properties.request.timeout.ms=30000",
+        )
+        assertContains(
+            generated.reliabilityProperties,
+            "spring.kafka.producer.properties.delivery.timeout.ms=31000",
         )
     }
 
@@ -236,6 +268,30 @@ class IntegrationConnectorGeneratorTest {
         assertContains(source, "authorizedClient.getAccessToken().getTokenValue()")
         assertFalse(source.contains("client-secret"))
         assertFalse(source.contains("token-uri"))
+    }
+
+    @Test
+    fun `generates traversal-safe atomic SFTP upload`() {
+        val model = connector(
+            kind = IntegrationConnectorKind.SFTP_UPLOAD,
+            addressProperty = "payroll.sftp.base-directory",
+            payloadJavaType = "byte[]",
+        )
+
+        val validation = IntegrationConnectorGenerator.validate(
+            model,
+            setOf(IntegrationCapability.SPRING_INTEGRATION_SFTP),
+        )
+        assertTrue(validation.valid, validation.diagnostics.joinToString())
+        val source = IntegrationConnectorGenerator.generate(model).javaSource
+
+        assertContains(source, "String safePath = safeRemotePath(remotePath)")
+        assertContains(source, "String temporary = destination + \".jvw-\"")
+        assertContains(source, "session.write(input, temporary)")
+        assertContains(source, "session.rename(temporary, destination)")
+        assertContains(source, "session.remove(temporary)")
+        assertContains(source, "remotePath.startsWith(\"/\")")
+        assertContains(source, "segment.equals(\"..\")")
     }
 
     private fun connector(
