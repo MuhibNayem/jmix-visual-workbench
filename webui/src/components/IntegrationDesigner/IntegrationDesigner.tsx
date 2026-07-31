@@ -122,6 +122,18 @@ function rootObjectSchemaId(operation: OpenApiOperationSnapshot, schemaId?: stri
   return undefined
 }
 
+function javaTypesMayMatch(left?: string, right?: string) {
+  if (!left || !right) return false
+  const normalize = (value: string) => value.replace(/[?\s]/g, '').replace(/^java\.lang\./, '')
+  const a = normalize(left)
+  const b = normalize(right)
+  return a === b || a.split('.').pop() === b.split('.').pop()
+}
+
+function enumToken(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+}
+
 function defaultOpenApiJmixLayer(
   model: IntegrationConnectorModel,
   operation: OpenApiOperationSnapshot,
@@ -840,6 +852,28 @@ export default function IntegrationDesigner() {
           const key = `${property.direction}:${property.entityProperty}`
           if (targetNames.has(key)) blockers.push(`Mapping for ${schema.javaName} writes ${property.entityProperty} more than once.`)
           targetNames.add(key)
+          if (property.enumAdapter && property.customConverter) {
+            blockers.push(`${schema.javaName}.${property.schemaProperty} cannot use two conversion strategies.`)
+          }
+          if (property.enumAdapter) {
+            const sourceProperty = schema.properties.find((candidate) => candidate.javaName === property.schemaProperty)
+            const enumSchema = schemas.find((candidate) => candidate.id === sourceProperty?.schemaId)
+            const values = new Set(property.enumAdapter.values.map((value) => value.wireValue))
+            if (!enumSchema?.enumValues?.length || enumSchema.enumValues.some((value) => !values.has(value))) {
+              blockers.push(`Map every wire value for ${schema.javaName}.${property.schemaProperty}.`)
+            }
+            if (property.enumAdapter.values.some((value) => !value.enumConstant)) {
+              blockers.push(`Select a Jmix enum constant for every value of ${schema.javaName}.${property.schemaProperty}.`)
+            }
+          }
+          if (property.customConverter) {
+            if (property.direction !== 'OUTBOUND' && !property.customConverter.inboundMethod) {
+              blockers.push(`Select an API-to-Jmix converter method for ${schema.javaName}.${property.schemaProperty}.`)
+            }
+            if (property.direction !== 'INBOUND' && !property.customConverter.outboundMethod) {
+              blockers.push(`Select a Jmix-to-API converter method for ${schema.javaName}.${property.schemaProperty}.`)
+            }
+          }
         })
       })
     }
@@ -1034,7 +1068,9 @@ export default function IntegrationDesigner() {
         const carriedProperties = fresh.properties.flatMap((property) => {
           const suggestion = exactSuggestions.get(property.schemaProperty)
           if (suggestion) {
+            const previousProperty = previousProperties.get(suggestion.previousSchemaProperty)
             return [{
+              ...previousProperty,
               schemaProperty: property.schemaProperty,
               entityProperty: suggestion.previousEntityProperty,
               direction: suggestion.direction,
@@ -1977,12 +2013,13 @@ export default function IntegrationDesigner() {
                                   role="region"
                                   aria-label={`${schema.javaName} property mappings`}
                                 >
-                                  <table className="w-full min-w-[590px] text-left text-[9px]">
+                                  <table className="w-full min-w-[920px] text-left text-[9px]">
                                     <thead className="bg-surface-light/70 text-gray-500">
                                       <tr>
                                         <th className="px-2 py-1.5 font-semibold">OpenAPI property</th>
                                         <th className="px-2 py-1.5 font-semibold">Jmix property</th>
                                         <th className="px-2 py-1.5 font-semibold">Direction</th>
+                                        <th className="px-2 py-1.5 font-semibold">Conversion</th>
                                         <th className="px-2 py-1.5 font-semibold">Contract</th>
                                       </tr>
                                     </thead>
@@ -1992,6 +2029,23 @@ export default function IntegrationDesigner() {
                                           candidate.schemaProperty === property.javaName
                                         ))
                                         const propertyMapping = propertyIndex >= 0 ? mapping.properties[propertyIndex] : undefined
+                                        const propertySchema = (selectedOpenApiOperation.schemas ?? []).find((candidate) => (
+                                          candidate.id === property.schemaId
+                                        ))
+                                        const targetAttribute = existingAttributes.find((attribute) => (
+                                          attribute.name === propertyMapping?.entityProperty
+                                        ))
+                                        const availableEnums = workspace.enumAdapters.filter((candidate) => (
+                                          candidate.destinationIds.includes(model.destinationId) &&
+                                          javaTypesMayMatch(candidate.qualifiedName, targetAttribute?.javaType)
+                                        ))
+                                        const availableConverters = workspace.converterBeans.filter((candidate) => (
+                                          candidate.destinationIds.includes(model.destinationId)
+                                        ))
+                                        const selectedConverter = availableConverters.find((candidate) => (
+                                          candidate.artifactId === propertyMapping?.customConverter?.artifactId &&
+                                          candidate.qualifiedName === propertyMapping.customConverter.qualifiedName
+                                        ))
                                         const remapCandidates = remapOption?.propertyCandidates.filter((candidate) => (
                                           candidate.candidateSchemaProperty === property.javaName &&
                                           candidate.confidence !== 'EXACT'
@@ -2018,6 +2072,10 @@ export default function IntegrationDesigner() {
                                                         candidate.schemaProperty !== property.javaName
                                                       ))
                                                       current.properties.push({
+                                                        ...previousMapping?.properties.find((candidate) => (
+                                                          candidate.schemaProperty === suggestion.previousSchemaProperty &&
+                                                          candidate.entityProperty === suggestion.previousEntityProperty
+                                                        )),
                                                         schemaProperty: property.javaName,
                                                         entityProperty: suggestion.previousEntityProperty,
                                                         direction: suggestion.direction,
@@ -2042,6 +2100,7 @@ export default function IntegrationDesigner() {
                                               )}
                                               {mapping.targetKind === 'EXISTING_ENTITY' ? (
                                                 <select
+                                                  aria-label={`${schema.javaName}.${property.javaName} Jmix property`}
                                                   value={propertyMapping?.entityProperty ?? ''}
                                                   onChange={(event) => commit((draft) => {
                                                     const current = draft.openApiJmixLayer?.mappings[mappingIndex]
@@ -2102,6 +2161,149 @@ export default function IntegrationDesigner() {
                                                 <option value="INBOUND">API → Jmix</option>
                                                 <option value="OUTBOUND">Jmix → API</option>
                                               </select>
+                                            </td>
+                                            <td className="min-w-56 px-2 py-1.5 align-top">
+                                              <select
+                                                aria-label={`${schema.javaName}.${property.javaName} conversion strategy`}
+                                                value={propertyMapping?.enumAdapter
+                                                  ? `enum:${propertyMapping.enumAdapter.artifactId}`
+                                                  : propertyMapping?.customConverter
+                                                    ? `converter:${propertyMapping.customConverter.artifactId}`
+                                                    : ''}
+                                                disabled={!propertyMapping || mapping.targetKind !== 'EXISTING_ENTITY'}
+                                                onChange={(event) => commit((draft) => {
+                                                  const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                                  const target = current?.properties.find((candidate) => candidate.schemaProperty === property.javaName)
+                                                  if (!target) return
+                                                  target.enumAdapter = undefined
+                                                  target.customConverter = undefined
+                                                  if (event.target.value.startsWith('enum:')) {
+                                                    const selected = availableEnums.find((candidate) => (
+                                                      candidate.artifactId === event.target.value.slice('enum:'.length)
+                                                    ))
+                                                    if (!selected) return
+                                                    target.enumAdapter = {
+                                                      artifactId: selected.artifactId,
+                                                      qualifiedName: selected.qualifiedName,
+                                                      revisionFingerprint: selected.sourceLocator.revisionFingerprint,
+                                                      values: (propertySchema?.enumValues ?? []).map((wireValue) => {
+                                                        const matches = selected.constants.filter((constant) => (
+                                                          enumToken(constant) === enumToken(wireValue)
+                                                        ))
+                                                        return { wireValue, enumConstant: matches.length === 1 ? matches[0] : '' }
+                                                      }),
+                                                    }
+                                                  } else if (event.target.value.startsWith('converter:')) {
+                                                    const selected = availableConverters.find((candidate) => (
+                                                      candidate.artifactId === event.target.value.slice('converter:'.length)
+                                                    ))
+                                                    if (!selected) return
+                                                    target.customConverter = {
+                                                      artifactId: selected.artifactId,
+                                                      qualifiedName: selected.qualifiedName,
+                                                      revisionFingerprint: selected.sourceLocator.revisionFingerprint,
+                                                    }
+                                                  }
+                                                })}
+                                                className="min-h-7 w-full min-w-48 rounded border border-surface-border bg-surface px-1.5 text-[9px]"
+                                              >
+                                                <option value="">Automatic compatible mapping</option>
+                                                {propertySchema?.kind === 'STRING' && propertySchema.enumValues.length > 0 && availableEnums.length > 0 && (
+                                                  <optgroup label="Existing Jmix EnumClass">
+                                                    {availableEnums.map((candidate) => (
+                                                      <option key={candidate.artifactId} value={`enum:${candidate.artifactId}`}>
+                                                        {candidate.className} · {candidate.moduleId}
+                                                      </option>
+                                                    ))}
+                                                  </optgroup>
+                                                )}
+                                                {availableConverters.length > 0 && (
+                                                  <optgroup label="Project converter bean">
+                                                    {availableConverters.map((candidate) => (
+                                                      <option key={candidate.artifactId} value={`converter:${candidate.artifactId}`}>
+                                                        {candidate.className} · {candidate.moduleId}
+                                                      </option>
+                                                    ))}
+                                                  </optgroup>
+                                                )}
+                                              </select>
+                                              {propertyMapping?.enumAdapter && (
+                                                <div className="mt-1.5 space-y-1 rounded border border-violet-500/20 bg-violet-500/[0.04] p-1.5">
+                                                  {propertyMapping.enumAdapter.values.map((value) => {
+                                                    const selected = availableEnums.find((candidate) => (
+                                                      candidate.artifactId === propertyMapping.enumAdapter?.artifactId
+                                                    ))
+                                                    return (
+                                                      <label key={value.wireValue} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center gap-1">
+                                                        <code className="truncate text-[8px] text-violet-200" title={value.wireValue}>{value.wireValue}</code>
+                                                        <select
+                                                          aria-label={`${value.wireValue} Jmix enum constant`}
+                                                          value={value.enumConstant}
+                                                          onChange={(event) => commit((draft) => {
+                                                            const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                                            const target = current?.properties.find((candidate) => candidate.schemaProperty === property.javaName)
+                                                            const decision = target?.enumAdapter?.values.find((candidate) => candidate.wireValue === value.wireValue)
+                                                            if (decision) decision.enumConstant = event.target.value
+                                                          })}
+                                                          className="min-h-6 min-w-0 rounded border border-surface-border bg-surface px-1 text-[8px]"
+                                                        >
+                                                          <option value="">Select…</option>
+                                                          {selected?.constants.map((constant) => (
+                                                            <option key={constant} value={constant}>{constant}</option>
+                                                          ))}
+                                                        </select>
+                                                      </label>
+                                                    )
+                                                  })}
+                                                </div>
+                                              )}
+                                              {propertyMapping?.customConverter && selectedConverter && (
+                                                <div className="mt-1.5 space-y-1 rounded border border-cyan-500/20 bg-cyan-500/[0.04] p-1.5">
+                                                  {propertyMapping.direction !== 'OUTBOUND' && (
+                                                    <label className="block">
+                                                      <span className="mb-0.5 block text-[8px] text-gray-500">API → Jmix method</span>
+                                                      <select
+                                                        aria-label={`${schema.javaName}.${property.javaName} API to Jmix converter method`}
+                                                        value={propertyMapping.customConverter.inboundMethod?.signature ?? ''}
+                                                        onChange={(event) => commit((draft) => {
+                                                          const target = draft.openApiJmixLayer?.mappings[mappingIndex]?.properties.find((candidate) => candidate.schemaProperty === property.javaName)
+                                                          const method = selectedConverter.methods.find((candidate) => candidate.signature === event.target.value)
+                                                          if (target?.customConverter) target.customConverter.inboundMethod = method ? { ...method } : undefined
+                                                        })}
+                                                        className="min-h-6 w-full min-w-48 rounded border border-surface-border bg-surface px-1 text-[8px]"
+                                                      >
+                                                        <option value="">Select exact method…</option>
+                                                        {selectedConverter.methods.map((method) => (
+                                                          <option key={method.signature} value={method.signature}>{method.signature}</option>
+                                                        ))}
+                                                      </select>
+                                                    </label>
+                                                  )}
+                                                  {propertyMapping.direction !== 'INBOUND' && (
+                                                    <label className="block">
+                                                      <span className="mb-0.5 block text-[8px] text-gray-500">Jmix → API method</span>
+                                                      <select
+                                                        aria-label={`${schema.javaName}.${property.javaName} Jmix to API converter method`}
+                                                        value={propertyMapping.customConverter.outboundMethod?.signature ?? ''}
+                                                        onChange={(event) => commit((draft) => {
+                                                          const target = draft.openApiJmixLayer?.mappings[mappingIndex]?.properties.find((candidate) => candidate.schemaProperty === property.javaName)
+                                                          const method = selectedConverter.methods.find((candidate) => candidate.signature === event.target.value)
+                                                          if (target?.customConverter) target.customConverter.outboundMethod = method ? { ...method } : undefined
+                                                        })}
+                                                        className="min-h-6 w-full min-w-48 rounded border border-surface-border bg-surface px-1 text-[8px]"
+                                                      >
+                                                        <option value="">Select exact method…</option>
+                                                        {selectedConverter.methods.map((method) => (
+                                                          <option key={method.signature} value={method.signature}>{method.signature}</option>
+                                                        ))}
+                                                      </select>
+                                                    </label>
+                                                  )}
+                                                  <p className="truncate text-[8px] text-cyan-200" title={selectedConverter.qualifiedName}>
+                                                    Revision bound · {selectedConverter.qualifiedName}
+                                                  </p>
+                                                </div>
+                                              )}
                                             </td>
                                             <td className="px-2 py-1.5 text-gray-500">
                                               {property.typeLabel}

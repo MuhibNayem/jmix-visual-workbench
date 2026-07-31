@@ -6,6 +6,8 @@ import org.jmixworkbench.model.IntegrationOpenApiJmixLayerModel
 import org.jmixworkbench.model.IntegrationOpenApiJmixTargetKind
 import org.jmixworkbench.model.IntegrationOpenApiJmixTypeMapping
 import org.jmixworkbench.model.IntegrationOpenApiMappingDirection
+import org.jmixworkbench.model.IntegrationOpenApiCustomConverterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumAdapterBinding
 import org.jmixworkbench.model.IntegrationOpenApiOperationModel
 import org.jmixworkbench.model.IntegrationOpenApiPropertyModel
 import org.jmixworkbench.model.IntegrationOpenApiSchemaKind
@@ -61,6 +63,13 @@ object OpenApiJmixLayerGenerator {
         val sources: List<GeneratedSource>,
         val issues: List<String>,
     )
+
+    fun transportType(
+        operation: IntegrationOpenApiOperationModel,
+        schemaId: String,
+        connectorPackage: String,
+        connectorClass: String,
+    ): String = transportJavaType(operation, schemaId, connectorPackage, connectorClass)
 
     fun generate(input: Input): Result {
         val issues = validate(input)
@@ -236,8 +245,72 @@ object OpenApiJmixLayerGenerator {
                 ) {
                     issues += "Inbound mapping cannot write read-only entity property '${property.entityProperty}'."
                 }
-                if (source != null && target != null && !compatible(source.schemaId, target.javaType, schemas, mappings, input)) {
+                if (
+                    source != null && target != null &&
+                    property.enumAdapter == null && property.customConverter == null &&
+                    !compatible(source.schemaId, target.javaType, schemas, mappings, input)
+                ) {
                     issues += "Property '${schema.javaName}.${source.javaName}' (${typeName(source.schemaId, schemas)}) is not safely compatible with '${property.entityProperty}' (${target.javaType})."
+                }
+                if (property.enumAdapter != null && property.customConverter != null) {
+                    issues += "Property '${schema.javaName}.${property.schemaProperty}' cannot use an enum adapter and a custom converter together."
+                }
+                if ((property.enumAdapter != null || property.customConverter != null) && mapping.targetKind != IntegrationOpenApiJmixTargetKind.EXISTING_ENTITY) {
+                    issues += "Mapping extensions are valid only when '${schema.javaName}' targets an existing Jmix entity."
+                }
+                property.enumAdapter?.let { adapter ->
+                    if (!isPackageName(adapter.qualifiedName.substringBeforeLast('.', "")) ||
+                        !isJavaIdentifier(adapter.qualifiedName.substringAfterLast('.')) ||
+                        adapter.revisionFingerprint.isBlank()
+                    ) {
+                        issues += "Enum adapter for '${schema.javaName}.${property.schemaProperty}' has no safe revision-bound type identity."
+                    }
+                    val enumSchema = source?.let { schemas[it.schemaId] }
+                    if (enumSchema?.kind != IntegrationOpenApiSchemaKind.STRING || enumSchema.enumValues.isEmpty()) {
+                        issues += "Enum adapter for '${schema.javaName}.${property.schemaProperty}' requires an OpenAPI string enum."
+                    }
+                    if (adapter.values.map { it.wireValue }.toSet() != enumSchema?.enumValues?.toSet()) {
+                        issues += "Enum adapter for '${schema.javaName}.${property.schemaProperty}' must map every OpenAPI wire value exactly once."
+                    }
+                    if (adapter.values.map { it.wireValue }.distinct().size != adapter.values.size) {
+                        issues += "Enum adapter for '${schema.javaName}.${property.schemaProperty}' contains duplicate wire values."
+                    }
+                    if (
+                        property.direction != IntegrationOpenApiMappingDirection.INBOUND &&
+                        adapter.values.map { it.enumConstant }.distinct().size != adapter.values.size
+                    ) {
+                        issues += "Outbound enum adapter for '${schema.javaName}.${property.schemaProperty}' must map each domain constant to one wire value."
+                    }
+                    if (adapter.values.any { !isJavaIdentifier(it.enumConstant) }) {
+                        issues += "Enum adapter for '${schema.javaName}.${property.schemaProperty}' contains an invalid Java enum constant."
+                    }
+                }
+                property.customConverter?.let { converter ->
+                    if (!isPackageName(converter.qualifiedName.substringBeforeLast('.', "")) ||
+                        !isJavaIdentifier(converter.qualifiedName.substringAfterLast('.')) ||
+                        converter.revisionFingerprint.isBlank()
+                    ) {
+                        issues += "Custom converter for '${schema.javaName}.${property.schemaProperty}' has no safe revision-bound bean identity."
+                    }
+                    if (
+                        property.direction != IntegrationOpenApiMappingDirection.OUTBOUND &&
+                        converter.inboundMethod == null
+                    ) {
+                        issues += "Custom converter for '${schema.javaName}.${property.schemaProperty}' needs an API-to-Jmix method."
+                    }
+                    if (
+                        property.direction != IntegrationOpenApiMappingDirection.INBOUND &&
+                        converter.outboundMethod == null
+                    ) {
+                        issues += "Custom converter for '${schema.javaName}.${property.schemaProperty}' needs a Jmix-to-API method."
+                    }
+                    listOfNotNull(converter.inboundMethod, converter.outboundMethod).forEach { method ->
+                        if (!isJavaIdentifier(method.methodName) || method.signature.isBlank() ||
+                            method.parameterType.isBlank() || method.returnType.isBlank()
+                        ) {
+                            issues += "Custom converter for '${schema.javaName}.${property.schemaProperty}' contains an invalid method contract."
+                        }
+                    }
                 }
             }
 
@@ -299,6 +372,21 @@ object OpenApiJmixLayerGenerator {
             .filter { it.kind == IntegrationOpenApiSchemaKind.STRING && it.enumValues.isNotEmpty() }
             .distinctBy(IntegrationOpenApiSchemaModel::id)
             .sortedBy(IntegrationOpenApiSchemaModel::javaName)
+        val converterFields: Map<String, String> = run {
+            val used = linkedSetOf("metadata", "entityStates")
+            layer.mappings.flatMap(IntegrationOpenApiJmixTypeMapping::properties)
+                .mapNotNull { it.customConverter?.qualifiedName }
+                .distinct()
+                .sorted()
+                .associateWith { qualifiedName ->
+                    val simpleName = qualifiedName.substringAfterLast('.')
+                    val base = simpleName.replaceFirstChar(Char::lowercaseChar).ifBlank { "valueConverter" }
+                    var candidate = base
+                    var suffix = 2
+                    while (!used.add(candidate)) candidate = "${base}${suffix++}"
+                    candidate
+                }
+        }
 
         fun targetQualifiedName(schemaId: String): String {
             val mapping = requireNotNull(mappings[schemaId]) { "Missing mapping for schema '$schemaId'." }
@@ -336,6 +424,9 @@ object OpenApiJmixLayerGenerator {
             return existing?.attributes?.singleOrNull { it.name == entityProperty }?.javaType
                 ?: entityJavaType(this, propertySchemaId)
         }
+
+        fun converterField(binding: IntegrationOpenApiCustomConverterBinding): String =
+            requireNotNull(converterFields[binding.qualifiedName])
     }
 
     private data class ResolvedMapping(
@@ -354,6 +445,8 @@ object OpenApiJmixLayerGenerator {
         val schemaProperty: String,
         val entityProperty: String,
         val direction: IntegrationOpenApiMappingDirection,
+        val enumAdapter: IntegrationOpenApiEnumAdapterBinding? = null,
+        val customConverter: IntegrationOpenApiCustomConverterBinding? = null,
     )
 
     private fun renderDto(context: Context, resolved: ResolvedMapping): String = buildString {
@@ -434,11 +527,22 @@ object OpenApiJmixLayerGenerator {
         append("@Component\n")
         append("public class ").append(context.mapperClassName).append(" {\n")
         append("    private final Metadata metadata;\n")
-        append("    private final EntityStates entityStates;\n\n")
+        append("    private final EntityStates entityStates;\n")
+        context.converterFields.forEach { (qualifiedName, fieldName) ->
+            append("    private final ").append(qualifiedName).append(' ').append(fieldName).append(";\n")
+        }
+        append('\n')
         append("    public ").append(context.mapperClassName)
-            .append("(Metadata metadata, EntityStates entityStates) {\n")
+            .append("(Metadata metadata, EntityStates entityStates")
+        context.converterFields.forEach { (qualifiedName, fieldName) ->
+            append(", ").append(qualifiedName).append(' ').append(fieldName)
+        }
+        append(") {\n")
         append("        this.metadata = metadata;\n")
         append("        this.entityStates = entityStates;\n")
+        context.converterFields.values.forEach { fieldName ->
+            append("        this.").append(fieldName).append(" = ").append(fieldName).append(";\n")
+        }
         append("    }\n\n")
         objectSchemas.forEach { schema ->
             append(renderInboundMapper(context, schema))
@@ -467,7 +571,7 @@ object OpenApiJmixLayerGenerator {
             val setter = "set${mapping.entityProperty.replaceFirstChar(Char::uppercaseChar)}"
             val targetType = context.targetPropertyType(schema.id, mapping.entityProperty, property.schemaId)
             append("        target.").append(setter).append('(')
-                .append(inboundExpression(context, property.schemaId, "source.${property.javaName}()", targetType))
+                .append(inboundMappedExpression(context, mapping, property.schemaId, "source.${property.javaName}()", targetType))
                 .append(");\n")
         }
         if (target == null || target.entityType == EntityType.DTO) {
@@ -495,7 +599,7 @@ object OpenApiJmixLayerGenerator {
             } else {
                 val getter = "source.get${mapping.entityProperty.replaceFirstChar(Char::uppercaseChar)}()"
                 val targetType = context.targetPropertyType(schema.id, mapping.entityProperty, property.schemaId)
-                outboundExpression(context, property.schemaId, getter, targetType)
+                outboundMappedExpression(context, mapping, property.schemaId, getter, targetType)
             }
             append("                ").append(expression)
             append(if (index == schema.properties.lastIndex) "\n" else ",\n")
@@ -602,6 +706,27 @@ object OpenApiJmixLayerGenerator {
         }
     }
 
+    private fun inboundMappedExpression(
+        context: Context,
+        mapping: EffectivePropertyMapping,
+        schemaId: String,
+        expression: String,
+        targetJavaType: String,
+    ): String {
+        mapping.customConverter?.let { converter ->
+            val method = requireNotNull(converter.inboundMethod)
+            return "$expression == null ? null : ${context.converterField(converter)}.${method.methodName}($expression)"
+        }
+        mapping.enumAdapter?.let { adapter ->
+            val cases = adapter.values.joinToString(" ") { value ->
+                "case \"${escapeJava(value.wireValue)}\" -> ${adapter.qualifiedName}.${value.enumConstant};"
+            }
+            return "$expression == null ? null : switch ($expression.value()) { $cases " +
+                "default -> throw new IllegalArgumentException(\"Unsupported OpenAPI enum value: \" + $expression.value()); }"
+        }
+        return inboundExpression(context, schemaId, expression, targetJavaType)
+    }
+
     private fun outboundExpression(
         context: Context,
         schemaId: String,
@@ -647,6 +772,28 @@ object OpenApiJmixLayerGenerator {
                 "$expression == null ? null : java.util.Arrays.copyOf($expression, $expression.length)"
             else -> expression
         }
+    }
+
+    private fun outboundMappedExpression(
+        context: Context,
+        mapping: EffectivePropertyMapping,
+        schemaId: String,
+        expression: String,
+        sourceJavaType: String,
+    ): String {
+        mapping.customConverter?.let { converter ->
+            val method = requireNotNull(converter.outboundMethod)
+            return "$expression == null ? null : ${context.converterField(converter)}.${method.methodName}($expression)"
+        }
+        mapping.enumAdapter?.let { adapter ->
+            val transport = context.transportType(schemaId)
+            val cases = adapter.values.joinToString(" ") { value ->
+                "case ${value.enumConstant} -> \"${escapeJava(value.wireValue)}\";"
+            }
+            return "$expression == null ? null : $transport.fromValue(switch ($expression) { $cases " +
+                "default -> throw new IllegalArgumentException(\"Unsupported Jmix enum value: \" + $expression); })"
+        }
+        return outboundExpression(context, schemaId, expression, sourceJavaType)
     }
 
     private fun serviceOutboundExpression(context: Context, schemaId: String, expression: String): String {
@@ -784,7 +931,13 @@ object OpenApiJmixLayerGenerator {
                 }
             } else {
                 mapping.properties.map {
-                    EffectivePropertyMapping(it.schemaProperty, it.entityProperty, it.direction)
+                    EffectivePropertyMapping(
+                        it.schemaProperty,
+                        it.entityProperty,
+                        it.direction,
+                        it.enumAdapter,
+                        it.customConverter,
+                    )
                 }
             }
             effective.associate { property ->
@@ -802,7 +955,13 @@ object OpenApiJmixLayerGenerator {
     ): List<EffectivePropertyMapping> {
         if (mapping.properties.isNotEmpty()) {
             return mapping.properties.map {
-                EffectivePropertyMapping(it.schemaProperty, it.entityProperty, it.direction)
+                EffectivePropertyMapping(
+                    it.schemaProperty,
+                    it.entityProperty,
+                    it.direction,
+                    it.enumAdapter,
+                    it.customConverter,
+                )
             }
         }
         val existingNames = existing?.attributes?.mapTo(hashSetOf(), ResolvedEntityAttribute::name)

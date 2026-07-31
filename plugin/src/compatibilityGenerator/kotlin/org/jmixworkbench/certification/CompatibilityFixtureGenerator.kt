@@ -36,6 +36,11 @@ import org.jmixworkbench.model.IntegrationReliabilityModel
 import org.jmixworkbench.model.IntegrationObservabilityApi
 import org.jmixworkbench.model.IntegrationObservabilityModel
 import org.jmixworkbench.model.IntegrationOpenApiBinding
+import org.jmixworkbench.model.IntegrationOpenApiConverterMethodBinding
+import org.jmixworkbench.model.IntegrationOpenApiCustomConverterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumAdapterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumValueMapping
+import org.jmixworkbench.model.IntegrationOpenApiExistingEntityBinding
 import org.jmixworkbench.model.IntegrationOpenApiJmixLayerModel
 import org.jmixworkbench.model.IntegrationOpenApiJmixTargetKind
 import org.jmixworkbench.model.IntegrationOpenApiJmixTypeMapping
@@ -715,6 +720,135 @@ object CompatibilityFixtureGenerator {
         )
         require(jmixLayer.issues.isEmpty()) { jmixLayer.issues.joinToString() }
         jmixLayer.sources.forEach { source ->
+            sources["common/java/${source.packageRelativePath}"] = source.content
+        }
+
+        sources["common/java/com/acme/cert/domain/ExternalReceiptId.java"] =
+            """
+            package com.acme.cert.domain;
+            public record ExternalReceiptId(java.util.UUID value) {}
+            """.trimIndent() + "\n"
+        sources["common/java/com/acme/cert/domain/PaymentState.java"] =
+            """
+            package com.acme.cert.domain;
+            import io.jmix.core.metamodel.datatype.EnumClass;
+            public enum PaymentState implements EnumClass<String> {
+                ACCEPTED("accepted"), REJECTED("rejected");
+                private final String id;
+                PaymentState(String id) { this.id = id; }
+                @Override public String getId() { return id; }
+            }
+            """.trimIndent() + "\n"
+        sources["common/java/com/acme/cert/domain/CertifiedReceipt.java"] =
+            """
+            package com.acme.cert.domain;
+            import io.jmix.core.metamodel.annotation.JmixEntity;
+            @JmixEntity(name = "cert_CertifiedReceipt")
+            public class CertifiedReceipt {
+                private ExternalReceiptId id;
+                private PaymentState status;
+                public ExternalReceiptId getId() { return id; }
+                public void setId(ExternalReceiptId id) { this.id = id; }
+                public PaymentState getStatus() { return status; }
+                public void setStatus(PaymentState status) { this.status = status; }
+            }
+            """.trimIndent() + "\n"
+        sources["common/java/com/acme/cert/integration/ReceiptValueConverter.java"] =
+            """
+            package com.acme.cert.integration;
+            import com.acme.cert.domain.ExternalReceiptId;
+            import org.springframework.stereotype.Component;
+            @Component
+            public class ReceiptValueConverter {
+                public ExternalReceiptId toDomain(java.util.UUID value) { return new ExternalReceiptId(value); }
+                public java.util.UUID toWire(ExternalReceiptId value) { return value.value(); }
+            }
+            """.trimIndent() + "\n"
+        val converter = IntegrationOpenApiCustomConverterBinding(
+            artifactId = "service:receipt-value-converter",
+            qualifiedName = "com.acme.cert.integration.ReceiptValueConverter",
+            revisionFingerprint = "c".repeat(64),
+            inboundMethod = IntegrationOpenApiConverterMethodBinding(
+                "toDomain(java.util.UUID):com.acme.cert.domain.ExternalReceiptId",
+                "toDomain",
+                "java.util.UUID",
+                "com.acme.cert.domain.ExternalReceiptId",
+            ),
+            outboundMethod = IntegrationOpenApiConverterMethodBinding(
+                "toWire(com.acme.cert.domain.ExternalReceiptId):java.util.UUID",
+                "toWire",
+                "com.acme.cert.domain.ExternalReceiptId",
+                "java.util.UUID",
+            ),
+        )
+        val enumAdapter = IntegrationOpenApiEnumAdapterBinding(
+            artifactId = "enum:payment-state",
+            qualifiedName = "com.acme.cert.domain.PaymentState",
+            revisionFingerprint = "e".repeat(64),
+            values = listOf(
+                IntegrationOpenApiEnumValueMapping("accepted", "ACCEPTED"),
+                IntegrationOpenApiEnumValueMapping("rejected", "REJECTED"),
+            ),
+        )
+        val existingLayer = requireNotNull(model.openApiJmixLayer).copy(
+            serviceClassName = "CertifiedExistingPaymentService",
+            serviceBeanName = "certifiedExistingPaymentService",
+            mappings = requireNotNull(model.openApiJmixLayer).mappings.map { mapping ->
+                if (mapping.schemaId != "component:PaymentReceipt") mapping else
+                    IntegrationOpenApiJmixTypeMapping(
+                        schemaId = mapping.schemaId,
+                        targetKind = IntegrationOpenApiJmixTargetKind.EXISTING_ENTITY,
+                        existingEntity = IntegrationOpenApiExistingEntityBinding(
+                            "entity:certified-receipt",
+                            "com.acme.cert.domain.CertifiedReceipt",
+                            "r".repeat(64),
+                        ),
+                        properties = listOf(
+                            IntegrationOpenApiPropertyMapping(
+                                "id",
+                                "id",
+                                IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                                customConverter = converter,
+                            ),
+                            IntegrationOpenApiPropertyMapping(
+                                "status",
+                                "status",
+                                IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                                enumAdapter = enumAdapter,
+                            ),
+                        ),
+                    )
+            },
+        )
+        val existingResult = OpenApiJmixLayerGenerator.generate(
+            OpenApiJmixLayerGenerator.Input(
+                connector = model.copy(openApiJmixLayer = existingLayer),
+                operation = operation,
+                layer = existingLayer,
+                entityNamePrefix = "cert",
+                existingTargets = mapOf(
+                    "component:PaymentReceipt" to OpenApiJmixLayerGenerator.ResolvedEntityTarget(
+                        artifactId = "entity:certified-receipt",
+                        qualifiedName = "com.acme.cert.domain.CertifiedReceipt",
+                        entityType = org.jmixworkbench.model.EntityType.DTO,
+                        attributes = listOf(
+                            OpenApiJmixLayerGenerator.ResolvedEntityAttribute(
+                                "id",
+                                "com.acme.cert.domain.ExternalReceiptId",
+                                false,
+                            ),
+                            OpenApiJmixLayerGenerator.ResolvedEntityAttribute(
+                                "status",
+                                "com.acme.cert.domain.PaymentState",
+                                false,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        require(existingResult.issues.isEmpty()) { existingResult.issues.joinToString() }
+        existingResult.sources.forEach { source ->
             sources["common/java/${source.packageRelativePath}"] = source.content
         }
     }

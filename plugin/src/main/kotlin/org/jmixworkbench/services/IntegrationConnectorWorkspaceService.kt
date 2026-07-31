@@ -6,8 +6,15 @@ import com.intellij.ide.highlighter.JavaFileType
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.JavaPsiFacade
+import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiEnumConstant
 import com.intellij.psi.PsiErrorElement
 import com.intellij.psi.PsiFileFactory
+import com.intellij.psi.PsiMethod
+import com.intellij.psi.PsiModifier
+import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.ProjectScope
 import com.intellij.psi.util.PsiTreeUtil
 import org.jmixworkbench.discovery.change.WorkspaceChangeIssue
 import org.jmixworkbench.discovery.change.WorkspaceChangePlan
@@ -32,6 +39,10 @@ import org.jmixworkbench.model.IntegrationObservabilityApi
 import org.jmixworkbench.model.IntegrationOpenApiJmixTargetKind
 import org.jmixworkbench.model.IntegrationOpenApiJmixTypeMapping
 import org.jmixworkbench.model.IntegrationOpenApiMappingDirection
+import org.jmixworkbench.model.IntegrationOpenApiConverterMethodBinding
+import org.jmixworkbench.model.IntegrationOpenApiCustomConverterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumAdapterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumValueMapping
 import org.jmixworkbench.model.IntegrationOpenApiPropertyMapping
 import org.jmixworkbench.model.IntegrationOpenApiSchemaKind
 import org.jmixworkbench.model.IntegrationOpenApiSchemaModel
@@ -53,6 +64,8 @@ import java.util.Locale
 @Service(Service.Level.PROJECT)
 class IntegrationConnectorWorkspaceService(private val project: Project) {
     private val gson = Gson()
+    private val mappingExtensionCatalogLock = Any()
+    private val mappingExtensionCatalogCache = linkedMapOf<String, IntegrationMappingExtensionCatalog>()
 
     fun load(forceRefresh: Boolean = false): IntegrationConnectorWorkspaceResponse {
         val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh)
@@ -67,6 +80,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             }.toSet(),
             forceRefresh = forceRefresh,
         )
+        val mappingExtensions = mappingExtensionCatalog(graph, destinations)
         return IntegrationConnectorWorkspaceResponse(
             graphDigest = graph.snapshotDigest,
             destinations = destinations,
@@ -76,6 +90,8 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             oauth2Services = oauth2Services(graph),
             dataStores = schema.stores,
             entities = schema.entities,
+            enumAdapters = mappingExtensions.enums,
+            converterBeans = mappingExtensions.converters,
             openApiContracts = openApiContracts,
             organizationConnectorTemplates = connectorCatalogs.options.map {
                 IntegrationOrganizationConnectorTemplateSnapshot(
@@ -270,7 +286,14 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     compareBy(IntegrationOpenApiPropertyMapping::schemaProperty, IntegrationOpenApiPropertyMapping::entityProperty),
                 )
                 val visibleProperties = properties.take(MAX_OPENAPI_APPROVAL_PROPERTIES).joinToString { property ->
-                    "${property.schemaProperty}→${property.entityProperty} (${property.direction.name.lowercase(Locale.ROOT)})"
+                    val extension = when {
+                        property.enumAdapter != null ->
+                            " · enum ${property.enumAdapter.qualifiedName} [${property.enumAdapter.values.size}]"
+                        property.customConverter != null ->
+                            " · converter ${property.customConverter.qualifiedName}"
+                        else -> ""
+                    }
+                    "${property.schemaProperty}→${property.entityProperty} (${property.direction.name.lowercase(Locale.ROOT)})$extension"
                 }
                 val suffix = if (properties.size > MAX_OPENAPI_APPROVAL_PROPERTIES) {
                     ", +${properties.size - MAX_OPENAPI_APPROVAL_PROPERTIES} more"
@@ -798,6 +821,159 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             .toList()
     }
 
+    /**
+     * Builds a bounded mapping-extension catalog from the semantic application
+     * graph and IntelliJ's class indexes. This runs only when the integration
+     * workspace is requested; it never walks every source file or keys a cache
+     * off the global PSI modification counter.
+     */
+    private fun mappingExtensionCatalog(
+        graph: ApplicationGraphResponse,
+        destinations: List<IntegrationConnectorDestinationSnapshot>,
+    ): IntegrationMappingExtensionCatalog {
+        val key = buildString {
+            append(graph.snapshotDigest).append('\u0000')
+            destinations.map(IntegrationConnectorDestinationSnapshot::id).sorted().forEach {
+                append(it).append('\u0000')
+            }
+        }
+        synchronized(mappingExtensionCatalogLock) {
+            mappingExtensionCatalogCache[key]?.let { return it }
+        }
+        val computed = computeMappingExtensionCatalog(graph, destinations)
+        synchronized(mappingExtensionCatalogLock) {
+            if (mappingExtensionCatalogCache.size >= MAX_MAPPING_EXTENSION_CATALOGS) {
+                mappingExtensionCatalogCache.remove(mappingExtensionCatalogCache.keys.first())
+            }
+            mappingExtensionCatalogCache[key] = computed
+        }
+        return computed
+    }
+
+    private fun computeMappingExtensionCatalog(
+        graph: ApplicationGraphResponse,
+        destinations: List<IntegrationConnectorDestinationSnapshot>,
+    ): IntegrationMappingExtensionCatalog {
+        val facade = JavaPsiFacade.getInstance(project)
+        val scope = GlobalSearchScope.projectScope(project)
+        val projectAndLibrariesScope = scope.uniteWith(ProjectScope.getLibrariesScope(project))
+        val enumClass = JavaPsiFacade.getInstance(project).findClass(JMIX_ENUM_CLASS, projectAndLibrariesScope)
+        val enumSnapshots = graph.artifacts.asSequence()
+            .filter { it.kind == ArtifactKind.ENUM }
+            .distinctBy { it.id }
+            .take(MAX_MAPPING_EXTENSION_TYPES)
+            .mapNotNull { artifact ->
+                val type = facade.findClass(artifact.semanticKey.substringBefore('#'), scope) ?: return@mapNotNull null
+                if (!type.isEnum || !isJmixEnum(type, enumClass)) return@mapNotNull null
+                val constants = type.fields.filterIsInstance<PsiEnumConstant>()
+                    .map(PsiEnumConstant::getName)
+                    .distinct()
+                    .take(MAX_ENUM_CONSTANTS)
+                if (constants.isEmpty()) return@mapNotNull null
+                IntegrationOpenApiEnumAdapterSnapshot(
+                    artifactId = artifact.id,
+                    moduleId = artifact.owner.moduleId,
+                    qualifiedName = requireNotNull(type.qualifiedName),
+                    className = type.name.orEmpty(),
+                    sourceLocator = artifact.sourceLocator,
+                    constants = constants,
+                    destinationIds = visibleDestinationIds(artifact.owner.moduleId, graph, destinations),
+                )
+            }
+            .filter { it.destinationIds.isNotEmpty() }
+            .sortedWith(compareBy(IntegrationOpenApiEnumAdapterSnapshot::className, IntegrationOpenApiEnumAdapterSnapshot::qualifiedName))
+            .toList()
+
+        val converterSnapshots = graph.artifacts.asSequence()
+            .filter { it.kind in CONVERTER_TYPE_KINDS }
+            .filter { '#' !in it.semanticKey }
+            .distinctBy { it.id }
+            .take(MAX_MAPPING_EXTENSION_TYPES)
+            .mapNotNull { artifact ->
+                val type = facade.findClass(artifact.semanticKey, scope) ?: return@mapNotNull null
+                if (type.isInterface || type.isEnum || type.hasModifierProperty(PsiModifier.ABSTRACT)) {
+                    return@mapNotNull null
+                }
+                if (!isSpringComponent(type)) return@mapNotNull null
+                val methods = type.methods.asSequence()
+                    .filter { method -> method.containingClass == type && isConverterMethod(method) }
+                    .map { method ->
+                        val parameterType = method.parameterList.parameters.single().type.canonicalText
+                        val returnType = requireNotNull(method.returnType).canonicalText
+                        IntegrationOpenApiConverterMethodSnapshot(
+                            signature = converterSignature(method.name, parameterType, returnType),
+                            methodName = method.name,
+                            parameterType = parameterType,
+                            returnType = returnType,
+                        )
+                    }
+                    .distinctBy(IntegrationOpenApiConverterMethodSnapshot::signature)
+                    .sortedWith(compareBy(IntegrationOpenApiConverterMethodSnapshot::methodName, IntegrationOpenApiConverterMethodSnapshot::signature))
+                    .take(MAX_CONVERTER_METHODS)
+                    .toList()
+                if (methods.isEmpty()) return@mapNotNull null
+                IntegrationOpenApiConverterBeanSnapshot(
+                    artifactId = artifact.id,
+                    moduleId = artifact.owner.moduleId,
+                    qualifiedName = requireNotNull(type.qualifiedName),
+                    className = type.name.orEmpty(),
+                    sourceLocator = artifact.sourceLocator,
+                    methods = methods,
+                    destinationIds = visibleDestinationIds(artifact.owner.moduleId, graph, destinations),
+                )
+            }
+            .filter { it.destinationIds.isNotEmpty() }
+            .sortedWith(compareBy(IntegrationOpenApiConverterBeanSnapshot::className, IntegrationOpenApiConverterBeanSnapshot::qualifiedName))
+            .toList()
+        return IntegrationMappingExtensionCatalog(enumSnapshots, converterSnapshots)
+    }
+
+    private fun visibleDestinationIds(
+        ownerModuleId: String,
+        graph: ApplicationGraphResponse,
+        destinations: List<IntegrationConnectorDestinationSnapshot>,
+    ): List<String> = destinations.filter { destination ->
+        ownerModuleId in accessibleModules(destination.moduleId, graph)
+    }.map(IntegrationConnectorDestinationSnapshot::id).sorted()
+
+    private fun isJmixEnum(type: PsiClass, enumClass: PsiClass?): Boolean =
+        enumClass?.let { base -> runCatching { type.isInheritor(base, true) }.getOrDefault(false) }
+            ?: type.superTypes.any { superType ->
+                superType.canonicalText.substringBefore('<') == JMIX_ENUM_CLASS ||
+                    superType.canonicalText.substringBefore('<').substringAfterLast('.') == "EnumClass"
+            }
+
+    private fun isSpringComponent(type: PsiClass): Boolean =
+        hasSpringComponentAnnotation(type, mutableSetOf(), 0)
+
+    private fun hasSpringComponentAnnotation(
+        type: PsiClass,
+        visited: MutableSet<String>,
+        depth: Int,
+    ): Boolean {
+        if (depth > MAX_COMPONENT_META_DEPTH) return false
+        return type.modifierList?.annotations.orEmpty().any { annotation ->
+            val name = annotation.qualifiedName ?: return@any false
+            if (name in SPRING_COMPONENT_ANNOTATIONS) return@any true
+            if (!visited.add(name) || name.startsWith("java.") || name.startsWith("kotlin.")) return@any false
+            val annotationClass = annotation.nameReferenceElement?.resolve() as? PsiClass ?: return@any false
+            hasSpringComponentAnnotation(annotationClass, visited, depth + 1)
+        }
+    }
+
+    private fun isConverterMethod(method: PsiMethod): Boolean =
+        !method.isConstructor &&
+            !method.isVarArgs &&
+            method.typeParameters.isEmpty() &&
+            method.parameterList.parametersCount == 1 &&
+            method.returnType != null &&
+            method.returnType?.canonicalText != "void" &&
+            method.hasModifierProperty(PsiModifier.PUBLIC) &&
+            !method.hasModifierProperty(PsiModifier.STATIC)
+
+    private fun converterSignature(name: String, parameterType: String, returnType: String): String =
+        "$name($parameterType):$returnType"
+
     private fun moduleBasePackage(
         moduleId: String,
         graph: ApplicationGraphResponse,
@@ -1222,7 +1398,223 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             "Jmix mappings contain a schema that is not reachable from the selected operation."
         }
         return model.copy(
-            openApiJmixLayer = layer.copy(mappings = normalizedMappings),
+            openApiJmixLayer = layer.copy(
+                mappings = normalizeMappingExtensions(
+                    model = model,
+                    operation = operation,
+                    mappings = normalizedMappings,
+                    destination = destination,
+                    schema = schema,
+                ),
+            ),
+        )
+    }
+
+    private fun normalizeMappingExtensions(
+        model: IntegrationConnectorModel,
+        operation: org.jmixworkbench.model.IntegrationOpenApiOperationModel,
+        mappings: List<IntegrationOpenApiJmixTypeMapping>,
+        destination: IntegrationConnectorDestinationSnapshot,
+        schema: SchemaWorkspaceResponse,
+    ): List<IntegrationOpenApiJmixTypeMapping> {
+        if (mappings.none { mapping ->
+                mapping.properties.any { it.enumAdapter != null || it.customConverter != null }
+            }
+        ) return mappings
+        val graph = ApplicationGraphService.getInstance(project).graph()
+        val catalog = mappingExtensionCatalog(graph, listOf(destination))
+        val enumByIdentity = catalog.enums.associateBy { it.artifactId to it.qualifiedName }
+        val converterByIdentity = catalog.converters.associateBy { it.artifactId to it.qualifiedName }
+        val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        return mappings.map { mapping ->
+            if (mapping.targetKind != IntegrationOpenApiJmixTargetKind.EXISTING_ENTITY) {
+                require(mapping.properties.none { it.enumAdapter != null || it.customConverter != null }) {
+                    "Custom mapping extensions are valid only for indexed existing Jmix entities."
+                }
+                return@map mapping
+            }
+            val entityBinding = requireNotNull(mapping.existingEntity) {
+                "Custom mapping extensions require an exact existing-entity binding."
+            }
+            val entity = schema.entities.singleOrNull {
+                it.artifactId == entityBinding.artifactId && it.qualifiedName == entityBinding.qualifiedName
+            } ?: throw IllegalArgumentException(
+                "The entity used by custom mapping extensions is missing or ambiguous in the schema index.",
+            )
+            val attributes = (entity.attributes + entity.inheritedAttributes.map(SchemaInheritedAttributeSnapshot::attribute))
+                .distinctBy(SchemaEntityAttributeSnapshot::name)
+                .associateBy(SchemaEntityAttributeSnapshot::name)
+            val objectSchema = requireNotNull(schemas[mapping.schemaId])
+            val sourceProperties = objectSchema.properties.associateBy { it.javaName }
+            mapping.copy(
+                properties = mapping.properties.map { property ->
+                    if (property.enumAdapter == null && property.customConverter == null) return@map property
+                    require(property.enumAdapter == null || property.customConverter == null) {
+                        "A property cannot use an enum adapter and a custom converter together."
+                    }
+                    val sourceProperty = requireNotNull(sourceProperties[property.schemaProperty]) {
+                        "Mapped OpenAPI property '${mapping.schemaId}.${property.schemaProperty}' no longer exists."
+                    }
+                    val targetAttribute = requireNotNull(attributes[property.entityProperty]) {
+                        "Mapped Jmix property '${entity.qualifiedName}.${property.entityProperty}' no longer exists."
+                    }
+                    val targetType = canonicalEntityPropertyType(entity.qualifiedName, property.entityProperty)
+                        ?: targetAttribute.javaType
+                    val wireType = OpenApiJmixLayerGenerator.transportType(
+                        operation,
+                        sourceProperty.schemaId,
+                        model.packageName,
+                        model.className,
+                    )
+                    property.enumAdapter?.let { supplied ->
+                        val indexed = enumByIdentity[supplied.artifactId to supplied.qualifiedName]
+                            ?: throw IllegalArgumentException(
+                                "The selected Jmix enum '${supplied.qualifiedName}' is missing, stale, or not visible from '${destination.moduleId}'.",
+                            )
+                        require(supplied.revisionFingerprint == indexed.sourceLocator.revisionFingerprint) {
+                            "Jmix enum '${indexed.qualifiedName}' changed after selection. Refresh and review its value mapping."
+                        }
+                        require(typeMatches(indexed.qualifiedName, targetType)) {
+                            "Jmix enum '${indexed.qualifiedName}' does not match target property type '$targetType'."
+                        }
+                        val enumSchema = requireNotNull(schemas[sourceProperty.schemaId])
+                        require(
+                            enumSchema.kind == IntegrationOpenApiSchemaKind.STRING &&
+                                enumSchema.enumValues.isNotEmpty()
+                        ) {
+                            "Enum adapters require an OpenAPI string enum property."
+                        }
+                        val suppliedByWire = supplied.values.groupBy(IntegrationOpenApiEnumValueMapping::wireValue)
+                        require(suppliedByWire.keys == enumSchema.enumValues.toSet()) {
+                            "Enum adapter must map every OpenAPI wire value exactly once."
+                        }
+                        require(suppliedByWire.values.all { it.size == 1 }) {
+                            "Enum adapter contains duplicate wire-value decisions."
+                        }
+                        val normalizedValues = enumSchema.enumValues.map { wireValue ->
+                            val decision = requireNotNull(suppliedByWire[wireValue]?.singleOrNull())
+                            require(decision.enumConstant in indexed.constants) {
+                                "Enum constant '${decision.enumConstant}' is absent from '${indexed.qualifiedName}'."
+                            }
+                            IntegrationOpenApiEnumValueMapping(wireValue, decision.enumConstant)
+                        }
+                        if (property.direction != IntegrationOpenApiMappingDirection.INBOUND) {
+                            require(normalizedValues.map { it.enumConstant }.toSet() == indexed.constants.toSet()) {
+                                "Outbound enum mapping must cover every constant of '${indexed.qualifiedName}' exactly once."
+                            }
+                            require(normalizedValues.map { it.enumConstant }.distinct().size == normalizedValues.size) {
+                                "Outbound enum mapping cannot assign multiple wire values to one domain constant."
+                            }
+                        }
+                        return@map property.copy(
+                            enumAdapter = IntegrationOpenApiEnumAdapterBinding(
+                                artifactId = indexed.artifactId,
+                                qualifiedName = indexed.qualifiedName,
+                                revisionFingerprint = indexed.sourceLocator.revisionFingerprint,
+                                values = normalizedValues,
+                            ),
+                            customConverter = null,
+                        )
+                    }
+                    property.customConverter?.let { supplied ->
+                        val indexed = converterByIdentity[supplied.artifactId to supplied.qualifiedName]
+                            ?: throw IllegalArgumentException(
+                                "The selected converter '${supplied.qualifiedName}' is missing, stale, or not visible from '${destination.moduleId}'.",
+                            )
+                        require(supplied.revisionFingerprint == indexed.sourceLocator.revisionFingerprint) {
+                            "Converter '${indexed.qualifiedName}' changed after selection. Refresh and review its method bindings."
+                        }
+                        fun resolveMethod(
+                            method: IntegrationOpenApiConverterMethodBinding?,
+                            expectedParameter: String,
+                            expectedReturn: String,
+                            label: String,
+                            required: Boolean,
+                        ): IntegrationOpenApiConverterMethodBinding? {
+                            if (!required && method == null) return null
+                            val selected = requireNotNull(method) {
+                                "Converter '${indexed.qualifiedName}' needs a $label method."
+                            }
+                            val resolved = indexed.methods.singleOrNull { it.signature == selected.signature }
+                                ?: throw IllegalArgumentException(
+                                    "Converter $label method '${selected.signature}' is missing or ambiguous.",
+                                )
+                            require(typeMatches(expectedParameter, resolved.parameterType)) {
+                                "Converter $label parameter '${resolved.parameterType}' must match '$expectedParameter'."
+                            }
+                            require(typeMatches(expectedReturn, resolved.returnType)) {
+                                "Converter $label return '${resolved.returnType}' must match '$expectedReturn'."
+                            }
+                            return IntegrationOpenApiConverterMethodBinding(
+                                signature = resolved.signature,
+                                methodName = resolved.methodName,
+                                parameterType = resolved.parameterType,
+                                returnType = resolved.returnType,
+                            )
+                        }
+                        val inboundRequired = property.direction != IntegrationOpenApiMappingDirection.OUTBOUND
+                        val outboundRequired = property.direction != IntegrationOpenApiMappingDirection.INBOUND
+                        return@map property.copy(
+                            enumAdapter = null,
+                            customConverter = IntegrationOpenApiCustomConverterBinding(
+                                artifactId = indexed.artifactId,
+                                qualifiedName = indexed.qualifiedName,
+                                revisionFingerprint = indexed.sourceLocator.revisionFingerprint,
+                                inboundMethod = resolveMethod(
+                                    supplied.inboundMethod,
+                                    wireType,
+                                    targetType,
+                                    "API-to-Jmix",
+                                    inboundRequired,
+                                ),
+                                outboundMethod = resolveMethod(
+                                    supplied.outboundMethod,
+                                    targetType,
+                                    wireType,
+                                    "Jmix-to-API",
+                                    outboundRequired,
+                                ),
+                            ),
+                        )
+                    }
+                    property
+                },
+            )
+        }
+    }
+
+    private fun canonicalEntityPropertyType(qualifiedName: String, propertyName: String): String? {
+        val type = JavaPsiFacade.getInstance(project).findClass(
+            qualifiedName,
+            GlobalSearchScope.projectScope(project),
+        ) ?: return null
+        type.findFieldByName(propertyName, true)?.type?.canonicalText?.let { return it }
+        val suffix = propertyName.replaceFirstChar(Char::uppercaseChar)
+        val getterTypes = type.allMethods.asSequence()
+            .filter { it.parameterList.parametersCount == 0 && it.name in setOf("get$suffix", "is$suffix") }
+            .mapNotNull { it.returnType?.canonicalText }
+            .distinct()
+            .toList()
+        if (getterTypes.size == 1) return getterTypes.single()
+        val setterTypes = type.allMethods.asSequence()
+            .filter { it.name == "set$suffix" && it.parameterList.parametersCount == 1 }
+            .map { it.parameterList.parameters.single().type.canonicalText }
+            .distinct()
+            .toList()
+        return setterTypes.singleOrNull()
+    }
+
+    private fun typeMatches(expected: String, actual: String): Boolean {
+        fun normalized(value: String): String = value
+            .replace("?", "")
+            .replace(Regex("\\s+"), "")
+            .let { JAVA_BOXED_TYPES[it] ?: it }
+        val left = normalized(expected)
+        val right = normalized(actual)
+        return left == right || (
+            '.' !in left && left.substringAfterLast('.') == right.substringAfterLast('.')
+        ) || (
+            '.' !in right && left.substringAfterLast('.') == right.substringAfterLast('.')
         )
     }
 
@@ -1540,6 +1932,31 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         private const val MAX_OPENAPI_APPROVAL_MAPPINGS = 12
         private const val MAX_OPENAPI_APPROVAL_PROPERTIES = 8
         private const val MAX_MARKER_LENGTH = 4_000_000
+        private const val MAX_MAPPING_EXTENSION_TYPES = 2_000
+        private const val MAX_CONVERTER_METHODS = 128
+        private const val MAX_ENUM_CONSTANTS = 512
+        private const val MAX_COMPONENT_META_DEPTH = 4
+        private const val MAX_MAPPING_EXTENSION_CATALOGS = 8
+        private const val JMIX_ENUM_CLASS = "io.jmix.core.metamodel.datatype.EnumClass"
+        private val SPRING_COMPONENT_ANNOTATIONS = setOf(
+            "org.springframework.stereotype.Component",
+            "org.springframework.stereotype.Service",
+        )
+        private val CONVERTER_TYPE_KINDS = setOf(
+            ArtifactKind.SERVICE,
+            ArtifactKind.BUSINESS_RULE,
+            ArtifactKind.SOURCE_TYPE,
+        )
+        private val JAVA_BOXED_TYPES = mapOf(
+            "boolean" to "java.lang.Boolean",
+            "byte" to "java.lang.Byte",
+            "short" to "java.lang.Short",
+            "int" to "java.lang.Integer",
+            "long" to "java.lang.Long",
+            "float" to "java.lang.Float",
+            "double" to "java.lang.Double",
+            "char" to "java.lang.Character",
+        )
         private val CONSUMER_KINDS = setOf(
             IntegrationConnectorKind.KAFKA_CONSUMER,
             IntegrationConnectorKind.RABBIT_CONSUMER,
@@ -1639,10 +2056,44 @@ data class IntegrationConnectorWorkspaceResponse(
     val oauth2Services: List<IntegrationOAuth2ServiceSnapshot>,
     val dataStores: List<SchemaDataStoreSnapshot>,
     val entities: List<SchemaEntitySnapshot> = emptyList(),
+    val enumAdapters: List<IntegrationOpenApiEnumAdapterSnapshot> = emptyList(),
+    val converterBeans: List<IntegrationOpenApiConverterBeanSnapshot> = emptyList(),
     val openApiContracts: List<OpenApiContractSnapshot> = emptyList(),
     val organizationConnectorTemplates: List<IntegrationOrganizationConnectorTemplateSnapshot> = emptyList(),
     val existingDocuments: List<IntegrationConnectorDocumentSnapshot>,
     val issues: List<WorkspaceChangeIssue>,
+)
+
+private data class IntegrationMappingExtensionCatalog(
+    val enums: List<IntegrationOpenApiEnumAdapterSnapshot>,
+    val converters: List<IntegrationOpenApiConverterBeanSnapshot>,
+)
+
+data class IntegrationOpenApiEnumAdapterSnapshot(
+    val artifactId: String,
+    val moduleId: String,
+    val qualifiedName: String,
+    val className: String,
+    val sourceLocator: SourceLocator,
+    val constants: List<String>,
+    val destinationIds: List<String>,
+)
+
+data class IntegrationOpenApiConverterMethodSnapshot(
+    val signature: String,
+    val methodName: String,
+    val parameterType: String,
+    val returnType: String,
+)
+
+data class IntegrationOpenApiConverterBeanSnapshot(
+    val artifactId: String,
+    val moduleId: String,
+    val qualifiedName: String,
+    val className: String,
+    val sourceLocator: SourceLocator,
+    val methods: List<IntegrationOpenApiConverterMethodSnapshot>,
+    val destinationIds: List<String>,
 )
 
 data class IntegrationOrganizationConnectorTemplateSnapshot(

@@ -1880,10 +1880,39 @@ export interface IntegrationOpenApiExistingEntityBinding {
   revisionFingerprint: string
 }
 
+export interface IntegrationOpenApiEnumValueMapping {
+  wireValue: string
+  enumConstant: string
+}
+
+export interface IntegrationOpenApiEnumAdapterBinding {
+  artifactId: string
+  qualifiedName: string
+  revisionFingerprint: string
+  values: IntegrationOpenApiEnumValueMapping[]
+}
+
+export interface IntegrationOpenApiConverterMethodBinding {
+  signature: string
+  methodName: string
+  parameterType: string
+  returnType: string
+}
+
+export interface IntegrationOpenApiCustomConverterBinding {
+  artifactId: string
+  qualifiedName: string
+  revisionFingerprint: string
+  inboundMethod?: IntegrationOpenApiConverterMethodBinding
+  outboundMethod?: IntegrationOpenApiConverterMethodBinding
+}
+
 export interface IntegrationOpenApiPropertyMapping {
   schemaProperty: string
   entityProperty: string
   direction: IntegrationOpenApiMappingDirection
+  enumAdapter?: IntegrationOpenApiEnumAdapterBinding
+  customConverter?: IntegrationOpenApiCustomConverterBinding
 }
 
 export interface IntegrationOpenApiJmixTypeMapping {
@@ -2382,11 +2411,40 @@ export interface IntegrationConnectorWorkspaceResponse {
   oauth2Services: IntegrationOAuth2ServiceSnapshot[]
   dataStores: SchemaDataStoreSnapshot[]
   entities: SchemaEntitySnapshot[]
+  enumAdapters: IntegrationOpenApiEnumAdapterSnapshot[]
+  converterBeans: IntegrationOpenApiConverterBeanSnapshot[]
   openApiContracts: OpenApiContractSnapshot[]
   organizationConnectorTemplates: IntegrationOrganizationConnectorTemplateSnapshot[]
   existingDocuments: IntegrationConnectorDocumentSnapshot[]
   issues: WorkspaceChangeIssue[]
   error?: string
+}
+
+export interface IntegrationOpenApiEnumAdapterSnapshot {
+  artifactId: string
+  moduleId: string
+  qualifiedName: string
+  className: string
+  sourceLocator: GraphSourceLocator
+  constants: string[]
+  destinationIds: string[]
+}
+
+export interface IntegrationOpenApiConverterMethodSnapshot {
+  signature: string
+  methodName: string
+  parameterType: string
+  returnType: string
+}
+
+export interface IntegrationOpenApiConverterBeanSnapshot {
+  artifactId: string
+  moduleId: string
+  qualifiedName: string
+  className: string
+  sourceLocator: GraphSourceLocator
+  methods: IntegrationOpenApiConverterMethodSnapshot[]
+  destinationIds: string[]
 }
 
 export interface IntegrationOAuth2ManagerSnapshot {

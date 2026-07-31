@@ -15,6 +15,10 @@ import org.jmixworkbench.model.IntegrationOpenApiMappingDirection
 import org.jmixworkbench.model.IntegrationOpenApiPropertyMapping
 import org.jmixworkbench.model.IntegrationOpenApiJmixTargetKind
 import org.jmixworkbench.model.IntegrationOpenApiJmixTypeMapping
+import org.jmixworkbench.model.IntegrationOpenApiConverterMethodBinding
+import org.jmixworkbench.model.IntegrationOpenApiCustomConverterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumAdapterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumValueMapping
 import java.io.IOException
 import java.util.Base64
 import kotlin.test.assertContains
@@ -335,6 +339,173 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertTrue(stale.issues.any { "changed after selection" in it.message })
     }
 
+    fun testExistingEnumAndConverterCatalogIsRevisionBoundAndGeneratesExactCalls() {
+        val root = prepareProject(enumContract())
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/io/jmix/core/metamodel/datatype/EnumClass.java",
+                "package io.jmix.core.metamodel.datatype; public interface EnumClass<T> { T getId(); }",
+            )
+            write(
+                root,
+                "src/main/java/org/springframework/stereotype/Component.java",
+                "package org.springframework.stereotype; public @interface Component {}",
+            )
+            write(
+                root,
+                "src/main/java/com/acme/payroll/entity/EmploymentStatus.java",
+                """
+                package com.acme.payroll.entity;
+                import io.jmix.core.metamodel.datatype.EnumClass;
+                public enum EmploymentStatus implements EnumClass<String> {
+                    ACTIVE("A"), TERMINATED("T");
+                    private final String id;
+                    EmploymentStatus(String id) { this.id = id; }
+                    public String getId() { return id; }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/payroll/entity/EmployeeLabel.java",
+                "package com.acme.payroll.entity; public record EmployeeLabel(String value) {}",
+            )
+            write(
+                root,
+                "src/main/java/com/acme/payroll/entity/Employee.java",
+                """
+                package com.acme.payroll.entity;
+                import io.jmix.core.metamodel.annotation.JmixEntity;
+                @JmixEntity
+                public class Employee {
+                    private String id;
+                    private EmployeeLabel displayName;
+                    private EmploymentStatus status;
+                    public String getId() { return id; }
+                    public void setId(String id) { this.id = id; }
+                    public EmployeeLabel getDisplayName() { return displayName; }
+                    public void setDisplayName(EmployeeLabel displayName) { this.displayName = displayName; }
+                    public EmploymentStatus getStatus() { return status; }
+                    public void setStatus(EmploymentStatus status) { this.status = status; }
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/payroll/integration/EmployeeValueConverter.java",
+                """
+                package com.acme.payroll.integration;
+                import com.acme.payroll.entity.EmployeeLabel;
+                import org.springframework.stereotype.Component;
+                @Component
+                public class EmployeeValueConverter {
+                    public EmployeeLabel toLabel(String value) { return new EmployeeLabel(value); }
+                    public String toText(EmployeeLabel value) { return value.value(); }
+                }
+                """.trimIndent(),
+            )
+        }
+        ApplicationGraphService.getInstance(project).invalidate()
+        val service = IntegrationConnectorWorkspaceService.getInstance(project)
+        val workspace = service.load(forceRefresh = true)
+        val destination = requireNotNull(workspace.destinations.firstOrNull())
+        val enumAdapter = workspace.enumAdapters.single { it.qualifiedName.endsWith(".EmploymentStatus") }
+        val converter = workspace.converterBeans.single { it.qualifiedName.endsWith(".EmployeeValueConverter") }
+        assertTrue(destination.id in enumAdapter.destinationIds)
+        assertTrue(destination.id in converter.destinationIds)
+        val operation = workspace.openApiContracts.single().operations.single()
+        val responseId = requireNotNull(operation.responseSchemaId)
+        val entity = workspace.entities.single { it.qualifiedName.endsWith(".Employee") }
+        val entityBinding = org.jmixworkbench.model.IntegrationOpenApiExistingEntityBinding(
+            entity.artifactId,
+            entity.qualifiedName,
+            entity.sourceLocator.revisionFingerprint,
+        )
+        val inbound = converter.methods.single { it.methodName == "toLabel" }
+        val outbound = converter.methods.single { it.methodName == "toText" }
+        val model = connector(destination.id, requireNotNull(operation.defaultBinding)).copy(
+            openApiJmixLayer = IntegrationOpenApiJmixLayerModel(
+                enabled = true,
+                dtoPackage = "com.acme.payroll.entity.hr",
+                mapperPackage = "com.acme.payroll.integration.mapper",
+                servicePackage = "com.acme.payroll.service.hr",
+                serviceClassName = "EmployeeDirectoryService",
+                serviceBeanName = "employeeDirectoryService",
+                mappings = listOf(
+                    IntegrationOpenApiJmixTypeMapping(
+                        schemaId = responseId,
+                        targetKind = IntegrationOpenApiJmixTargetKind.EXISTING_ENTITY,
+                        existingEntity = entityBinding,
+                        properties = listOf(
+                            IntegrationOpenApiPropertyMapping("id", "id", IntegrationOpenApiMappingDirection.INBOUND),
+                            IntegrationOpenApiPropertyMapping(
+                                "displayName",
+                                "displayName",
+                                IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                                customConverter = IntegrationOpenApiCustomConverterBinding(
+                                    converter.artifactId,
+                                    converter.qualifiedName,
+                                    converter.sourceLocator.revisionFingerprint,
+                                    IntegrationOpenApiConverterMethodBinding(
+                                        inbound.signature,
+                                        inbound.methodName,
+                                        inbound.parameterType,
+                                        inbound.returnType,
+                                    ),
+                                    IntegrationOpenApiConverterMethodBinding(
+                                        outbound.signature,
+                                        outbound.methodName,
+                                        outbound.parameterType,
+                                        outbound.returnType,
+                                    ),
+                                ),
+                            ),
+                            IntegrationOpenApiPropertyMapping(
+                                "status",
+                                "status",
+                                IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                                enumAdapter = IntegrationOpenApiEnumAdapterBinding(
+                                    enumAdapter.artifactId,
+                                    enumAdapter.qualifiedName,
+                                    enumAdapter.sourceLocator.revisionFingerprint,
+                                    listOf(
+                                        IntegrationOpenApiEnumValueMapping("active", "ACTIVE"),
+                                        IntegrationOpenApiEnumValueMapping("terminated", "TERMINATED"),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val accepted = service.preview(model)
+        assertTrue(accepted.accepted, accepted.issues.joinToString { it.message })
+        val mapper = requireNotNull(
+            accepted.files.single { it.relativePath.endsWith("/EmployeeDirectoryMapper.java") }.resultContent,
+        )
+        assertContains(mapper, "employeeValueConverter.toLabel(source.displayName())")
+        assertContains(mapper, "employeeValueConverter.toText(source.getDisplayName())")
+        assertContains(mapper, "case \"active\" -> com.acme.payroll.entity.EmploymentStatus.ACTIVE;")
+
+        val stale = model.copy(
+            openApiJmixLayer = requireNotNull(model.openApiJmixLayer).copy(
+                mappings = model.openApiJmixLayer.mappings.map { mapping ->
+                    mapping.copy(properties = mapping.properties.map { property ->
+                        if (property.customConverter == null) property else property.copy(
+                            customConverter = property.customConverter.copy(revisionFingerprint = "f".repeat(64)),
+                        )
+                    })
+                },
+            ),
+        )
+        val rejected = service.preview(stale)
+        assertFalse(rejected.accepted)
+        assertTrue(rejected.issues.any { "changed after selection" in it.message })
+    }
+
     fun testJmixLayerPartialWriteFailureRestoresEveryFileAndCreatedDirectory() {
         val root = prepareProject(contract("1"))
         val service = IntegrationConnectorWorkspaceService.getInstance(project)
@@ -651,6 +822,41 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
               properties:
                 workerId: { type: string }
                 displayLabel: { type: string }
+        """.trimIndent()
+
+    private fun enumContract(): String = """
+        openapi: 3.0.3
+        info:
+          title: HR Provider
+          version: "1"
+        paths:
+          /employees/{employeeId}:
+            get:
+              operationId: findEmployee
+              parameters:
+                - name: employeeId
+                  in: path
+                  required: true
+                  schema: { type: string }
+              responses:
+                "200":
+                  description: employee
+                  content:
+                    application/json:
+                      schema:
+                        ${'$'}ref: '#/components/schemas/Employee'
+        components:
+          schemas:
+            EmploymentStatus:
+              type: string
+              enum: [active, terminated]
+            Employee:
+              type: object
+              required: [id, displayName, status]
+              properties:
+                id: { type: string }
+                displayName: { type: string }
+                status: { ${'$'}ref: '#/components/schemas/EmploymentStatus' }
         """.trimIndent()
 
     private fun write(root: VirtualFile, path: String, content: String) {

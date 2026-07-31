@@ -141,10 +141,50 @@ data class IntegrationOpenApiExistingEntityBinding(
     val revisionFingerprint: String,
 )
 
+data class IntegrationOpenApiEnumValueMapping(
+    val wireValue: String,
+    val enumConstant: String,
+)
+
+/**
+ * Exact source-owned Jmix EnumClass selected for one OpenAPI enum property.
+ * The backend resolves [artifactId]/[qualifiedName] again and verifies the
+ * source revision before preview/apply; only the explicit value decisions remain
+ * developer-authored.
+ */
+data class IntegrationOpenApiEnumAdapterBinding(
+    val artifactId: String,
+    val qualifiedName: String,
+    val revisionFingerprint: String,
+    val values: List<IntegrationOpenApiEnumValueMapping> = emptyList(),
+)
+
+data class IntegrationOpenApiConverterMethodBinding(
+    val signature: String,
+    val methodName: String,
+    val parameterType: String,
+    val returnType: String,
+)
+
+/**
+ * Exact source-owned Spring bean used for a non-trivial value conversion.
+ * Method signatures and the source revision are re-resolved by the backend;
+ * generated code never invokes a browser-supplied arbitrary symbol.
+ */
+data class IntegrationOpenApiCustomConverterBinding(
+    val artifactId: String,
+    val qualifiedName: String,
+    val revisionFingerprint: String,
+    val inboundMethod: IntegrationOpenApiConverterMethodBinding? = null,
+    val outboundMethod: IntegrationOpenApiConverterMethodBinding? = null,
+)
+
 data class IntegrationOpenApiPropertyMapping(
     val schemaProperty: String,
     val entityProperty: String,
     val direction: IntegrationOpenApiMappingDirection = IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+    val enumAdapter: IntegrationOpenApiEnumAdapterBinding? = null,
+    val customConverter: IntegrationOpenApiCustomConverterBinding? = null,
 )
 
 /**

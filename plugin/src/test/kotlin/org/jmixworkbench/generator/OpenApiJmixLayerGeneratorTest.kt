@@ -5,6 +5,10 @@ import org.jmixworkbench.model.IntegrationConnectorKind
 import org.jmixworkbench.model.IntegrationConnectorModel
 import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationOpenApiExistingEntityBinding
+import org.jmixworkbench.model.IntegrationOpenApiConverterMethodBinding
+import org.jmixworkbench.model.IntegrationOpenApiCustomConverterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumAdapterBinding
+import org.jmixworkbench.model.IntegrationOpenApiEnumValueMapping
 import org.jmixworkbench.model.IntegrationOpenApiJmixLayerModel
 import org.jmixworkbench.model.IntegrationOpenApiJmixTargetKind
 import org.jmixworkbench.model.IntegrationOpenApiJmixTypeMapping
@@ -106,6 +110,89 @@ class OpenApiJmixLayerGeneratorTest {
             ),
         )
         assertTrue(blocked.issues.any { "read-only entity property 'status'" in it })
+    }
+
+    @Test
+    fun `generates explicit existing enum and revision bound converter calls`() {
+        val binding = IntegrationOpenApiExistingEntityBinding(
+            artifactId = "entity:receipt",
+            qualifiedName = "com.acme.domain.ExternalReceipt",
+            revisionFingerprint = "a".repeat(64),
+        )
+        val inbound = IntegrationOpenApiConverterMethodBinding(
+            signature = "toMoney(java.math.BigDecimal):com.acme.domain.Money",
+            methodName = "toMoney",
+            parameterType = "java.math.BigDecimal",
+            returnType = "com.acme.domain.Money",
+        )
+        val outbound = IntegrationOpenApiConverterMethodBinding(
+            signature = "toAmount(com.acme.domain.Money):java.math.BigDecimal",
+            methodName = "toAmount",
+            parameterType = "com.acme.domain.Money",
+            returnType = "java.math.BigDecimal",
+        )
+        val converter = IntegrationOpenApiCustomConverterBinding(
+            artifactId = "service:money-converter",
+            qualifiedName = "com.acme.integration.MoneyConverter",
+            revisionFingerprint = "c".repeat(64),
+            inboundMethod = inbound,
+            outboundMethod = outbound,
+        )
+        val enumAdapter = IntegrationOpenApiEnumAdapterBinding(
+            artifactId = "enum:payment-state",
+            qualifiedName = "com.acme.domain.PaymentState",
+            revisionFingerprint = "d".repeat(64),
+            values = listOf(
+                IntegrationOpenApiEnumValueMapping("accepted", "ACTIVE"),
+                IntegrationOpenApiEnumValueMapping("rejected", "REJECTED"),
+            ),
+        )
+        val mapping = IntegrationOpenApiJmixTypeMapping(
+            schemaId = "receipt",
+            targetKind = IntegrationOpenApiJmixTargetKind.EXISTING_ENTITY,
+            existingEntity = binding,
+            idProperty = "id",
+            properties = listOf(
+                property("id"),
+                IntegrationOpenApiPropertyMapping(
+                    "status",
+                    "status",
+                    IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                    enumAdapter = enumAdapter,
+                ),
+                IntegrationOpenApiPropertyMapping(
+                    "total",
+                    "total",
+                    IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                    customConverter = converter,
+                ),
+            ),
+        )
+        val existing = OpenApiJmixLayerGenerator.ResolvedEntityTarget(
+            artifactId = binding.artifactId,
+            qualifiedName = binding.qualifiedName,
+            entityType = EntityType.ENTITY,
+            attributes = listOf(
+                OpenApiJmixLayerGenerator.ResolvedEntityAttribute("id", "java.util.UUID", false),
+                OpenApiJmixLayerGenerator.ResolvedEntityAttribute("status", "com.acme.domain.PaymentState", false),
+                OpenApiJmixLayerGenerator.ResolvedEntityAttribute("total", "com.acme.domain.Money", false),
+            ),
+        )
+
+        val result = OpenApiJmixLayerGenerator.generate(
+            input(
+                mappings = listOf(generated("request", "PaymentRequest"), mapping, generated("line", "PaymentLine")),
+                existingTargets = mapOf("receipt" to existing),
+            ),
+        )
+
+        assertTrue(result.issues.isEmpty(), result.issues.joinToString())
+        val mapper = result.sources.single { it.role == "JMIX_MAPPER" }.content
+        assertContains(mapper, "private final com.acme.integration.MoneyConverter moneyConverter;")
+        assertContains(mapper, "moneyConverter.toMoney(source.total())")
+        assertContains(mapper, "moneyConverter.toAmount(source.getTotal())")
+        assertContains(mapper, "case \"accepted\" -> com.acme.domain.PaymentState.ACTIVE;")
+        assertContains(mapper, "case ACTIVE -> \"accepted\";")
     }
 
     private fun input(

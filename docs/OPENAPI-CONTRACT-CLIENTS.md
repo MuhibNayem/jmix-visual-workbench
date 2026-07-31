@@ -33,9 +33,12 @@ Authoritative public references:
 7. For every reachable object schema, generate a DTO entity or select an exact
    indexed existing entity, then review property direction, stable identifier
    and instance-name mappings.
-8. Configure endpoint, credentials, SSL bundle and reliability policy through
+8. When provider and domain types differ, select a module-visible project
+   converter bean and exact directional methods. For OpenAPI string enums,
+   select an existing Jmix `EnumClass` and explicitly map every wire value.
+9. Configure endpoint, credentials, SSL bundle and reliability policy through
    external properties.
-9. Preview the connector, policy, DTOs, enums, mapper and application service as
+10. Preview the connector, policy, DTOs, enums, mapper and application service as
    one immutable diff and apply them through the shared atomic workspace-change
    pipeline.
 
@@ -120,6 +123,20 @@ in Kotlin.
 - Cross-module entity targets must be compile-visible through the indexed
   module-dependency graph. Missing, ambiguous, stale and inaccessible targets
   fail closed.
+- Existing enum adapters and converter beans are discovered through the
+  semantic application graph plus IntelliJ class indexes; the feature does not
+  scan every project file. Catalog entries are cached by application-graph
+  digest and exact destination set, never by the global PSI modification
+  counter.
+- An enum binding records exact artifact/type/revision coordinates. Preview
+  resolves the `EnumClass` again, proves the target property type, verifies
+  every constant, requires complete wire coverage and requires a one-to-one,
+  total mapping for outbound use.
+- A custom converter binding records exact Spring bean artifact/type/revision
+  coordinates and exact public instance method signatures. Preview resolves
+  the bean and methods again, proves module visibility and verifies input and
+  output types for each enabled direction. Stale, overloaded, static,
+  generic, inaccessible or non-component methods fail closed.
 - Read-only target attributes, duplicate destinations, unsafe type conversion,
   missing required outbound mappings and unstable response DTO identity are
   rejected before source preview.
@@ -160,6 +177,10 @@ Reachable OpenAPI object graphs can produce:
   inbound DTO entities not-new through `EntityStates` only after mapping;
 - mappings to exact indexed Jmix DTO or persistent entity classes, including
   inherited attributes;
+- explicit adapters from provider enum identifiers to existing Jmix
+  `EnumClass` constants, with fail-fast handling for unknown values;
+- constructor-injected project converter beans with separate API-to-Jmix and
+  Jmix-to-API methods and null-safe invocation;
 - a Spring application-service facade whose public request/response contract
   uses Jmix types and whose remote invocation is not incorrectly enclosed in a
   database transaction.
@@ -188,6 +209,11 @@ parameter/media serialization, security mismatch, Java name collisions,
 generated and existing Jmix targets, read-only attributes, inbound/outbound
 direction, source revision, complete create/reopen/update/remove round trips,
 manual supplemental-source protection and injected partial-write rollback.
+The mapping-extension lifecycle additionally discovers Java and Kotlin-light
+`EnumClass` and Spring component symbols from indexes, rejects stale revisions
+and forged identities, verifies exact directional method signatures, and
+compiles generated switch expressions and converter injection in all four
+Jmix/JDK cells.
 Evolution tests additionally cover distinct wire/source impact, validation
 tightening, deterministic reports, exact current-operation recovery, forged
 baseline replacement, stale generated ownership, native-capability scope and
@@ -197,17 +223,17 @@ exact ranking, conservative rejection without evidence, renamed schema and
 property candidates, retained DTO identity, generated mapper expressions and
 the complete create/rename/remap/approve/preview lifecycle.
 
-The clean `phase1Check` release gate on 2026-07-31 passed 412 regression tests
+The clean `phase1Check` release gate on 2026-07-31 passed 414 regression tests
 and 3 host smoke tests on each IntelliJ lane. Plugin Verifier reported both
 artifacts compatible:
 
 | IntelliJ host | Packaged ZIP SHA-256 |
 | --- | --- |
-| IU-253.28294.334 | `3412d280b5f377ff0c1b48563a5d1f8f1104cbf618172a34ddb08e5e8489480a` |
-| IU-262.8665.258 | `bb1297b7eb53bd124136e9740053d37adee85c1d3ec8ee0db8d310b629b671bd` |
+| IU-253.28294.334 | `9639501f157235d6b13b5f8f489cfdc9e3158d90efc46f9cf8a49eef5ee16578` |
+| IU-262.8665.258 | `20e91a58621a504ed0a6c2d0a23da73ae837ebc158ea9b290eda33b973c87506` |
 
 Both ZIPs contain the same verified web input digest:
-`c785db7909168ea36794f07055601c4dc2a23f47524f6f6fda7bbc5f9f9fa4c0`.
+`9370432aa88612b607241f5816cf772d75c46bf82b00f69d6f62bab9514d372b`.
 
 Responsive browser evidence on 2026-07-31 measured the real Integration
 Designer and the semantic-evolution workflow:
@@ -220,10 +246,12 @@ Designer and the semantic-evolution workflow:
 
 At 360 pixels, selecting the Payment Provider contract and generating its Jmix
 layer rendered both object mappings, package/service controls and all property
-directions without document/body overflow. Each 590-pixel mapping table remained
+directions without document/body overflow. Each 920-pixel mapping table remained
 inside a 196-pixel keyboard-focusable local scroll region. Mapping targets and
-directions have schema-qualified accessible names. Generate, undo and redo were
-executed successfully at that width.
+directions have schema-qualified accessible names. Existing-enum values and
+bidirectional converter methods were selected successfully at that width;
+their state survived viewport changes and the console contained no warnings
+or errors.
 
 The changed-contract and explicit-remapping workflow also has zero global
 overflow at 1280, 720 and 360 pixels. At 360 pixels the review chips, schema
@@ -239,7 +267,6 @@ The console contained no warnings or errors.
 This milestone does not yet claim complete Jmix Studio OpenAPI parity. The
 active remaining layers are:
 
-- user-defined, versioned mapping converters and existing custom-enum adapters;
 - Kotlin DTO/mapper/service generation for Kotlin-owned target source sets;
 - controlled multi-file contract bundles and cross-operation shared models;
 - provider/consumer contract suites and saved runtime scenarios;
