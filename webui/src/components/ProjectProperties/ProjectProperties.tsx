@@ -9,6 +9,7 @@ import type {
   ProjectDataStorePropertySnapshot,
   WorkspaceChangePreviewResponse,
 } from '../../types'
+import EnvironmentConfiguration from './EnvironmentConfiguration'
 
 interface StoreDraft {
   name: string
@@ -850,6 +851,7 @@ export default function ProjectProperties() {
                 )}
             </main>
           </div>
+          <EnvironmentConfiguration />
         </div>
       )}
     </section>

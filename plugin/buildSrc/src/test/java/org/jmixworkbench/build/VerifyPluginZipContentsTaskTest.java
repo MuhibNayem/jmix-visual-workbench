@@ -257,6 +257,7 @@ class VerifyPluginZipContentsTaskTest {
                         + "<projectService serviceImplementation=\"org.jmixworkbench.toolwindow.WorkbenchNavigationService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.EntityEventListenerService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.JmixProjectPropertiesService\" />"
+                        + "<projectService serviceImplementation=\"org.jmixworkbench.services.JmixEnvironmentConfigurationService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.RepositoryMethodRefactorService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.AggregateUpdateServiceChangeService\" />"
                         + "</extensions>"
@@ -275,7 +276,11 @@ class VerifyPluginZipContentsTaskTest {
         entries.put(
                 "webui/assets/app-abcdef.js",
                 bytes("previewProjectProfileChange();applyProjectProfileChange();"
-                        + "previewProjectProfileLifecycle();applyProjectProfileLifecycle();")
+                        + "previewProjectProfileLifecycle();applyProjectProfileLifecycle();"
+                        + "getEnvironmentWorkspace();previewEnvironmentChange();"
+                        + "applyEnvironmentChange();prepareSecretEnvironmentChange();"
+                        + "applySecretEnvironmentChange();previewEnvironmentConnection();"
+                        + "applyEnvironmentConnection();navigateEnvironmentSource();")
         );
         entries.put("webui/assets/app-abcdef.css", bytes("body{}"));
         entries.put("webui/build-info.json", bytes("{\"inputSha256\":\"" + DIGEST + "\"}"));
@@ -343,6 +348,18 @@ class VerifyPluginZipContentsTaskTest {
         );
         entries.put(
                 "org/jmixworkbench/services/JmixApplicationProfileLifecycleApplyRequest.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/JmixEnvironmentConfigurationService.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/JmixEnvironmentSecretApplyRequest.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/JmixEnvironmentNavigationRequest.class",
                 new byte[]{0, 1, 2}
         );
         entries.put(

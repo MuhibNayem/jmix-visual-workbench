@@ -99,6 +99,14 @@ import org.jmixworkbench.services.JmixApplicationPropertiesChangeApplyRequest
 import org.jmixworkbench.services.JmixApplicationPropertiesChangeRequest
 import org.jmixworkbench.services.JmixApplicationProfileLifecycleApplyRequest
 import org.jmixworkbench.services.JmixApplicationProfileLifecycleRequest
+import org.jmixworkbench.services.JmixEnvironmentChangeApplyRequest
+import org.jmixworkbench.services.JmixEnvironmentChangeRequest
+import org.jmixworkbench.services.JmixEnvironmentConnectionApplyRequest
+import org.jmixworkbench.services.JmixEnvironmentConnectionRequest
+import org.jmixworkbench.services.JmixEnvironmentConfigurationService
+import org.jmixworkbench.services.JmixEnvironmentNavigationRequest
+import org.jmixworkbench.services.JmixEnvironmentSecretApplyRequest
+import org.jmixworkbench.services.JmixEnvironmentSecretChangeRequest
 import org.jmixworkbench.services.JmixProjectPropertiesService
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
@@ -270,6 +278,38 @@ class JcefBridge(
             }
             if (action == "applyProjectProfileLifecycle") {
                 handleApplyProjectProfileLifecycle(action, requestId, payload)
+                return
+            }
+            if (action == "getEnvironmentWorkspace") {
+                handleGetEnvironmentWorkspace(action, requestId)
+                return
+            }
+            if (action == "previewEnvironmentChange") {
+                handlePreviewEnvironmentChange(action, requestId, payload)
+                return
+            }
+            if (action == "applyEnvironmentChange") {
+                handleApplyEnvironmentChange(action, requestId, payload)
+                return
+            }
+            if (action == "prepareSecretEnvironmentChange") {
+                handlePrepareSecretEnvironmentChange(action, requestId, payload)
+                return
+            }
+            if (action == "applySecretEnvironmentChange") {
+                handleApplySecretEnvironmentChange(action, requestId, payload)
+                return
+            }
+            if (action == "previewEnvironmentConnection") {
+                handlePreviewEnvironmentConnection(action, requestId, payload)
+                return
+            }
+            if (action == "applyEnvironmentConnection") {
+                handleApplyEnvironmentConnection(action, requestId, payload)
+                return
+            }
+            if (action == "navigateEnvironmentSource") {
+                handleNavigateEnvironmentSource(action, requestId, payload)
                 return
             }
             if (action == "getMenuWorkspace") {
@@ -541,12 +581,18 @@ class JcefBridge(
                 return
             }
             if (action == "undoWorkspaceChange") {
-                val response = WorkspaceHistoryService.getInstance(project).undo()
+                val response = JmixEnvironmentConfigurationService.getInstance(project)
+                    .browserSafeHistoryResponse(
+                        WorkspaceHistoryService.getInstance(project).undo(),
+                    )
                 sendResponse(action, requestId, gson.toJson(response))
                 return
             }
             if (action == "redoWorkspaceChange") {
-                val response = WorkspaceHistoryService.getInstance(project).redo()
+                val response = JmixEnvironmentConfigurationService.getInstance(project)
+                    .browserSafeHistoryResponse(
+                        WorkspaceHistoryService.getInstance(project).redo(),
+                    )
                 sendResponse(action, requestId, gson.toJson(response))
                 return
             }
@@ -999,6 +1045,310 @@ class JcefBridge(
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }
+
+    private fun handleGetEnvironmentWorkspace(
+        action: String,
+        requestId: String?,
+    ) {
+        ReadAction.nonBlocking<org.jmixworkbench.services.JmixEnvironmentWorkspace> {
+            JmixEnvironmentConfigurationService.getInstance(project).inspect()
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { result ->
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewEnvironmentChange(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = parseEnvironmentChangeRequest(action, requestId, payload) ?: return
+        ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
+            JmixEnvironmentConfigurationService.getInstance(project).previewChange(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { result ->
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePreviewEnvironmentConnection(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixEnvironmentConnectionRequest::class.java).also(
+                ::validateEnvironmentConnectionRequest,
+            )
+        }.getOrElse { error ->
+            sendResponse(action, requestId, gson.toJson(invalidEnvironmentPreview(error)))
+            return
+        }
+        ReadAction.nonBlocking<WorkspaceChangePreviewResponse> {
+            JmixEnvironmentConfigurationService.getInstance(project).previewConnection(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { result ->
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyEnvironmentConnection(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixEnvironmentConnectionApplyRequest::class.java).also { parsed ->
+                validateEnvironmentConnectionRequest(parsed.change)
+                require(parsed.expectedPlanDigest.isNotBlank())
+                require(parsed.expectedPlanDigest.length <= 128)
+            }
+        }.getOrElse { error ->
+            sendResponse(action, requestId, gson.toJson(invalidEnvironmentApplyResponse(error)))
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            JmixEnvironmentConfigurationService.getInstance(project).prepareConnection(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val result = WorkspaceChangeService.getInstance(project)
+                    .applyPrepared(prepared)
+                    .copy(planDigest = request.expectedPlanDigest.takeIf { prepared.plan.accepted })
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleApplyEnvironmentChange(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixEnvironmentChangeApplyRequest::class.java).also { parsed ->
+                validateEnvironmentChangeRequest(parsed.change)
+                require(parsed.expectedPlanDigest.isNotBlank())
+                require(parsed.expectedPlanDigest.length <= 128)
+            }
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(invalidEnvironmentApplyResponse(error)),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            JmixEnvironmentConfigurationService.getInstance(project).prepareChange(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val result = WorkspaceChangeService.getInstance(project)
+                    .applyPrepared(prepared)
+                    .copy(planDigest = request.expectedPlanDigest.takeIf { prepared.plan.accepted })
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handlePrepareSecretEnvironmentChange(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixEnvironmentSecretChangeRequest::class.java).also { parsed ->
+                require(parsed.workspaceDigest.isNotBlank())
+                require(parsed.workspaceDigest.length <= 128)
+                require(parsed.relativePath.isNotBlank())
+                require(parsed.relativePath.length <= 1_024)
+                require(parsed.variableName.isNotBlank())
+                require(parsed.variableName.length <= 200)
+                require((parsed.locator?.revisionFingerprint?.length ?: 0) <= 128)
+            }
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    org.jmixworkbench.services.JmixEnvironmentSecretPreviewResponse(
+                        accepted = false,
+                        capability = null,
+                        preview = invalidEnvironmentPreview(error),
+                    ),
+                ),
+            )
+            return
+        }
+        ApplicationManager.getApplication().invokeLater(
+            {
+                val result = JmixEnvironmentConfigurationService.getInstance(project)
+                    .prepareSecretChange(request)
+                sendResponse(action, requestId, gson.toJson(result))
+            },
+            ModalityState.any(),
+            project.disposed,
+        )
+    }
+
+    private fun handleApplySecretEnvironmentChange(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixEnvironmentSecretApplyRequest::class.java).also { parsed ->
+                require(parsed.capability.isNotBlank())
+                require(parsed.capability.length <= 100)
+                require(parsed.expectedPlanDigest.isNotBlank())
+                require(parsed.expectedPlanDigest.length <= 128)
+            }
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(invalidEnvironmentApplyResponse(error)),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedWorkspaceChange> {
+            JmixEnvironmentConfigurationService.getInstance(project).prepareSecretApply(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                val result = WorkspaceChangeService.getInstance(project)
+                    .applyPrepared(prepared)
+                    .copy(planDigest = request.expectedPlanDigest.takeIf { prepared.plan.accepted })
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun parseEnvironmentChangeRequest(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ): JmixEnvironmentChangeRequest? =
+        runCatching {
+            gson.fromJson(payload, JmixEnvironmentChangeRequest::class.java).also(
+                ::validateEnvironmentChangeRequest,
+            )
+        }.getOrElse { error ->
+            sendResponse(action, requestId, gson.toJson(invalidEnvironmentPreview(error)))
+            null
+        }
+
+    private fun validateEnvironmentChangeRequest(request: JmixEnvironmentChangeRequest) {
+        require(request.workspaceDigest.isNotBlank())
+        require(request.workspaceDigest.length <= 128)
+        require(request.relativePath.isNotBlank())
+        require(request.relativePath.length <= 1_024)
+        require(request.variableName.isNotBlank())
+        require(request.variableName.length <= 200)
+        require(request.mode.name in setOf("SET", "REMOVE"))
+        require((request.value?.length ?: 0) <= 4_096)
+        require((request.locator?.revisionFingerprint?.length ?: 0) <= 128)
+    }
+
+    private fun validateEnvironmentConnectionRequest(request: JmixEnvironmentConnectionRequest) {
+        require(request.workspaceDigest.isNotBlank())
+        require(request.workspaceDigest.length <= 128)
+        require(request.profileLocator.relativePath.isNotBlank())
+        require(request.profileLocator.relativePath.length <= 1_024)
+        require(request.profileLocator.revisionFingerprint.isNotBlank())
+        require(request.profileLocator.revisionFingerprint.length <= 128)
+        require(request.environmentFile in setOf(".env", ".env.properties"))
+    }
+
+    private fun handleNavigateEnvironmentSource(
+        action: String,
+        requestId: String?,
+        payload: JsonObject,
+    ) {
+        val request = runCatching {
+            gson.fromJson(payload, JmixEnvironmentNavigationRequest::class.java).also { parsed ->
+                require(parsed.relativePath.isNotBlank())
+                require(parsed.relativePath.length <= 1_024)
+                require(parsed.revisionFingerprint.isNotBlank())
+                require(parsed.revisionFingerprint.length <= 128)
+                require(parsed.line == null || parsed.line in 1..10_000_000)
+                require(parsed.column == null || parsed.column in 1..10_000_000)
+            }
+        }.getOrElse { error ->
+            sendResponse(
+                action,
+                requestId,
+                gson.toJson(
+                    org.jmixworkbench.services.SourceNavigationResponse(
+                        success = false,
+                        errorCode = "JVW-ENV-NAVIGATION-REQUEST-INVALID",
+                        message = error.message ?: "The environment navigation request is malformed.",
+                    ),
+                ),
+            )
+            return
+        }
+        ReadAction.nonBlocking<PreparedSourceNavigation> {
+            JmixEnvironmentConfigurationService.getInstance(project).prepareNavigation(request)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { prepared ->
+                if (prepared.success && prepared.file != null) {
+                    OpenFileDescriptor(
+                        project,
+                        prepared.file,
+                        prepared.zeroBasedLine,
+                        prepared.zeroBasedColumn,
+                    ).navigate(true)
+                }
+                sendResponse(action, requestId, gson.toJson(prepared.response()))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun invalidEnvironmentPreview(error: Throwable): WorkspaceChangePreviewResponse =
+        WorkspaceChangePreviewResponse(
+            accepted = false,
+            changeSetId = "environment:rejected",
+            label = "Environment change rejected",
+            planDigest = null,
+            files = emptyList(),
+            issues = listOf(
+                org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                    code = "JVW-ENV-REQUEST-INVALID",
+                    message = error.message ?: "The environment change request is malformed.",
+                ),
+            ),
+        )
+
+    private fun invalidEnvironmentApplyResponse(error: Throwable): WorkspaceChangeApplyResponse =
+        WorkspaceChangeApplyResponse(
+            success = false,
+            changeSetId = "environment:rejected",
+            planDigest = null,
+            filesChanged = emptyList(),
+            issues = listOf(
+                org.jmixworkbench.discovery.change.WorkspaceChangeIssue(
+                    code = "JVW-ENV-REQUEST-INVALID",
+                    message = error.message ?: "The environment change request is malformed.",
+                ),
+            ),
+        )
 
     private fun handleGetMenuWorkspace(
         action: String,

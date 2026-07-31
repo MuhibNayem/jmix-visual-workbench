@@ -42,6 +42,7 @@
 
         <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectPropertiesService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixEnvironmentConfigurationService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.ApplicationGraphService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.WorkspaceChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiWorkspaceService"/>

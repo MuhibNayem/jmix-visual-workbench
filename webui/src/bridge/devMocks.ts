@@ -4,6 +4,7 @@ import type {
   FlowUiElementSnapshot,
   FlowUiWorkspaceResponse,
   IntegrationConnectorWorkspaceResponse,
+  JmixEnvironmentWorkspace,
   JmixProjectPropertiesWorkspace,
   ProjectConfig,
   RestApiWorkspaceResponse,
@@ -120,6 +121,89 @@ export const developmentProjectPropertiesWorkspace: JmixProjectPropertiesWorkspa
   ],
   issues: [],
   snapshotDigest: 'development-project-properties',
+}
+
+export const developmentEnvironmentWorkspace: JmixEnvironmentWorkspace = {
+  files: [
+    {
+      relativePath: '.env',
+      locator: locator('.env'),
+      existing: true,
+      mutable: true,
+      importedBy: [
+        {
+          profileLocator: locator('src/main/resources/application.properties'),
+          profile: 'default',
+          modulePath: '',
+          optional: true,
+          declaration: 'optional:file:.env[.properties]',
+        },
+      ],
+      variables: [
+        {
+          name: 'SPRING_PROFILES_ACTIVE',
+          displayValue: 'dev',
+          secret: false,
+          mutable: true,
+          references: [
+            {
+              profileLocator: locator('src/main/resources/application.properties'),
+              propertyKey: 'spring.profiles.active',
+              secretProperty: false,
+            },
+          ],
+        },
+        {
+          name: 'DB_PASSWORD',
+          displayValue: '••••••••',
+          secret: true,
+          mutable: true,
+          references: [
+            {
+              profileLocator: locator('src/main/resources/application.properties'),
+              propertyKey: 'main.datasource.password',
+              secretProperty: true,
+            },
+          ],
+        },
+      ],
+    },
+  ],
+  connectionCandidates: [
+    {
+      profileLocator: locator('src/main/resources/application-dev.properties'),
+      profile: 'dev',
+      modulePath: '',
+      proposedRelativePath: '.env',
+    },
+  ],
+  activations: [
+    {
+      modulePath: '',
+      declarationLocator: locator('src/main/resources/application.properties'),
+      rawExpression: '${SPRING_PROFILES_ACTIVE:dev}',
+      source: 'IMPORTED_ENV',
+      declaredProfiles: ['dev'],
+      expandedProfiles: ['dev'],
+      missingProfiles: [],
+      runtimeProven: false,
+      explanation:
+        'Resolved from an explicitly imported environment file; launch/runtime use is not yet proven.',
+    },
+  ],
+  launchConfigurations: [
+    {
+      relativePath: '.run/Payroll.run.xml',
+      revisionFingerprint: 'development-preview',
+      activeProfiles: ['dev'],
+      environmentFiles: ['.env'],
+      runtimeProven: false,
+      explanation:
+        'This is launch-configuration evidence. Start and inspect the process before calling it runtime active.',
+    },
+  ],
+  issues: [],
+  snapshotDigest: 'development-environment-workspace',
 }
 
 export const developmentApplicationGraph: ApplicationGraphResponse = {

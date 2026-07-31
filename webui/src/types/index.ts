@@ -1239,6 +1239,117 @@ export interface JmixProjectPropertiesWorkspace {
   snapshotDigest: string
 }
 
+export interface EnvironmentReferenceSnapshot {
+  profileLocator: GraphSourceLocator
+  propertyKey: string
+  secretProperty: boolean
+}
+
+export interface EnvironmentVariableSnapshot {
+  name: string
+  displayValue: string
+  secret: boolean
+  mutable: boolean
+  references: EnvironmentReferenceSnapshot[]
+}
+
+export interface EnvironmentImportSnapshot {
+  profileLocator: GraphSourceLocator
+  profile: string
+  modulePath: string
+  optional: boolean
+  declaration: string
+}
+
+export interface EnvironmentFileSnapshot {
+  relativePath: string
+  locator?: GraphSourceLocator
+  existing: boolean
+  mutable: boolean
+  importedBy: EnvironmentImportSnapshot[]
+  variables: EnvironmentVariableSnapshot[]
+}
+
+export interface EnvironmentConnectionCandidate {
+  profileLocator: GraphSourceLocator
+  profile: string
+  modulePath: string
+  proposedRelativePath: string
+}
+
+export type ProfileActivationSource =
+  | 'STATIC'
+  | 'IMPORTED_ENV'
+  | 'PLACEHOLDER_DEFAULT'
+  | 'UNRESOLVED'
+  | 'NOT_CONFIGURED'
+
+export interface ProfileActivationSnapshot {
+  modulePath: string
+  declarationLocator?: GraphSourceLocator
+  rawExpression?: string
+  source: ProfileActivationSource
+  declaredProfiles: string[]
+  expandedProfiles: string[]
+  missingProfiles: string[]
+  runtimeProven: boolean
+  explanation: string
+}
+
+export interface LaunchProfileSnapshot {
+  relativePath: string
+  revisionFingerprint: string
+  activeProfiles: string[]
+  environmentFiles: string[]
+  runtimeProven: boolean
+  explanation: string
+}
+
+export interface EnvironmentConfigurationIssue {
+  code: string
+  message: string
+  relativePath?: string
+}
+
+export interface JmixEnvironmentWorkspace {
+  files: EnvironmentFileSnapshot[]
+  connectionCandidates: EnvironmentConnectionCandidate[]
+  activations: ProfileActivationSnapshot[]
+  launchConfigurations: LaunchProfileSnapshot[]
+  issues: EnvironmentConfigurationIssue[]
+  snapshotDigest: string
+}
+
+export interface EnvironmentConnectionRequest {
+  workspaceDigest: string
+  profileLocator: GraphSourceLocator
+  environmentFile: '.env' | '.env.properties'
+}
+
+export type EnvironmentChangeMode = 'SET' | 'REMOVE'
+
+export interface EnvironmentChangeRequest {
+  workspaceDigest: string
+  relativePath: string
+  locator?: GraphSourceLocator
+  variableName: string
+  mode: EnvironmentChangeMode
+  value?: string
+}
+
+export interface EnvironmentSecretChangeRequest {
+  workspaceDigest: string
+  relativePath: string
+  locator?: GraphSourceLocator
+  variableName: string
+}
+
+export interface EnvironmentSecretPreviewResponse {
+  accepted: boolean
+  capability?: string
+  preview: WorkspaceChangePreviewResponse
+}
+
 // ─── Connected Application Graph ─────────────────────────────────────────────
 
 export interface GraphSourceLocator {

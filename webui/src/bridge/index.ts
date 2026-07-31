@@ -41,6 +41,11 @@ import type {
   GraphSourceLocator,
   IntegrationConnectorModel,
   IntegrationConnectorWorkspaceResponse,
+  EnvironmentChangeRequest,
+  EnvironmentConnectionRequest,
+  EnvironmentSecretChangeRequest,
+  EnvironmentSecretPreviewResponse,
+  JmixEnvironmentWorkspace,
   ProjectApplicationPropertiesChangeRequest,
   ProjectApplicationProfileLifecycleRequest,
   JmixProjectPropertiesWorkspace,
@@ -89,6 +94,7 @@ import {
   developmentDmnDecisionWorkspace,
   developmentFlowUiWorkspace,
   developmentIntegrationConnectorWorkspace,
+  developmentEnvironmentWorkspace,
   developmentProjectPropertiesWorkspace,
   developmentProjectConfig,
   developmentRestApiWorkspace,
@@ -434,6 +440,157 @@ class Bridge {
                   changeSetId: `project-profile-lifecycle:development-${change.mode.toLowerCase()}`,
                   planDigest: 'development-project-profile-lifecycle-digest',
                   filesChanged: [changedPath],
+                  issues: [],
+                }
+              }
+              case 'getEnvironmentWorkspace':
+                return developmentEnvironmentWorkspace
+              case 'navigateEnvironmentSource':
+                return {
+                  success: true,
+                  errorCode: null,
+                  message: 'Environment source token verified.',
+                }
+              case 'previewEnvironmentChange': {
+                const change = payload as EnvironmentChangeRequest
+                const file = developmentEnvironmentWorkspace.files.find(
+                  candidate => candidate.relativePath === change.relativePath,
+                )
+                if (!file || change.workspaceDigest !== developmentEnvironmentWorkspace.snapshotDigest) {
+                  return {
+                    accepted: false,
+                    changeSetId: 'environment:development-rejected',
+                    label: 'Environment change rejected',
+                    planDigest: null,
+                    files: [],
+                    issues: [{
+                      code: 'JVW-ENV-WORKSPACE-STALE',
+                      message: 'The development environment workspace is stale.',
+                    }],
+                  }
+                }
+                return {
+                  accepted: true,
+                  changeSetId: `environment:${change.mode.toLowerCase()}:development`,
+                  label: `${change.mode === 'SET' ? 'Update' : 'Remove'} ${change.variableName}`,
+                  planDigest: 'development-environment-change-digest',
+                  files: [{
+                    relativePath: file.relativePath,
+                    mode: file.existing ? 'MODIFY' : 'CREATE',
+                    beforeFingerprint: file.locator?.revisionFingerprint,
+                    afterFingerprint: 'development-environment-after',
+                    originalContent: null,
+                    resultContent: `${change.variableName}=value selected in editor`,
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'prepareSecretEnvironmentChange': {
+                const change = payload as EnvironmentSecretChangeRequest
+                return {
+                  accepted: true,
+                  capability: 'development-secret-capability',
+                  preview: {
+                    accepted: true,
+                    changeSetId: 'environment:set:development-secret',
+                    label: `Securely update ${change.variableName}`,
+                    planDigest: 'development-secret-environment-digest',
+                    files: [{
+                      relativePath: change.relativePath,
+                      mode: 'MODIFY',
+                      beforeFingerprint: change.locator?.revisionFingerprint,
+                      afterFingerprint: 'development-environment-secret-after',
+                      originalContent: null,
+                      resultContent: `${change.variableName}=••••••••`,
+                      appliedEditCount: 1,
+                    }],
+                    issues: [],
+                  },
+                }
+              }
+              case 'previewEnvironmentConnection': {
+                const change = payload as EnvironmentConnectionRequest
+                return {
+                  accepted: true,
+                  changeSetId: 'environment-connect:development',
+                  label: `Connect ${change.environmentFile}`,
+                  planDigest: 'development-environment-connection-digest',
+                  files: [{
+                    relativePath: change.profileLocator.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: change.profileLocator.revisionFingerprint,
+                    afterFingerprint: 'development-environment-connection-after',
+                    originalContent: null,
+                    resultContent:
+                      `spring.config.import += optional:file:${change.environmentFile}[.properties]`,
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applyEnvironmentConnection':
+                return {
+                  success:
+                    payload.expectedPlanDigest === 'development-environment-connection-digest',
+                  changeSetId: 'environment-connect:development',
+                  planDigest: 'development-environment-connection-digest',
+                  filesChanged: [payload.change.profileLocator.relativePath],
+                  issues: [],
+                }
+              case 'applyEnvironmentChange':
+              case 'applySecretEnvironmentChange': {
+                const secret = action === 'applySecretEnvironmentChange'
+                const change = secret ? undefined : payload.change as EnvironmentChangeRequest
+                const expected = secret
+                  ? 'development-secret-environment-digest'
+                  : 'development-environment-change-digest'
+                if (payload.expectedPlanDigest !== expected) {
+                  return {
+                    success: false,
+                    changeSetId: 'environment:development-rejected',
+                    planDigest: null,
+                    filesChanged: [],
+                    issues: [{
+                      code: 'JVW-CHANGE-PREVIEW-STALE',
+                      message: 'The approved development environment preview is stale.',
+                    }],
+                  }
+                }
+                if (change) {
+                  const file = developmentEnvironmentWorkspace.files.find(
+                    candidate => candidate.relativePath === change.relativePath,
+                  )
+                  if (file) {
+                    const index = file.variables.findIndex(variable =>
+                      variable.name === change.variableName,
+                    )
+                    if (change.mode === 'REMOVE') {
+                      if (index >= 0) file.variables.splice(index, 1)
+                    } else if (index >= 0) {
+                      file.variables[index].displayValue = change.value ?? ''
+                    } else {
+                      file.variables.push({
+                        name: change.variableName,
+                        displayValue: change.value ?? '',
+                        secret: false,
+                        mutable: true,
+                        references: [],
+                      })
+                    }
+                  }
+                }
+                developmentEnvironmentWorkspace.snapshotDigest =
+                  `development-environment-${Date.now()}`
+                return {
+                  success: true,
+                  changeSetId: secret
+                    ? 'environment:set:development-secret'
+                    : `environment:${change?.mode.toLowerCase()}:development`,
+                  planDigest: expected,
+                  filesChanged: [
+                    change?.relativePath ?? developmentEnvironmentWorkspace.files[0].relativePath,
+                  ],
                   issues: [],
                 }
               }
@@ -2903,6 +3060,49 @@ ${javaMethods}
     })
   }
 
+  getEnvironmentWorkspace() {
+    return this.request<JmixEnvironmentWorkspace>('getEnvironmentWorkspace')
+  }
+
+  previewEnvironmentChange(change: EnvironmentChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewEnvironmentChange', change)
+  }
+
+  applyEnvironmentChange(change: EnvironmentChangeRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyEnvironmentChange', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  prepareSecretEnvironmentChange(change: EnvironmentSecretChangeRequest) {
+    return this.request<EnvironmentSecretPreviewResponse>(
+      'prepareSecretEnvironmentChange',
+      change,
+    )
+  }
+
+  applySecretEnvironmentChange(capability: string, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applySecretEnvironmentChange', {
+      capability,
+      expectedPlanDigest,
+    })
+  }
+
+  previewEnvironmentConnection(change: EnvironmentConnectionRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewEnvironmentConnection', change)
+  }
+
+  applyEnvironmentConnection(
+    change: EnvironmentConnectionRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>('applyEnvironmentConnection', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
   getApplicationGraph(forceRefresh: boolean = false) {
     return this.request<ApplicationGraphResponse>('getApplicationGraph', { forceRefresh })
   }
@@ -3061,6 +3261,10 @@ ${javaMethods}
 
   navigateToSource(locator: GraphSourceLocator) {
     return this.request<SourceNavigationResponse>('navigateToSource', locator)
+  }
+
+  navigateEnvironmentSource(locator: GraphSourceLocator) {
+    return this.request<SourceNavigationResponse>('navigateEnvironmentSource', locator)
   }
 
   openWorkbenchSurface(

@@ -244,6 +244,21 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         );
         requireEntry(
                 contents,
+                "org/jmixworkbench/services/JmixEnvironmentConfigurationService.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/services/JmixEnvironmentSecretApplyRequest.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/services/JmixEnvironmentNavigationRequest.class",
+                archive
+        );
+        requireEntry(
+                contents,
                 "org/jmixworkbench/bridge/JcefBridge.class",
                 archive
         );
@@ -330,6 +345,13 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 descriptor,
                 "projectService",
                 "serviceImplementation",
+                "org.jmixworkbench.services.JmixEnvironmentConfigurationService",
+                archive
+        );
+        requireExtensionRegistration(
+                descriptor,
+                "projectService",
+                "serviceImplementation",
                 "org.jmixworkbench.services.RepositoryMethodRefactorService",
                 archive
         );
@@ -392,6 +414,14 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         requireContains(bundledJavaScript.toString(), "applyProjectProfileChange", archive);
         requireContains(bundledJavaScript.toString(), "previewProjectProfileLifecycle", archive);
         requireContains(bundledJavaScript.toString(), "applyProjectProfileLifecycle", archive);
+        requireContains(bundledJavaScript.toString(), "getEnvironmentWorkspace", archive);
+        requireContains(bundledJavaScript.toString(), "previewEnvironmentChange", archive);
+        requireContains(bundledJavaScript.toString(), "applyEnvironmentChange", archive);
+        requireContains(bundledJavaScript.toString(), "prepareSecretEnvironmentChange", archive);
+        requireContains(bundledJavaScript.toString(), "applySecretEnvironmentChange", archive);
+        requireContains(bundledJavaScript.toString(), "previewEnvironmentConnection", archive);
+        requireContains(bundledJavaScript.toString(), "applyEnvironmentConnection", archive);
+        requireContains(bundledJavaScript.toString(), "navigateEnvironmentSource", archive);
 
         String buildInfo = text(contents.get("webui/build-info.json"));
         Matcher digest = DIGEST_PATTERN.matcher(buildInfo);

@@ -12,6 +12,11 @@ properties and data-store contracts:
   and additional stores, profile-aware configuration, environment
   placeholders, schema-management modes, generic databases, driver
   dependencies and connection testing.
+- [External Configuration with `.env`](https://docs.jmix.io/jmix/studio/external-config-with-env.html)
+  defines the Studio workflow for connecting project-local environment files.
+- [Spring Boot external configuration](https://docs.spring.io/spring-boot/reference/features/external-config.html)
+  and [profiles](https://docs.spring.io/spring-boot/reference/features/profiles.html)
+  define import precedence, placeholders, profile groups and includes.
 
 This workbench must support those workflows without executing untrusted Gradle
 scripts merely to render the editor and without moving credentials into JCEF.
@@ -97,6 +102,41 @@ post-write absence verification, injected-failure rollback, undo recreation,
 redo deletion and stale restored-source rejection are enforced for all future
 visual features, not only Project Configuration.
 
+## Implemented external environment and activation contract
+
+Project Configuration now includes a continuous responsive three-region
+environment workspace rather than a disconnected tab:
+
+- only project-local `.env` and `.env.properties` files explicitly imported by
+  an indexed `spring.config.import` declaration are inventoried;
+- unsupported, absolute, dynamic, traversing or ambiguous imports remain
+  visible as read-only findings and cannot become mutation targets;
+- comments, blank lines, `export`, quoted/unquoted values and CR/LF/CRLF are
+  parsed with exact ranges; duplicates and unsupported syntax fail closed;
+- non-secret variables support revision-bound add, update and guarded removal;
+  missing imported files are created only when the first variable is approved;
+- references from application properties are shown, and referenced variables
+  cannot be removed before their consumers are changed;
+- profiles without an environment import can add
+  `optional:file:.env[.properties]` through a focused, source-preserving
+  preview;
+- active-profile expressions, placeholder defaults, imported values, profile
+  groups, includes, missing profile files and cycles are explained without
+  claiming that configuration evidence proves a running process;
+- IntelliJ `.run`, `.idea/runConfigurations` and workspace launch evidence is
+  indexed across registered multi-module roots and explicitly labelled as
+  launch evidence rather than runtime proof.
+
+Secret values never enter JCEF. Secret selection occurs in a native IntelliJ
+`JBPasswordField`; the backend retains a single-use, five-minute, memory-only
+capability and clears the dialog character buffer. JCEF receives only a
+redacted focused preview. Browser-visible workspace, source, launch,
+change-set, plan and history revisions use per-project HMAC tokens instead of
+raw content hashes, preventing weak-secret hash-oracle attacks. Environment
+source opening uses a dedicated native verifier that validates the opaque token
+against the current bounded workspace and consumes the real fingerprint only
+inside IntelliJ. Forged, stale and cross-workspace tokens fail closed.
+
 ## Current verification
 
 - Pure parser tests cover profiles, locales, multi-store discovery, undeclared
@@ -107,12 +147,12 @@ visual features, not only Project Configuration.
   Mutation fixtures additionally prove focused secret-safe preview, exact
   formatting preservation, deterministic append, validation, indexed-target
   ownership, stale/digest rejection, atomic apply and exact undo/redo.
-- Seventeen focused parser/integration tests pass independently on IDEA 2025.3
+- Twenty-three focused parser/integration tests pass independently on IDEA 2025.3
   and IDEA 2026.2 with zero skips/failures/errors.
 - Build-owned package-contract tests require the profile request/apply models,
   backend bridge, service, native Tools action and both frontend action names
   in every installable ZIP.
-- The final clean release gate passes 371 regression tests plus 3 host smoke
+- The final clean release gate passes 377 regression tests plus 3 host smoke
   tests independently on IDEA 2025.3 and IDEA 2026.2 with zero
   failures/errors/skips. Both Plugin Verifier lanes report `Compatible`, and
   exact nested-ZIP inspection passes.
@@ -121,19 +161,22 @@ visual features, not only Project Configuration.
   or body overflow, no overflowing workspace regions or controls, and at least
   40-pixel visible workspace controls. Default/environment comparison, create
   review/apply, deletion review/apply, active-profile protection and completion
-  feedback work at 320 pixels with no console warning or error.
+  feedback work at 320 pixels with no console warning or error. The external
+  environment workspace separately passes 1280/320 inspection with exact
+  viewport width, no horizontal overflow, no sub-40-pixel controls and working
+  opaque-token source navigation.
 - The build-owned Node runtime and immutable web-input fingerprint produce the
   packaged UI; no system Node installation is required.
 
 Release ZIP SHA-256:
 
 - IDEA 2025.3:
-  `c3f7d266eb9757c28847c3a39814fd9db69eb2a5e7bea363f18a09ec40983203`
+  `40e59a2a1111df9d062cf5446bef6cede85bfc063be21341945bba75d7aa6ced`
 - IDEA 2026.2:
-  `fcf9f168cb8001229dd6eb1b55fddc2d5bba902ff490702575d481df22d8b59f`
+  `7bb66c1efd0cafb06607dfa39584f4ba536bc615dff28c82272b4660ac6e83a1`
 
 Both archives contain web input SHA-256
-`2db1f41b4f6cccf583f019a3d153cc016aede3c782db27b7cf6ffa9edfe53564`.
+`7638031f4d917734a867dc00d5638f372f7942edac0228cbbe24bbb7ac5a8a3d`.
 
 ## Required before STRONG
 
@@ -149,8 +192,9 @@ rollback and IntelliJ undo:
    convention plugins, version catalogs and composite builds;
 4. complete locale matrix, fallback and format-string editing beyond the
    implemented profile locale list;
-5. external `.env` mutation, runtime activation validation and profile-group
-   semantics beyond the implemented profile editing, comparison and lifecycle;
+5. attach-to-process runtime activation proof and safe operating-system or
+   deployment-environment reconciliation beyond the implemented `.env`,
+   profile-group/include and IntelliJ launch-evidence workflows;
 6. main/additional/generic data-store create and removal, dependency and
    configuration-class changes, schema-management modes, multi-DB identifier
    policies and protected secret references beyond the implemented
