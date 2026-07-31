@@ -8,6 +8,10 @@ import com.acme.cert.integration.LoanEventHandler;
 import com.acme.cert.integration.LoanEventPublisher;
 import com.acme.cert.integration.PayrollEventConsumer;
 import com.acme.cert.integration.PayrollEventPublisher;
+import com.acme.cert.integration.SecureIdentityClient;
+import com.acme.cert.integration.SecureIdentityHostnameMismatchClient;
+import com.acme.cert.integration.SecureIdentityNoClientCertificateClient;
+import com.acme.cert.integration.SecureIdentityUntrustedServerClient;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -33,6 +37,8 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.ssl.DefaultSslBundleRegistry;
+import org.springframework.boot.ssl.SslBundles;
 import org.springframework.beans.factory.FactoryBean;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
@@ -53,6 +59,16 @@ import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.oauth2.client.AuthorizedClientServiceOAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.ClientCredentialsOAuth2AuthorizedClientProvider;
+import org.springframework.security.oauth2.client.InMemoryOAuth2AuthorizedClientService;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
+import org.springframework.security.oauth2.client.registration.ClientRegistration;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.registration.InMemoryClientRegistrationRepository;
+import org.springframework.security.oauth2.core.AuthorizationGrantType;
+import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.web.client.RestClient;
 
@@ -90,7 +106,11 @@ import java.util.function.BooleanSupplier;
         LoanEventHandler.class,
         LoanEventPublisher.class,
         PayrollEventConsumer.class,
-        PayrollEventPublisher.class
+        PayrollEventPublisher.class,
+        SecureIdentityClient.class,
+        SecureIdentityHostnameMismatchClient.class,
+        SecureIdentityNoClientCertificateClient.class,
+        SecureIdentityUntrustedServerClient.class
 })
 public class IntegrationRuntimeCertificationApplication {
     private static final String KAFKA_TOPIC = "jvw-cert-loan-events";
@@ -216,6 +236,42 @@ public class IntegrationRuntimeCertificationApplication {
     }
 
     @Bean
+    ClientRegistrationRepository clientRegistrationRepository(RuntimeTarget target) {
+        ClientRegistration registration = ClientRegistration
+                .withRegistrationId("cert-identity")
+                .clientId(target.oauthClientId())
+                .clientSecret(target.oauthClientSecret())
+                .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
+                .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
+                .tokenUri(target.wiremockUrl() + "/oauth2/token")
+                .scope("identity.read")
+                .build();
+        return new InMemoryClientRegistrationRepository(registration);
+    }
+
+    @Bean(name = "authorizedClientService")
+    OAuth2AuthorizedClientService authorizedClientService(
+            ClientRegistrationRepository registrations
+    ) {
+        return new InMemoryOAuth2AuthorizedClientService(registrations);
+    }
+
+    @Bean(name = "authorizedClientManager")
+    OAuth2AuthorizedClientManager authorizedClientManager(
+            ClientRegistrationRepository registrations,
+            OAuth2AuthorizedClientService authorizedClientService
+    ) {
+        ClientCredentialsOAuth2AuthorizedClientProvider provider =
+                new ClientCredentialsOAuth2AuthorizedClientProvider();
+        provider.setClockSkew(Duration.ZERO);
+        AuthorizedClientServiceOAuth2AuthorizedClientManager manager =
+                new AuthorizedClientServiceOAuth2AuthorizedClientManager(
+                        registrations, authorizedClientService);
+        manager.setAuthorizedClientProvider(provider);
+        return manager;
+    }
+
+    @Bean
     RuntimeTarget runtimeTarget() {
         return RuntimeTarget.fromEnvironment();
     }
@@ -268,6 +324,39 @@ public class IntegrationRuntimeCertificationApplication {
         properties.put("spring.rabbitmq.host", target.rabbitHost());
         properties.put("spring.rabbitmq.port", target.rabbitPort());
         properties.put("spring.kafka.admin.fail-fast", "true");
+        properties.put("cert.identity.address", target.mtlsUrl() + "/identity");
+        properties.put(
+                "cert.identity.hostname-mismatch-address",
+                target.mtlsHostnameMismatchUrl() + "/identity");
+        properties.put("cert.identity.registration-id", "cert-identity");
+        properties.put("cert.identity.principal-name", "jvw-runtime-application");
+        properties.put("cert.identity.ssl-bundle", "cert-client");
+        properties.put("cert.identity.trust-only-ssl-bundle", "cert-trust-only");
+        properties.put("cert.identity.untrusted-ssl-bundle", "cert-untrusted");
+        addJksBundle(
+                properties,
+                "cert-client",
+                target.tlsDirectory().resolve("client.p12"),
+                target.tlsDirectory().resolve("client-trust.p12"),
+                target.mtlsPassword());
+        addJksBundle(
+                properties,
+                "cert-client-rotated",
+                target.tlsDirectory().resolve("rotated-client.p12"),
+                target.tlsDirectory().resolve("client-trust.p12"),
+                target.mtlsPassword());
+        addJksBundle(
+                properties,
+                "cert-trust-only",
+                null,
+                target.tlsDirectory().resolve("client-trust.p12"),
+                target.mtlsPassword());
+        addJksBundle(
+                properties,
+                "cert-untrusted",
+                target.tlsDirectory().resolve("client.p12"),
+                target.tlsDirectory().resolve("untrusted-trust.p12"),
+                target.mtlsPassword());
 
         long startedAt = System.nanoTime();
         try (ConfigurableApplicationContext context = new SpringApplicationBuilder(
@@ -279,6 +368,24 @@ public class IntegrationRuntimeCertificationApplication {
             evidence.write(target.evidenceFile());
             System.out.println("JVW_INTEGRATION_CERTIFICATION_OK " + evidence.toJson());
         }
+    }
+
+    private static void addJksBundle(
+            Map<String, Object> properties,
+            String name,
+            Path keyStore,
+            Path trustStore,
+            String password
+    ) {
+        String prefix = "spring.ssl.bundle.jks." + name + ".";
+        if (keyStore != null) {
+            properties.put(prefix + "keystore.location", keyStore.toUri().toString());
+            properties.put(prefix + "keystore.password", password);
+            properties.put(prefix + "keystore.type", "PKCS12");
+        }
+        properties.put(prefix + "truststore.location", trustStore.toUri().toString());
+        properties.put(prefix + "truststore.password", password);
+        properties.put(prefix + "truststore.type", "PKCS12");
     }
 
     private static CertificationEvidence certify(
@@ -293,6 +400,14 @@ public class IntegrationRuntimeCertificationApplication {
         DocumentDownloadConnector documentDownload =
                 context.getBean(DocumentDownloadConnector.class);
         HrmsPartnerClient hrmsPartnerClient = context.getBean(HrmsPartnerClient.class);
+        SecureIdentityClient secureIdentityClient =
+                context.getBean(SecureIdentityClient.class);
+        SecureIdentityNoClientCertificateClient noClientCertificateClient =
+                context.getBean(SecureIdentityNoClientCertificateClient.class);
+        SecureIdentityUntrustedServerClient untrustedServerClient =
+                context.getBean(SecureIdentityUntrustedServerClient.class);
+        SecureIdentityHostnameMismatchClient hostnameMismatchClient =
+                context.getBean(SecureIdentityHostnameMismatchClient.class);
         SftpRemoteFileTemplate sftpTemplate =
                 context.getBean(SftpRemoteFileTemplate.class);
         RabbitTemplate rabbitTemplate = context.getBean(RabbitTemplate.class);
@@ -401,6 +516,14 @@ public class IntegrationRuntimeCertificationApplication {
                     "HTTP circuit breaker did not fail fast");
             require(wireMockRequestCount(target) == requestsBeforeFailFast,
                     "Open HTTP circuit breaker still called the failed provider");
+
+            OAuthMtlsCertification oauthMtls = certifyOAuthMtls(
+                    context,
+                    target,
+                    secureIdentityClient,
+                    noClientCertificateClient,
+                    untrustedServerClient,
+                    hostnameMismatchClient);
 
             byte[] document = "certified-payroll-document".getBytes(StandardCharsets.UTF_8);
             documentUpload.upload("payroll-proof.txt", document);
@@ -522,9 +645,73 @@ public class IntegrationRuntimeCertificationApplication {
                     inbound.rabbitScenarios(),
                     inbound.missingIdentityQuarantined(),
                     inbound.conflictingIdentityRejected(),
-                    inbound.transactionalEffectsCertified()
+                    inbound.transactionalEffectsCertified(),
+                    oauthMtls.oauth2RenewalCertified(),
+                    oauthMtls.invalidTokenEvictionCertified(),
+                    oauthMtls.clientCertificateCertified(),
+                    oauthMtls.negativePathsCertified(),
+                    oauthMtls.hotRotationCertified()
             );
         }
+    }
+
+    private static OAuthMtlsCertification certifyOAuthMtls(
+            ConfigurableApplicationContext context,
+            RuntimeTarget target,
+            SecureIdentityClient secureIdentityClient,
+            SecureIdentityNoClientCertificateClient noClientCertificateClient,
+            SecureIdentityUntrustedServerClient untrustedServerClient,
+            SecureIdentityHostnameMismatchClient hostnameMismatchClient
+    ) throws Exception {
+        configureOAuthMtlsWireMock(target);
+
+        require("identity-accepted".equals(secureIdentityClient.exchange()),
+                "Generated OAuth2/mTLS client did not complete its initial request");
+        Thread.sleep(2_300);
+        requireThrowsRuntime(
+                secureIdentityClient::exchange,
+                "The provider's invalid-token response was not surfaced");
+        require("identity-accepted".equals(secureIdentityClient.exchange()),
+                "Invalid OAuth2 authorization was not evicted and reacquired");
+        require(wireMockRequestCount(target, "POST", "/oauth2/token") == 3,
+                "OAuth2 expiry and invalid-token eviction did not obtain exactly three tokens");
+        require(wireMockRequestCount(target, "GET", "/identity") == 3,
+                "OAuth2/mTLS lifecycle did not produce the expected provider requests");
+
+        requireThrowsRuntime(
+                noClientCertificateClient::exchange,
+                "mTLS provider accepted a generated client without a client certificate");
+        requireThrowsRuntime(
+                untrustedServerClient::exchange,
+                "Generated client accepted a server outside its configured trust roots");
+        requireThrowsRuntime(
+                hostnameMismatchClient::exchange,
+                "Generated client disabled TLS hostname verification");
+        require(wireMockRequestCount(target, "GET", "/identity") == 3,
+                "TLS-negative requests reached the provider HTTP layer");
+
+        Object clientBeforeRotation = privateField(secureIdentityClient, "restClient");
+        SslBundles sslBundles = context.getBean(SslBundles.class);
+        require(sslBundles instanceof DefaultSslBundleRegistry,
+                "Spring Boot SSL bundle registry cannot prove runtime rotation");
+        ((DefaultSslBundleRegistry) sslBundles).updateBundle(
+                "cert-client",
+                sslBundles.getBundle("cert-client-rotated"));
+        Object clientAfterRotation = privateField(secureIdentityClient, "restClient");
+        require(clientAfterRotation != clientBeforeRotation,
+                "Generated connector did not atomically rebuild after SSL bundle rotation");
+        require("identity-accepted".equals(secureIdentityClient.exchange()),
+                "Rotated client certificate could not call the mTLS provider");
+        require(wireMockRequestCount(target, "GET", "/identity") == 4,
+                "Rotated mTLS request did not reach the provider");
+
+        return new OAuthMtlsCertification(true, true, true, true, true);
+    }
+
+    private static Object privateField(Object target, String name) throws Exception {
+        var field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
     }
 
     private static InboundCertification certifyInbound(
@@ -812,25 +999,7 @@ public class IntegrationRuntimeCertificationApplication {
     private static void configureWireMock(RuntimeTarget target, WireMockMode mode)
             throws Exception {
         HttpClient client = HttpClient.newHttpClient();
-        HttpRequest reset = HttpRequest.newBuilder(
-                        URI.create(target.wiremockUrl() + "/__admin/mappings"))
-                .timeout(Duration.ofSeconds(5))
-                .DELETE()
-                .build();
-        HttpResponse<String> resetResponse =
-                client.send(reset, HttpResponse.BodyHandlers.ofString());
-        require(resetResponse.statusCode() >= 200 && resetResponse.statusCode() < 300,
-                "WireMock mappings could not be reset");
-        HttpRequest resetRequests = HttpRequest.newBuilder(
-                        URI.create(target.wiremockUrl() + "/__admin/requests"))
-                .timeout(Duration.ofSeconds(5))
-                .DELETE()
-                .build();
-        HttpResponse<String> resetRequestsResponse =
-                client.send(resetRequests, HttpResponse.BodyHandlers.ofString());
-        require(resetRequestsResponse.statusCode() >= 200
-                        && resetRequestsResponse.statusCode() < 300,
-                "WireMock request journal could not be reset");
+        resetWireMock(client, target);
 
         if (mode == WireMockMode.TRANSIENT_FAILURE) {
             addWireMockMapping(client, target, "{"
@@ -859,6 +1028,94 @@ public class IntegrationRuntimeCertificationApplication {
                 + delay + "}}");
     }
 
+    private static void configureOAuthMtlsWireMock(RuntimeTarget target)
+            throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        resetWireMock(client, target);
+        String credentials = "\"basicAuthCredentials\":{\"username\":\""
+                + jsonEscape(target.oauthClientId()) + "\",\"password\":\""
+                + jsonEscape(target.oauthClientSecret()) + "\"}";
+        String tokenRequest = "\"request\":{\"method\":\"POST\","
+                + "\"urlPath\":\"/oauth2/token\"," + credentials + ","
+                + "\"bodyPatterns\":[{\"contains\":\"grant_type=client_credentials\"}]}";
+        String tokenHeaders = "\"headers\":{\"Content-Type\":\"application/json\"}";
+        addWireMockMapping(client, target, "{"
+                + "\"scenarioName\":\"oauth-token-lifecycle\","
+                + "\"requiredScenarioState\":\"Started\","
+                + "\"newScenarioState\":\"expired-token-issued\","
+                + tokenRequest + ","
+                + "\"response\":{\"status\":200," + tokenHeaders + ","
+                + "\"body\":\"{\\\"access_token\\\":\\\"token-expiring\\\","
+                + "\\\"token_type\\\":\\\"Bearer\\\",\\\"expires_in\\\":2}\"}}");
+        addWireMockMapping(client, target, "{"
+                + "\"scenarioName\":\"oauth-token-lifecycle\","
+                + "\"requiredScenarioState\":\"expired-token-issued\","
+                + "\"newScenarioState\":\"rejected-token-issued\","
+                + tokenRequest + ","
+                + "\"response\":{\"status\":200," + tokenHeaders + ","
+                + "\"body\":\"{\\\"access_token\\\":\\\"token-rejected\\\","
+                + "\\\"token_type\\\":\\\"Bearer\\\",\\\"expires_in\\\":300}\"}}");
+        addWireMockMapping(client, target, "{"
+                + "\"scenarioName\":\"oauth-token-lifecycle\","
+                + "\"requiredScenarioState\":\"rejected-token-issued\","
+                + "\"newScenarioState\":\"stable-token-issued\","
+                + tokenRequest + ","
+                + "\"response\":{\"status\":200," + tokenHeaders + ","
+                + "\"body\":\"{\\\"access_token\\\":\\\"token-valid\\\","
+                + "\\\"token_type\\\":\\\"Bearer\\\",\\\"expires_in\\\":300}\"}}");
+        addWireMockMapping(client, target, "{"
+                + "\"scenarioName\":\"oauth-token-lifecycle\","
+                + "\"requiredScenarioState\":\"stable-token-issued\","
+                + tokenRequest + ","
+                + "\"response\":{\"status\":200," + tokenHeaders + ","
+                + "\"body\":\"{\\\"access_token\\\":\\\"token-valid\\\","
+                + "\\\"token_type\\\":\\\"Bearer\\\",\\\"expires_in\\\":300}\"}}");
+
+        addWireMockMapping(client, target, "{"
+                + "\"priority\":1,"
+                + "\"request\":{\"method\":\"GET\",\"urlPath\":\"/identity\","
+                + "\"headers\":{\"Authorization\":{\"equalTo\":\"Bearer token-expiring\"}}},"
+                + "\"response\":{\"status\":200,\"body\":\"identity-accepted\"}}");
+        addWireMockMapping(client, target, "{"
+                + "\"priority\":1,"
+                + "\"request\":{\"method\":\"GET\",\"urlPath\":\"/identity\","
+                + "\"headers\":{\"Authorization\":{\"equalTo\":\"Bearer token-rejected\"}}},"
+                + "\"response\":{\"status\":401,\"headers\":{"
+                + "\"WWW-Authenticate\":\"Bearer error=\\\"invalid_token\\\"\"}}}");
+        addWireMockMapping(client, target, "{"
+                + "\"priority\":1,"
+                + "\"request\":{\"method\":\"GET\",\"urlPath\":\"/identity\","
+                + "\"headers\":{\"Authorization\":{\"equalTo\":\"Bearer token-valid\"}}},"
+                + "\"response\":{\"status\":200,\"body\":\"identity-accepted\"}}");
+        addWireMockMapping(client, target, "{"
+                + "\"priority\":10,"
+                + "\"request\":{\"method\":\"GET\",\"urlPath\":\"/identity\"},"
+                + "\"response\":{\"status\":403}}");
+    }
+
+    private static void resetWireMock(HttpClient client, RuntimeTarget target)
+            throws Exception {
+        HttpRequest reset = HttpRequest.newBuilder(
+                        URI.create(target.wiremockUrl() + "/__admin/mappings"))
+                .timeout(Duration.ofSeconds(5))
+                .DELETE()
+                .build();
+        HttpResponse<String> resetResponse =
+                client.send(reset, HttpResponse.BodyHandlers.ofString());
+        require(resetResponse.statusCode() >= 200 && resetResponse.statusCode() < 300,
+                "WireMock mappings could not be reset");
+        HttpRequest resetRequests = HttpRequest.newBuilder(
+                        URI.create(target.wiremockUrl() + "/__admin/requests"))
+                .timeout(Duration.ofSeconds(5))
+                .DELETE()
+                .build();
+        HttpResponse<String> resetRequestsResponse =
+                client.send(resetRequests, HttpResponse.BodyHandlers.ofString());
+        require(resetRequestsResponse.statusCode() >= 200
+                        && resetRequestsResponse.statusCode() < 300,
+                "WireMock request journal could not be reset");
+    }
+
     private static void addWireMockMapping(
             HttpClient client,
             RuntimeTarget target,
@@ -877,7 +1134,16 @@ public class IntegrationRuntimeCertificationApplication {
     }
 
     private static int wireMockRequestCount(RuntimeTarget target) throws Exception {
-        String body = "{\"method\":\"POST\",\"url\":\"/hrms/payroll\"}";
+        return wireMockRequestCount(target, "POST", "/hrms/payroll");
+    }
+
+    private static int wireMockRequestCount(
+            RuntimeTarget target,
+            String method,
+            String url
+    ) throws Exception {
+        String body = "{\"method\":\"" + jsonEscape(method)
+                + "\",\"url\":\"" + jsonEscape(url) + "\"}";
         HttpRequest countRequest = HttpRequest.newBuilder(
                         URI.create(target.wiremockUrl() + "/__admin/requests/count"))
                 .timeout(Duration.ofSeconds(5))
@@ -893,6 +1159,10 @@ public class IntegrationRuntimeCertificationApplication {
                 .matcher(response.body());
         require(matcher.find(), "WireMock request count response was malformed");
         return Integer.parseInt(matcher.group(1));
+    }
+
+    private static String jsonEscape(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     enum WireMockMode {
@@ -1045,6 +1315,12 @@ public class IntegrationRuntimeCertificationApplication {
             String sftpUsername,
             String sftpPassword,
             String wiremockUrl,
+            String mtlsUrl,
+            String mtlsHostnameMismatchUrl,
+            Path tlsDirectory,
+            String mtlsPassword,
+            String oauthClientId,
+            String oauthClientSecret,
             Path evidenceFile,
             String cellId
     ) {
@@ -1062,6 +1338,12 @@ public class IntegrationRuntimeCertificationApplication {
                     required("CERT_SFTP_USERNAME"),
                     required("CERT_SFTP_PASSWORD"),
                     required("CERT_WIREMOCK_URL"),
+                    required("CERT_MTLS_URL"),
+                    required("CERT_MTLS_HOSTNAME_MISMATCH_URL"),
+                    Path.of(required("CERT_TLS_DIR")).toAbsolutePath().normalize(),
+                    required("CERT_MTLS_PASSWORD"),
+                    required("CERT_OAUTH_CLIENT_ID"),
+                    required("CERT_OAUTH_CLIENT_SECRET"),
                     Path.of(required("CERT_EVIDENCE_FILE")).toAbsolutePath().normalize(),
                     required("CERT_CELL_ID")
             );
@@ -1082,6 +1364,15 @@ public class IntegrationRuntimeCertificationApplication {
             boolean missingIdentityQuarantined,
             boolean conflictingIdentityRejected,
             boolean transactionalEffectsCertified
+    ) {
+    }
+
+    record OAuthMtlsCertification(
+            boolean oauth2RenewalCertified,
+            boolean invalidTokenEvictionCertified,
+            boolean clientCertificateCertified,
+            boolean negativePathsCertified,
+            boolean hotRotationCertified
     ) {
     }
 
@@ -1107,7 +1398,12 @@ public class IntegrationRuntimeCertificationApplication {
             int inboundRabbitScenarios,
             boolean missingIdentityQuarantined,
             boolean conflictingIdentityRejected,
-            boolean transactionalEffectsCertified
+            boolean transactionalEffectsCertified,
+            boolean oauth2RenewalCertified,
+            boolean invalidTokenEvictionCertified,
+            boolean mtlsClientCertificateCertified,
+            boolean mtlsNegativePathsCertified,
+            boolean mtlsHotRotationCertified
     ) {
         void write(Path file) throws Exception {
             Files.createDirectories(file.getParent());
@@ -1116,7 +1412,7 @@ public class IntegrationRuntimeCertificationApplication {
 
         String toJson() {
             return "{"
-                    + "\"schemaVersion\":\"integration-runtime-certification-v3\","
+                    + "\"schemaVersion\":\"integration-runtime-certification-v4\","
                     + "\"cellId\":\"" + escape(cellId) + "\","
                     + "\"jmixVersion\":\"" + escape(jmixVersion) + "\","
                     + "\"runtimeJava\":" + runtimeJava + ","
@@ -1144,7 +1440,17 @@ public class IntegrationRuntimeCertificationApplication {
                     + "\"conflictingIdentityRejected\":"
                     + conflictingIdentityRejected + ","
                     + "\"transactionalEffectsCertified\":"
-                    + transactionalEffectsCertified
+                    + transactionalEffectsCertified + ","
+                    + "\"oauth2RenewalCertified\":"
+                    + oauth2RenewalCertified + ","
+                    + "\"invalidTokenEvictionCertified\":"
+                    + invalidTokenEvictionCertified + ","
+                    + "\"mtlsClientCertificateCertified\":"
+                    + mtlsClientCertificateCertified + ","
+                    + "\"mtlsNegativePathsCertified\":"
+                    + mtlsNegativePathsCertified + ","
+                    + "\"mtlsHotRotationCertified\":"
+                    + mtlsHotRotationCertified
                     + "}";
         }
 

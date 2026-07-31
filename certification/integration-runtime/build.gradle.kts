@@ -69,6 +69,10 @@ dependencies {
     }
     implementation("org.springframework.integration:spring-integration-sftp")
     implementation("org.springframework:spring-web")
+    implementation("org.springframework.security:spring-security-oauth2-client")
+    if (jmixLine.get() == "jmix30") {
+        implementation("org.springframework.boot:spring-boot-http-client:${springBootVersion.get()}")
+    }
     implementation(
         "org.springframework.boot:"
             + if (jmixLine.get() == "jmix30") {
@@ -125,6 +129,12 @@ tasks.register<JavaExec>("certifyIntegrationRuntime") {
         "CERT_SFTP_USERNAME",
         "CERT_SFTP_PASSWORD",
         "CERT_WIREMOCK_URL",
+        "CERT_MTLS_URL",
+        "CERT_MTLS_HOSTNAME_MISMATCH_URL",
+        "CERT_TLS_DIR",
+        "CERT_MTLS_PASSWORD",
+        "CERT_OAUTH_CLIENT_ID",
+        "CERT_OAUTH_CLIENT_SECRET",
         "CERT_EVIDENCE_FILE",
         "CERT_CELL_ID",
     ).forEach { name ->

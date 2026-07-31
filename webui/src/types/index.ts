@@ -1801,6 +1801,7 @@ export type IntegrationCapability =
   | 'SPRING_WEB' | 'SPRING_KAFKA' | 'SPRING_BOOT_KAFKA' | 'SPRING_AMQP'
   | 'SPRING_INTEGRATION_SFTP' | 'RESILIENCE4J'
   | 'JMIX_EMAIL' | 'JMIX_FILE_STORAGE' | 'OAUTH2_CLIENT'
+  | 'SPRING_BOOT_SSL_BUNDLES'
 
 export type IntegrationHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 export type IntegrationDeliveryGuarantee = 'AT_MOST_ONCE' | 'AT_LEAST_ONCE' | 'EXACTLY_ONCE'
@@ -1808,6 +1809,7 @@ export type IntegrationRetryMode = 'NONE' | 'BLOCKING' | 'NON_BLOCKING'
 export type IntegrationBackoffMode = 'FIXED' | 'EXPONENTIAL'
 export type IntegrationJsonApi = 'JACKSON_2' | 'JACKSON_3'
 export type IntegrationObservabilityApi = 'APPLICATION_EVENTS' | 'MICROMETER_OBSERVATION'
+export type IntegrationSpringBootApi = 'BOOT_3' | 'BOOT_4'
 export type IntegrationAuthenticationKind =
   | 'NONE' | 'BASIC' | 'BEARER' | 'API_KEY'
   | 'OAUTH2_CLIENT_CREDENTIALS' | 'SSH_KEY'
@@ -1826,9 +1828,16 @@ export interface IntegrationAuthenticationModel {
   tokenUriProperty?: string
   clientIdProperty?: string
   authorizedClientManagerBeanName?: string
+  authorizedClientServiceBeanName?: string
   clientRegistrationIdProperty?: string
   principalNameProperty?: string
+  evictInvalidAuthorizedClient: boolean
   scopes: string[]
+}
+
+export interface IntegrationTransportSecurityModel {
+  mutualTlsEnabled: boolean
+  sslBundleNameProperty?: string
 }
 
 export interface IntegrationRetryPolicyModel {
@@ -1942,9 +1951,11 @@ export interface IntegrationConnectorModel {
   handlerMethod?: string
   headers: IntegrationHeaderModel[]
   authentication: IntegrationAuthenticationModel
+  transportSecurity: IntegrationTransportSecurityModel
   reliability: IntegrationReliabilityModel
   observability: IntegrationObservabilityModel
   runtimeJsonApi?: IntegrationJsonApi
+  runtimeSpringBootApi?: IntegrationSpringBootApi
   profiles: string[]
   enabled: boolean
   sourceLocator?: GraphSourceLocator
@@ -1959,6 +1970,7 @@ export interface IntegrationConnectorDestinationSnapshot {
   capabilities: IntegrationCapability[]
   jsonApi: IntegrationJsonApi
   observabilityApi: IntegrationObservabilityApi
+  springBootApi: IntegrationSpringBootApi
   recommended: boolean
 }
 
@@ -1975,6 +1987,7 @@ export interface IntegrationConnectorWorkspaceResponse {
   defaultDestinationId?: string
   contextArtifacts: GraphArtifact[]
   oauth2Managers: IntegrationOAuth2ManagerSnapshot[]
+  oauth2Services: IntegrationOAuth2ServiceSnapshot[]
   dataStores: SchemaDataStoreSnapshot[]
   existingDocuments: IntegrationConnectorDocumentSnapshot[]
   issues: WorkspaceChangeIssue[]
@@ -1982,6 +1995,13 @@ export interface IntegrationConnectorWorkspaceResponse {
 }
 
 export interface IntegrationOAuth2ManagerSnapshot {
+  beanName: string
+  declaringType: string
+  moduleId: string
+  sourceLocator: GraphSourceLocator
+}
+
+export interface IntegrationOAuth2ServiceSnapshot {
   beanName: string
   declaringType: string
   moduleId: string

@@ -29,6 +29,7 @@ enum class IntegrationCapability {
     JMIX_EMAIL,
     JMIX_FILE_STORAGE,
     OAUTH2_CLIENT,
+    SPRING_BOOT_SSL_BUNDLES,
 }
 
 enum class IntegrationHttpMethod {
@@ -66,6 +67,11 @@ enum class IntegrationObservabilityApi {
     MICROMETER_OBSERVATION,
 }
 
+enum class IntegrationSpringBootApi {
+    BOOT_3,
+    BOOT_4,
+}
+
 enum class IntegrationAuthenticationKind {
     NONE,
     BASIC,
@@ -95,9 +101,24 @@ data class IntegrationAuthenticationModel(
     val tokenUriProperty: String? = null,
     val clientIdProperty: String? = null,
     val authorizedClientManagerBeanName: String? = null,
+    val authorizedClientServiceBeanName: String? = null,
     val clientRegistrationIdProperty: String? = null,
     val principalNameProperty: String? = null,
+    val evictInvalidAuthorizedClient: Boolean = true,
     val scopes: List<String> = emptyList(),
+)
+
+/**
+ * Transport security is independent from application authentication: an HTTP
+ * connector may use mTLS together with OAuth2 client credentials.
+ *
+ * The bundle name is externalized and the key/trust material remains owned by
+ * Spring Boot's SSL-bundle configuration. Generated source never contains
+ * certificate paths, passwords, private keys or trust-all behavior.
+ */
+data class IntegrationTransportSecurityModel(
+    val mutualTlsEnabled: Boolean = false,
+    val sslBundleNameProperty: String? = null,
 )
 
 data class IntegrationRetryPolicyModel(
@@ -239,9 +260,11 @@ data class IntegrationConnectorModel(
     val handlerMethod: String? = null,
     val headers: List<IntegrationHeaderModel> = emptyList(),
     val authentication: IntegrationAuthenticationModel = IntegrationAuthenticationModel(),
+    val transportSecurity: IntegrationTransportSecurityModel = IntegrationTransportSecurityModel(),
     val reliability: IntegrationReliabilityModel = IntegrationReliabilityModel(),
     val observability: IntegrationObservabilityModel = IntegrationObservabilityModel(),
     val runtimeJsonApi: IntegrationJsonApi? = null,
+    val runtimeSpringBootApi: IntegrationSpringBootApi? = null,
     val profiles: List<String> = emptyList(),
     val enabled: Boolean = true,
     val sourceLocator: SourceLocator? = null,

@@ -1,6 +1,7 @@
 package org.jmixworkbench.services
 
 import com.google.gson.Gson
+import com.google.gson.JsonParser
 import com.intellij.ide.highlighter.JavaFileType
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
@@ -27,6 +28,8 @@ import org.jmixworkbench.model.IntegrationConnectorModel
 import org.jmixworkbench.model.IntegrationDiagnosticSeverity
 import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationObservabilityApi
+import org.jmixworkbench.model.IntegrationSpringBootApi
+import org.jmixworkbench.model.IntegrationTransportSecurityModel
 import java.util.Base64
 
 /**
@@ -51,6 +54,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             defaultDestinationId = destinations.firstOrNull(IntegrationConnectorDestinationSnapshot::recommended)?.id,
             contextArtifacts = graph.artifacts.filter { it.kind in CONTEXT_KINDS },
             oauth2Managers = oauth2Managers(graph),
+            oauth2Services = oauth2Services(graph),
             dataStores = schema.stores,
             existingDocuments = discoverExisting(destinations),
             issues = buildList {
@@ -137,6 +141,16 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             issues += WorkspaceChangeIssue(
                 "JVW-INTEGRATION-OAUTH-MANAGER-NOT-INDEXED",
                 "The selected OAuth2AuthorizedClientManager bean is not present in the current application graph.",
+            )
+        }
+        if (
+            normalized.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS &&
+            normalized.authentication.evictInvalidAuthorizedClient &&
+            oauth2Services(graph).none { it.beanName == normalized.authentication.authorizedClientServiceBeanName }
+        ) {
+            issues += WorkspaceChangeIssue(
+                "JVW-INTEGRATION-OAUTH-SERVICE-NOT-INDEXED",
+                "The selected OAuth2AuthorizedClientService bean is not present in the current application graph.",
             )
         }
         if (normalized.kind in CONSUMER_KINDS) {
@@ -331,6 +345,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             ?: "com.example.app"
         val candidates = javaRoots.flatMap { javaRoot ->
             resourceRoots[javaRoot.moduleId].orEmpty().map { resourceRoot ->
+                val jsonApi = detectJsonApi(javaRoot, graph)
                 IntegrationConnectorDestinationSnapshot(
                     id = CanonicalDiscoveryJson.sha256(
                         "${javaRoot.moduleId}\u0000${javaRoot.sourceRoot}\u0000${resourceRoot.sourceRoot}",
@@ -340,8 +355,13 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     resourceRoot = resourceRoot.sourceRoot,
                     defaultPackage = "${moduleBasePackage(javaRoot.moduleId, graph, fallbackPackage)}.integration",
                     capabilities = detectCapabilities(javaRoot, graph),
-                    jsonApi = detectJsonApi(javaRoot, graph),
+                    jsonApi = jsonApi,
                     observabilityApi = detectObservabilityApi(javaRoot, graph),
+                    springBootApi = if (jsonApi == IntegrationJsonApi.JACKSON_3) {
+                        IntegrationSpringBootApi.BOOT_4
+                    } else {
+                        IntegrationSpringBootApi.BOOT_3
+                    },
                     recommended = false,
                 )
             }
@@ -405,6 +425,10 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 listOf("oauth2-client", "spring.security.oauth2.client", "jmix-oidc", "jmix.oidc")
                     .any(buildText::contains)
             ) add(IntegrationCapability.OAUTH2_CLIENT)
+            if (
+                listOf("io.jmix", "spring-boot", "org.springframework.boot")
+                    .any(buildText::contains)
+            ) add(IntegrationCapability.SPRING_BOOT_SSL_BUNDLES)
         }
     }
 
@@ -444,6 +468,47 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 compareBy<IntegrationOAuth2ManagerSnapshot>(
                     IntegrationOAuth2ManagerSnapshot::moduleId,
                     IntegrationOAuth2ManagerSnapshot::beanName,
+                ),
+            )
+            .toList()
+    }
+
+    private fun oauth2Services(graph: ApplicationGraphResponse): List<IntegrationOAuth2ServiceSnapshot> {
+        val resolver = ProjectFileResolver.getInstance(project)
+        return graph.artifacts.asSequence()
+            .filter { it.kind in setOf(ArtifactKind.SOURCE_TYPE, ArtifactKind.SERVICE) }
+            .distinctBy { it.sourceLocator.relativePath }
+            .flatMap { artifact ->
+                val content = resolver.resolveFile(artifact.sourceLocator.relativePath)?.file
+                    ?.let(::fileText)
+                    .orEmpty()
+                val javaServices = OAUTH2_SERVICE_JAVA.findAll(content).map { match ->
+                    val explicitName = match.groupValues[1].ifBlank { null }
+                    val methodName = match.groupValues[2]
+                    IntegrationOAuth2ServiceSnapshot(
+                        beanName = explicitName ?: methodName,
+                        declaringType = artifact.semanticKey.substringBefore('#'),
+                        moduleId = artifact.owner.moduleId,
+                        sourceLocator = artifact.sourceLocator,
+                    )
+                }
+                val kotlinServices = OAUTH2_SERVICE_KOTLIN.findAll(content).map { match ->
+                    val explicitName = match.groupValues[1].ifBlank { null }
+                    val methodName = match.groupValues[2]
+                    IntegrationOAuth2ServiceSnapshot(
+                        beanName = explicitName ?: methodName,
+                        declaringType = artifact.semanticKey.substringBefore('#'),
+                        moduleId = artifact.owner.moduleId,
+                        sourceLocator = artifact.sourceLocator,
+                    )
+                }
+                javaServices + kotlinServices
+            }
+            .distinctBy { "${it.moduleId}\u0000${it.beanName}" }
+            .sortedWith(
+                compareBy<IntegrationOAuth2ServiceSnapshot>(
+                    IntegrationOAuth2ServiceSnapshot::moduleId,
+                    IntegrationOAuth2ServiceSnapshot::beanName,
                 ),
             )
             .toList()
@@ -605,6 +670,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             reliability = normalizedReliability,
             observability = model.observability.copy(runtimeApi = destination.observabilityApi),
             runtimeJsonApi = destination.jsonApi,
+            runtimeSpringBootApi = destination.springBootApi,
         )
     }
 
@@ -715,7 +781,16 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
 
     private fun decode(encoded: String): IntegrationConnectorModel? = runCatching {
         val json = String(Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
-        gson.fromJson(json, IntegrationConnectorModel::class.java).copy(sourceLocator = null)
+        val root = JsonParser.parseString(json).asJsonObject
+        if (!root.has("transportSecurity")) {
+            root.add("transportSecurity", gson.toJsonTree(IntegrationTransportSecurityModel()))
+        }
+        root.getAsJsonObject("authentication")?.let { authentication ->
+            if (!authentication.has("evictInvalidAuthorizedClient")) {
+                authentication.addProperty("evictInvalidAuthorizedClient", true)
+            }
+        }
+        gson.fromJson(root, IntegrationConnectorModel::class.java).copy(sourceLocator = null)
     }.getOrNull()
 
     private fun visitJava(root: VirtualFile, consumer: (VirtualFile) -> Unit) {
@@ -766,10 +841,16 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             "controller",
         )
         private val OAUTH2_MANAGER_JAVA = Regex(
-            """@Bean(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']([^"']+)["'][^)]*\))?[\s\S]{0,320}?\bOAuth2AuthorizedClientManager\s+([A-Za-z_]\w*)\s*\(""",
+            """@Bean(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']([^"']+)["'][^)]*\))?(?:(?!@Bean)[\s\S]){0,320}?\bOAuth2AuthorizedClientManager\s+([A-Za-z_]\w*)\s*\(""",
         )
         private val OAUTH2_MANAGER_KOTLIN = Regex(
-            """@Bean(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']([^"']+)["'][^)]*\))?[\s\S]{0,320}?\bfun\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*:\s*OAuth2AuthorizedClientManager\b""",
+            """@Bean(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']([^"']+)["'][^)]*\))?(?:(?!@Bean)[\s\S]){0,320}?\bfun\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*:\s*OAuth2AuthorizedClientManager\b""",
+        )
+        private val OAUTH2_SERVICE_JAVA = Regex(
+            """@Bean(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']([^"']+)["'][^)]*\))?(?:(?!@Bean)[\s\S]){0,320}?\bOAuth2AuthorizedClientService\s+([A-Za-z_]\w*)\s*\(""",
+        )
+        private val OAUTH2_SERVICE_KOTLIN = Regex(
+            """@Bean(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']([^"']+)["'][^)]*\))?(?:(?!@Bean)[\s\S]){0,320}?\bfun\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*:\s*OAuth2AuthorizedClientService\b""",
         )
 
         fun getInstance(project: Project): IntegrationConnectorWorkspaceService =
@@ -786,6 +867,7 @@ data class IntegrationConnectorDestinationSnapshot(
     val capabilities: Set<IntegrationCapability>,
     val jsonApi: IntegrationJsonApi,
     val observabilityApi: IntegrationObservabilityApi,
+    val springBootApi: IntegrationSpringBootApi,
     val recommended: Boolean,
 )
 
@@ -802,12 +884,20 @@ data class IntegrationConnectorWorkspaceResponse(
     val defaultDestinationId: String?,
     val contextArtifacts: List<ArtifactSnapshot>,
     val oauth2Managers: List<IntegrationOAuth2ManagerSnapshot>,
+    val oauth2Services: List<IntegrationOAuth2ServiceSnapshot>,
     val dataStores: List<SchemaDataStoreSnapshot>,
     val existingDocuments: List<IntegrationConnectorDocumentSnapshot>,
     val issues: List<WorkspaceChangeIssue>,
 )
 
 data class IntegrationOAuth2ManagerSnapshot(
+    val beanName: String,
+    val declaringType: String,
+    val moduleId: String,
+    val sourceLocator: SourceLocator,
+)
+
+data class IntegrationOAuth2ServiceSnapshot(
     val beanName: String,
     val declaringType: String,
     val moduleId: String,

@@ -196,6 +196,20 @@ val targetCompatibilityCompileTasks = targetCompatibilityCells.flatMap { cell ->
         )
         add(
             sourceSet.implementationConfigurationName,
+            "org.springframework.boot:spring-boot",
+        )
+        if (cell.jmixVersion.startsWith("3.")) {
+            add(
+                sourceSet.implementationConfigurationName,
+                "org.springframework.boot:spring-boot-http-client",
+            )
+        }
+        add(
+            sourceSet.implementationConfigurationName,
+            "org.springframework.security:spring-security-oauth2-client",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
             if (cell.jmixVersion.startsWith("3.")) {
                 "io.github.resilience4j:resilience4j-spring-boot4:2.4.0"
             } else {

@@ -18,6 +18,8 @@ import org.jmixworkbench.model.IntegrationObservabilityApi
 import org.jmixworkbench.model.IntegrationObservabilityModel
 import org.jmixworkbench.model.IntegrationRetryMode
 import org.jmixworkbench.model.IntegrationRetryPolicyModel
+import org.jmixworkbench.model.IntegrationSpringBootApi
+import org.jmixworkbench.model.IntegrationTransportSecurityModel
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertFalse
@@ -340,15 +342,17 @@ class IntegrationConnectorGeneratorTest {
     }
 
     @Test
-    fun `generates OAuth2 client credentials through an explicitly selected manager`() {
+    fun `generates OAuth2 lifecycle through selected manager and invalid-token eviction service`() {
         val model = connector(
             kind = IntegrationConnectorKind.IDENTITY_PROVIDER,
             responseJavaType = "java.lang.String",
             authentication = IntegrationAuthenticationModel(
                 kind = IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS,
                 authorizedClientManagerBeanName = "authorizedClientManager",
+                authorizedClientServiceBeanName = "authorizedClientService",
                 clientRegistrationIdProperty = "identity.partner.registration-id",
                 principalNameProperty = "identity.partner.principal-name",
+                evictInvalidAuthorizedClient = true,
             ),
         )
 
@@ -367,11 +371,104 @@ class IntegrationConnectorGeneratorTest {
             source,
             "@Value(\"\${identity.partner.registration-id}\") String clientRegistrationId",
         )
-        assertContains(source, "OAuth2AuthorizeRequest.withClientRegistrationId(clientRegistrationId)")
-        assertContains(source, ".principal(oauthPrincipalName)")
-        assertContains(source, "authorizedClient.getAccessToken().getTokenValue()")
+        assertContains(
+            source,
+            "@Qualifier(\"authorizedClientService\") OAuth2AuthorizedClientService authorizedClientService",
+        )
+        assertContains(source, "new OAuth2ClientHttpRequestInterceptor(authorizedClientManager)")
+        assertContains(source, "oauth2.setPrincipalResolver(new RequestAttributePrincipalResolver())")
+        assertContains(source, "authorizationFailureHandler(authorizedClientService)")
+        assertContains(source, "RequestAttributeClientRegistrationIdResolver.clientRegistrationId(clientRegistrationId)")
+        assertContains(source, "RequestAttributePrincipalResolver.principal(oauthPrincipalName)")
+        assertFalse(source.contains("OAuth2AuthorizeRequest"))
+        assertFalse(source.contains("getTokenValue()"))
         assertFalse(source.contains("client-secret"))
         assertFalse(source.contains("token-uri"))
+    }
+
+    @Test
+    fun `generates versioned Spring Boot mTLS request factory without losing timeouts`() {
+        listOf(
+            IntegrationSpringBootApi.BOOT_3 to "ClientHttpRequestFactorySettings",
+            IntegrationSpringBootApi.BOOT_4 to "HttpClientSettings",
+        ).forEach { (api, settingsType) ->
+            val model = connector(
+                kind = IntegrationConnectorKind.HTTP_CLIENT,
+                responseJavaType = "java.lang.String",
+            ).copy(
+                runtimeSpringBootApi = api,
+                transportSecurity = IntegrationTransportSecurityModel(
+                    mutualTlsEnabled = true,
+                    sslBundleNameProperty = "payroll.partner.ssl-bundle",
+                ),
+            )
+            val validation = IntegrationConnectorGenerator.validate(
+                model,
+                setOf(
+                    IntegrationCapability.SPRING_WEB,
+                    IntegrationCapability.SPRING_BOOT_SSL_BUNDLES,
+                ),
+            )
+
+            assertTrue(validation.valid, "$api: ${validation.diagnostics}")
+            val generated = IntegrationConnectorGenerator.generate(model)
+            assertContains(generated.javaSource, "$settingsType.defaults()")
+            assertContains(generated.javaSource, ".withTimeouts(Duration.ofMillis(5000L), Duration.ofMillis(30000L))")
+            assertContains(generated.javaSource, ".withSslBundle(sslBundle)")
+            assertContains(generated.javaSource, "ClientHttpRequestFactoryBuilder.jdk().build(httpSettings)")
+            assertContains(generated.javaSource, "private volatile RestClient restClient")
+            assertContains(generated.javaSource, "sslBundles.addBundleUpdateHandler(sslBundleName, this::reloadSslBundle)")
+            assertContains(generated.javaSource, "RestClient replacement = buildRestClient(updatedBundle)")
+            assertContains(generated.javaSource, "keeping the last working client")
+            assertContains(generated.javaSource, "Mutual TLS requires an https endpoint")
+            assertFalse(generated.javaSource.contains("trustAll"))
+            assertFalse(generated.javaSource.contains("HostnameVerifier"))
+            assertContains(generated.reliabilityProperties, "private keys, trust material and bundle passwords outside")
+        }
+    }
+
+    @Test
+    fun `rejects unresolved mTLS runtime and OAuth2 invalid-token service`() {
+        val unresolvedMtls = connector(
+            kind = IntegrationConnectorKind.HTTP_CLIENT,
+            responseJavaType = "java.lang.String",
+        ).copy(
+            transportSecurity = IntegrationTransportSecurityModel(
+                mutualTlsEnabled = true,
+                sslBundleNameProperty = "payroll.partner.ssl-bundle",
+            ),
+        )
+        val mtlsValidation = IntegrationConnectorGenerator.validate(
+            unresolvedMtls,
+            setOf(IntegrationCapability.SPRING_WEB),
+        )
+
+        assertFalse(mtlsValidation.valid)
+        assertTrue(mtlsValidation.diagnostics.any { it.code == "INTEGRATION_MTLS_BOOT_API_REQUIRED" })
+        assertTrue(mtlsValidation.diagnostics.any { it.code == "INTEGRATION_DEPENDENCY_MISSING" })
+
+        val unresolvedOAuth2Service = connector(
+            kind = IntegrationConnectorKind.IDENTITY_PROVIDER,
+            responseJavaType = "java.lang.String",
+            authentication = IntegrationAuthenticationModel(
+                kind = IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS,
+                authorizedClientManagerBeanName = "authorizedClientManager",
+                clientRegistrationIdProperty = "identity.partner.registration-id",
+                principalNameProperty = "identity.partner.principal-name",
+                evictInvalidAuthorizedClient = true,
+            ),
+        )
+        val oauthValidation = IntegrationConnectorGenerator.validate(
+            unresolvedOAuth2Service,
+            setOf(IntegrationCapability.SPRING_WEB, IntegrationCapability.OAUTH2_CLIENT),
+        )
+
+        assertFalse(oauthValidation.valid)
+        assertTrue(
+            oauthValidation.diagnostics.any {
+                it.code == "INTEGRATION_OAUTH_CLIENT_SERVICE_REQUIRED"
+            },
+        )
     }
 
     @Test

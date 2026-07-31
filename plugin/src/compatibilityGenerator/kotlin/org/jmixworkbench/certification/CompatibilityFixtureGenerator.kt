@@ -28,6 +28,8 @@ import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationOutboxModel
 import org.jmixworkbench.model.IntegrationRetryMode
 import org.jmixworkbench.model.IntegrationRetryPolicyModel
+import org.jmixworkbench.model.IntegrationSpringBootApi
+import org.jmixworkbench.model.IntegrationTransportSecurityModel
 import org.jmixworkbench.model.IntegrationCircuitBreakerModel
 import org.jmixworkbench.model.IntegrationReliabilityModel
 import org.jmixworkbench.model.IntegrationObservabilityApi
@@ -424,6 +426,79 @@ object CompatibilityFixtureGenerator {
                 generatedHttp.javaSource
             sources["$line/resources/META-INF/jvw/integration/hrmsPartnerClient.properties"] =
                 generatedHttp.reliabilityProperties
+
+            val secureIdentityModel = IntegrationConnectorModel(
+                name = "Certified OAuth2 mTLS identity client",
+                destinationId = "certified:main",
+                packageName = "com.acme.cert.integration",
+                className = "SecureIdentityClient",
+                beanName = "secureIdentityClient",
+                kind = IntegrationConnectorKind.IDENTITY_PROVIDER,
+                configurationPrefix = "cert.identity",
+                addressProperty = "cert.identity.address",
+                responseJavaType = "java.lang.String",
+                httpMethod = IntegrationHttpMethod.GET,
+                authentication = IntegrationAuthenticationModel(
+                    kind = IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS,
+                    authorizedClientManagerBeanName = "authorizedClientManager",
+                    authorizedClientServiceBeanName = "authorizedClientService",
+                    clientRegistrationIdProperty = "cert.identity.registration-id",
+                    principalNameProperty = "cert.identity.principal-name",
+                    evictInvalidAuthorizedClient = true,
+                ),
+                transportSecurity = IntegrationTransportSecurityModel(
+                    mutualTlsEnabled = true,
+                    sslBundleNameProperty = "cert.identity.ssl-bundle",
+                ),
+                runtimeSpringBootApi = if (line == "jmix30") {
+                    IntegrationSpringBootApi.BOOT_4
+                } else {
+                    IntegrationSpringBootApi.BOOT_3
+                },
+            )
+            val generatedSecureIdentity = IntegrationConnectorGenerator.generate(secureIdentityModel)
+            sources["$line/java/com/acme/cert/integration/SecureIdentityClient.java"] =
+                generatedSecureIdentity.javaSource
+            sources["$line/resources/META-INF/jvw/integration/secureIdentityClient.properties"] =
+                generatedSecureIdentity.reliabilityProperties
+
+            listOf(
+                Triple(
+                    "SecureIdentityNoClientCertificateClient",
+                    "secureIdentityNoClientCertificateClient",
+                    "cert.identity.trust-only-ssl-bundle",
+                ),
+                Triple(
+                    "SecureIdentityUntrustedServerClient",
+                    "secureIdentityUntrustedServerClient",
+                    "cert.identity.untrusted-ssl-bundle",
+                ),
+                Triple(
+                    "SecureIdentityHostnameMismatchClient",
+                    "secureIdentityHostnameMismatchClient",
+                    "cert.identity.ssl-bundle",
+                ),
+            ).forEach { (className, beanName, sslBundleProperty) ->
+                val variantModel = secureIdentityModel.copy(
+                    name = "Certified negative-path $className",
+                    className = className,
+                    beanName = beanName,
+                    configurationPrefix = "cert.identity.${beanName.lowercase()}",
+                    addressProperty = if (className == "SecureIdentityHostnameMismatchClient") {
+                        "cert.identity.hostname-mismatch-address"
+                    } else {
+                        "cert.identity.address"
+                    },
+                    transportSecurity = secureIdentityModel.transportSecurity.copy(
+                        sslBundleNameProperty = sslBundleProperty,
+                    ),
+                )
+                val generatedVariant = IntegrationConnectorGenerator.generate(variantModel)
+                sources["$line/java/com/acme/cert/integration/$className.java"] =
+                    generatedVariant.javaSource
+                sources["$line/resources/META-INF/jvw/integration/$beanName.properties"] =
+                    generatedVariant.reliabilityProperties
+            }
         }
     }
 

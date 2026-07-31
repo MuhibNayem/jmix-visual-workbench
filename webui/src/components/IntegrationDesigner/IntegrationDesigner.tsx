@@ -147,7 +147,10 @@ function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: In
     httpMethod: 'POST',
     contentType: 'application/json',
     headers: [],
-    authentication: { kind: 'NONE', scopes: [] },
+    authentication: { kind: 'NONE', evictInvalidAuthorizedClient: true, scopes: [] },
+    transportSecurity: {
+      mutualTlsEnabled: false,
+    },
     reliability: {
       deliveryGuarantee: 'AT_LEAST_ONCE',
       connectTimeoutMs: 5000,
@@ -199,6 +202,8 @@ function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: In
       runtimeApi: destination?.observabilityApi,
       redactHeaders: ['Authorization', 'Proxy-Authorization', 'X-Api-Key', 'Cookie', 'Set-Cookie'],
     },
+    runtimeJsonApi: destination?.jsonApi,
+    runtimeSpringBootApi: destination?.springBootApi,
     profiles: [],
     enabled: true,
   }
@@ -206,8 +211,10 @@ function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: In
     model.authentication = {
       kind: 'OAUTH2_CLIENT_CREDENTIALS',
       authorizedClientManagerBeanName: workspace.oauth2Managers[0]?.beanName,
+      authorizedClientServiceBeanName: workspace.oauth2Services[0]?.beanName,
       clientRegistrationIdProperty: `${prefix}.client-registration-id`,
       principalNameProperty: `${prefix}.principal-name`,
+      evictInvalidAuthorizedClient: true,
       scopes: [],
     }
   }
@@ -222,6 +229,7 @@ function requiredCapabilities(model: IntegrationConnectorModel): IntegrationCapa
     result.add('SPRING_WEB')
     result.add('OAUTH2_CLIENT')
   }
+  if (model.transportSecurity.mutualTlsEnabled) result.add('SPRING_BOOT_SSL_BUNDLES')
   if (
     model.reliability.retry.mode === 'BLOCKING' ||
     model.reliability.circuitBreaker.enabled ||
@@ -289,6 +297,15 @@ function localBlockers(
     }
     if (!model.authentication.clientRegistrationIdProperty || !model.authentication.principalNameProperty) {
       blockers.push('OAuth2 registration ID and application principal must use external property keys.')
+    }
+    if (model.authentication.evictInvalidAuthorizedClient && !model.authentication.authorizedClientServiceBeanName) {
+      blockers.push('Select an indexed OAuth2AuthorizedClientService for invalid-token eviction.')
+    }
+  }
+  if (model.transportSecurity.mutualTlsEnabled) {
+    if (!httpKinds.has(model.kind)) blockers.push('Mutual TLS is available only for HTTP-based connectors.')
+    if (!model.transportSecurity.sslBundleNameProperty) {
+      blockers.push('Mutual TLS requires an externalized Spring Boot SSL-bundle name property.')
     }
   }
   return blockers
@@ -753,9 +770,13 @@ export default function IntegrationDesigner() {
                     draft.authentication = {
                       kind,
                       scopes: [],
+                      evictInvalidAuthorizedClient: true,
                       headerName: kind === 'API_KEY' ? 'X-Api-Key' : undefined,
                       authorizedClientManagerBeanName: kind === 'OAUTH2_CLIENT_CREDENTIALS'
                         ? workspace.oauth2Managers[0]?.beanName
+                        : undefined,
+                      authorizedClientServiceBeanName: kind === 'OAUTH2_CLIENT_CREDENTIALS'
+                        ? workspace.oauth2Services[0]?.beanName
                         : undefined,
                       clientRegistrationIdProperty: kind === 'OAUTH2_CLIENT_CREDENTIALS'
                         ? `${draft.configurationPrefix}.client-registration-id`
@@ -780,8 +801,20 @@ export default function IntegrationDesigner() {
                         <option value="">Select indexed client manager…</option>
                         {workspace.oauth2Managers.map((manager) => <option key={`${manager.moduleId}:${manager.beanName}`} value={manager.beanName}>{manager.beanName} · {manager.moduleId}</option>)}
                       </select>
+                      <select aria-label="OAuth2 authorized client service" value={model.authentication.authorizedClientServiceBeanName ?? ''} onChange={(event) => commit((draft) => { draft.authentication.authorizedClientServiceBeanName = event.target.value || undefined })} className={fieldClass}>
+                        <option value="">Select indexed client service…</option>
+                        {workspace.oauth2Services.map((service) => <option key={`${service.moduleId}:${service.beanName}`} value={service.beanName}>{service.beanName} · {service.moduleId}</option>)}
+                      </select>
                       <input aria-label="Client registration ID property" placeholder="Client registration ID property" value={model.authentication.clientRegistrationIdProperty ?? ''} onChange={(event) => commit((draft) => { draft.authentication.clientRegistrationIdProperty = event.target.value || undefined })} className={fieldClass} />
                       <input aria-label="OAuth2 principal property" placeholder="Application principal property" value={model.authentication.principalNameProperty ?? ''} onChange={(event) => commit((draft) => { draft.authentication.principalNameProperty = event.target.value || undefined })} className={fieldClass} />
+                      <div className="sm:col-span-2">
+                        <Toggle
+                          checked={model.authentication.evictInvalidAuthorizedClient}
+                          onChange={(checked) => commit((draft) => { draft.authentication.evictInvalidAuthorizedClient = checked })}
+                          label="Evict invalid access tokens"
+                          description="Spring Security removes rejected authorized clients so the next attempt obtains a fresh token."
+                        />
+                      </div>
                     </>
                   )}
                   {model.authentication.kind !== 'OAUTH2_CLIENT_CREDENTIALS' && <input aria-label="Secret property" placeholder="Secret/token/key property key" value={model.authentication.secretProperty ?? ''} onChange={(event) => commit((draft) => { draft.authentication.secretProperty = event.target.value || undefined })} className={fieldClass} />}
@@ -798,6 +831,35 @@ export default function IntegrationDesigner() {
                 ))}
                 {!model.headers.length && <p className="rounded border border-dashed border-surface-border p-3 text-center text-[10px] text-gray-600">No static headers. Secrets and endpoints are never stored as literal values.</p>}
               </div>
+              {httpKinds.has(model.kind) && (
+                <div className="mt-3 border-t border-surface-border pt-3">
+                  <Toggle
+                    checked={model.transportSecurity.mutualTlsEnabled}
+                    onChange={(checked) => commit((draft) => {
+                      draft.transportSecurity.mutualTlsEnabled = checked
+                      draft.transportSecurity.sslBundleNameProperty = checked
+                        ? draft.transportSecurity.sslBundleNameProperty ?? `${draft.configurationPrefix}.ssl-bundle`
+                        : undefined
+                    })}
+                    label="Mutual TLS"
+                    description="Use a named Spring Boot SSL bundle. Private keys, trust material and passwords remain external."
+                  />
+                  {model.transportSecurity.mutualTlsEnabled && (
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      <input
+                        aria-label="SSL bundle name property"
+                        placeholder="SSL bundle name property"
+                        value={model.transportSecurity.sslBundleNameProperty ?? ''}
+                        onChange={(event) => commit((draft) => { draft.transportSecurity.sslBundleNameProperty = event.target.value || undefined })}
+                        className={fieldClass}
+                      />
+                      <div className="rounded border border-emerald-500/20 bg-emerald-500/5 px-2 py-1.5 text-[10px] leading-4 text-emerald-200">
+                        HTTPS and hostname verification are mandatory. Certificate material is never copied into generated source.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
 
             <section className="rounded-lg border border-surface-border bg-surface/45 p-3">

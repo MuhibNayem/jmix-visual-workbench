@@ -13,6 +13,7 @@ import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationObservabilityApi
 import org.jmixworkbench.model.IntegrationRetryMode
+import org.jmixworkbench.model.IntegrationSpringBootApi
 import org.jmixworkbench.model.IntegrationValidationResult
 import org.jmixworkbench.model.ChangeSetModel
 import org.jmixworkbench.model.ColumnDef
@@ -83,6 +84,9 @@ object IntegrationConnectorGenerator {
         }
         if (model.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS) {
             add(IntegrationCapability.OAUTH2_CLIENT)
+        }
+        if (model.transportSecurity.mutualTlsEnabled) {
+            add(IntegrationCapability.SPRING_BOOT_SSL_BUNDLES)
         }
     }
 
@@ -179,6 +183,18 @@ object IntegrationConnectorGenerator {
                     "OAuth2 application principal name",
                     ::error,
                 )
+                if (
+                    auth.evictInvalidAuthorizedClient &&
+                    (
+                        auth.authorizedClientServiceBeanName.isNullOrBlank() ||
+                            !SPRING_BEAN_IDENTIFIER.matches(auth.authorizedClientServiceBeanName)
+                        )
+                ) {
+                    error(
+                        "INTEGRATION_OAUTH_CLIENT_SERVICE_REQUIRED",
+                        "Automatic invalid-token eviction requires a selected OAuth2AuthorizedClientService bean.",
+                    )
+                }
             }
             IntegrationAuthenticationKind.SSH_KEY -> {
                 if (model.kind !in SFTP_KINDS) {
@@ -186,6 +202,33 @@ object IntegrationConnectorGenerator {
                 }
                 requireProperty(auth.secretProperty, "INTEGRATION_AUTH_SECRET_REQUIRED", "SSH private-key location", ::error)
             }
+        }
+
+        val transportSecurity = model.transportSecurity
+        if (transportSecurity.mutualTlsEnabled) {
+            if (model.kind !in HTTP_KINDS) {
+                error(
+                    "INTEGRATION_MTLS_HTTP_ONLY",
+                    "Mutual TLS is supported only for HTTP-based connectors.",
+                )
+            }
+            requireProperty(
+                transportSecurity.sslBundleNameProperty,
+                "INTEGRATION_MTLS_SSL_BUNDLE_PROPERTY_REQUIRED",
+                "Spring Boot SSL bundle name",
+                ::error,
+            )
+            if (model.runtimeSpringBootApi == null) {
+                error(
+                    "INTEGRATION_MTLS_BOOT_API_REQUIRED",
+                    "The backend must resolve the Spring Boot HTTP-client contract before mTLS generation.",
+                )
+            }
+        } else if (!transportSecurity.sslBundleNameProperty.isNullOrBlank()) {
+            warning(
+                "INTEGRATION_MTLS_BUNDLE_UNUSED",
+                "The SSL-bundle property is ignored until mutual TLS is enabled.",
+            )
         }
 
         val reliability = model.reliability
@@ -541,7 +584,10 @@ object IntegrationConnectorGenerator {
             // Spring transaction and Resilience4j annotations use class-based
             // proxies when the generated adapter has no interface.
             append("public class ").append(model.className).append(" {\n")
-            if (model.observability.structuredLoggingEnabled) {
+            if (
+                model.observability.structuredLoggingEnabled ||
+                model.transportSecurity.mutualTlsEnabled
+            ) {
                 append("    private static final Logger log = LoggerFactory.getLogger(")
                     .append(model.className).append(".class);\n")
             }
@@ -553,7 +599,9 @@ object IntegrationConnectorGenerator {
                     .append(escapeJava(model.beanName)).append("-\" + UUID.randomUUID();\n")
             }
             constructorFields.forEach { field ->
-                append("    private final ").append(field.javaType).append(' ').append(field.name).append(";\n")
+                append("    private ")
+                if (field.name == "restClient") append("volatile ") else append("final ")
+                append(field.javaType).append(' ').append(field.name).append(";\n")
             }
             append('\n')
             append("    public ").append(model.className).append("(\n")
@@ -577,14 +625,33 @@ object IntegrationConnectorGenerator {
                 append("        this.").append(field.name).append(" = ").append(field.name).append(";\n")
             }
             if (model.kind in HTTP_KINDS) {
-                append("        HttpClient httpClient = HttpClient.newBuilder()\n")
-                append("                .connectTimeout(Duration.ofMillis(")
-                    .append(model.reliability.connectTimeoutMs).append("L))\n")
-                append("                .build();\n")
-                append("        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);\n")
-                append("        requestFactory.setReadTimeout(Duration.ofMillis(")
-                    .append(model.reliability.requestTimeoutMs).append("L));\n")
-                append("        this.restClient = restClientBuilder.requestFactory(requestFactory).build();\n")
+                if (model.transportSecurity.mutualTlsEnabled) {
+                    append("        if (!\"https\".equalsIgnoreCase(URI.create(address).getScheme())) {\n")
+                    append("            throw new IllegalStateException(\"Mutual TLS requires an https endpoint\");\n")
+                    append("        }\n")
+                    append("        this.restClient = buildRestClient(sslBundles.getBundle(sslBundleName));\n")
+                    append("        sslBundles.addBundleUpdateHandler(sslBundleName, this::reloadSslBundle);\n")
+                } else {
+                    append("        RestClient.Builder connectorBuilder = restClientBuilder.clone();\n")
+                    append("        HttpClient httpClient = HttpClient.newBuilder()\n")
+                    append("                .connectTimeout(Duration.ofMillis(")
+                        .append(model.reliability.connectTimeoutMs).append("L))\n")
+                    append("                .build();\n")
+                    append("        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);\n")
+                    append("        requestFactory.setReadTimeout(Duration.ofMillis(")
+                        .append(model.reliability.requestTimeoutMs).append("L));\n")
+                    append("        connectorBuilder.requestFactory(requestFactory);\n")
+                    if (model.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS) {
+                        append("        OAuth2ClientHttpRequestInterceptor oauth2 = new OAuth2ClientHttpRequestInterceptor(authorizedClientManager);\n")
+                        append("        oauth2.setPrincipalResolver(new RequestAttributePrincipalResolver());\n")
+                        if (model.authentication.evictInvalidAuthorizedClient) {
+                            append("        oauth2.setAuthorizationFailureHandler(\n")
+                            append("                OAuth2ClientHttpRequestInterceptor.authorizationFailureHandler(authorizedClientService));\n")
+                        }
+                        append("        connectorBuilder.requestInterceptor(oauth2);\n")
+                    }
+                    append("        this.restClient = connectorBuilder.build();\n")
+                }
             }
             if (model.kind in setOf(IntegrationConnectorKind.JMIX_FILE_STORAGE, IntegrationConnectorKind.OBJECT_STORAGE)) {
                 append("        this.fileStorage = fileStorageLocator.getByName(storageName);\n")
@@ -598,6 +665,9 @@ object IntegrationConnectorGenerator {
                 append("        this.inboxTransactions = new TransactionTemplate(transactionManager);\n")
             }
             append("    }\n\n")
+            if (model.kind in HTTP_KINDS && model.transportSecurity.mutualTlsEnabled) {
+                append(renderReloadableMtlsClient(model))
+            }
             append(renderOperation(model))
             if (model.reliability.outboxEnabled) {
                 append('\n').append(renderOutboxRuntime(model))
@@ -606,6 +676,49 @@ object IntegrationConnectorGenerator {
                 append('\n').append(renderInboxRuntime(model))
             }
             append("}\n")
+        }
+    }
+
+    private fun renderReloadableMtlsClient(model: IntegrationConnectorModel): String {
+        val settingsType = when (model.runtimeSpringBootApi) {
+            IntegrationSpringBootApi.BOOT_3 -> "ClientHttpRequestFactorySettings"
+            IntegrationSpringBootApi.BOOT_4 -> "HttpClientSettings"
+            null -> error("Spring Boot API must be resolved before mTLS generation")
+        }
+        return buildString {
+            append("    private RestClient buildRestClient(SslBundle sslBundle) {\n")
+            append("        RestClient.Builder connectorBuilder = restClientBuilder.clone();\n")
+            append("        ").append(settingsType).append(" httpSettings = ")
+                .append(settingsType).append(".defaults()\n")
+            append("                .withTimeouts(Duration.ofMillis(")
+                .append(model.reliability.connectTimeoutMs).append("L), Duration.ofMillis(")
+                .append(model.reliability.requestTimeoutMs).append("L))\n")
+            append("                .withSslBundle(sslBundle);\n")
+            append("        ClientHttpRequestFactory requestFactory = ClientHttpRequestFactoryBuilder.jdk().build(httpSettings);\n")
+            append("        connectorBuilder.requestFactory(requestFactory);\n")
+            if (model.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS) {
+                append("        OAuth2ClientHttpRequestInterceptor oauth2 = new OAuth2ClientHttpRequestInterceptor(authorizedClientManager);\n")
+                append("        oauth2.setPrincipalResolver(new RequestAttributePrincipalResolver());\n")
+                if (model.authentication.evictInvalidAuthorizedClient) {
+                    append("        oauth2.setAuthorizationFailureHandler(\n")
+                    append("                OAuth2ClientHttpRequestInterceptor.authorizationFailureHandler(authorizedClientService));\n")
+                }
+                append("        connectorBuilder.requestInterceptor(oauth2);\n")
+            }
+            append("        return connectorBuilder.build();\n")
+            append("    }\n\n")
+            append("    private void reloadSslBundle(SslBundle updatedBundle) {\n")
+            append("        try {\n")
+            append("            RestClient replacement = buildRestClient(updatedBundle);\n")
+            append("            this.restClient = replacement;\n")
+            append("            log.info(\"Reloaded SSL bundle for integration connector ")
+                .append(escapeJava(model.beanName)).append("\");\n")
+            append("        } catch (RuntimeException exception) {\n")
+            append("            log.error(\"SSL bundle reload failed for integration connector ")
+                .append(escapeJava(model.beanName))
+                .append("; keeping the last working client\", exception);\n")
+            append("        }\n")
+            append("    }\n\n")
         }
     }
 
@@ -658,15 +771,9 @@ object IntegrationConnectorGenerator {
                     .append("\", authSecret);\n")
             }
             IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS -> {
-                append("        OAuth2AuthorizedClient authorizedClient = authorizedClientManager.authorize(\n")
-                append("                OAuth2AuthorizeRequest.withClientRegistrationId(clientRegistrationId)\n")
-                append("                        .principal(oauthPrincipalName)\n")
-                append("                        .build());\n")
-                append("        if (authorizedClient == null) {\n")
-                append("            throw new IllegalStateException(\"OAuth2 authorization failed for connector ")
-                    .append(escapeJava(model.beanName)).append("\");\n")
-                append("        }\n")
-                append("        request = request.header(\"Authorization\", \"Bearer \" + authorizedClient.getAccessToken().getTokenValue());\n")
+                append("        request = request\n")
+                append("                .attributes(RequestAttributeClientRegistrationIdResolver.clientRegistrationId(clientRegistrationId))\n")
+                append("                .attributes(RequestAttributePrincipalResolver.principal(oauthPrincipalName));\n")
             }
             else -> Unit
         }
@@ -1720,6 +1827,25 @@ object IntegrationConnectorGenerator {
                     model.authentication.principalNameProperty,
                 ),
             )
+            if (model.authentication.evictInvalidAuthorizedClient) {
+                add(
+                    InjectedField(
+                        "OAuth2AuthorizedClientService",
+                        "authorizedClientService",
+                        qualifier = model.authentication.authorizedClientServiceBeanName,
+                    ),
+                )
+            }
+        }
+        if (model.transportSecurity.mutualTlsEnabled) {
+            add(InjectedField("SslBundles", "sslBundles"))
+            add(
+                InjectedField(
+                    "String",
+                    "sslBundleName",
+                    model.transportSecurity.sslBundleNameProperty,
+                ),
+            )
         }
         model.headers.forEachIndexed { index, header ->
             add(InjectedField("String", "headerValue$index", header.valueProperty))
@@ -1731,7 +1857,10 @@ object IntegrationConnectorGenerator {
         add("org.springframework.context.annotation.Profile")
         add("org.springframework.context.annotation.PropertySource")
         add("org.springframework.stereotype.Component")
-        if (model.observability.structuredLoggingEnabled) {
+        if (
+            model.observability.structuredLoggingEnabled ||
+            model.transportSecurity.mutualTlsEnabled
+        ) {
             add("org.slf4j.Logger")
             add("org.slf4j.LoggerFactory")
         }
@@ -1855,12 +1984,27 @@ object IntegrationConnectorGenerator {
         }
         when (model.kind) {
             in HTTP_KINDS -> {
-                add("java.net.http.HttpClient")
                 add("java.time.Duration")
                 add("org.springframework.http.HttpMethod")
                 add("org.springframework.http.MediaType")
-                add("org.springframework.http.client.JdkClientHttpRequestFactory")
                 add("org.springframework.web.client.RestClient")
+                if (model.transportSecurity.mutualTlsEnabled) {
+                    add("java.net.URI")
+                    add("org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder")
+                    add("org.springframework.boot.ssl.SslBundle")
+                    add("org.springframework.boot.ssl.SslBundles")
+                    add("org.springframework.http.client.ClientHttpRequestFactory")
+                    when (model.runtimeSpringBootApi) {
+                        IntegrationSpringBootApi.BOOT_3 ->
+                            add("org.springframework.boot.http.client.ClientHttpRequestFactorySettings")
+                        IntegrationSpringBootApi.BOOT_4 ->
+                            add("org.springframework.boot.http.client.HttpClientSettings")
+                        null -> Unit
+                    }
+                } else {
+                    add("java.net.http.HttpClient")
+                    add("org.springframework.http.client.JdkClientHttpRequestFactory")
+                }
                 if (model.responseJavaType != "void") add("java.util.Objects")
                 if (model.authentication.kind == IntegrationAuthenticationKind.BASIC) {
                     add("java.nio.charset.StandardCharsets")
@@ -1868,9 +2012,13 @@ object IntegrationConnectorGenerator {
                 }
                 if (model.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS) {
                     add("org.springframework.beans.factory.annotation.Qualifier")
-                    add("org.springframework.security.oauth2.client.OAuth2AuthorizeRequest")
-                    add("org.springframework.security.oauth2.client.OAuth2AuthorizedClient")
                     add("org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager")
+                    add("org.springframework.security.oauth2.client.web.client.OAuth2ClientHttpRequestInterceptor")
+                    add("org.springframework.security.oauth2.client.web.client.RequestAttributeClientRegistrationIdResolver")
+                    add("org.springframework.security.oauth2.client.web.client.RequestAttributePrincipalResolver")
+                    if (model.authentication.evictInvalidAuthorizedClient) {
+                        add("org.springframework.security.oauth2.client.OAuth2AuthorizedClientService")
+                    }
                 }
             }
             IntegrationConnectorKind.KAFKA_PUBLISHER -> {
@@ -1941,6 +2089,18 @@ object IntegrationConnectorGenerator {
         return buildString {
             append("# JVW-INTEGRATION-MODEL: ").append(encodedModel).append('\n')
             append("# Owned connector reliability policy for ").append(model.beanName).append('\n')
+            if (model.transportSecurity.mutualTlsEnabled) {
+                append("# mTLS uses a named Spring Boot SSL bundle supplied through ")
+                    .append(model.transportSecurity.sslBundleNameProperty).append(".\n")
+                append("# Keep private keys, trust material and bundle passwords outside this owned file.\n")
+                append("# Hostname verification remains enabled; the configured endpoint must use https.\n")
+            }
+            if (
+                model.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS &&
+                model.authentication.evictInvalidAuthorizedClient
+            ) {
+                append("# OAuth2 tokens are application-principal scoped, renewed by Spring Security, and evicted after invalid-token responses.\n")
+            }
             if (retry.mode == IntegrationRetryMode.BLOCKING) {
                 append("resilience4j.retry.instances.").append(model.beanName)
                     .append(".max-attempts=").append(retry.attempts).append('\n')

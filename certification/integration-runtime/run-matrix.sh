@@ -11,8 +11,21 @@ RABBIT_PROXY_PORT="${CERT_RABBIT_PROXY_PORT:-55673}"
 TOXIPROXY_PORT="${CERT_TOXIPROXY_PORT:-58474}"
 SFTP_PORT="${CERT_SFTP_PORT:-52222}"
 WIREMOCK_PORT="${CERT_WIREMOCK_PORT:-58080}"
+MTLS_PORT="${CERT_MTLS_PORT:-58443}"
+MTLS_PASSWORD="${CERT_MTLS_PASSWORD:-jmix-integration-mtls}"
+OAUTH_CLIENT_ID="${CERT_OAUTH_CLIENT_ID:-jvw-runtime-client}"
+OAUTH_CLIENT_SECRET="${CERT_OAUTH_CLIENT_SECRET:-jmix-integration-oauth}"
 BUILD_JAVA_HOME="${CERT_BUILD_JAVA_HOME:-}"
 CELL_FILTER="${CERT_INTEGRATION_CELL:-all}"
+TLS_DIR=""
+
+cleanup() {
+  if [[ -n "$TLS_DIR" && -d "$TLS_DIR" ]]; then
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" down -v >/dev/null 2>&1 || true
+    rm -rf "$TLS_DIR"
+  fi
+}
+trap cleanup EXIT
 
 resolve_jdk() {
   local version="$1"
@@ -36,6 +49,19 @@ resolve_jdk() {
       fi
     done
   fi
+  if [[ -z "$resolved" ]]; then
+    local gradle_jdks="${GRADLE_USER_HOME:-$HOME/.gradle}/jdks"
+    local candidate
+    for candidate in \
+      "$gradle_jdks"/eclipse_adoptium-"$version"-*/jdk-"$version".*/Contents/Home \
+      "$gradle_jdks"/*-"$version"-*/Contents/Home
+    do
+      if [[ -x "$candidate/bin/java" ]]; then
+        resolved="$candidate"
+        break
+      fi
+    done
+  fi
   printf '%s' "$resolved"
 }
 
@@ -50,7 +76,81 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required for integration runtime certification." >&2
   exit 1
 fi
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "OpenSSL is required to create disposable mTLS certification material." >&2
+  exit 1
+fi
 
+generate_tls_lab() {
+  local keytool="$BUILD_JAVA_HOME/bin/keytool"
+  if [[ ! -x "$keytool" ]]; then
+    echo "The selected JDK does not provide keytool." >&2
+    exit 1
+  fi
+  TLS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/jvw-integration-tls.XXXXXX")"
+  export CERT_TLS_DIR="$TLS_DIR"
+  export CERT_MTLS_PASSWORD="$MTLS_PASSWORD"
+  export CERT_MTLS_PORT="$MTLS_PORT"
+
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 2 \
+    -subj "/CN=JVW Integration Runtime CA" \
+    -keyout "$TLS_DIR/ca.key" -out "$TLS_DIR/ca.crt" >/dev/null 2>&1
+  printf '%s\n' \
+    'basicConstraints=CA:FALSE' \
+    'keyUsage=digitalSignature,keyEncipherment' \
+    'extendedKeyUsage=serverAuth' \
+    'subjectAltName=DNS:localhost' >"$TLS_DIR/server.ext"
+  openssl req -newkey rsa:2048 -sha256 -nodes \
+    -subj "/CN=localhost" \
+    -keyout "$TLS_DIR/server.key" -out "$TLS_DIR/server.csr" >/dev/null 2>&1
+  openssl x509 -req -sha256 -days 2 \
+    -in "$TLS_DIR/server.csr" \
+    -CA "$TLS_DIR/ca.crt" -CAkey "$TLS_DIR/ca.key" -CAcreateserial \
+    -extfile "$TLS_DIR/server.ext" -out "$TLS_DIR/server.crt" >/dev/null 2>&1
+  openssl pkcs12 -export -name wiremock-server \
+    -inkey "$TLS_DIR/server.key" -in "$TLS_DIR/server.crt" \
+    -certfile "$TLS_DIR/ca.crt" -out "$TLS_DIR/server.p12" \
+    -passout "pass:$MTLS_PASSWORD" >/dev/null 2>&1
+
+  printf '%s\n' \
+    'basicConstraints=CA:FALSE' \
+    'keyUsage=digitalSignature,keyEncipherment' \
+    'extendedKeyUsage=clientAuth' >"$TLS_DIR/client.ext"
+  for client_name in client rotated-client; do
+    openssl req -newkey rsa:2048 -sha256 -nodes \
+      -subj "/CN=jvw-$client_name" \
+      -keyout "$TLS_DIR/$client_name.key" \
+      -out "$TLS_DIR/$client_name.csr" >/dev/null 2>&1
+    openssl x509 -req -sha256 -days 2 \
+      -in "$TLS_DIR/$client_name.csr" \
+      -CA "$TLS_DIR/ca.crt" -CAkey "$TLS_DIR/ca.key" -CAcreateserial \
+      -extfile "$TLS_DIR/client.ext" \
+      -out "$TLS_DIR/$client_name.crt" >/dev/null 2>&1
+    openssl pkcs12 -export -name "$client_name" \
+      -inkey "$TLS_DIR/$client_name.key" -in "$TLS_DIR/$client_name.crt" \
+      -certfile "$TLS_DIR/ca.crt" -out "$TLS_DIR/$client_name.p12" \
+      -passout "pass:$MTLS_PASSWORD" >/dev/null 2>&1
+  done
+
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 2 \
+    -subj "/CN=JVW Untrusted Runtime CA" \
+    -keyout "$TLS_DIR/untrusted-ca.key" \
+    -out "$TLS_DIR/untrusted-ca.crt" >/dev/null 2>&1
+  "$keytool" -importcert -noprompt -storetype PKCS12 \
+    -alias client-ca -file "$TLS_DIR/ca.crt" \
+    -keystore "$TLS_DIR/server-trust.p12" \
+    -storepass "$MTLS_PASSWORD" >/dev/null 2>&1
+  "$keytool" -importcert -noprompt -storetype PKCS12 \
+    -alias server-ca -file "$TLS_DIR/ca.crt" \
+    -keystore "$TLS_DIR/client-trust.p12" \
+    -storepass "$MTLS_PASSWORD" >/dev/null 2>&1
+  "$keytool" -importcert -noprompt -storetype PKCS12 \
+    -alias untrusted-server-ca -file "$TLS_DIR/untrusted-ca.crt" \
+    -keystore "$TLS_DIR/untrusted-trust.p12" \
+    -storepass "$MTLS_PASSWORD" >/dev/null 2>&1
+}
+
+generate_tls_lab
 mkdir -p "$EVIDENCE_DIR"
 
 (
@@ -135,6 +235,12 @@ run_cell() {
   CERT_SFTP_USERNAME="jmixintcert" \
   CERT_SFTP_PASSWORD="jmix-integration-sftp" \
   CERT_WIREMOCK_URL="http://127.0.0.1:$WIREMOCK_PORT" \
+  CERT_MTLS_URL="https://localhost:$MTLS_PORT" \
+  CERT_MTLS_HOSTNAME_MISMATCH_URL="https://127.0.0.1:$MTLS_PORT" \
+  CERT_TLS_DIR="$TLS_DIR" \
+  CERT_MTLS_PASSWORD="$MTLS_PASSWORD" \
+  CERT_OAUTH_CLIENT_ID="$OAUTH_CLIENT_ID" \
+  CERT_OAUTH_CLIENT_SECRET="$OAUTH_CLIENT_SECRET" \
   CERT_EVIDENCE_FILE="$EVIDENCE_DIR/$cell_id.json" \
   CERT_CELL_ID="$cell_id" \
   JAVA_HOME="$cell_java_home" \
@@ -168,7 +274,12 @@ run_cell() {
   for required_flag in \
     missingIdentityQuarantined \
     conflictingIdentityRejected \
-    transactionalEffectsCertified
+    transactionalEffectsCertified \
+    oauth2RenewalCertified \
+    invalidTokenEvictionCertified \
+    mtlsClientCertificateCertified \
+    mtlsNegativePathsCertified \
+    mtlsHotRotationCertified
   do
     if ! grep -q "\"$required_flag\":true" "$EVIDENCE_DIR/$cell_id.json"; then
       echo "$required_flag evidence failed for $cell_id." >&2

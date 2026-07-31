@@ -503,9 +503,11 @@ export const developmentIntegrationConnectorWorkspace: IntegrationConnectorWorks
         'JMIX_EMAIL',
         'JMIX_FILE_STORAGE',
         'OAUTH2_CLIENT',
+        'SPRING_BOOT_SSL_BUNDLES',
       ],
       jsonApi: 'JACKSON_2',
       observabilityApi: 'MICROMETER_OBSERVATION',
+      springBootApi: 'BOOT_3',
       recommended: true,
     },
     {
@@ -517,6 +519,7 @@ export const developmentIntegrationConnectorWorkspace: IntegrationConnectorWorks
       capabilities: ['SPRING_WEB', 'JMIX_FILE_STORAGE'],
       jsonApi: 'JACKSON_2',
       observabilityApi: 'APPLICATION_EVENTS',
+      springBootApi: 'BOOT_3',
       recommended: false,
     },
   ],
@@ -526,6 +529,12 @@ export const developmentIntegrationConnectorWorkspace: IntegrationConnectorWorks
   ),
   oauth2Managers: [{
     beanName: 'authorizedClientManager',
+    declaringType: 'com.company.loan.security.OAuth2ClientConfiguration',
+    moduleId: 'loan',
+    sourceLocator: locator('loan/src/main/java/com/company/loan/security/OAuth2ClientConfiguration.java'),
+  }],
+  oauth2Services: [{
+    beanName: 'authorizedClientService',
     declaringType: 'com.company.loan.security.OAuth2ClientConfiguration',
     moduleId: 'loan',
     sourceLocator: locator('loan/src/main/java/com/company/loan/security/OAuth2ClientConfiguration.java'),

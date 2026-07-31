@@ -87,4 +87,27 @@ services:
     image: wiremock/wiremock:3.13.2-2
     ports:
       - "127.0.0.1:${CERT_WIREMOCK_PORT:-58080}:8080"
-    command: ["--global-response-templating", "--disable-gzip", "--verbose"]
+      - "127.0.0.1:${CERT_MTLS_PORT:-58443}:8443"
+    volumes:
+      - "${CERT_TLS_DIR:?CERT_TLS_DIR is required}/server.p12:/certs/server.p12:ro"
+      - "${CERT_TLS_DIR:?CERT_TLS_DIR is required}/server-trust.p12:/certs/server-trust.p12:ro"
+    command:
+      - "--global-response-templating"
+      - "--disable-gzip"
+      - "--https-port"
+      - "8443"
+      - "--https-keystore"
+      - "/certs/server.p12"
+      - "--keystore-type"
+      - "PKCS12"
+      - "--keystore-password"
+      - "${CERT_MTLS_PASSWORD:-jmix-integration-mtls}"
+      - "--key-manager-password"
+      - "${CERT_MTLS_PASSWORD:-jmix-integration-mtls}"
+      - "--https-truststore"
+      - "/certs/server-trust.p12"
+      - "--truststore-type"
+      - "PKCS12"
+      - "--truststore-password"
+      - "${CERT_MTLS_PASSWORD:-jmix-integration-mtls}"
+      - "--https-require-client-cert"

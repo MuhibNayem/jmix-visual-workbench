@@ -1,5 +1,6 @@
 package org.jmixworkbench.services
 
+import com.google.gson.JsonParser
 import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
@@ -20,6 +21,9 @@ import org.jmixworkbench.model.IntegrationOutboxModel
 import org.jmixworkbench.model.IntegrationReliabilityModel
 import org.jmixworkbench.model.IntegrationRetryMode
 import org.jmixworkbench.model.IntegrationRetryPolicyModel
+import org.jmixworkbench.model.IntegrationSpringBootApi
+import org.jmixworkbench.model.IntegrationTransportSecurityModel
+import java.util.Base64
 import kotlin.test.assertContains
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -198,18 +202,36 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertContains(requireNotNull(policyChange.createContent), "# JVW-INTEGRATION-MODEL:")
         assertTrue(service.preview(model).accepted)
 
+        val currentMarker = requireNotNull(javaChange.createContent)
+            .lineSequence()
+            .first { it.startsWith("// JVW-INTEGRATION-MODEL: ") }
+            .removePrefix("// JVW-INTEGRATION-MODEL: ")
+            .trim()
+        val legacyJson = JsonParser.parseString(
+            String(Base64.getUrlDecoder().decode(currentMarker), Charsets.UTF_8),
+        ).asJsonObject.apply {
+            remove("transportSecurity")
+            getAsJsonObject("authentication").remove("evictInvalidAuthorizedClient")
+        }
+        val legacyMarker = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(legacyJson.toString().toByteArray(Charsets.UTF_8))
+        val legacyJava = requireNotNull(javaChange.createContent).replace(currentMarker, legacyMarker)
+        val legacyPolicy = requireNotNull(policyChange.createContent).replace(currentMarker, legacyMarker)
         WriteAction.run<RuntimeException> {
-            changes.forEach { change -> write(root, change.relativePath, requireNotNull(change.createContent)) }
+            write(root, javaChange.relativePath, legacyJava)
+            write(root, policyChange.relativePath, legacyPolicy)
         }
         ApplicationGraphService.getInstance(project).invalidate()
         val document = requireNotNull(
             service.load(forceRefresh = true).existingDocuments.singleOrNull(),
         ) { "Owned integration connector was not rediscovered." }
         assertTrue(document.editable)
+        assertFalse(document.model.transportSecurity.mutualTlsEnabled)
+        assertTrue(document.model.authentication.evictInvalidAuthorizedClient)
 
         val policyFile = requireNotNull(root.findFileByRelativePath(policyChange.relativePath))
         WriteAction.run<RuntimeException> {
-            VfsUtil.saveText(policyFile, requireNotNull(policyChange.createContent) + "\n# manually changed\n")
+            VfsUtil.saveText(policyFile, legacyPolicy + "\n# manually changed\n")
         }
         val rejected = service.propose(document.model)
 
@@ -259,10 +281,16 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                 package com.acme.integration;
                 import org.springframework.context.annotation.Bean;
                 import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
+                import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
 
                 public class OAuth2ClientConfiguration {
                     @Bean("authorizedClientManager")
                     public OAuth2AuthorizedClientManager authorizedClientManager() {
+                        return null;
+                    }
+
+                    @Bean("authorizedClientService")
+                    public OAuth2AuthorizedClientService authorizedClientService() {
                         return null;
                     }
                 }
@@ -306,6 +334,32 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
             "No schema data store was indexed: ${workspace.issues}"
         }
         assertTrue(workspace.oauth2Managers.any { it.beanName == "authorizedClientManager" })
+        assertTrue(workspace.oauth2Services.any { it.beanName == "authorizedClientService" })
+        val missingOAuth2Service = IntegrationConnectorModel(
+            name = "Unresolved identity connector",
+            destinationId = destination.id,
+            packageName = "com.acme.integration",
+            className = "UnresolvedIdentityConnector",
+            beanName = "unresolvedIdentityConnector",
+            kind = IntegrationConnectorKind.IDENTITY_PROVIDER,
+            configurationPrefix = "integration.identity",
+            addressProperty = "integration.identity.address",
+            authentication = IntegrationAuthenticationModel(
+                kind = IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS,
+                authorizedClientManagerBeanName = "authorizedClientManager",
+                authorizedClientServiceBeanName = "missingAuthorizedClientService",
+                clientRegistrationIdProperty = "integration.identity.registration-id",
+                principalNameProperty = "integration.identity.principal-name",
+                evictInvalidAuthorizedClient = true,
+            ),
+        )
+        val missingServiceProposal = service.propose(missingOAuth2Service)
+        assertTrue(missingServiceProposal.changeSet == null)
+        assertTrue(
+            missingServiceProposal.issues.any {
+                it.code == "JVW-INTEGRATION-OAUTH-SERVICE-NOT-INDEXED"
+            },
+        )
         val supported = IntegrationConnectorKind.entries
 
         supported.forEach { kind ->
@@ -343,11 +397,21 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                     IntegrationAuthenticationModel(
                         kind = IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS,
                         authorizedClientManagerBeanName = "authorizedClientManager",
+                        authorizedClientServiceBeanName = "authorizedClientService",
                         clientRegistrationIdProperty = "integration.identity.registration-id",
                         principalNameProperty = "integration.identity.principal-name",
+                        evictInvalidAuthorizedClient = true,
                     )
                 } else {
                     IntegrationAuthenticationModel()
+                },
+                transportSecurity = if (oauth2) {
+                    IntegrationTransportSecurityModel(
+                        mutualTlsEnabled = true,
+                        sslBundleNameProperty = "integration.identity.ssl-bundle",
+                    )
+                } else {
+                    IntegrationTransportSecurityModel()
                 },
                 reliability = if (consumer) {
                     IntegrationReliabilityModel(
@@ -376,6 +440,7 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                 } else {
                     IntegrationReliabilityModel()
                 },
+                runtimeSpringBootApi = if (oauth2) IntegrationSpringBootApi.BOOT_4 else null,
             )
 
             val proposal = service.propose(model)
@@ -396,6 +461,13 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                 assertFalse(generatedJava.contains("tools.jackson.databind.ObjectMapper"))
                 assertFalse(generatedJava.contains("forgedInboxDataSource"))
                 assertFalse(generatedJava.contains("forgedInboxTransactionManager"))
+            }
+            if (oauth2) {
+                assertContains(
+                    generatedJava,
+                    "org.springframework.boot.http.client.ClientHttpRequestFactorySettings",
+                )
+                assertFalse(generatedJava.contains("org.springframework.boot.http.client.HttpClientSettings"))
             }
         }
     }
