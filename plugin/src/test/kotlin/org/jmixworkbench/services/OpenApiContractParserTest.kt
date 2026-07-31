@@ -35,6 +35,13 @@ class OpenApiContractParserTest {
         assertEquals("application/json", operation.requestMediaType)
         assertEquals("201", operation.responseStatus)
         assertEquals(listOf("oauth"), operation.securitySchemes)
+        assertEquals(operation.requestSchemaId, operationSnapshot.requestSchemaId)
+        assertEquals(operation.responseSchemaId, operationSnapshot.responseSchemaId)
+        assertEquals(operation.schemas.size, operationSnapshot.schemas.size)
+        assertEquals(
+            listOf("payments.write"),
+            operationSnapshot.securityRequirements.single().schemes.single().requiredScopes,
+        )
         assertEquals(1, operation.securityRequirements.size)
         assertEquals(
             IntegrationOpenApiSecuritySchemeKind.OAUTH2_CLIENT_CREDENTIALS,

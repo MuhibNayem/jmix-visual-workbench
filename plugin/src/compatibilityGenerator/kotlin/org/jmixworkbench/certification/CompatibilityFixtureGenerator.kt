@@ -7,6 +7,7 @@ import org.jmixworkbench.generator.EntityGenerator
 import org.jmixworkbench.generator.KotlinDataRepositoryGenerator
 import org.jmixworkbench.generator.KotlinEntityGenerator
 import org.jmixworkbench.generator.IntegrationConnectorGenerator
+import org.jmixworkbench.generator.OpenApiJmixLayerGenerator
 import org.jmixworkbench.generator.ViewControllerGenerator
 import org.jmixworkbench.model.AttributeModel
 import org.jmixworkbench.model.AttributeType
@@ -35,10 +36,15 @@ import org.jmixworkbench.model.IntegrationReliabilityModel
 import org.jmixworkbench.model.IntegrationObservabilityApi
 import org.jmixworkbench.model.IntegrationObservabilityModel
 import org.jmixworkbench.model.IntegrationOpenApiBinding
+import org.jmixworkbench.model.IntegrationOpenApiJmixLayerModel
+import org.jmixworkbench.model.IntegrationOpenApiJmixTargetKind
+import org.jmixworkbench.model.IntegrationOpenApiJmixTypeMapping
+import org.jmixworkbench.model.IntegrationOpenApiMappingDirection
 import org.jmixworkbench.model.IntegrationOpenApiOperationModel
 import org.jmixworkbench.model.IntegrationOpenApiParameterLocation
 import org.jmixworkbench.model.IntegrationOpenApiParameterModel
 import org.jmixworkbench.model.IntegrationOpenApiPropertyModel
+import org.jmixworkbench.model.IntegrationOpenApiPropertyMapping
 import org.jmixworkbench.model.IntegrationOpenApiSchemaKind
 import org.jmixworkbench.model.IntegrationOpenApiSchemaModel
 import org.jmixworkbench.model.QueryType
@@ -575,6 +581,12 @@ object CompatibilityFixtureGenerator {
                     enumValues = listOf("accepted", "rejected"),
                 ),
                 IntegrationOpenApiSchemaModel(
+                    id = "inline:receipt-id",
+                    javaName = "ReceiptId",
+                    kind = IntegrationOpenApiSchemaKind.UUID,
+                    format = "uuid",
+                ),
+                IntegrationOpenApiSchemaModel(
                     id = "component:PaymentRequest",
                     javaName = "PaymentRequest",
                     kind = IntegrationOpenApiSchemaKind.OBJECT,
@@ -601,6 +613,14 @@ object CompatibilityFixtureGenerator {
                     kind = IntegrationOpenApiSchemaKind.OBJECT,
                     properties = listOf(
                         IntegrationOpenApiPropertyModel(
+                            wireName = "id",
+                            javaName = "id",
+                            schemaId = "inline:receipt-id",
+                            required = true,
+                            nullable = false,
+                            readOnly = true,
+                        ),
+                        IntegrationOpenApiPropertyModel(
                             wireName = "status",
                             javaName = "status",
                             schemaId = "inline:status",
@@ -625,6 +645,51 @@ object CompatibilityFixtureGenerator {
             httpMethod = binding.method,
             contentType = requireNotNull(binding.requestMediaType),
             openApiBinding = binding,
+            openApiJmixLayer = IntegrationOpenApiJmixLayerModel(
+                enabled = true,
+                dtoPackage = "com.acme.cert.entity.payment",
+                mapperPackage = "com.acme.cert.integration.mapper",
+                servicePackage = "com.acme.cert.service.payment",
+                serviceClassName = "CertifiedPaymentService",
+                serviceBeanName = "certifiedPaymentService",
+                mappings = listOf(
+                    IntegrationOpenApiJmixTypeMapping(
+                        schemaId = "component:PaymentRequest",
+                        targetKind = IntegrationOpenApiJmixTargetKind.GENERATED_DTO,
+                        generatedClassName = "PaymentRequest",
+                        properties = listOf(
+                            IntegrationOpenApiPropertyMapping(
+                                "amount",
+                                "amount",
+                                IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                            ),
+                            IntegrationOpenApiPropertyMapping(
+                                "externalReference",
+                                "externalReference",
+                                IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                            ),
+                        ),
+                    ),
+                    IntegrationOpenApiJmixTypeMapping(
+                        schemaId = "component:PaymentReceipt",
+                        targetKind = IntegrationOpenApiJmixTargetKind.GENERATED_DTO,
+                        generatedClassName = "PaymentReceipt",
+                        idProperty = "id",
+                        properties = listOf(
+                            IntegrationOpenApiPropertyMapping(
+                                "id",
+                                "id",
+                                IntegrationOpenApiMappingDirection.INBOUND,
+                            ),
+                            IntegrationOpenApiPropertyMapping(
+                                "status",
+                                "status",
+                                IntegrationOpenApiMappingDirection.INBOUND,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
             resolvedOpenApiOperation = operation,
         )
         val model = initial.copy(
@@ -639,6 +704,19 @@ object CompatibilityFixtureGenerator {
         )
         sources["common/java/com/acme/cert/integration/CertifiedPaymentClient.java"] =
             IntegrationConnectorGenerator.generate(model).javaSource
+        val jmixLayer = OpenApiJmixLayerGenerator.generate(
+            OpenApiJmixLayerGenerator.Input(
+                connector = model,
+                operation = operation,
+                layer = requireNotNull(model.openApiJmixLayer),
+                entityNamePrefix = "cert",
+                existingTargets = emptyMap(),
+            ),
+        )
+        require(jmixLayer.issues.isEmpty()) { jmixLayer.issues.joinToString() }
+        jmixLayer.sources.forEach { source ->
+            sources["common/java/${source.packageRelativePath}"] = source.content
+        }
     }
 
     private fun entityModel(

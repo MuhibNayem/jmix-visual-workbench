@@ -1871,6 +1871,41 @@ export interface IntegrationOpenApiSecurityRequirement {
   schemes: IntegrationOpenApiSecurityScheme[]
 }
 
+export type IntegrationOpenApiJmixTargetKind = 'GENERATED_DTO' | 'EXISTING_ENTITY'
+export type IntegrationOpenApiMappingDirection = 'INBOUND' | 'OUTBOUND' | 'BIDIRECTIONAL'
+
+export interface IntegrationOpenApiExistingEntityBinding {
+  artifactId: string
+  qualifiedName: string
+  revisionFingerprint: string
+}
+
+export interface IntegrationOpenApiPropertyMapping {
+  schemaProperty: string
+  entityProperty: string
+  direction: IntegrationOpenApiMappingDirection
+}
+
+export interface IntegrationOpenApiJmixTypeMapping {
+  schemaId: string
+  targetKind: IntegrationOpenApiJmixTargetKind
+  generatedClassName?: string
+  existingEntity?: IntegrationOpenApiExistingEntityBinding
+  idProperty?: string
+  instanceNameProperty?: string
+  properties: IntegrationOpenApiPropertyMapping[]
+}
+
+export interface IntegrationOpenApiJmixLayerModel {
+  enabled: boolean
+  dtoPackage: string
+  mapperPackage: string
+  servicePackage: string
+  serviceClassName: string
+  serviceBeanName: string
+  mappings: IntegrationOpenApiJmixTypeMapping[]
+}
+
 export interface IntegrationOpenApiBinding {
   relativePath: string
   documentSha256: string
@@ -1923,9 +1958,35 @@ export interface OpenApiOperationSnapshot {
   parameters: OpenApiParameterSnapshot[]
   securitySchemes: string[]
   securityRequirements: IntegrationOpenApiSecurityRequirement[]
+  requestSchemaId?: string
+  responseSchemaId?: string
+  schemas: OpenApiSchemaSnapshot[]
   defaultBinding?: IntegrationOpenApiBinding
   supported: boolean
   issues: string[]
+}
+
+export interface OpenApiSchemaSnapshot {
+  id: string
+  javaName: string
+  kind: 'OBJECT' | 'ARRAY' | 'STRING' | 'INTEGER' | 'NUMBER' | 'BOOLEAN' | 'UUID' | 'DATE' | 'DATE_TIME' | 'BINARY' | 'ANY'
+  typeLabel: string
+  nullable: boolean
+  enumValues: string[]
+  itemSchemaId?: string
+  additionalPropertiesAllowed: boolean
+  properties: OpenApiSchemaPropertySnapshot[]
+}
+
+export interface OpenApiSchemaPropertySnapshot {
+  wireName: string
+  javaName: string
+  schemaId: string
+  typeLabel: string
+  required: boolean
+  nullable: boolean
+  readOnly: boolean
+  writeOnly: boolean
 }
 
 export interface OpenApiContractSnapshot {
@@ -2130,6 +2191,7 @@ export interface IntegrationConnectorModel {
   enabled: boolean
   catalogBinding?: IntegrationConnectorCatalogBinding
   openApiBinding?: IntegrationOpenApiBinding
+  openApiJmixLayer?: IntegrationOpenApiJmixLayerModel
   sourceLocator?: GraphSourceLocator
 }
 
@@ -2161,6 +2223,7 @@ export interface IntegrationConnectorWorkspaceResponse {
   oauth2Managers: IntegrationOAuth2ManagerSnapshot[]
   oauth2Services: IntegrationOAuth2ServiceSnapshot[]
   dataStores: SchemaDataStoreSnapshot[]
+  entities: SchemaEntitySnapshot[]
   openApiContracts: OpenApiContractSnapshot[]
   organizationConnectorTemplates: IntegrationOrganizationConnectorTemplateSnapshot[]
   existingDocuments: IntegrationConnectorDocumentSnapshot[]

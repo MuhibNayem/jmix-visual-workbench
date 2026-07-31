@@ -7,10 +7,10 @@ The Integration Designer can bind an HTTP-based connector to an OpenAPI 3.0 or
 owns contract parsing, schema normalization, operation resolution, security
 evaluation and generated Java types.
 
-This milestone implements the contract-client foundation documented by Jmix:
-client generation is the first layer, followed by Jmix entities/mappers and
-application services. The latter two layers remain a separate active milestone
-and are not implied by this document.
+The generated transport client can now be wrapped by a Jmix-facing layer in the
+same visual workflow. That layer consists of Jmix DTO entities and enums,
+explicit transport/entity mappers, and an application service that keeps
+provider-owned transport types out of views and business logic.
 
 Authoritative public references:
 
@@ -28,10 +28,16 @@ Authoritative public references:
 4. Review typed path, query, header and cookie parameters.
 5. Configure an authentication alternative that satisfies the exact OpenAPI
    security requirement, including required OAuth scopes and mutual TLS.
-6. Configure endpoint, credentials, SSL bundle and reliability policy through
+6. Select **Generate Jmix layer** when application code must consume Jmix
+   entities rather than provider transport records.
+7. For every reachable object schema, generate a DTO entity or select an exact
+   indexed existing entity, then review property direction, stable identifier
+   and instance-name mappings.
+8. Configure endpoint, credentials, SSL bundle and reliability policy through
    external properties.
-7. Preview the complete Java/configuration diff and apply it through the shared
-   atomic workspace-change pipeline.
+9. Preview the connector, policy, DTOs, enums, mapper and application service as
+   one immutable diff and apply them through the shared atomic workspace-change
+   pipeline.
 
 The visual UI suggests contract-required authentication, but this is only a
 convenience. Preview and apply always reconstruct and validate the requirement
@@ -64,7 +70,19 @@ in Kotlin.
 - Generated headers are checked for ownership collisions across OpenAPI
   parameters, API-key auth, idempotency and configured headers.
 - Existing generated connectors remain editable only when Java, policy,
-  migration and contract regeneration are byte-for-byte owned.
+  migration and every supplemental Jmix source regenerate byte-for-byte.
+- Existing-entity targets are selected by backend-issued artifact ID, qualified
+  name and exact source revision. Preview resolves attributes and types again
+  from the schema index; browser-supplied entity shape is never trusted.
+- Cross-module entity targets must be compile-visible through the indexed
+  module-dependency graph. Missing, ambiguous, stale and inaccessible targets
+  fail closed.
+- Read-only target attributes, duplicate destinations, unsafe type conversion,
+  missing required outbound mappings and unstable response DTO identity are
+  rejected before source preview.
+- Create, update and removal of all owned sources are one rollback-protected
+  IntelliJ command. Injected partial-write tests prove that failure restores
+  every byte and removes newly created directory topology.
 
 ## Generated contract
 
@@ -86,6 +104,28 @@ The adapter uses Spring `RestClient` with:
 Generated operation and nested type names are collision-safe for Java keywords,
 `Object` methods and the connector's enclosing class name.
 
+## Generated Jmix layer
+
+Reachable OpenAPI object graphs can produce:
+
+- `@JmixEntity` DTO classes with `@JmixId`, `@InstanceName` and mandatory
+  property metadata;
+- `EnumClass<String>` enums that retain the exact provider wire identifier;
+- nested object, list, set, UUID, temporal, decimal, floating-point and binary
+  mappings with defensive copies where required;
+- an explicit Spring mapper that creates instances through `Metadata` and marks
+  inbound DTO entities not-new through `EntityStates` only after mapping;
+- mappings to exact indexed Jmix DTO or persistent entity classes, including
+  inherited attributes;
+- a Spring application-service facade whose public request/response contract
+  uses Jmix types and whose remote invocation is not incorrectly enclosed in a
+  database transaction.
+
+The mapper is deliberately explicit and dependency-free. It does not silently
+add MapStruct or annotation-processor dependencies to an enterprise build.
+OpenAPI maps are rejected because Jmix entity attributes do not support `Map`.
+Unsupported conversions fail closed rather than emitting placeholder casts.
+
 ## Compatibility evidence
 
 Production OpenAPI-generated source is part of
@@ -98,22 +138,25 @@ Production OpenAPI-generated source is part of
 | 3.0.0 | 21 | Spring Boot 4 / Jackson 3 |
 | 3.0.0 | 25 | Spring Boot 4 / Jackson 3 |
 
-Focused parser/workspace tests cover YAML and JSON, local references, `allOf`,
-typed records/enums, exact status handling, stale documents, duplicate
+Focused parser/generator/workspace tests cover YAML and JSON, local references,
+`allOf`, typed records/enums, exact status handling, stale documents, duplicate
 operation IDs, external references, polymorphism, form serializers, unsupported
-parameter/media serialization, security mismatch and Java name collisions.
+parameter/media serialization, security mismatch, Java name collisions,
+generated and existing Jmix targets, read-only attributes, inbound/outbound
+direction, source revision, complete create/reopen/update/remove round trips,
+manual supplemental-source protection and injected partial-write rollback.
 
-The clean `phase1Check` release gate on 2026-07-31 passed 396 regression tests
+The clean `phase1Check` release gate on 2026-07-31 passed 401 regression tests
 and 3 host smoke tests on each IntelliJ lane. Plugin Verifier reported both
 artifacts compatible:
 
 | IntelliJ host | Packaged ZIP SHA-256 |
 | --- | --- |
-| IU-253.28294.334 | `44c92b238a4bbf378235e922dcf1afaf8789b504bf7e1767fcc152863d6b4120` |
-| IU-262.8665.258 | `977b567c0a1d820abc376a9b59eddfd7d5b9fa8ad8fee3c38fe971c9d742ed1f` |
+| IU-253.28294.334 | `3db844ff750ee8edcc6353738b095958dc4886414ba91401b3acec901931a915` |
+| IU-262.8665.258 | `e19ded99d224d23ae3b6eb305e302815e87a5a20bcce4d8bcb383d672972b3a7` |
 
 Both ZIPs contain the same verified web input digest:
-`3729dade3039c1d75f83fbb59d2f93df5213f2bc7979fca191e696e0934f53f0`.
+`bcd9f56e7fed9dc290ee0bfad3130c3d6787f75fd93d62cf64b536ea1632c263`.
 
 Responsive browser evidence on 2026-07-31 measured the real Integration
 Designer through its isolated iframe harness:
@@ -124,25 +167,25 @@ Designer through its isolated iframe harness:
 | 720 px | Continuous stack | 720 / 720 | 712 |
 | 360 px | Continuous stack | 360 / 360 | 352 |
 
-At 360 pixels, selecting the Payment Provider contract rendered the complete
-operation, request/response representations, generated types, OAuth scope and
-typed parameters. The OpenAPI region ended at 340 pixels; all seven visible
-controls stayed within the 360-pixel viewport and document/body horizontal
-overflow was zero. Direct application execution reported no application-origin
-console errors.
+At 360 pixels, selecting the Payment Provider contract and generating its Jmix
+layer rendered both object mappings, package/service controls and all property
+directions without document/body overflow. Each 590-pixel mapping table remained
+inside a 196-pixel keyboard-focusable local scroll region. Mapping targets and
+directions have schema-qualified accessible names. Generate, undo and redo were
+executed successfully at that width.
 
 ## Deliberate remaining boundary
 
-This foundation does not yet claim complete Jmix Studio OpenAPI parity. The
-active next layers are:
+This milestone does not yet claim complete Jmix Studio OpenAPI parity. The
+active remaining layers are:
 
-- visual generation/customization of Jmix DTO entities;
-- lossless mappings between transport models and new or existing Jmix entities;
-- application-level services that expose Jmix entity types;
-- safe regeneration and semantic breaking-change migration;
-- controlled multi-file contract bundles;
+- semantic contract diff and guided breaking-change migration;
+- user-defined, versioned mapping converters and existing custom-enum adapters;
+- Kotlin DTO/mapper/service generation for Kotlin-owned target source sets;
+- controlled multi-file contract bundles and cross-operation shared models;
 - provider/consumer contract suites and saved runtime scenarios;
-- installed-IDE accessibility and large-contract performance certification.
+- installed-IDE accessibility, memory/leak and large-contract performance
+  certification.
 
 Until those layers pass their own release gates, `STUDIO-ADV-001` remains
 `SUBSTANTIAL`, not `STRONG`.

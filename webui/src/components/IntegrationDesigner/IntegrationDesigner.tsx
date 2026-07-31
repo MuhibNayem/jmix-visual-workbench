@@ -18,12 +18,15 @@ import type {
   IntegrationDeliveryGuarantee,
   IntegrationHttpMethod,
   IntegrationOrganizationConnectorTemplateSnapshot,
+  IntegrationOpenApiJmixLayerModel,
+  IntegrationOpenApiJmixTypeMapping,
   IntegrationOpenApiSecurityRequirement,
   IntegrationOpenApiSecurityScheme,
   IntegrationRetryMode,
   IntegrationConnectorWorkspaceResponse,
   OpenApiContractSnapshot,
   OpenApiOperationSnapshot,
+  OpenApiSchemaSnapshot,
   SchemaDataStoreSnapshot,
   WorkspaceChangePreviewResponse,
 } from '../../types'
@@ -85,6 +88,91 @@ function classNameFor(kind: IntegrationConnectorKind) {
 
 function beanNameFor(className: string) {
   return className ? className.charAt(0).toLowerCase() + className.slice(1) : ''
+}
+
+function safeJavaTypeName(value: string, fallback: string) {
+  const cleaned = value.replace(/[^A-Za-z0-9_$]/g, '_')
+  const prefixed = /^[0-9]/.test(cleaned) ? `Type_${cleaned}` : cleaned
+  return prefixed || fallback
+}
+
+function reachableOpenApiSchemaIds(operation: OpenApiOperationSnapshot) {
+  const schemas = new Map((operation.schemas ?? []).map((schema) => [schema.id, schema]))
+  const visited = new Set<string>()
+  const visit = (schemaId?: string) => {
+    if (!schemaId || visited.has(schemaId)) return
+    visited.add(schemaId)
+    const schema = schemas.get(schemaId)
+    schema?.properties.forEach((property) => visit(property.schemaId))
+    visit(schema?.itemSchemaId)
+  }
+  visit(operation.requestSchemaId)
+  visit(operation.responseSchemaId)
+  return [...visited]
+}
+
+function rootObjectSchemaId(operation: OpenApiOperationSnapshot, schemaId?: string) {
+  if (!schemaId) return undefined
+  const schema = (operation.schemas ?? []).find((candidate) => candidate.id === schemaId)
+  if (schema?.kind === 'OBJECT') return schema.id
+  if (schema?.kind === 'ARRAY') {
+    const item = (operation.schemas ?? []).find((candidate) => candidate.id === schema.itemSchemaId)
+    if (item?.kind === 'OBJECT') return item.id
+  }
+  return undefined
+}
+
+function defaultOpenApiJmixLayer(
+  model: IntegrationConnectorModel,
+  operation: OpenApiOperationSnapshot,
+  defaultPackage: string,
+): IntegrationOpenApiJmixLayerModel {
+  const basePackage = defaultPackage.endsWith('.integration')
+    ? defaultPackage.slice(0, -'.integration'.length)
+    : defaultPackage
+  const schemas = new Map((operation.schemas ?? []).map((schema) => [schema.id, schema]))
+  const reachable = reachableOpenApiSchemaIds(operation)
+    .map((schemaId) => schemas.get(schemaId))
+    .filter((schema): schema is OpenApiSchemaSnapshot => schema?.kind === 'OBJECT')
+  const responseRoot = rootObjectSchemaId(operation, operation.responseSchemaId)
+  const used = new Set<string>()
+  const mappings: IntegrationOpenApiJmixTypeMapping[] = reachable.map((schema) => {
+    let base = safeJavaTypeName(
+      schema.javaName.replace(/(?:Model|Dto)$/, ''),
+      `${model.className}Entity`,
+    )
+    let className = base
+    let suffix = 2
+    while (used.has(className)) className = `${base}${suffix++}`
+    used.add(className)
+    const propertyNames = new Set(schema.properties.map((property) => property.javaName))
+    const idProperty = ['id', 'uuid', 'code', 'externalId'].find((name) => propertyNames.has(name))
+    const instanceNameProperty = [
+      'name', 'title', 'caption', 'label', 'summary', 'description', 'firstName', 'lastName',
+    ].find((name) => propertyNames.has(name))
+    return {
+      schemaId: schema.id,
+      targetKind: 'GENERATED_DTO',
+      generatedClassName: className,
+      idProperty: schema.id === responseRoot ? idProperty : undefined,
+      instanceNameProperty,
+      properties: schema.properties.map((property) => ({
+        schemaProperty: property.javaName,
+        entityProperty: property.javaName,
+        direction: 'BIDIRECTIONAL',
+      })),
+    }
+  })
+  const serviceClassName = `${operation.javaMethodName.charAt(0).toUpperCase()}${operation.javaMethodName.slice(1)}Service`
+  return {
+    enabled: true,
+    dtoPackage: `${basePackage}.entity.integration.${model.beanName}`,
+    mapperPackage: `${basePackage}.integration.mapper`,
+    servicePackage: `${basePackage}.service.integration`,
+    serviceClassName,
+    serviceBeanName: beanNameFor(serviceClassName),
+    mappings,
+  }
 }
 
 function outboxTableName(beanName: string) {
@@ -659,6 +747,53 @@ export default function IntegrationDesigner() {
       }.`,
     )
   }
+  if (model?.openApiJmixLayer?.enabled) {
+    const layer = model.openApiJmixLayer
+    if (!selectedOpenApiOperation) {
+      blockers.push('The Jmix entity/service layer requires a selected OpenAPI operation.')
+    } else {
+      const schemas = selectedOpenApiOperation.schemas ?? []
+      const schemaById = new Map(schemas.map((schema) => [schema.id, schema]))
+      const objectSchemaIds = reachableOpenApiSchemaIds(selectedOpenApiOperation)
+        .filter((schemaId) => schemaById.get(schemaId)?.kind === 'OBJECT')
+      const mappings = new Map(layer.mappings.map((mapping) => [mapping.schemaId, mapping]))
+      const missing = objectSchemaIds.filter((schemaId) => !mappings.has(schemaId))
+      if (missing.length) blockers.push(`Jmix mappings are missing ${missing.length} reachable object type(s).`)
+      if (!/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(layer.dtoPackage) ||
+          !/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(layer.mapperPackage) ||
+          !/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(layer.servicePackage)) {
+        blockers.push('DTO, mapper, and service destinations must be valid Java packages.')
+      }
+      if (!/^[A-Za-z_$][\w$]*$/.test(layer.serviceClassName) ||
+          !/^[a-z_$][\w$]*$/.test(layer.serviceBeanName)) {
+        blockers.push('Application service class and bean names are invalid.')
+      }
+      const responseRoot = rootObjectSchemaId(selectedOpenApiOperation, selectedOpenApiOperation.responseSchemaId)
+      layer.mappings.forEach((mapping) => {
+        const schema = schemaById.get(mapping.schemaId)
+        if (!schema) return
+        if (mapping.targetKind === 'GENERATED_DTO') {
+          if (!mapping.generatedClassName || !/^[A-Za-z_$][\w$]*$/.test(mapping.generatedClassName)) {
+            blockers.push(`Generated DTO for ${schema.javaName} needs a valid class name.`)
+          }
+          if (mapping.schemaId === responseRoot && !mapping.idProperty) {
+            blockers.push(`Response DTO ${schema.javaName} needs a stable identifier property.`)
+          }
+        } else if (!mapping.existingEntity) {
+          blockers.push(`Select an indexed Jmix entity for ${schema.javaName}.`)
+        }
+        const targetNames = new Set<string>()
+        mapping.properties.forEach((property) => {
+          if (!property.entityProperty || !/^[A-Za-z_$][\w$]*$/.test(property.entityProperty)) {
+            blockers.push(`Mapping target for ${schema.javaName}.${property.schemaProperty} is invalid.`)
+          }
+          const key = `${property.direction}:${property.entityProperty}`
+          if (targetNames.has(key)) blockers.push(`Mapping for ${schema.javaName} writes ${property.entityProperty} more than once.`)
+          targetNames.add(key)
+        })
+      })
+    }
+  }
   if (
     selectedCatalogTemplate &&
     selectedCatalogTemplate.template.policy.risk !== 'STANDARD' &&
@@ -696,6 +831,7 @@ export default function IntegrationDesigner() {
     if (!operation.defaultBinding) return
     commit((draft) => {
       draft.openApiBinding = { ...operation.defaultBinding! }
+      draft.openApiJmixLayer = undefined
       draft.httpMethod = operation.method
       if (operation.defaultBinding?.requestMediaType) {
         draft.contentType = operation.defaultBinding.requestMediaType
@@ -1102,7 +1238,10 @@ export default function IntegrationDesigner() {
                   {model.openApiBinding && (
                     <button
                       className="btn-secondary flex items-center gap-1 text-[10px]"
-                      onClick={() => commit((draft) => { draft.openApiBinding = undefined })}
+                      onClick={() => commit((draft) => {
+                        draft.openApiBinding = undefined
+                        draft.openApiJmixLayer = undefined
+                      })}
                     >
                       <Unlink size={12} /> Detach
                     </button>
@@ -1319,6 +1458,355 @@ export default function IntegrationDesigner() {
                       </div>
                     )}
                   </div>
+                )}
+
+                {selectedOpenApiOperation && model.openApiBinding && (
+                  <section className="mt-3 rounded-lg border border-violet-500/25 bg-violet-500/[0.045] p-3" aria-label="Jmix entity mapping and application service">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <Boxes size={15} className="shrink-0 text-violet-300" />
+                      <div className="min-w-0 flex-1">
+                        <h4 className="text-[11px] font-semibold text-violet-100">Jmix entity and service layer</h4>
+                        <p className="text-[9px] leading-4 text-gray-500">
+                          Transport isolation · Jmix metadata entities · explicit bidirectional mapping · application façade
+                        </p>
+                      </div>
+                      {model.openApiJmixLayer?.enabled ? (
+                        <button
+                          className="btn-secondary flex items-center gap-1 text-[10px]"
+                          onClick={() => commit((draft) => { draft.openApiJmixLayer = undefined })}
+                        >
+                          <Unlink size={12} /> Remove layer
+                        </button>
+                      ) : (
+                        <button
+                          className="btn-secondary flex items-center gap-1 border-violet-500/30 text-[10px] text-violet-200"
+                          onClick={() => commit((draft) => {
+                            draft.openApiJmixLayer = defaultOpenApiJmixLayer(
+                              draft,
+                              selectedOpenApiOperation,
+                              destination?.defaultPackage ?? draft.packageName,
+                            )
+                          })}
+                        >
+                          <Plus size={12} /> Generate Jmix layer
+                        </button>
+                      )}
+                    </div>
+
+                    {model.openApiJmixLayer?.enabled && (
+                      <div className="mt-3 space-y-3">
+                        <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                          <label>
+                            <span className={labelClass}>DTO entity package</span>
+                            <input
+                              value={model.openApiJmixLayer.dtoPackage}
+                              onChange={(event) => commit((draft) => {
+                                if (draft.openApiJmixLayer) draft.openApiJmixLayer.dtoPackage = event.target.value
+                              })}
+                              className={fieldClass}
+                            />
+                          </label>
+                          <label>
+                            <span className={labelClass}>Mapper package</span>
+                            <input
+                              value={model.openApiJmixLayer.mapperPackage}
+                              onChange={(event) => commit((draft) => {
+                                if (draft.openApiJmixLayer) draft.openApiJmixLayer.mapperPackage = event.target.value
+                              })}
+                              className={fieldClass}
+                            />
+                          </label>
+                          <label>
+                            <span className={labelClass}>Service package</span>
+                            <input
+                              value={model.openApiJmixLayer.servicePackage}
+                              onChange={(event) => commit((draft) => {
+                                if (draft.openApiJmixLayer) draft.openApiJmixLayer.servicePackage = event.target.value
+                              })}
+                              className={fieldClass}
+                            />
+                          </label>
+                          <label>
+                            <span className={labelClass}>Application service class</span>
+                            <input
+                              value={model.openApiJmixLayer.serviceClassName}
+                              onChange={(event) => commit((draft) => {
+                                if (draft.openApiJmixLayer) {
+                                  draft.openApiJmixLayer.serviceClassName = event.target.value
+                                  draft.openApiJmixLayer.serviceBeanName = beanNameFor(event.target.value)
+                                }
+                              })}
+                              className={fieldClass}
+                            />
+                          </label>
+                          <label>
+                            <span className={labelClass}>Spring bean name</span>
+                            <input
+                              value={model.openApiJmixLayer.serviceBeanName}
+                              onChange={(event) => commit((draft) => {
+                                if (draft.openApiJmixLayer) draft.openApiJmixLayer.serviceBeanName = event.target.value
+                              })}
+                              className={fieldClass}
+                            />
+                          </label>
+                          <div className="rounded-md border border-violet-500/15 bg-surface/50 p-2">
+                            <span className={labelClass}>Atomic output</span>
+                            <p className="text-[10px] leading-4 text-gray-300">
+                              {model.openApiJmixLayer.mappings.filter((mapping) => mapping.targetKind === 'GENERATED_DTO').length} DTO types · mapper · service
+                            </p>
+                            <p className="text-[8px] leading-4 text-gray-600">All files share preview, apply, undo and ownership verification.</p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {model.openApiJmixLayer.mappings.map((mapping, mappingIndex) => {
+                            const schema = (selectedOpenApiOperation.schemas ?? []).find((candidate) => candidate.id === mapping.schemaId)
+                            if (!schema) return null
+                            const existingEntity = workspace.entities.find((entity) => (
+                              entity.artifactId === mapping.existingEntity?.artifactId &&
+                              entity.qualifiedName === mapping.existingEntity?.qualifiedName
+                            ))
+                            const existingAttributes = [
+                              ...(existingEntity?.attributes ?? []),
+                              ...(existingEntity?.inheritedAttributes ?? []).map((inherited) => inherited.attribute),
+                            ]
+                            const targetProperties = mapping.targetKind === 'GENERATED_DTO'
+                              ? mapping.properties.map((property) => property.entityProperty)
+                              : existingAttributes.map((attribute) => attribute.name)
+                            return (
+                              <article
+                                key={mapping.schemaId}
+                                className="min-w-0 rounded-md border border-surface-border bg-surface/55 p-2.5"
+                                aria-label={`${schema.javaName} Jmix mapping`}
+                              >
+                                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                  <span className="rounded bg-violet-500/10 px-2 py-1 font-mono text-[9px] text-violet-200">{schema.javaName}</span>
+                                  <span className="min-w-0 flex-1 truncate text-[9px] text-gray-500">{schema.properties.length} properties · {schema.typeLabel}</span>
+                                  <select
+                                    aria-label={`${schema.javaName} Jmix target`}
+                                    value={mapping.targetKind}
+                                    onChange={(event) => commit((draft) => {
+                                      const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                      if (!current) return
+                                      current.targetKind = event.target.value as IntegrationOpenApiJmixTypeMapping['targetKind']
+                                      if (current.targetKind === 'GENERATED_DTO') {
+                                        current.generatedClassName = safeJavaTypeName(schema.javaName.replace(/(?:Model|Dto)$/, ''), 'IntegrationDto')
+                                        current.existingEntity = undefined
+                                        current.properties = schema.properties.map((property) => ({
+                                          schemaProperty: property.javaName,
+                                          entityProperty: property.javaName,
+                                          direction: 'BIDIRECTIONAL',
+                                        }))
+                                      } else {
+                                        current.generatedClassName = undefined
+                                        current.existingEntity = undefined
+                                        current.idProperty = undefined
+                                        current.instanceNameProperty = undefined
+                                      }
+                                    })}
+                                    className="min-h-8 min-w-36 rounded border border-surface-border bg-surface px-2 text-[10px] text-gray-200"
+                                  >
+                                    <option value="GENERATED_DTO">Generate DTO entity</option>
+                                    <option value="EXISTING_ENTITY">Map existing entity</option>
+                                  </select>
+                                </div>
+
+                                <div className="mt-2 grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                                  {mapping.targetKind === 'GENERATED_DTO' ? (
+                                    <label>
+                                      <span className={labelClass}>DTO class</span>
+                                      <input
+                                        value={mapping.generatedClassName ?? ''}
+                                        onChange={(event) => commit((draft) => {
+                                          const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                          if (current) current.generatedClassName = event.target.value
+                                        })}
+                                        className={fieldClass}
+                                      />
+                                    </label>
+                                  ) : (
+                                    <label className="sm:col-span-2">
+                                      <span className={labelClass}>Indexed Jmix entity</span>
+                                      <select
+                                        value={existingEntity?.artifactId ?? ''}
+                                        onChange={(event) => {
+                                          const entity = workspace.entities.find((candidate) => candidate.artifactId === event.target.value)
+                                          commit((draft) => {
+                                            const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                            if (!current) return
+                                            if (!entity) {
+                                              current.existingEntity = undefined
+                                              current.properties = []
+                                              return
+                                            }
+                                            current.existingEntity = {
+                                              artifactId: entity.artifactId,
+                                              qualifiedName: entity.qualifiedName,
+                                              revisionFingerprint: entity.sourceLocator.revisionFingerprint,
+                                            }
+                                            const attributes = [
+                                              ...entity.attributes,
+                                              ...entity.inheritedAttributes.map((inherited) => inherited.attribute),
+                                            ]
+                                            const names = new Set(attributes.map((attribute) => attribute.name))
+                                            current.properties = schema.properties
+                                              .filter((property) => names.has(property.javaName))
+                                              .map((property) => ({
+                                                schemaProperty: property.javaName,
+                                                entityProperty: property.javaName,
+                                                direction: 'BIDIRECTIONAL',
+                                              }))
+                                            current.idProperty = names.has('id') ? 'id' : undefined
+                                            current.instanceNameProperty = ['name', 'title', 'description']
+                                              .find((name) => names.has(name))
+                                          })
+                                        }}
+                                        className={fieldClass}
+                                      >
+                                        <option value="">Select entity…</option>
+                                        {workspace.entities.map((entity) => (
+                                          <option key={entity.artifactId} value={entity.artifactId}>
+                                            {entity.className} · {entity.moduleId} · {entity.entityType}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </label>
+                                  )}
+                                  <label>
+                                    <span className={labelClass}>Stable identifier</span>
+                                    <select
+                                      value={mapping.idProperty ?? ''}
+                                      onChange={(event) => commit((draft) => {
+                                        const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                        if (current) current.idProperty = event.target.value || undefined
+                                      })}
+                                      className={fieldClass}
+                                    >
+                                      <option value="">No identifier</option>
+                                      {[...new Set(targetProperties)].map((property) => (
+                                        <option key={property} value={property}>{property}</option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                  <label>
+                                    <span className={labelClass}>Instance name</span>
+                                    <select
+                                      value={mapping.instanceNameProperty ?? ''}
+                                      onChange={(event) => commit((draft) => {
+                                        const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                        if (current) current.instanceNameProperty = event.target.value || undefined
+                                      })}
+                                      className={fieldClass}
+                                    >
+                                      <option value="">No instance name</option>
+                                      {[...new Set(targetProperties)].map((property) => (
+                                        <option key={property} value={property}>{property}</option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                </div>
+
+                                <div
+                                  className="mt-2 overflow-x-auto rounded border border-surface-border/80 focus:outline-none focus:ring-1 focus:ring-violet-400/60"
+                                  tabIndex={0}
+                                  role="region"
+                                  aria-label={`${schema.javaName} property mappings`}
+                                >
+                                  <table className="w-full min-w-[590px] text-left text-[9px]">
+                                    <thead className="bg-surface-light/70 text-gray-500">
+                                      <tr>
+                                        <th className="px-2 py-1.5 font-semibold">OpenAPI property</th>
+                                        <th className="px-2 py-1.5 font-semibold">Jmix property</th>
+                                        <th className="px-2 py-1.5 font-semibold">Direction</th>
+                                        <th className="px-2 py-1.5 font-semibold">Contract</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {schema.properties.map((property) => {
+                                        const propertyIndex = mapping.properties.findIndex((candidate) => (
+                                          candidate.schemaProperty === property.javaName
+                                        ))
+                                        const propertyMapping = propertyIndex >= 0 ? mapping.properties[propertyIndex] : undefined
+                                        return (
+                                          <tr key={property.javaName} className="border-t border-surface-border/70">
+                                            <td className="px-2 py-1.5">
+                                              <code className="text-gray-200">{property.javaName}</code>
+                                              <span className="ml-1 text-gray-600">({property.wireName})</span>
+                                            </td>
+                                            <td className="px-2 py-1.5">
+                                              {mapping.targetKind === 'EXISTING_ENTITY' ? (
+                                                <select
+                                                  value={propertyMapping?.entityProperty ?? ''}
+                                                  onChange={(event) => commit((draft) => {
+                                                    const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                                    if (!current) return
+                                                    current.properties = current.properties.filter((candidate) => candidate.schemaProperty !== property.javaName)
+                                                    if (event.target.value) {
+                                                      current.properties.push({
+                                                        schemaProperty: property.javaName,
+                                                        entityProperty: event.target.value,
+                                                        direction: propertyMapping?.direction ?? 'BIDIRECTIONAL',
+                                                      })
+                                                    }
+                                                  })}
+                                                  className="min-h-7 w-full min-w-32 rounded border border-surface-border bg-surface px-1.5 text-[9px]"
+                                                >
+                                                  <option value="">Ignore</option>
+                                                  {existingAttributes.map((attribute) => (
+                                                    <option key={attribute.artifactId} value={attribute.name} disabled={attribute.readOnly}>
+                                                      {attribute.name} · {attribute.javaType}{attribute.readOnly ? ' · read-only' : ''}
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                              ) : (
+                                                <input
+                                                  aria-label={`${schema.javaName}.${property.javaName} Jmix property`}
+                                                  value={propertyMapping?.entityProperty ?? ''}
+                                                  onChange={(event) => commit((draft) => {
+                                                    const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                                    const target = current?.properties.find((candidate) => candidate.schemaProperty === property.javaName)
+                                                    if (target) target.entityProperty = event.target.value
+                                                  })}
+                                                  className="min-h-7 w-full min-w-32 rounded border border-surface-border bg-surface px-1.5 text-[9px]"
+                                                />
+                                              )}
+                                            </td>
+                                            <td className="px-2 py-1.5">
+                                              <select
+                                                aria-label={`${schema.javaName}.${property.javaName} mapping direction`}
+                                                value={propertyMapping?.direction ?? 'BIDIRECTIONAL'}
+                                                disabled={!propertyMapping}
+                                                onChange={(event) => commit((draft) => {
+                                                  const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                                  const target = current?.properties.find((candidate) => candidate.schemaProperty === property.javaName)
+                                                  if (target) target.direction = event.target.value as typeof target.direction
+                                                })}
+                                                className="min-h-7 rounded border border-surface-border bg-surface px-1.5 text-[9px]"
+                                              >
+                                                <option value="BIDIRECTIONAL">Both</option>
+                                                <option value="INBOUND">API → Jmix</option>
+                                                <option value="OUTBOUND">Jmix → API</option>
+                                              </select>
+                                            </td>
+                                            <td className="px-2 py-1.5 text-gray-500">
+                                              {property.typeLabel}
+                                              {property.required && <span className="ml-1 text-amber-300">required</span>}
+                                              {property.readOnly && <span className="ml-1 text-cyan-300">read-only</span>}
+                                              {property.writeOnly && <span className="ml-1 text-fuchsia-300">write-only</span>}
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </article>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </section>
                 )}
 
                 {!workspace.openApiContracts.length && (

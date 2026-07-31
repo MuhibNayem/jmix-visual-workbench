@@ -71,6 +71,7 @@ val compatibilityGeneratorSourceSet = sourceSets.create("compatibilityGenerator"
         "org/jmixworkbench/generator/XmlBuilder.kt",
         "org/jmixworkbench/generator/MigrationGenerator.kt",
         "org/jmixworkbench/generator/IntegrationConnectorGenerator.kt",
+        "org/jmixworkbench/generator/OpenApiJmixLayerGenerator.kt",
         "org/jmixworkbench/generator/EntityGenerator.kt",
         "org/jmixworkbench/generator/KotlinEntityGenerator.kt",
         "org/jmixworkbench/generator/DataRepositoryGenerator.kt",

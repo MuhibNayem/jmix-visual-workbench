@@ -223,9 +223,36 @@ data class OpenApiOperationSnapshot(
     val responseTypeLabel: String?,
     val parameters: List<OpenApiParameterSnapshot>,
     val securitySchemes: List<String>,
+    val securityRequirements: List<IntegrationOpenApiSecurityRequirementModel> = emptyList(),
+    val requestSchemaId: String? = null,
+    val responseSchemaId: String? = null,
+    val schemas: List<OpenApiSchemaSnapshot> = emptyList(),
     val defaultBinding: IntegrationOpenApiBinding?,
     val supported: Boolean,
     val issues: List<String>,
+)
+
+data class OpenApiSchemaSnapshot(
+    val id: String,
+    val javaName: String,
+    val kind: IntegrationOpenApiSchemaKind,
+    val typeLabel: String,
+    val nullable: Boolean,
+    val enumValues: List<String>,
+    val itemSchemaId: String?,
+    val additionalPropertiesAllowed: Boolean,
+    val properties: List<OpenApiSchemaPropertySnapshot>,
+)
+
+data class OpenApiSchemaPropertySnapshot(
+    val wireName: String,
+    val javaName: String,
+    val schemaId: String,
+    val typeLabel: String,
+    val required: Boolean,
+    val nullable: Boolean,
+    val readOnly: Boolean,
+    val writeOnly: Boolean,
 )
 
 data class OpenApiResponseSnapshot(
@@ -521,6 +548,36 @@ internal class ParsedOpenApiContract(
                 )
             },
             securitySchemes = built.securitySchemes,
+            securityRequirements = built.securityRequirements,
+            requestSchemaId = built.requestSchemaId,
+            responseSchemaId = built.responseSchemaId,
+            schemas = built.schemas.map { schema ->
+                OpenApiSchemaSnapshot(
+                    id = schema.id,
+                    javaName = schema.javaName,
+                    kind = schema.kind,
+                    typeLabel = typeLabel(schema, schemaById),
+                    nullable = schema.nullable,
+                    enumValues = schema.enumValues,
+                    itemSchemaId = schema.itemSchemaId,
+                    additionalPropertiesAllowed = schema.additionalPropertiesAllowed,
+                    properties = schema.properties.map { property ->
+                        OpenApiSchemaPropertySnapshot(
+                            wireName = property.wireName,
+                            javaName = property.javaName,
+                            schemaId = property.schemaId,
+                            typeLabel = typeLabel(
+                                requireNotNull(schemaById[property.schemaId]),
+                                schemaById,
+                            ),
+                            required = property.required,
+                            nullable = property.nullable,
+                            readOnly = property.readOnly,
+                            writeOnly = property.writeOnly,
+                        )
+                    },
+                )
+            },
             defaultBinding = binding,
             supported = true,
             issues = emptyList(),

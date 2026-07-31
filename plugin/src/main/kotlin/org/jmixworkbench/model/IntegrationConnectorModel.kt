@@ -118,6 +118,65 @@ enum class IntegrationOpenApiSecuritySchemeKind {
     MUTUAL_TLS,
 }
 
+enum class IntegrationOpenApiJmixTargetKind {
+    GENERATED_DTO,
+    EXISTING_ENTITY,
+}
+
+enum class IntegrationOpenApiMappingDirection {
+    INBOUND,
+    OUTBOUND,
+    BIDIRECTIONAL,
+}
+
+/**
+ * Immutable coordinates for a source-owned Jmix entity selected as a mapping
+ * target. Preview/apply resolves the artifact again from the schema index and
+ * verifies the exact source revision; browser-supplied attributes and types
+ * are never authoritative.
+ */
+data class IntegrationOpenApiExistingEntityBinding(
+    val artifactId: String,
+    val qualifiedName: String,
+    val revisionFingerprint: String,
+)
+
+data class IntegrationOpenApiPropertyMapping(
+    val schemaProperty: String,
+    val entityProperty: String,
+    val direction: IntegrationOpenApiMappingDirection = IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+)
+
+/**
+ * Mapping of one OpenAPI object schema to either a generated Jmix DTO entity
+ * or an indexed existing Jmix entity.
+ */
+data class IntegrationOpenApiJmixTypeMapping(
+    val schemaId: String,
+    val targetKind: IntegrationOpenApiJmixTargetKind = IntegrationOpenApiJmixTargetKind.GENERATED_DTO,
+    val generatedClassName: String? = null,
+    val existingEntity: IntegrationOpenApiExistingEntityBinding? = null,
+    val idProperty: String? = null,
+    val instanceNameProperty: String? = null,
+    val properties: List<IntegrationOpenApiPropertyMapping> = emptyList(),
+)
+
+/**
+ * Optional Jmix-facing abstraction over a generated transport connector.
+ *
+ * Generated DTOs, mappers and the application service are owned together with
+ * the connector and participate in the same preview, atomic apply and undo.
+ */
+data class IntegrationOpenApiJmixLayerModel(
+    val enabled: Boolean = false,
+    val dtoPackage: String,
+    val mapperPackage: String,
+    val servicePackage: String,
+    val serviceClassName: String,
+    val serviceBeanName: String,
+    val mappings: List<IntegrationOpenApiJmixTypeMapping> = emptyList(),
+)
+
 data class IntegrationOpenApiSecuritySchemeModel(
     val name: String,
     val kind: IntegrationOpenApiSecuritySchemeKind,
@@ -417,6 +476,7 @@ data class IntegrationConnectorModel(
     val enabled: Boolean = true,
     val catalogBinding: IntegrationConnectorCatalogBinding? = null,
     val openApiBinding: IntegrationOpenApiBinding? = null,
+    val openApiJmixLayer: IntegrationOpenApiJmixLayerModel? = null,
     val resolvedOpenApiOperation: IntegrationOpenApiOperationModel? = null,
     val sourceLocator: SourceLocator? = null,
 )

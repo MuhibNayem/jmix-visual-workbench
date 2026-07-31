@@ -21,6 +21,7 @@ import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
 import org.jmixworkbench.discovery.model.SourceLocator
 import org.jmixworkbench.generator.GeneratedIntegrationConnector
 import org.jmixworkbench.generator.IntegrationConnectorGenerator
+import org.jmixworkbench.generator.OpenApiJmixLayerGenerator
 import org.jmixworkbench.model.IntegrationCapability
 import org.jmixworkbench.model.IntegrationAuthenticationKind
 import org.jmixworkbench.model.IntegrationConnectorKind
@@ -28,6 +29,12 @@ import org.jmixworkbench.model.IntegrationConnectorModel
 import org.jmixworkbench.model.IntegrationDiagnosticSeverity
 import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationObservabilityApi
+import org.jmixworkbench.model.IntegrationOpenApiJmixTargetKind
+import org.jmixworkbench.model.IntegrationOpenApiJmixTypeMapping
+import org.jmixworkbench.model.IntegrationOpenApiMappingDirection
+import org.jmixworkbench.model.IntegrationOpenApiPropertyMapping
+import org.jmixworkbench.model.IntegrationOpenApiSchemaKind
+import org.jmixworkbench.model.IntegrationOpenApiSchemaModel
 import org.jmixworkbench.model.IntegrationSpringBootApi
 import org.jmixworkbench.model.IntegrationTransportSecurityModel
 import org.jmixworkbench.project.JmixOrganizationConnectorTemplate
@@ -51,7 +58,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val destinations = destinations(graph)
         val schema = SchemaWorkspaceService.getInstance(project).load(forceRefresh)
         val connectorCatalogs = JmixTemplateCatalogManager.getInstance().connectorInventory()
-        val existingDocuments = discoverExisting(destinations)
+        val existingDocuments = discoverExisting(destinations, schema)
         val openApiContracts = OpenApiContractService.getInstance(project).discover(
             destinations = destinations,
             explicitlyReferencedPaths = existingDocuments.mapNotNull {
@@ -67,6 +74,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             oauth2Managers = oauth2Managers(graph),
             oauth2Services = oauth2Services(graph),
             dataStores = schema.stores,
+            entities = schema.entities,
             openApiContracts = openApiContracts,
             organizationConnectorTemplates = connectorCatalogs.options.map {
                 IntegrationOrganizationConnectorTemplateSnapshot(
@@ -211,7 +219,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             schema.stores.firstOrNull { it.id == storeId }
         }
         val normalized = runCatching {
-            normalizeBackendContracts(model, destination, selectedStore)
+            normalizeBackendContracts(model, destination, selectedStore, schema)
         }.getOrElse { failure ->
             return rejected(
                 "JVW-INTEGRATION-OPENAPI-CONTRACT-INVALID",
@@ -357,11 +365,28 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         }
         val encoded = IntegrationConnectorGenerator.encode(stored)
         val generated = IntegrationConnectorGenerator.generate(stored, encoded)
+        val jmixLayer = generateOpenApiJmixLayer(stored, destination, schema)
+        if (jmixLayer.issues.isNotEmpty()) {
+            return IntegrationConnectorProposal(
+                null,
+                jmixLayer.issues.map {
+                    WorkspaceChangeIssue("JVW-INTEGRATION-JMIX-MAPPING-INVALID", it)
+                },
+            )
+        }
         javaSyntaxError("${model.className}.java", generated.javaSource)?.let { syntax ->
             return rejected(
                 "JVW-INTEGRATION-GENERATED-SYNTAX",
                 "Generated Java is not syntactically valid: ${syntax.errorDescription}",
             )
+        }
+        jmixLayer.sources.forEach { source ->
+            javaSyntaxError("${source.className}.java", source.content)?.let { syntax ->
+                return rejected(
+                    "JVW-INTEGRATION-JMIX-GENERATED-SYNTAX",
+                    "Generated ${source.role.lowercase().replace('_', ' ')} '${source.className}' is not syntactically valid: ${syntax.errorDescription}",
+                )
+            }
         }
         if (migrationChanges.isNotEmpty()) {
             val generatedMigration = generated.migrationXml
@@ -382,13 +407,16 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         }
         val javaPath = javaPath(destination, stored)
         val policyPath = policyPath(destination, stored.beanName)
+        val supplemental = jmixLayer.sources.associate { source ->
+            supplementalJavaPath(destination, source) to source.content
+        }
         val changes = if (normalized.sourceLocator == null) {
             migrationChanges + listOf(
                 create(javaPath, generated.javaSource),
                 create(policyPath, generated.reliabilityProperties),
-            )
+            ) + supplemental.map { (path, content) -> create(path, content) }
         } else {
-            val owned = loadOwned(normalized.sourceLocator, destination)
+            val owned = loadOwned(normalized.sourceLocator, destination, schema)
                 ?: return rejected(
                     "JVW-INTEGRATION-SOURCE-NOT-OWNED",
                     "The Java adapter or its reliability policy was manually changed. Neither file will be overwritten.",
@@ -426,10 +454,38 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     owned.javaPath,
                 )
             }
+            val supplementalChanges = buildList {
+                val oldPaths = owned.supplementalContent.keys
+                val newPaths = supplemental.keys
+                (oldPaths intersect newPaths).sorted().forEach { path ->
+                    val before = requireNotNull(owned.supplementalContent[path])
+                    add(
+                        modify(
+                            path,
+                            before,
+                            CanonicalDiscoveryJson.sha256(before),
+                            requireNotNull(supplemental[path]),
+                        ),
+                    )
+                }
+                (newPaths - oldPaths).sorted().forEach { path ->
+                    add(create(path, requireNotNull(supplemental[path])))
+                }
+                (oldPaths - newPaths).sorted().forEach { path ->
+                    val before = requireNotNull(owned.supplementalContent[path])
+                    add(
+                        WorkspaceFileChange(
+                            relativePath = path,
+                            mode = WorkspaceFileChangeMode.DELETE,
+                            baseRevisionFingerprint = CanonicalDiscoveryJson.sha256(before),
+                        ),
+                    )
+                }
+            }
             listOf(
                 modify(owned.javaPath, owned.javaContent, owned.javaFingerprint, generated.javaSource),
                 modify(owned.policyPath, owned.policyContent, owned.policyFingerprint, generated.reliabilityProperties),
-            )
+            ) + supplementalChanges
         }
         val identity = changes.joinToString("\u0000") {
             listOf(it.relativePath, it.createContent.orEmpty(), it.edits.firstOrNull()?.replacement.orEmpty())
@@ -654,6 +710,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
 
     private fun discoverExisting(
         destinations: List<IntegrationConnectorDestinationSnapshot>,
+        schema: SchemaWorkspaceResponse,
     ): List<IntegrationConnectorDocumentSnapshot> {
         val resolver = ProjectFileResolver.getInstance(project)
         val documents = mutableListOf<IntegrationConnectorDocumentSnapshot>()
@@ -678,17 +735,24 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 val policyPath = policyPath(destination, model.beanName)
                 val policyContent = resolver.resolveFile(policyPath)?.file?.let(::fileText)
                 val regenerated = runCatching {
-                    IntegrationConnectorGenerator.generate(resolveOpenApiContract(model), encoded)
+                    val resolved = normalizeOpenApiJmixLayer(resolveOpenApiContract(model), destination, schema)
+                    IntegrationConnectorGenerator.generate(resolved, encoded) to
+                        generateOpenApiJmixLayer(resolved, destination, schema)
                 }.getOrNull()
                 val migrationContent = ledgerMigrationPath(model)
                     ?.let { resolver.resolveFile(it)?.file?.let(::fileText) }
+                val supplementalOwned = regenerated?.second?.takeIf { it.issues.isEmpty() }?.sources?.all { source ->
+                    val path = supplementalJavaPath(destination, source)
+                    resolver.resolveFile(path)?.file?.let(::fileText) == source.content
+                } == true
                 val owned = regenerated != null &&
-                    regenerated.javaSource == javaContent &&
-                    regenerated.reliabilityProperties == policyContent &&
+                    regenerated.first.javaSource == javaContent &&
+                    regenerated.first.reliabilityProperties == policyContent &&
                     (
-                        regenerated.migrationXml == null ||
-                            regenerated.migrationXml == migrationContent
-                        )
+                        regenerated.first.migrationXml == null ||
+                            regenerated.first.migrationXml == migrationContent
+                        ) &&
+                    supplementalOwned
                 documents += IntegrationConnectorDocumentSnapshot(
                     locator = locator,
                     model = model.copy(destinationId = destination.id, sourceLocator = locator),
@@ -704,6 +768,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
     private fun loadOwned(
         locator: SourceLocator,
         destination: IntegrationConnectorDestinationSnapshot,
+        schema: SchemaWorkspaceResponse,
     ): OwnedIntegrationConnector? {
         val resolver = ProjectFileResolver.getInstance(project)
         val javaFile = resolver.resolveFile(locator.relativePath)?.file ?: return null
@@ -716,13 +781,25 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val policyFile = resolver.resolveFile(policyPath)?.file ?: return null
         val policyContent = fileText(policyFile) ?: return null
         val policyFingerprint = CanonicalDiscoveryJson.sha256(policyContent)
+        val resolved = runCatching {
+            normalizeOpenApiJmixLayer(resolveOpenApiContract(model), destination, schema)
+        }.getOrNull() ?: return null
         val generated = runCatching {
-            IntegrationConnectorGenerator.generate(resolveOpenApiContract(model), encoded)
+            IntegrationConnectorGenerator.generate(resolved, encoded)
         }.getOrNull() ?: return null
         if (generated.javaSource != javaContent || generated.reliabilityProperties != policyContent) return null
         val migrationPath = ledgerMigrationPath(model)
         val migrationContent = migrationPath?.let { resolver.resolveFile(it)?.file?.let(::fileText) }
         if (generated.migrationXml != null && generated.migrationXml != migrationContent) return null
+        val layer = generateOpenApiJmixLayer(resolved, destination, schema)
+        if (layer.issues.isNotEmpty()) return null
+        val supplementalContent = linkedMapOf<String, String>()
+        layer.sources.forEach { source ->
+            val path = supplementalJavaPath(destination, source)
+            val content = resolver.resolveFile(path)?.file?.let(::fileText) ?: return null
+            if (content != source.content) return null
+            supplementalContent[path] = content
+        }
         return OwnedIntegrationConnector(
             model = model,
             javaPath = locator.relativePath,
@@ -733,6 +810,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             policyFingerprint = policyFingerprint,
             migrationPath = migrationPath,
             migrationContent = migrationContent,
+            supplementalContent = supplementalContent,
         )
     }
 
@@ -740,6 +818,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         model: IntegrationConnectorModel,
         destination: IntegrationConnectorDestinationSnapshot,
         selectedStore: SchemaDataStoreSnapshot?,
+        schema: SchemaWorkspaceResponse,
     ): IntegrationConnectorModel {
         val reliability = model.reliability
         val outbox = reliability.outbox
@@ -775,7 +854,12 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 ),
             )
         }
-        return resolveOpenApiContract(model).copy(
+        val resolved = normalizeOpenApiJmixLayer(
+            resolveOpenApiContract(model),
+            destination,
+            schema,
+        )
+        return resolved.copy(
             reliability = normalizedReliability,
             observability = model.observability.copy(runtimeApi = destination.observabilityApi),
             runtimeJsonApi = destination.jsonApi,
@@ -801,6 +885,232 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             resolvedOpenApiOperation = operation,
         )
     }
+
+    private fun normalizeOpenApiJmixLayer(
+        model: IntegrationConnectorModel,
+        destination: IntegrationConnectorDestinationSnapshot,
+        schema: SchemaWorkspaceResponse,
+    ): IntegrationConnectorModel {
+        val layer = model.openApiJmixLayer ?: return model
+        if (!layer.enabled) return model.copy(openApiJmixLayer = null)
+        val operation = requireNotNull(model.resolvedOpenApiOperation) {
+            "A Jmix entity mapping layer requires a backend-resolved OpenAPI operation."
+        }
+        val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        val reachableObjects = reachableOpenApiSchemas(operation)
+            .mapNotNull(schemas::get)
+            .filter { it.kind == IntegrationOpenApiSchemaKind.OBJECT }
+        require(reachableObjects.isNotEmpty()) {
+            "The selected request/response contract has no object graph that can be represented as Jmix entities."
+        }
+        fun rootEntitySchemaId(rootId: String?): String? {
+            rootId ?: return null
+            val root = schemas[rootId] ?: return null
+            return when (root.kind) {
+                IntegrationOpenApiSchemaKind.OBJECT -> root.id
+                IntegrationOpenApiSchemaKind.ARRAY -> root.itemSchemaId?.takeIf {
+                    schemas[it]?.kind == IntegrationOpenApiSchemaKind.OBJECT
+                }
+                else -> null
+            }
+        }
+        require(operation.requestSchemaId == null || rootEntitySchemaId(operation.requestSchemaId) != null) {
+            "The OpenAPI request body must be an object or an array of objects to expose a Jmix-facing service."
+        }
+        require(operation.responseSchemaId == null || rootEntitySchemaId(operation.responseSchemaId) != null) {
+            "The OpenAPI response body must be an object or an array of objects to expose a Jmix-facing service."
+        }
+
+        val supplied = layer.mappings.associateBy(IntegrationOpenApiJmixTypeMapping::schemaId)
+        val usedClassNames = linkedSetOf<String>()
+        fun generatedName(schemaModel: IntegrationOpenApiSchemaModel, suppliedName: String?): String {
+            val base = suppliedName?.trim().orEmpty().ifBlank {
+                schemaModel.javaName
+                    .removeSuffix("Model")
+                    .removeSuffix("Dto")
+                    .ifBlank { "${model.className}Entity" }
+            }.replace(Regex("[^A-Za-z0-9_$]"), "_")
+                .let { if (it.firstOrNull()?.isDigit() == true) "Type_$it" else it }
+            var candidate = base
+            var suffix = 2
+            while (!usedClassNames.add(candidate)) candidate = "${base}${suffix++}"
+            return candidate
+        }
+        val responseRoot = rootEntitySchemaId(operation.responseSchemaId)
+        val normalizedMappings = reachableObjects.map { schemaModel ->
+            val current = supplied[schemaModel.id]
+            if (current?.targetKind == IntegrationOpenApiJmixTargetKind.EXISTING_ENTITY) {
+                requireNotNull(current.existingEntity) {
+                    "Existing Jmix target for '${schemaModel.javaName}' has no immutable entity binding."
+                }
+                current.copy(generatedClassName = null)
+            } else {
+                val properties = current?.properties.orEmpty().ifEmpty {
+                    schemaModel.properties.map { property ->
+                        IntegrationOpenApiPropertyMapping(
+                            schemaProperty = property.javaName,
+                            entityProperty = property.javaName,
+                            direction = IntegrationOpenApiMappingDirection.BIDIRECTIONAL,
+                        )
+                    }
+                }
+                val targetProperties = properties.mapTo(linkedSetOf(), IntegrationOpenApiPropertyMapping::entityProperty)
+                val naturalId = current?.idProperty?.takeIf { it in targetProperties }
+                    ?: schemaModel.properties.firstOrNull {
+                        it.javaName in setOf("id", "uuid", "code", "externalId") &&
+                            it.javaName in targetProperties
+                    }?.javaName
+                require(schemaModel.id != responseRoot || naturalId != null) {
+                    "Response DTO '${schemaModel.javaName}' needs a stable identifier property (id, uuid, code, externalId, or an explicit selection)."
+                }
+                val instanceName = current?.instanceNameProperty?.takeIf { it in targetProperties }
+                    ?: schemaModel.properties.firstOrNull {
+                        it.javaName in setOf(
+                            "name", "title", "caption", "label", "summary",
+                            "description", "firstName", "lastName",
+                        ) && it.javaName in targetProperties
+                    }?.javaName
+                IntegrationOpenApiJmixTypeMapping(
+                    schemaId = schemaModel.id,
+                    targetKind = IntegrationOpenApiJmixTargetKind.GENERATED_DTO,
+                    generatedClassName = generatedName(schemaModel, current?.generatedClassName),
+                    idProperty = naturalId,
+                    instanceNameProperty = instanceName,
+                    properties = properties,
+                )
+            }
+        }
+        require(supplied.keys.all { suppliedId -> normalizedMappings.any { it.schemaId == suppliedId } }) {
+            "Jmix mappings contain a schema that is not reachable from the selected operation."
+        }
+        return model.copy(
+            openApiJmixLayer = layer.copy(mappings = normalizedMappings),
+        )
+    }
+
+    private fun generateOpenApiJmixLayer(
+        model: IntegrationConnectorModel,
+        destination: IntegrationConnectorDestinationSnapshot,
+        schema: SchemaWorkspaceResponse,
+    ): OpenApiJmixLayerGenerator.Result {
+        val layer = model.openApiJmixLayer
+            ?: return OpenApiJmixLayerGenerator.Result(emptyList(), emptyList())
+        if (!layer.enabled) return OpenApiJmixLayerGenerator.Result(emptyList(), emptyList())
+        val operation = model.resolvedOpenApiOperation
+            ?: return OpenApiJmixLayerGenerator.Result(
+                emptyList(),
+                listOf("Jmix mapping requires a resolved OpenAPI operation."),
+            )
+        val existingTargets = linkedMapOf<String, OpenApiJmixLayerGenerator.ResolvedEntityTarget>()
+        layer.mappings.filter {
+            it.targetKind == IntegrationOpenApiJmixTargetKind.EXISTING_ENTITY
+        }.forEach { mapping ->
+            val binding = mapping.existingEntity
+                ?: return OpenApiJmixLayerGenerator.Result(
+                    emptyList(),
+                    listOf("Existing entity mapping '${mapping.schemaId}' has no immutable binding."),
+                )
+            val entity = schema.entities.singleOrNull {
+                it.artifactId == binding.artifactId && it.qualifiedName == binding.qualifiedName
+            } ?: return OpenApiJmixLayerGenerator.Result(
+                emptyList(),
+                listOf("Mapped Jmix entity '${binding.qualifiedName}' is missing or ambiguous in the current index."),
+            )
+            if (entity.sourceLocator.revisionFingerprint != binding.revisionFingerprint) {
+                return OpenApiJmixLayerGenerator.Result(
+                    emptyList(),
+                    listOf("Mapped Jmix entity '${binding.qualifiedName}' changed after selection. Refresh and review the mapping."),
+                )
+            }
+            if (entity.moduleId != destination.moduleId) {
+                val graph = ApplicationGraphService.getInstance(project).graph()
+                val accessible = accessibleModules(destination.moduleId, graph)
+                if (entity.moduleId !in accessible) {
+                    return OpenApiJmixLayerGenerator.Result(
+                        emptyList(),
+                        listOf("Mapped entity '${binding.qualifiedName}' is not compile-visible from module '${destination.moduleId}'."),
+                    )
+                }
+            }
+            existingTargets[mapping.schemaId] = OpenApiJmixLayerGenerator.ResolvedEntityTarget(
+                artifactId = entity.artifactId,
+                qualifiedName = entity.qualifiedName,
+                entityType = entity.entityType,
+                attributes = (
+                    entity.attributes + entity.inheritedAttributes.map(SchemaInheritedAttributeSnapshot::attribute)
+                    ).distinctBy(SchemaEntityAttributeSnapshot::name)
+                    .map {
+                        OpenApiJmixLayerGenerator.ResolvedEntityAttribute(
+                            name = it.name,
+                            javaType = it.javaType,
+                            readOnly = it.readOnly,
+                        )
+                    },
+            )
+        }
+        val projectId = schema.modules.firstOrNull { it.moduleId == destination.moduleId }?.projectId
+        val entityNamePrefix = projectId
+            ?.replace(Regex("[^A-Za-z0-9_$]"), "_")
+            ?.trim('_')
+            ?.takeIf(String::isNotBlank)
+            ?: destination.defaultPackage.substringBefore('.').replace(Regex("[^A-Za-z0-9_$]"), "_")
+                .ifBlank { "integration" }
+        return OpenApiJmixLayerGenerator.generate(
+            OpenApiJmixLayerGenerator.Input(
+                connector = model,
+                operation = operation,
+                layer = layer,
+                entityNamePrefix = entityNamePrefix,
+                existingTargets = existingTargets,
+            ),
+        )
+    }
+
+    private fun reachableOpenApiSchemas(operation: org.jmixworkbench.model.IntegrationOpenApiOperationModel): Set<String> {
+        val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        val visited = linkedSetOf<String>()
+        fun visit(schemaId: String) {
+            if (!visited.add(schemaId)) return
+            val schema = schemas[schemaId] ?: return
+            schema.properties.forEach { visit(it.schemaId) }
+            schema.itemSchemaId?.let(::visit)
+            schema.additionalPropertiesSchemaId?.let(::visit)
+        }
+        operation.requestSchemaId?.let(::visit)
+        operation.responseSchemaId?.let(::visit)
+        return visited
+    }
+
+    private fun accessibleModules(
+        moduleId: String,
+        graph: ApplicationGraphResponse,
+    ): Set<String> {
+        val moduleArtifacts = graph.artifacts.filter { it.kind == ArtifactKind.MODULE }
+        val idToModule = moduleArtifacts.associate { it.id to it.owner.moduleId }
+        val moduleToId = moduleArtifacts.associate { it.owner.moduleId to it.id }
+        val dependencies = graph.relationships
+            .filter { it.type == org.jmixworkbench.discovery.model.RelationshipType.DEPENDS_ON_MODULE }
+            .groupBy { idToModule[it.sourceArtifactId] }
+        val visited = linkedSetOf(moduleId)
+        val queue = ArrayDeque<String>()
+        queue += moduleId
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            val sourceId = moduleToId[current] ?: continue
+            dependencies[current].orEmpty()
+                .filter { it.sourceArtifactId == sourceId }
+                .mapNotNull { it.targetArtifactId?.let(idToModule::get) }
+                .forEach { dependency ->
+                    if (visited.add(dependency)) queue += dependency
+                }
+        }
+        return visited
+    }
+
+    private fun supplementalJavaPath(
+        destination: IntegrationConnectorDestinationSnapshot,
+        source: OpenApiJmixLayerGenerator.GeneratedSource,
+    ): String = join(destination.sourceRoot, source.packageRelativePath)
 
     private fun detectJsonApi(
         javaRoot: ProjectSourceDestination,
@@ -1014,6 +1324,7 @@ data class IntegrationConnectorWorkspaceResponse(
     val oauth2Managers: List<IntegrationOAuth2ManagerSnapshot>,
     val oauth2Services: List<IntegrationOAuth2ServiceSnapshot>,
     val dataStores: List<SchemaDataStoreSnapshot>,
+    val entities: List<SchemaEntitySnapshot> = emptyList(),
     val openApiContracts: List<OpenApiContractSnapshot> = emptyList(),
     val organizationConnectorTemplates: List<IntegrationOrganizationConnectorTemplateSnapshot> = emptyList(),
     val existingDocuments: List<IntegrationConnectorDocumentSnapshot>,
@@ -1087,4 +1398,5 @@ private data class OwnedIntegrationConnector(
     val policyFingerprint: String,
     val migrationPath: String?,
     val migrationContent: String?,
+    val supplementalContent: Map<String, String>,
 )
