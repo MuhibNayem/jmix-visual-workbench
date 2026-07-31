@@ -49,6 +49,8 @@ Implemented workspaces currently include:
 - typed transactional server logic and reusable server-enforced formulas;
 - Jmix/Flowable DMN decision tables with hit policies, conflict analysis,
   governance metadata, simulation and BPMN key resolution;
+- project-owned OpenAPI 3.0/3.1 contract clients with typed operation models,
+  backend-enforced security requirements and safe digest-bound regeneration;
 - source-generated integration scenarios and production-readiness diagnostics.
 
 Every workspace remains subject to the compatibility and certification
@@ -99,6 +101,7 @@ host toolchains and runs the shared IDEA 253/262 test lanes.
 - [Native REST service, configuration, and event intelligence](docs/NATIVE-SERVICE-EVENT-CONFIGURATION-INTELLIGENCE.md)
 - [Signed organization project-template catalogs](docs/ORGANIZATION-TEMPLATE-CATALOGS.md)
 - [Signed organization connector catalogs and native approval](docs/ORGANIZATION-CONNECTOR-CATALOGS.md)
+- [OpenAPI contract-first clients](docs/OPENAPI-CONTRACT-CLIENTS.md)
 - [Dependency, checksum, CI, and future signing/SBOM policy](docs/RELEASE-INTEGRITY.md)
 
 Java 17, Java 21 and current-JDK target projects are the compatibility

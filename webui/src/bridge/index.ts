@@ -42,6 +42,7 @@ import type {
   IntegrationConnectorCatalogApprovalResponse,
   IntegrationConnectorModel,
   IntegrationConnectorWorkspaceResponse,
+  OpenApiContractSelectionResponse,
   EnvironmentChangeRequest,
   EnvironmentConnectionRequest,
   EnvironmentSecretChangeRequest,
@@ -601,6 +602,11 @@ class Bridge {
                 return developmentVisualLogicWorkspace
               case 'getIntegrationConnectorWorkspace':
                 return developmentIntegrationConnectorWorkspace
+              case 'chooseOpenApiContract':
+                return {
+                  selected: true,
+                  contract: developmentIntegrationConnectorWorkspace.openApiContracts[0],
+                } satisfies OpenApiContractSelectionResponse
               case 'getVisualRuleWorkspace':
                 return developmentVisualRuleWorkspace
               case 'getDmnDecisionWorkspace':
@@ -3151,6 +3157,10 @@ ${javaMethods}
       'getIntegrationConnectorWorkspace',
       { forceRefresh },
     )
+  }
+
+  chooseOpenApiContract() {
+    return this.request<OpenApiContractSelectionResponse>('chooseOpenApiContract', {})
   }
 
   previewIntegrationConnector(model: IntegrationConnectorModel) {

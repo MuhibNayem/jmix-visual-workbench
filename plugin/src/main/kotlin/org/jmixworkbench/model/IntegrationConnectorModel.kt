@@ -87,6 +87,134 @@ enum class IntegrationDiagnosticSeverity {
     ERROR,
 }
 
+enum class IntegrationOpenApiParameterLocation {
+    PATH,
+    QUERY,
+    HEADER,
+    COOKIE,
+}
+
+enum class IntegrationOpenApiSchemaKind {
+    OBJECT,
+    ARRAY,
+    STRING,
+    INTEGER,
+    NUMBER,
+    BOOLEAN,
+    UUID,
+    DATE,
+    DATE_TIME,
+    BINARY,
+    ANY,
+}
+
+enum class IntegrationOpenApiSecuritySchemeKind {
+    API_KEY,
+    HTTP_BASIC,
+    HTTP_BEARER,
+    OAUTH2_CLIENT_CREDENTIALS,
+    OAUTH2_OTHER,
+    OPEN_ID_CONNECT,
+    MUTUAL_TLS,
+}
+
+data class IntegrationOpenApiSecuritySchemeModel(
+    val name: String,
+    val kind: IntegrationOpenApiSecuritySchemeKind,
+    val parameterName: String? = null,
+    val parameterLocation: IntegrationOpenApiParameterLocation? = null,
+    val requiredScopes: List<String> = emptyList(),
+)
+
+/**
+ * One OpenAPI Security Requirement Object. Schemes inside a requirement are
+ * combined with AND; separate requirement objects are alternatives (OR).
+ */
+data class IntegrationOpenApiSecurityRequirementModel(
+    val schemes: List<IntegrationOpenApiSecuritySchemeModel>,
+)
+
+/**
+ * Immutable coordinates of a project-owned OpenAPI operation.
+ *
+ * The browser selects these coordinates, but never supplies the effective
+ * operation or schema. Before preview/apply the backend reopens the project
+ * file, verifies the digest, parses it without network access and reconstructs
+ * [IntegrationOpenApiOperationModel].
+ */
+data class IntegrationOpenApiBinding(
+    val relativePath: String,
+    val documentSha256: String,
+    val specificationVersion: String,
+    val operationId: String?,
+    val method: IntegrationHttpMethod,
+    val path: String,
+    val requestMediaType: String? = null,
+    val responseStatus: String? = null,
+    val responseMediaType: String? = null,
+)
+
+data class IntegrationOpenApiPropertyModel(
+    val wireName: String,
+    val javaName: String,
+    val schemaId: String,
+    val required: Boolean,
+    val nullable: Boolean,
+    val readOnly: Boolean = false,
+    val writeOnly: Boolean = false,
+)
+
+data class IntegrationOpenApiSchemaModel(
+    val id: String,
+    val javaName: String,
+    val kind: IntegrationOpenApiSchemaKind,
+    val format: String? = null,
+    val nullable: Boolean = false,
+    val enumValues: List<String> = emptyList(),
+    val properties: List<IntegrationOpenApiPropertyModel> = emptyList(),
+    val itemSchemaId: String? = null,
+    val additionalPropertiesSchemaId: String? = null,
+    val additionalPropertiesAllowed: Boolean = false,
+)
+
+data class IntegrationOpenApiParameterModel(
+    val wireName: String,
+    val javaName: String,
+    val location: IntegrationOpenApiParameterLocation,
+    val schemaId: String,
+    val required: Boolean,
+    val style: String?,
+    val explode: Boolean?,
+)
+
+/**
+ * Backend-derived, deterministic operation contract used only during
+ * validation and generation. It is deliberately removed from the persisted
+ * source marker so a large or forged schema cannot become an authority.
+ */
+data class IntegrationOpenApiOperationModel(
+    val contractPath: String,
+    val contractSha256: String,
+    val specificationVersion: String,
+    val title: String,
+    val apiVersion: String?,
+    val operationId: String?,
+    val javaMethodName: String,
+    val method: IntegrationHttpMethod,
+    val path: String,
+    val deprecated: Boolean,
+    val requestMediaType: String?,
+    val requestRequired: Boolean,
+    val requestSchemaId: String?,
+    val responseStatus: String?,
+    val responseMediaType: String?,
+    val responseSchemaId: String?,
+    val parameters: List<IntegrationOpenApiParameterModel>,
+    val schemas: List<IntegrationOpenApiSchemaModel>,
+    val securitySchemes: List<String> = emptyList(),
+    val securityRequirements: List<IntegrationOpenApiSecurityRequirementModel> = emptyList(),
+)
+
 data class IntegrationHeaderModel(
     val name: String,
     val valueProperty: String,
@@ -288,6 +416,8 @@ data class IntegrationConnectorModel(
     val profiles: List<String> = emptyList(),
     val enabled: Boolean = true,
     val catalogBinding: IntegrationConnectorCatalogBinding? = null,
+    val openApiBinding: IntegrationOpenApiBinding? = null,
+    val resolvedOpenApiOperation: IntegrationOpenApiOperationModel? = null,
     val sourceLocator: SourceLocator? = null,
 )
 

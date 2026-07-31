@@ -34,6 +34,13 @@ import org.jmixworkbench.model.IntegrationCircuitBreakerModel
 import org.jmixworkbench.model.IntegrationReliabilityModel
 import org.jmixworkbench.model.IntegrationObservabilityApi
 import org.jmixworkbench.model.IntegrationObservabilityModel
+import org.jmixworkbench.model.IntegrationOpenApiBinding
+import org.jmixworkbench.model.IntegrationOpenApiOperationModel
+import org.jmixworkbench.model.IntegrationOpenApiParameterLocation
+import org.jmixworkbench.model.IntegrationOpenApiParameterModel
+import org.jmixworkbench.model.IntegrationOpenApiPropertyModel
+import org.jmixworkbench.model.IntegrationOpenApiSchemaKind
+import org.jmixworkbench.model.IntegrationOpenApiSchemaModel
 import org.jmixworkbench.model.QueryType
 import org.jmixworkbench.model.RepositoryMethod
 import org.jmixworkbench.model.RepositoryParameterRole
@@ -70,6 +77,7 @@ object CompatibilityFixtureGenerator {
         generateKotlinCorpus(sources)
         generateAggregateServices(sources)
         generateDurableIntegrationAdapters(sources)
+        generateOpenApiAdapter(sources)
 
         sources.toSortedMap().forEach { (relativePath, source) ->
             val target = outputRoot.resolve(relativePath).normalize()
@@ -500,6 +508,137 @@ object CompatibilityFixtureGenerator {
                     generatedVariant.reliabilityProperties
             }
         }
+    }
+
+    private fun generateOpenApiAdapter(sources: MutableMap<String, String>) {
+        val binding = IntegrationOpenApiBinding(
+            relativePath = "src/main/resources/openapi/certified-payments.yaml",
+            documentSha256 = "a".repeat(64),
+            specificationVersion = "3.1.1",
+            operationId = "submitCertifiedPayment",
+            method = IntegrationHttpMethod.POST,
+            path = "/payments/{accountId}",
+            requestMediaType = "application/json",
+            responseStatus = "201",
+            responseMediaType = "application/json",
+        )
+        val operation = IntegrationOpenApiOperationModel(
+            contractPath = binding.relativePath,
+            contractSha256 = binding.documentSha256,
+            specificationVersion = binding.specificationVersion,
+            title = "Certified Payments",
+            apiVersion = "1.0.0",
+            operationId = binding.operationId,
+            javaMethodName = "submitCertifiedPayment",
+            method = binding.method,
+            path = binding.path,
+            deprecated = false,
+            requestMediaType = binding.requestMediaType,
+            requestRequired = true,
+            requestSchemaId = "component:PaymentRequest",
+            responseStatus = binding.responseStatus,
+            responseMediaType = binding.responseMediaType,
+            responseSchemaId = "component:PaymentReceipt",
+            parameters = listOf(
+                IntegrationOpenApiParameterModel(
+                    wireName = "accountId",
+                    javaName = "accountId",
+                    location = IntegrationOpenApiParameterLocation.PATH,
+                    schemaId = "inline:account-id",
+                    required = true,
+                    style = "simple",
+                    explode = false,
+                ),
+            ),
+            schemas = listOf(
+                IntegrationOpenApiSchemaModel(
+                    id = "inline:account-id",
+                    javaName = "AccountId",
+                    kind = IntegrationOpenApiSchemaKind.UUID,
+                    format = "uuid",
+                ),
+                IntegrationOpenApiSchemaModel(
+                    id = "inline:amount",
+                    javaName = "Amount",
+                    kind = IntegrationOpenApiSchemaKind.NUMBER,
+                    format = "decimal",
+                ),
+                IntegrationOpenApiSchemaModel(
+                    id = "inline:reference",
+                    javaName = "Reference",
+                    kind = IntegrationOpenApiSchemaKind.STRING,
+                ),
+                IntegrationOpenApiSchemaModel(
+                    id = "inline:status",
+                    javaName = "PaymentStatus",
+                    kind = IntegrationOpenApiSchemaKind.STRING,
+                    enumValues = listOf("accepted", "rejected"),
+                ),
+                IntegrationOpenApiSchemaModel(
+                    id = "component:PaymentRequest",
+                    javaName = "PaymentRequest",
+                    kind = IntegrationOpenApiSchemaKind.OBJECT,
+                    properties = listOf(
+                        IntegrationOpenApiPropertyModel(
+                            wireName = "amount",
+                            javaName = "amount",
+                            schemaId = "inline:amount",
+                            required = true,
+                            nullable = false,
+                        ),
+                        IntegrationOpenApiPropertyModel(
+                            wireName = "external-reference",
+                            javaName = "externalReference",
+                            schemaId = "inline:reference",
+                            required = true,
+                            nullable = false,
+                        ),
+                    ),
+                ),
+                IntegrationOpenApiSchemaModel(
+                    id = "component:PaymentReceipt",
+                    javaName = "PaymentReceipt",
+                    kind = IntegrationOpenApiSchemaKind.OBJECT,
+                    properties = listOf(
+                        IntegrationOpenApiPropertyModel(
+                            wireName = "status",
+                            javaName = "status",
+                            schemaId = "inline:status",
+                            required = true,
+                            nullable = false,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val initial = IntegrationConnectorModel(
+            name = "Certified OpenAPI payment client",
+            destinationId = "certified:main",
+            packageName = "com.acme.cert.integration",
+            className = "CertifiedPaymentClient",
+            beanName = "certifiedPaymentClient",
+            kind = IntegrationConnectorKind.HTTP_CLIENT,
+            configurationPrefix = "cert.payments",
+            addressProperty = "cert.payments.base-url",
+            payloadJavaType = "void",
+            responseJavaType = "void",
+            httpMethod = binding.method,
+            contentType = requireNotNull(binding.requestMediaType),
+            openApiBinding = binding,
+            resolvedOpenApiOperation = operation,
+        )
+        val model = initial.copy(
+            payloadJavaType = IntegrationConnectorGenerator.openApiPayloadJavaType(
+                operation,
+                initial.className,
+            ),
+            responseJavaType = IntegrationConnectorGenerator.openApiResponseJavaType(
+                operation,
+                initial.className,
+            ),
+        )
+        sources["common/java/com/acme/cert/integration/CertifiedPaymentClient.java"] =
+            IntegrationConnectorGenerator.generate(model).javaSource
     }
 
     private fun entityModel(

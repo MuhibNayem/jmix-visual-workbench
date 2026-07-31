@@ -40,6 +40,14 @@ contracts. Jmix 3 additionally requires the modular Spring Boot 4 Kafka runtime
 capability rather than treating the lower-level `spring-kafka` library as
 sufficient auto-configuration.
 
+The same production corpus includes a contract-derived OpenAPI `RestClient`
+adapter with a typed request, typed response, enum wire mapping, path expansion
+and exact successful-status handling. Jmix 2 cells compile the Jackson 2 /
+Spring Boot 3 variant and Jmix 3 cells compile the Jackson 3 / Spring Boot 4
+variant. Parser behavior, contract freshness and security requirements are
+covered separately by focused plugin tests; see
+`OPENAPI-CONTRACT-CLIENTS.md`.
+
 Signed organization connector presets declare their compatible
 `BOOT_3`/`BOOT_4` APIs and required indexed capabilities. The Integration
 Designer filters incompatible presets, and the backend repeats the check after
@@ -49,10 +57,10 @@ target dependency.
 
 | Exact Jmix | Target-project JDK | Languages | Generated artifacts | Current evidence |
 | --- | --- | --- | --- | --- |
-| 2.8.2 | 17 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 61 |
-| 2.8.2 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 65 |
-| 3.0.0 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 65 |
-| 3.0.0 | 25 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 69 |
+| 2.8.2 | 17 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox, consumer inbox and typed OpenAPI client | Strict compile passed; class major 61 |
+| 2.8.2 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox, consumer inbox and typed OpenAPI client | Strict compile passed; class major 65 |
+| 3.0.0 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox, consumer inbox and typed OpenAPI client | Strict compile passed; class major 65 |
+| 3.0.0 | 25 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox, consumer inbox and typed OpenAPI client | Strict compile passed; class major 69 |
 
 This follows Jmix's published runtime boundary: the Jmix 2 line supports Java
 17/21, while [Jmix 3.0 requires Java 21 or

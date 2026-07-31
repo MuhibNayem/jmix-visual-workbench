@@ -12,6 +12,14 @@ import org.jmixworkbench.model.IntegrationDiagnosticSeverity
 import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationObservabilityApi
+import org.jmixworkbench.model.IntegrationOpenApiOperationModel
+import org.jmixworkbench.model.IntegrationOpenApiParameterLocation
+import org.jmixworkbench.model.IntegrationOpenApiParameterModel
+import org.jmixworkbench.model.IntegrationOpenApiSchemaKind
+import org.jmixworkbench.model.IntegrationOpenApiSchemaModel
+import org.jmixworkbench.model.IntegrationOpenApiSecurityRequirementModel
+import org.jmixworkbench.model.IntegrationOpenApiSecuritySchemeKind
+import org.jmixworkbench.model.IntegrationOpenApiSecuritySchemeModel
 import org.jmixworkbench.model.IntegrationRetryMode
 import org.jmixworkbench.model.IntegrationSpringBootApi
 import org.jmixworkbench.model.IntegrationValidationResult
@@ -38,6 +46,20 @@ object IntegrationConnectorGenerator {
     private val gson = Gson()
 
     fun markerPrefix(): String = MARKER_PREFIX
+
+    fun openApiPayloadJavaType(
+        operation: IntegrationOpenApiOperationModel,
+        outerClassName: String,
+    ): String = operation.requestSchemaId
+        ?.let { openApiPublicType(operation, it, outerClassName) }
+        ?: "void"
+
+    fun openApiResponseJavaType(
+        operation: IntegrationOpenApiOperationModel,
+        outerClassName: String,
+    ): String = operation.responseSchemaId
+        ?.let { openApiPublicType(operation, it, outerClassName) }
+        ?: "void"
 
     fun requiredCapabilities(model: IntegrationConnectorModel): Set<IntegrationCapability> = buildSet {
         when (model.kind) {
@@ -121,6 +143,7 @@ object IntegrationConnectorGenerator {
         if (!isSafeJavaType(model.payloadJavaType) || !isSafeJavaType(model.responseJavaType)) {
             error("INTEGRATION_JAVA_TYPE_INVALID", "Payload and response Java types must be safe declared types.")
         }
+        validateOpenApiContract(model, ::error, ::warning)
         if (model.profiles.any { !PROFILE.matches(it) }) {
             error("INTEGRATION_PROFILE_INVALID", "Spring profiles may contain letters, digits, dot, dash, and underscore.")
         }
@@ -385,6 +408,185 @@ object IntegrationConnectorGenerator {
         )
     }
 
+    private fun validateOpenApiContract(
+        model: IntegrationConnectorModel,
+        error: (String, String) -> Unit,
+        warning: (String, String) -> Unit,
+    ) {
+        val binding = model.openApiBinding
+        val operation = model.resolvedOpenApiOperation
+        if (binding == null) {
+            if (operation != null) {
+                error(
+                    "INTEGRATION_OPENAPI_UNBOUND_OPERATION",
+                    "A backend-resolved OpenAPI operation cannot exist without immutable contract coordinates.",
+                )
+            }
+            return
+        }
+        if (model.kind !in HTTP_KINDS) {
+            error(
+                "INTEGRATION_OPENAPI_HTTP_ONLY",
+                "OpenAPI operation binding is valid only for HTTP-based connectors.",
+            )
+        }
+        if (operation == null) {
+            error(
+                "INTEGRATION_OPENAPI_BACKEND_RESOLUTION_REQUIRED",
+                "The backend must resolve the exact project-owned OpenAPI operation before generation.",
+            )
+            return
+        }
+        if (
+            operation.contractPath != binding.relativePath ||
+            operation.contractSha256 != binding.documentSha256 ||
+            operation.specificationVersion != binding.specificationVersion ||
+            operation.operationId != binding.operationId ||
+            operation.method != binding.method ||
+            operation.path != binding.path ||
+            operation.requestMediaType != binding.requestMediaType ||
+            operation.responseStatus != binding.responseStatus ||
+            operation.responseMediaType != binding.responseMediaType
+        ) {
+            error(
+                "INTEGRATION_OPENAPI_RESOLUTION_MISMATCH",
+                "Resolved OpenAPI operation does not match the exact contract binding.",
+            )
+        }
+        if (model.httpMethod != operation.method) {
+            error("INTEGRATION_OPENAPI_METHOD_MISMATCH", "HTTP method must be owned by the OpenAPI operation.")
+        }
+        val expectedTypes = runCatching {
+            Pair(
+                operation.requestSchemaId?.let { openApiPublicType(operation, it, model.className) } ?: "void",
+                operation.responseSchemaId?.let { openApiPublicType(operation, it, model.className) } ?: "void",
+            )
+        }.getOrElse { failure ->
+            error(
+                "INTEGRATION_OPENAPI_SCHEMA_RECURSION_UNSUPPORTED",
+                failure.message ?: "The selected OpenAPI schema cannot be represented safely.",
+            )
+            return
+        }
+        val (expectedPayload, expectedResponse) = expectedTypes
+        if (model.payloadJavaType != expectedPayload || model.responseJavaType != expectedResponse) {
+            error(
+                "INTEGRATION_OPENAPI_TYPE_MISMATCH",
+                "Payload and response Java types must be derived from the selected OpenAPI schemas.",
+            )
+        }
+        if (operation.requestMediaType != null && model.contentType != operation.requestMediaType) {
+            error(
+                "INTEGRATION_OPENAPI_MEDIA_TYPE_MISMATCH",
+                "Request content type must match the selected OpenAPI representation.",
+            )
+        }
+        if (operation.requestSchemaId != null && operation.method == IntegrationHttpMethod.GET) {
+            error(
+                "INTEGRATION_OPENAPI_GET_BODY_UNSUPPORTED",
+                "A GET request body has ambiguous intermediary behavior and requires an explicit custom adapter.",
+            )
+        }
+        if (
+            operation.securityRequirements.isNotEmpty() &&
+            operation.securityRequirements.none { requirement -> securityRequirementSatisfied(model, requirement) }
+        ) {
+            error(
+                "INTEGRATION_OPENAPI_SECURITY_UNSATISFIED",
+                "The connector authentication and transport do not satisfy any complete OpenAPI security requirement: " +
+                    operation.securityRequirements.joinToString(" OR ") { requirement ->
+                        requirement.schemes.joinToString(" + ") { scheme ->
+                            buildString {
+                                append(scheme.name).append('[').append(scheme.kind.name).append(']')
+                                if (scheme.requiredScopes.isNotEmpty()) {
+                                    append("{").append(scheme.requiredScopes.joinToString()).append("}")
+                                }
+                            }
+                        }
+                    },
+            )
+        }
+        val parameterNames = operation.parameters.map(IntegrationOpenApiParameterModel::javaName)
+        if (
+            model.reliability.idempotency.enabled &&
+            model.reliability.idempotency.keyParameterName in parameterNames
+        ) {
+            error(
+                "INTEGRATION_OPENAPI_IDEMPOTENCY_PARAMETER_COLLISION",
+                "The idempotency parameter name collides with an OpenAPI operation parameter.",
+            )
+        }
+        operation.parameters.filter { it.location == IntegrationOpenApiParameterLocation.HEADER }
+            .forEach { parameter ->
+                if (!HTTP_HEADER.matches(parameter.wireName)) {
+                    error(
+                        "INTEGRATION_OPENAPI_HEADER_INVALID",
+                        "OpenAPI header parameter '${parameter.wireName}' is not a safe HTTP header name.",
+                    )
+                }
+            }
+        val ownedHeaders = buildList {
+            addAll(model.headers.map { it.name to "configured header" })
+            if (model.authentication.kind == IntegrationAuthenticationKind.API_KEY) {
+                model.authentication.headerName?.let { add(it to "API-key authentication") }
+            }
+            if (model.reliability.idempotency.enabled) {
+                add(model.reliability.idempotency.headerName to "idempotency")
+            }
+            addAll(
+                operation.parameters
+                    .filter { it.location == IntegrationOpenApiParameterLocation.HEADER }
+                    .map { it.wireName to "OpenAPI parameter" },
+            )
+        }
+        ownedHeaders.groupBy { it.first.lowercase() }
+            .filterValues { definitions -> definitions.size > 1 }
+            .forEach { (header, definitions) ->
+                error(
+                    "INTEGRATION_OPENAPI_HEADER_COLLISION",
+                    "HTTP header '$header' is owned by multiple mechanisms: " +
+                        definitions.joinToString { it.second } + ".",
+                )
+            }
+        if (operation.deprecated) {
+            warning(
+                "INTEGRATION_OPENAPI_OPERATION_DEPRECATED",
+                "The selected OpenAPI operation is deprecated; contract evolution should migrate callers.",
+            )
+        }
+    }
+
+    private fun securityRequirementSatisfied(
+        model: IntegrationConnectorModel,
+        requirement: IntegrationOpenApiSecurityRequirementModel,
+    ): Boolean = requirement.schemes.all { scheme -> securitySchemeSatisfied(model, scheme) }
+
+    private fun securitySchemeSatisfied(
+        model: IntegrationConnectorModel,
+        scheme: IntegrationOpenApiSecuritySchemeModel,
+    ): Boolean = when (scheme.kind) {
+        IntegrationOpenApiSecuritySchemeKind.API_KEY ->
+            model.authentication.kind == IntegrationAuthenticationKind.API_KEY &&
+                scheme.parameterLocation == IntegrationOpenApiParameterLocation.HEADER &&
+                model.authentication.headerName.equals(scheme.parameterName, ignoreCase = true)
+        IntegrationOpenApiSecuritySchemeKind.HTTP_BASIC ->
+            model.authentication.kind == IntegrationAuthenticationKind.BASIC
+        IntegrationOpenApiSecuritySchemeKind.HTTP_BEARER ->
+            model.authentication.kind in setOf(
+                IntegrationAuthenticationKind.BEARER,
+                IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS,
+            )
+        IntegrationOpenApiSecuritySchemeKind.OAUTH2_CLIENT_CREDENTIALS ->
+            model.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS &&
+                model.authentication.scopes.containsAll(scheme.requiredScopes)
+        IntegrationOpenApiSecuritySchemeKind.OAUTH2_OTHER,
+        IntegrationOpenApiSecuritySchemeKind.OPEN_ID_CONNECT,
+        ->
+            model.authentication.kind == IntegrationAuthenticationKind.BEARER
+        IntegrationOpenApiSecuritySchemeKind.MUTUAL_TLS ->
+            model.transportSecurity.mutualTlsEnabled
+    }
+
     fun generate(
         model: IntegrationConnectorModel,
         encodedModel: String = encode(model),
@@ -560,6 +762,7 @@ object IntegrationConnectorGenerator {
                 model.copy(
                     sourceLocator = null,
                     catalogBinding = model.catalogBinding?.copy(approvalCapability = null),
+                    resolvedOpenApiOperation = null,
                 ),
             ).toByteArray(Charsets.UTF_8),
         )
@@ -680,6 +883,9 @@ object IntegrationConnectorGenerator {
             if (model.reliability.inboxEnabled) {
                 append('\n').append(renderInboxRuntime(model))
             }
+            model.resolvedOpenApiOperation?.let {
+                append('\n').append(renderOpenApiTypes(it, model.className))
+            }
             append("}\n")
         }
     }
@@ -744,7 +950,11 @@ object IntegrationConnectorGenerator {
         else -> error("Unsupported connector kind: ${model.kind}")
     }
 
-    private fun renderHttpOperation(model: IntegrationConnectorModel): String = buildString {
+    private fun renderHttpOperation(model: IntegrationConnectorModel): String =
+        model.resolvedOpenApiOperation?.let { renderOpenApiHttpOperation(model, it) }
+            ?: renderGenericHttpOperation(model)
+
+    private fun renderGenericHttpOperation(model: IntegrationConnectorModel): String = buildString {
         appendResilienceAnnotations(model)
         append("    public ").append(model.responseJavaType).append(" exchange(")
         val parameters = mutableListOf<String>()
@@ -801,6 +1011,354 @@ object IntegrationConnectorGenerator {
                 .append(rawClassLiteral(model.responseJavaType)).append("), \"Remote response body is required\");\n")
         }
         append("    }\n")
+    }
+
+    private fun renderOpenApiHttpOperation(
+        model: IntegrationConnectorModel,
+        operation: IntegrationOpenApiOperationModel,
+    ): String = buildString {
+        val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        appendResilienceAnnotations(model)
+        append("    public ").append(model.responseJavaType).append(' ')
+            .append(operation.javaMethodName).append('(')
+        val declarations = mutableListOf<String>()
+        operation.parameters.forEach { parameter ->
+            declarations += "${openApiLocalType(operation, parameter.schemaId, model.className)} ${parameter.javaName}"
+        }
+        if (operation.requestSchemaId != null) {
+            declarations += "${model.payloadJavaType} payload"
+        }
+        if (model.reliability.idempotency.enabled) {
+            declarations += "String ${model.reliability.idempotency.keyParameterName}"
+        }
+        append(declarations.joinToString()).append(") {\n")
+        operation.parameters.filter(IntegrationOpenApiParameterModel::required).forEach { parameter ->
+            append("        Objects.requireNonNull(").append(parameter.javaName).append(", \"")
+                .append(escapeJava(parameter.wireName)).append(" is required\");\n")
+        }
+        if (operation.requestRequired && operation.requestSchemaId != null) {
+            append("        Objects.requireNonNull(payload, \"OpenAPI request body is required\");\n")
+        }
+        if (model.observability.structuredLoggingEnabled) {
+            append("        log.debug(\"Calling OpenAPI integration connector ")
+                .append(escapeJava(model.beanName)).append(" operation=")
+                .append(escapeJava(operation.operationId ?: operation.javaMethodName))
+                .append(" method=").append(operation.method.name).append("\");\n")
+        }
+        append("        UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromUriString(address)\n")
+        append("                .path(\"").append(escapeJava(operation.path)).append("\");\n")
+        operation.parameters.filter { it.location == IntegrationOpenApiParameterLocation.QUERY }
+            .forEach { parameter ->
+                appendOpenApiQueryParameter(
+                    parameter,
+                    requireNotNull(schemas[parameter.schemaId]),
+                    operation,
+                    model.className,
+                    this,
+                )
+            }
+        val pathParameters = operation.parameters.filter {
+            it.location == IntegrationOpenApiParameterLocation.PATH
+        }
+        if (pathParameters.isNotEmpty()) {
+            append("        Map<String, Object> pathVariables = new LinkedHashMap<>();\n")
+            pathParameters.forEach { parameter ->
+                val schema = requireNotNull(schemas[parameter.schemaId])
+                val wireValue = if (schema.kind == IntegrationOpenApiSchemaKind.ARRAY) {
+                    val item = requireNotNull(schemas[requireNotNull(schema.itemSchemaId)])
+                    "${parameter.javaName}.stream().map(value -> " +
+                        openApiWireExpression(item, "value") +
+                        ").collect(Collectors.joining(\",\"))"
+                } else {
+                    openApiWireExpression(schema, parameter.javaName)
+                }
+                append("        pathVariables.put(\"").append(escapeJava(parameter.wireName))
+                    .append("\", ").append(wireValue).append(");\n")
+            }
+            append("        URI requestUri = uriBuilder.buildAndExpand(pathVariables).encode().toUri();\n")
+        } else {
+            append("        URI requestUri = uriBuilder.build().encode().toUri();\n")
+        }
+        append("        RestClient.RequestBodySpec request = restClient.method(HttpMethod.")
+            .append(operation.method.name).append(")\n")
+        append("                .uri(requestUri);\n")
+        operation.requestMediaType?.let { mediaType ->
+            append("        request = request.contentType(MediaType.parseMediaType(\"")
+                .append(escapeJava(mediaType)).append("\"));\n")
+        }
+        operation.responseMediaType?.let { mediaType ->
+            append("        request = request.accept(MediaType.parseMediaType(\"")
+                .append(escapeJava(mediaType)).append("\"));\n")
+        }
+        appendHttpAuthentication(model, this)
+        model.headers.forEachIndexed { index, header ->
+            append("        request = request.header(\"").append(escapeJava(header.name))
+                .append("\", headerValue").append(index).append(");\n")
+        }
+        operation.parameters.filter { it.location == IntegrationOpenApiParameterLocation.HEADER }
+            .forEach { parameter ->
+                appendOpenApiHeaderOrCookie(parameter, requireNotNull(schemas[parameter.schemaId]), operation, false, this)
+            }
+        operation.parameters.filter { it.location == IntegrationOpenApiParameterLocation.COOKIE }
+            .forEach { parameter ->
+                appendOpenApiHeaderOrCookie(parameter, requireNotNull(schemas[parameter.schemaId]), operation, true, this)
+            }
+        if (model.reliability.idempotency.enabled) {
+            append("        request = request.header(\"")
+                .append(escapeJava(model.reliability.idempotency.headerName)).append("\", ")
+                .append(model.reliability.idempotency.keyParameterName).append(");\n")
+        }
+        if (operation.requestSchemaId != null) {
+            append("        request = request.body(payload);\n")
+        }
+        val responseType = operation.responseSchemaId?.let {
+            openApiLocalType(operation, it, model.className)
+        }
+        if (responseType == null) {
+            append("        ResponseEntity<Void> response = request.retrieve().toBodilessEntity();\n")
+            appendOpenApiStatusCheck(operation.responseStatus, this)
+        } else {
+            append("        ResponseEntity<").append(responseType).append("> response = request.retrieve().toEntity(")
+            if ('<' in responseType) {
+                append("new ParameterizedTypeReference<").append(responseType).append(">() {})")
+            } else {
+                append(rawClassLiteral(responseType)).append(')')
+            }
+            append(";\n")
+            appendOpenApiStatusCheck(operation.responseStatus, this)
+            append("        return Objects.requireNonNull(response.getBody(), \"OpenAPI response body is required\");\n")
+        }
+        append("    }\n")
+    }
+
+    private fun appendHttpAuthentication(
+        model: IntegrationConnectorModel,
+        target: StringBuilder,
+    ) {
+        with(target) {
+            when (model.authentication.kind) {
+                IntegrationAuthenticationKind.BASIC -> {
+                    append("        request = request.header(\"Authorization\", \"Basic \" + Base64.getEncoder().encodeToString((authUsername + \":\" + authSecret).getBytes(StandardCharsets.UTF_8)));\n")
+                }
+                IntegrationAuthenticationKind.BEARER -> {
+                    append("        request = request.header(\"Authorization\", \"Bearer \" + authSecret);\n")
+                }
+                IntegrationAuthenticationKind.API_KEY -> {
+                    append("        request = request.header(\"")
+                        .append(escapeJava(model.authentication.headerName.orEmpty()))
+                        .append("\", authSecret);\n")
+                }
+                IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS -> {
+                    append("        request = request\n")
+                    append("                .attributes(RequestAttributeClientRegistrationIdResolver.clientRegistrationId(clientRegistrationId))\n")
+                    append("                .attributes(RequestAttributePrincipalResolver.principal(oauthPrincipalName));\n")
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    private fun appendOpenApiQueryParameter(
+        parameter: org.jmixworkbench.model.IntegrationOpenApiParameterModel,
+        schema: IntegrationOpenApiSchemaModel,
+        operation: IntegrationOpenApiOperationModel,
+        modelClassName: String,
+        target: StringBuilder,
+    ) {
+        with(target) {
+            val guard = if (parameter.required) null else "if (${parameter.javaName} != null) "
+            if (schema.kind == IntegrationOpenApiSchemaKind.ARRAY) {
+                val itemType = openApiLocalType(
+                    operation,
+                    requireNotNull(schema.itemSchemaId),
+                    modelClassName,
+                )
+                val itemSchema = operation.schemas.single { it.id == schema.itemSchemaId }
+                val wireValue = openApiWireExpression(itemSchema, "value")
+                if (parameter.explode == false) {
+                    append("        ").append(guard.orEmpty()).append("{\n")
+                    append("            uriBuilder.queryParam(\"").append(escapeJava(parameter.wireName))
+                        .append("\", ").append(parameter.javaName)
+                        .append(".stream().map(value -> ").append(wireValue)
+                        .append(").collect(Collectors.joining(\",\")));\n")
+                    append("        }\n")
+                } else {
+                    append("        ").append(guard.orEmpty()).append("{\n")
+                    append("            for (").append(itemType).append(" value : ")
+                        .append(parameter.javaName).append(") {\n")
+                    append("                uriBuilder.queryParam(\"").append(escapeJava(parameter.wireName))
+                        .append("\", ").append(wireValue).append(");\n")
+                    append("            }\n")
+                    append("        }\n")
+                }
+            } else {
+                if (guard != null) append("        ").append(guard)
+                else append("        ")
+                append("uriBuilder.queryParam(\"").append(escapeJava(parameter.wireName))
+                    .append("\", ").append(openApiWireExpression(schema, parameter.javaName)).append(");\n")
+            }
+        }
+    }
+
+    private fun appendOpenApiHeaderOrCookie(
+        parameter: org.jmixworkbench.model.IntegrationOpenApiParameterModel,
+        schema: IntegrationOpenApiSchemaModel,
+        operation: IntegrationOpenApiOperationModel,
+        cookie: Boolean,
+        target: StringBuilder,
+    ) {
+        with(target) {
+            val method = if (cookie) "cookie" else "header"
+            val value = if (schema.kind == IntegrationOpenApiSchemaKind.ARRAY) {
+                val item = operation.schemas.single { it.id == schema.itemSchemaId }
+                "${parameter.javaName}.stream().map(value -> " +
+                    openApiWireExpression(item, "value") +
+                    ").collect(Collectors.joining(\",\"))"
+            } else {
+                openApiWireExpression(schema, parameter.javaName)
+            }
+            if (!parameter.required) {
+                append("        if (").append(parameter.javaName).append(" != null) {\n    ")
+            }
+            append("        request = request.").append(method).append("(\"")
+                .append(escapeJava(parameter.wireName)).append("\", ").append(value).append(");\n")
+            if (!parameter.required) append("        }\n")
+        }
+    }
+
+    private fun openApiWireExpression(
+        schema: IntegrationOpenApiSchemaModel,
+        expression: String,
+    ): String = if (isStringEnum(schema)) {
+        "$expression.value()"
+    } else {
+        "String.valueOf($expression)"
+    }
+
+    private fun appendOpenApiStatusCheck(status: String?, target: StringBuilder) {
+        with(target) {
+            when {
+                status == null -> Unit
+                status.equals("2XX", true) ->
+                    append("        if (!response.getStatusCode().is2xxSuccessful()) throw new IllegalStateException(\"Unexpected OpenAPI response status: \" + response.getStatusCode());\n")
+                else ->
+                    append("        if (response.getStatusCode().value() != ").append(status.toInt())
+                        .append(") throw new IllegalStateException(\"Unexpected OpenAPI response status: \" + response.getStatusCode());\n")
+            }
+        }
+    }
+
+    private fun renderOpenApiTypes(
+        operation: IntegrationOpenApiOperationModel,
+        modelClassName: String,
+    ): String = buildString {
+        val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        operation.schemas.filter(::isStringEnum).sortedBy(IntegrationOpenApiSchemaModel::javaName)
+            .forEach { schema ->
+                append("    public enum ").append(openApiNestedTypeName(schema.javaName, modelClassName))
+                    .append(" {\n")
+                val constants = uniqueEnumConstants(schema.enumValues)
+                constants.forEachIndexed { index, (constant, wireValue) ->
+                    append("        ").append(constant).append("(\"").append(escapeJava(wireValue)).append("\")")
+                    append(if (index == constants.lastIndex) ";\n\n" else ",\n")
+                }
+                append("        private final String value;\n\n")
+                append("        ").append(openApiNestedTypeName(schema.javaName, modelClassName))
+                    .append("(String value) { this.value = value; }\n\n")
+                append("        @JsonValue\n")
+                append("        public String value() { return value; }\n\n")
+                append("        @JsonCreator\n")
+                append("        public static ").append(openApiNestedTypeName(schema.javaName, modelClassName))
+                    .append(" fromValue(String value) {\n")
+                append("            for (").append(openApiNestedTypeName(schema.javaName, modelClassName))
+                    .append(" candidate : values()) {\n")
+                append("                if (candidate.value.equals(value)) return candidate;\n")
+                append("            }\n")
+                append("            throw new IllegalArgumentException(\"Unknown ").append(schema.javaName)
+                    .append(" value: \" + value);\n")
+                append("        }\n")
+                append("    }\n\n")
+            }
+        operation.schemas.filter { schema ->
+            schema.kind == IntegrationOpenApiSchemaKind.OBJECT &&
+                !schema.additionalPropertiesAllowed
+        }.sortedBy(IntegrationOpenApiSchemaModel::javaName).forEach { schema ->
+            if (schema.properties.isEmpty()) {
+            append("    public record ").append(openApiNestedTypeName(schema.javaName, modelClassName))
+                .append("() {}\n\n")
+                return@forEach
+            }
+            append("    public record ").append(openApiNestedTypeName(schema.javaName, modelClassName))
+                .append("(\n")
+            schema.properties.forEachIndexed { index, property ->
+                append("            @JsonProperty(value = \"").append(escapeJava(property.wireName)).append("\"")
+                when {
+                    property.readOnly -> append(", access = JsonProperty.Access.READ_ONLY")
+                    property.writeOnly -> append(", access = JsonProperty.Access.WRITE_ONLY")
+                }
+                append(") ").append(openApiLocalType(operation, property.schemaId, modelClassName)).append(' ')
+                    .append(property.javaName)
+                append(if (index == schema.properties.lastIndex) "\n" else ",\n")
+            }
+            append("    ) {\n")
+            append("        public ").append(openApiNestedTypeName(schema.javaName, modelClassName))
+                .append(" {\n")
+            schema.properties.forEach { property ->
+                val child = requireNotNull(schemas[property.schemaId])
+                if (property.required && !property.nullable) {
+                    append("            Objects.requireNonNull(").append(property.javaName).append(", \"")
+                        .append(escapeJava(property.wireName)).append(" is required\");\n")
+                }
+                if (child.enumValues.isNotEmpty() && !isStringEnum(child)) {
+                    append("            if (").append(property.javaName)
+                        .append(" != null && !Set.of(")
+                        .append(child.enumValues.joinToString { "\"${escapeJava(it)}\"" })
+                        .append(").contains(String.valueOf(").append(property.javaName).append("))) {\n")
+                    append("                throw new IllegalArgumentException(\"Invalid enum value for ")
+                        .append(escapeJava(property.wireName)).append("\");\n")
+                    append("            }\n")
+                }
+                when {
+                    child.kind == IntegrationOpenApiSchemaKind.ARRAY ->
+                        append("            if (").append(property.javaName).append(" != null) ")
+                            .append(property.javaName).append(" = Collections.unmodifiableList(new ArrayList<>(")
+                            .append(property.javaName).append("));\n")
+                    child.kind == IntegrationOpenApiSchemaKind.OBJECT && child.additionalPropertiesAllowed ->
+                        append("            if (").append(property.javaName).append(" != null) ")
+                            .append(property.javaName).append(" = Collections.unmodifiableMap(new LinkedHashMap<>(")
+                            .append(property.javaName).append("));\n")
+                    child.kind == IntegrationOpenApiSchemaKind.BINARY ->
+                        append("            if (").append(property.javaName).append(" != null) ")
+                            .append(property.javaName).append(" = ").append(property.javaName).append(".clone();\n")
+                }
+            }
+            append("        }\n")
+            schema.properties.filter { property ->
+                schemas[property.schemaId]?.kind == IntegrationOpenApiSchemaKind.BINARY
+            }.forEach { property ->
+                append("\n        @Override\n")
+                append("        public byte[] ").append(property.javaName).append("() {\n")
+                append("            return ").append(property.javaName)
+                    .append(" == null ? null : ").append(property.javaName).append(".clone();\n")
+                append("        }\n")
+            }
+            append("    }\n\n")
+        }
+    }
+
+    private fun uniqueEnumConstants(values: List<String>): List<Pair<String, String>> {
+        val used = mutableSetOf<String>()
+        return values.map { value ->
+            val base = value.uppercase()
+                .replace(Regex("""[^A-Z0-9]+"""), "_")
+                .trim('_')
+                .let { if (it.firstOrNull()?.isDigit() == true) "_$it" else it }
+                .ifBlank { "VALUE" }
+            var candidate = base
+            var suffix = 2
+            while (!used.add(candidate)) candidate = "${base}_${suffix++}"
+            candidate to value
+        }
     }
 
     private fun renderKafkaPublisher(model: IntegrationConnectorModel): String = buildString {
@@ -1993,6 +2551,27 @@ object IntegrationConnectorGenerator {
                 add("org.springframework.http.HttpMethod")
                 add("org.springframework.http.MediaType")
                 add("org.springframework.web.client.RestClient")
+                if (model.resolvedOpenApiOperation != null) {
+                    add("com.fasterxml.jackson.annotation.JsonCreator")
+                    add("com.fasterxml.jackson.annotation.JsonProperty")
+                    add("com.fasterxml.jackson.annotation.JsonValue")
+                    add("java.math.BigDecimal")
+                    add("java.net.URI")
+                    add("java.time.LocalDate")
+                    add("java.time.OffsetDateTime")
+                    add("java.util.ArrayList")
+                    add("java.util.Collections")
+                    add("java.util.LinkedHashMap")
+                    add("java.util.List")
+                    add("java.util.Map")
+                    add("java.util.Objects")
+                    add("java.util.Set")
+                    add("java.util.UUID")
+                    add("java.util.stream.Collectors")
+                    add("org.springframework.core.ParameterizedTypeReference")
+                    add("org.springframework.http.ResponseEntity")
+                    add("org.springframework.web.util.UriComponentsBuilder")
+                }
                 if (model.transportSecurity.mutualTlsEnabled) {
                     add("java.net.URI")
                     add("org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder")
@@ -2526,6 +3105,97 @@ object IntegrationConnectorGenerator {
         value.split('.').all(::isJavaIdentifier) && '.' in value
 
     private fun isPropertyKey(value: String): Boolean = PROPERTY_KEY.matches(value)
+
+    private fun openApiPublicType(
+        operation: IntegrationOpenApiOperationModel,
+        schemaId: String,
+        outerClassName: String,
+    ): String = openApiType(
+        operation,
+        schemaId,
+        qualifier = outerClassName,
+        modelClassName = outerClassName,
+        visiting = mutableSetOf(),
+    )
+
+    private fun openApiLocalType(
+        operation: IntegrationOpenApiOperationModel,
+        schemaId: String,
+        modelClassName: String,
+    ): String = openApiType(
+        operation,
+        schemaId,
+        qualifier = null,
+        modelClassName = modelClassName,
+        visiting = mutableSetOf(),
+    )
+
+    private fun openApiType(
+        operation: IntegrationOpenApiOperationModel,
+        schemaId: String,
+        qualifier: String?,
+        modelClassName: String,
+        visiting: MutableSet<String>,
+    ): String {
+        val schema = operation.schemas.singleOrNull { it.id == schemaId }
+            ?: throw IllegalArgumentException("OpenAPI schema '$schemaId' is missing.")
+        if (!visiting.add(schemaId)) {
+            throw IllegalArgumentException(
+                "Recursive array/map schema '${schema.javaName}' requires an explicit mapper.",
+            )
+        }
+        return try {
+            when {
+                isStringEnum(schema) -> qualifyOpenApiType(
+                    qualifier,
+                    openApiNestedTypeName(schema.javaName, modelClassName),
+                )
+                schema.kind == IntegrationOpenApiSchemaKind.OBJECT && schema.additionalPropertiesAllowed -> {
+                    val valueType = schema.additionalPropertiesSchemaId
+                        ?.let { openApiType(operation, it, qualifier, modelClassName, visiting) }
+                        ?: "java.lang.Object"
+                    "java.util.Map<java.lang.String,$valueType>"
+                }
+                schema.kind == IntegrationOpenApiSchemaKind.OBJECT ->
+                    qualifyOpenApiType(
+                        qualifier,
+                        openApiNestedTypeName(schema.javaName, modelClassName),
+                    )
+                schema.kind == IntegrationOpenApiSchemaKind.ARRAY -> {
+                    val itemType = openApiType(
+                        operation,
+                        requireNotNull(schema.itemSchemaId) { "Array schema '${schema.javaName}' has no items." },
+                        qualifier,
+                        modelClassName,
+                        visiting,
+                    )
+                    "java.util.List<$itemType>"
+                }
+                schema.kind == IntegrationOpenApiSchemaKind.STRING -> "java.lang.String"
+                schema.kind == IntegrationOpenApiSchemaKind.INTEGER ->
+                    if (schema.format == "int64") "java.lang.Long" else "java.lang.Integer"
+                schema.kind == IntegrationOpenApiSchemaKind.NUMBER ->
+                    if (schema.format == "float") "java.lang.Float" else "java.math.BigDecimal"
+                schema.kind == IntegrationOpenApiSchemaKind.BOOLEAN -> "java.lang.Boolean"
+                schema.kind == IntegrationOpenApiSchemaKind.UUID -> "java.util.UUID"
+                schema.kind == IntegrationOpenApiSchemaKind.DATE -> "java.time.LocalDate"
+                schema.kind == IntegrationOpenApiSchemaKind.DATE_TIME -> "java.time.OffsetDateTime"
+                schema.kind == IntegrationOpenApiSchemaKind.BINARY -> "byte[]"
+                else -> "java.lang.Object"
+            }
+        } finally {
+            visiting.remove(schemaId)
+        }
+    }
+
+    private fun qualifyOpenApiType(outerClassName: String?, nestedName: String): String =
+        if (outerClassName == null) nestedName else "$outerClassName.$nestedName"
+
+    private fun openApiNestedTypeName(schemaName: String, modelClassName: String): String =
+        if (schemaName == modelClassName) "${schemaName}Model" else schemaName
+
+    private fun isStringEnum(schema: IntegrationOpenApiSchemaModel): Boolean =
+        schema.kind == IntegrationOpenApiSchemaKind.STRING && schema.enumValues.isNotEmpty()
 
     private fun isSafeJavaType(value: String): Boolean =
         value == "void" ||

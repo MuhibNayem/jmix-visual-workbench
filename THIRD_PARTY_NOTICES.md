@@ -14,6 +14,7 @@ once available, supersede this list for a particular revision or release.
 | Node.js | Project-local frontend build runtime | MIT |
 | IntelliJ Plugin Verifier | Plugin compatibility verification | Apache License 2.0 |
 | Gson | JVM JSON serialization | Apache License 2.0 |
+| Swagger Parser v3 | Network-isolated OpenAPI 3.0/3.1 parsing | Apache License 2.0 |
 | JUnit 4 and JUnit 5 | JVM and IntelliJ-hosted tests | Eclipse Public License 1.0 / 2.0 |
 | Kotlin test | Kotlin test assertions and adapters | Apache License 2.0 |
 | React and React DOM | Web UI | MIT |

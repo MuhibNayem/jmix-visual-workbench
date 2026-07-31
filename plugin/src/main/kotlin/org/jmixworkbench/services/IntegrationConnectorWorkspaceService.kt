@@ -51,6 +51,14 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val destinations = destinations(graph)
         val schema = SchemaWorkspaceService.getInstance(project).load(forceRefresh)
         val connectorCatalogs = JmixTemplateCatalogManager.getInstance().connectorInventory()
+        val existingDocuments = discoverExisting(destinations)
+        val openApiContracts = OpenApiContractService.getInstance(project).discover(
+            destinations = destinations,
+            explicitlyReferencedPaths = existingDocuments.mapNotNull {
+                it.model.openApiBinding?.relativePath
+            }.toSet(),
+            forceRefresh = forceRefresh,
+        )
         return IntegrationConnectorWorkspaceResponse(
             graphDigest = graph.snapshotDigest,
             destinations = destinations,
@@ -59,6 +67,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             oauth2Managers = oauth2Managers(graph),
             oauth2Services = oauth2Services(graph),
             dataStores = schema.stores,
+            openApiContracts = openApiContracts,
             organizationConnectorTemplates = connectorCatalogs.options.map {
                 IntegrationOrganizationConnectorTemplateSnapshot(
                     catalogId = it.catalogId,
@@ -68,7 +77,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     template = it.template,
                 )
             },
-            existingDocuments = discoverExisting(destinations),
+            existingDocuments = existingDocuments,
             issues = buildList {
                 if (!graph.indexHealth.complete) {
                     add(
@@ -91,6 +100,15 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                         WorkspaceChangeIssue(
                             "JVW-INTEGRATION-CATALOG-UNAVAILABLE",
                             "${issue.configuredName}: ${issue.message}",
+                        ),
+                    )
+                }
+                openApiContracts.filterNot(OpenApiContractSnapshot::valid).forEach { contract ->
+                    add(
+                        WorkspaceChangeIssue(
+                            "JVW-INTEGRATION-OPENAPI-CONTRACT-INVALID",
+                            "${contract.title}: ${contract.issues.firstOrNull() ?: "No operation can be generated safely."}",
+                            contract.relativePath,
                         ),
                     )
                 }
@@ -192,7 +210,15 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val selectedStore = selectedStoreId?.let { storeId ->
             schema.stores.firstOrNull { it.id == storeId }
         }
-        val normalized = normalizeBackendContracts(model, destination, selectedStore)
+        val normalized = runCatching {
+            normalizeBackendContracts(model, destination, selectedStore)
+        }.getOrElse { failure ->
+            return rejected(
+                "JVW-INTEGRATION-OPENAPI-CONTRACT-INVALID",
+                failure.message ?: "The selected OpenAPI contract could not be resolved safely.",
+                model.openApiBinding?.relativePath,
+            )
+        }
         val validation = IntegrationConnectorGenerator.validate(normalized, destination.capabilities)
         val issues = validation.diagnostics
             .filter { it.severity == IntegrationDiagnosticSeverity.ERROR }
@@ -652,7 +678,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 val policyPath = policyPath(destination, model.beanName)
                 val policyContent = resolver.resolveFile(policyPath)?.file?.let(::fileText)
                 val regenerated = runCatching {
-                    IntegrationConnectorGenerator.generate(model, encoded)
+                    IntegrationConnectorGenerator.generate(resolveOpenApiContract(model), encoded)
                 }.getOrNull()
                 val migrationContent = ledgerMigrationPath(model)
                     ?.let { resolver.resolveFile(it)?.file?.let(::fileText) }
@@ -691,7 +717,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val policyContent = fileText(policyFile) ?: return null
         val policyFingerprint = CanonicalDiscoveryJson.sha256(policyContent)
         val generated = runCatching {
-            IntegrationConnectorGenerator.generate(model, encoded)
+            IntegrationConnectorGenerator.generate(resolveOpenApiContract(model), encoded)
         }.getOrNull() ?: return null
         if (generated.javaSource != javaContent || generated.reliabilityProperties != policyContent) return null
         val migrationPath = ledgerMigrationPath(model)
@@ -749,11 +775,30 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 ),
             )
         }
-        return model.copy(
+        return resolveOpenApiContract(model).copy(
             reliability = normalizedReliability,
             observability = model.observability.copy(runtimeApi = destination.observabilityApi),
             runtimeJsonApi = destination.jsonApi,
             runtimeSpringBootApi = destination.springBootApi,
+        )
+    }
+
+    private fun resolveOpenApiContract(model: IntegrationConnectorModel): IntegrationConnectorModel {
+        val binding = model.openApiBinding
+            ?: return model.copy(resolvedOpenApiOperation = null)
+        val operation = OpenApiContractService.getInstance(project).resolve(binding).operation
+        return model.copy(
+            httpMethod = operation.method,
+            contentType = operation.requestMediaType ?: model.contentType,
+            payloadJavaType = IntegrationConnectorGenerator.openApiPayloadJavaType(
+                operation,
+                model.className,
+            ),
+            responseJavaType = IntegrationConnectorGenerator.openApiResponseJavaType(
+                operation,
+                model.className,
+            ),
+            resolvedOpenApiOperation = operation,
         )
     }
 
@@ -969,6 +1014,7 @@ data class IntegrationConnectorWorkspaceResponse(
     val oauth2Managers: List<IntegrationOAuth2ManagerSnapshot>,
     val oauth2Services: List<IntegrationOAuth2ServiceSnapshot>,
     val dataStores: List<SchemaDataStoreSnapshot>,
+    val openApiContracts: List<OpenApiContractSnapshot> = emptyList(),
     val organizationConnectorTemplates: List<IntegrationOrganizationConnectorTemplateSnapshot> = emptyList(),
     val existingDocuments: List<IntegrationConnectorDocumentSnapshot>,
     val issues: List<WorkspaceChangeIssue>,

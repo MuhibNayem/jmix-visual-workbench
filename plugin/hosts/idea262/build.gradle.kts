@@ -129,6 +129,7 @@ sourceSets {
 
 dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
+    implementation("io.swagger.parser.v3:swagger-parser-v3:2.1.45")
     testImplementation(kotlin("test"))
     testImplementation("junit:junit:4.13.2")
     testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.10.1")

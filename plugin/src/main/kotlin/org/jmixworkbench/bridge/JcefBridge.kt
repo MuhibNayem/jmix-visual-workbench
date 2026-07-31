@@ -13,6 +13,8 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptor
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.refactoring.rename.RenameProcessor
 import com.intellij.refactoring.safeDelete.SafeDeleteProcessor
@@ -145,6 +147,9 @@ import org.jmixworkbench.services.IntegrationConnectorCatalogApprovalReview
 import org.jmixworkbench.services.IntegrationConnectorCatalogApprovalResponse
 import org.jmixworkbench.services.IntegrationConnectorWorkspaceResponse
 import org.jmixworkbench.services.IntegrationConnectorWorkspaceService
+import org.jmixworkbench.services.OpenApiContractSelectionResponse
+import org.jmixworkbench.services.OpenApiContractSnapshot
+import org.jmixworkbench.services.OpenApiContractService
 import org.jmixworkbench.services.MigrationJsonParser
 import org.jmixworkbench.services.MenuWorkspaceService
 import org.jmixworkbench.services.SchemaMigrationApplyRequest
@@ -347,6 +352,10 @@ class JcefBridge(
             }
             if (action == "getIntegrationConnectorWorkspace") {
                 handleGetIntegrationConnectorWorkspace(action, requestId, payload)
+                return
+            }
+            if (action == "chooseOpenApiContract") {
+                handleChooseOpenApiContract(action, requestId)
                 return
             }
             if (action == "previewIntegrationConnector") {
@@ -1437,6 +1446,51 @@ class JcefBridge(
                 sendResponse(action, requestId, gson.toJson(result))
             }
             .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleChooseOpenApiContract(action: String, requestId: String?) {
+        ApplicationManager.getApplication().invokeLater {
+            val descriptor = FileChooserDescriptor(true, false, false, false, false, false)
+                .withTitle("Choose Project OpenAPI Contract")
+                .withDescription(
+                    "Choose a project-owned OpenAPI 3.0 or 3.1 JSON/YAML contract. " +
+                        "External references and network resolution remain disabled.",
+                )
+                .withFileFilter {
+                    !it.isDirectory && it.extension?.lowercase() in setOf("json", "yaml", "yml")
+                }
+            val selected = FileChooser.chooseFile(descriptor, project, null)
+            if (selected == null) {
+                sendResponse(
+                    action,
+                    requestId,
+                    gson.toJson(OpenApiContractSelectionResponse(false, null, "Selection cancelled.")),
+                )
+                return@invokeLater
+            }
+            ReadAction.nonBlocking<Result<OpenApiContractSnapshot>> {
+                runCatching {
+                    OpenApiContractService.getInstance(project).inspectProjectFile(selected)
+                }
+            }
+                .expireWith(project)
+                .finishOnUiThread(ModalityState.any()) { result ->
+                    val response = result.fold(
+                        onSuccess = { contract ->
+                            OpenApiContractSelectionResponse(true, contract, null)
+                        },
+                        onFailure = { failure ->
+                            OpenApiContractSelectionResponse(
+                                false,
+                                null,
+                                failure.message ?: "The OpenAPI contract could not be inspected safely.",
+                            )
+                        },
+                    )
+                    sendResponse(action, requestId, gson.toJson(response))
+                }
+                .submit(AppExecutorUtil.getAppExecutorService())
+        }
     }
 
     private fun handlePreviewIntegrationConnector(action: String, requestId: String?, payload: JsonObject) {

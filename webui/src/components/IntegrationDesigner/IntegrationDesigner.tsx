@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Boxes, CheckCircle2, ChevronRight,
-  CircuitBoard, Cloud, Code2, Database, FileKey2, Gauge, HardDrive, History,
+  CircuitBoard, Cloud, Code2, Database, FileJson2, FileKey2, FolderOpen, Gauge, HardDrive, History,
   Inbox, KeyRound, Loader2, Mail, MessageSquareMore, Network, Plus, Radio,
   RefreshCw, RotateCcw, RotateCw, Save, Send, Server, ShieldCheck, SlidersHorizontal,
-  Trash2, Undo2, Webhook, X,
+  Trash2, Undo2, Unlink, Webhook, X,
 } from 'lucide-react'
 import { bridge } from '../../bridge'
 import { useStore } from '../../store'
@@ -18,8 +18,12 @@ import type {
   IntegrationDeliveryGuarantee,
   IntegrationHttpMethod,
   IntegrationOrganizationConnectorTemplateSnapshot,
+  IntegrationOpenApiSecurityRequirement,
+  IntegrationOpenApiSecurityScheme,
   IntegrationRetryMode,
   IntegrationConnectorWorkspaceResponse,
+  OpenApiContractSnapshot,
+  OpenApiOperationSnapshot,
   SchemaDataStoreSnapshot,
   WorkspaceChangePreviewResponse,
 } from '../../types'
@@ -436,6 +440,38 @@ function localBlockers(
   return blockers
 }
 
+function openApiSecuritySchemeSatisfied(
+  model: IntegrationConnectorModel,
+  scheme: IntegrationOpenApiSecurityScheme,
+): boolean {
+  switch (scheme.kind) {
+    case 'API_KEY':
+      return model.authentication.kind === 'API_KEY' &&
+        scheme.parameterLocation === 'HEADER' &&
+        model.authentication.headerName?.toLowerCase() === scheme.parameterName?.toLowerCase()
+    case 'HTTP_BASIC':
+      return model.authentication.kind === 'BASIC'
+    case 'HTTP_BEARER':
+      return model.authentication.kind === 'BEARER' ||
+        model.authentication.kind === 'OAUTH2_CLIENT_CREDENTIALS'
+    case 'OAUTH2_CLIENT_CREDENTIALS':
+      return model.authentication.kind === 'OAUTH2_CLIENT_CREDENTIALS' &&
+        scheme.requiredScopes.every((scope) => model.authentication.scopes.includes(scope))
+    case 'OAUTH2_OTHER':
+    case 'OPEN_ID_CONNECT':
+      return model.authentication.kind === 'BEARER'
+    case 'MUTUAL_TLS':
+      return model.transportSecurity.mutualTlsEnabled
+  }
+}
+
+function openApiSecurityRequirementSatisfied(
+  model: IntegrationConnectorModel,
+  requirement: IntegrationOpenApiSecurityRequirement,
+): boolean {
+  return requirement.schemes.every((scheme) => openApiSecuritySchemeSatisfied(model, scheme))
+}
+
 function cloneModel(model: IntegrationConnectorModel): IntegrationConnectorModel {
   return JSON.parse(JSON.stringify(model)) as IntegrationConnectorModel
 }
@@ -488,6 +524,7 @@ export default function IntegrationDesigner() {
   const [previewing, setPreviewing] = useState(false)
   const [applying, setApplying] = useState(false)
   const [approvingCatalog, setApprovingCatalog] = useState(false)
+  const [choosingOpenApi, setChoosingOpenApi] = useState(false)
   const [activePreviewFile, setActivePreviewFile] = useState(0)
   const historyRef = useRef<IntegrationConnectorModel[]>([])
   const futureRef = useRef<IntegrationConnectorModel[]>([])
@@ -513,6 +550,7 @@ export default function IntegrationDesigner() {
   useEffect(() => { void load() }, [])
 
   const commit = (mutate: (draft: IntegrationConnectorModel) => void) => {
+    setPreview(null)
     setModel((current) => {
       if (!current) return current
       const next = cloneModel(current)
@@ -565,6 +603,24 @@ export default function IntegrationDesigner() {
     candidate.template.id === model?.catalogBinding?.templateId &&
     candidate.template.version === model?.catalogBinding?.templateVersion
   ))
+  const selectedOpenApiContract = workspace?.openApiContracts.find((candidate) => (
+    candidate.relativePath === model?.openApiBinding?.relativePath &&
+    candidate.documentSha256 === model?.openApiBinding?.documentSha256
+  ))
+  const selectedOpenApiOperation = selectedOpenApiContract?.operations.find((candidate) => (
+    candidate.method === model?.openApiBinding?.method &&
+    candidate.path === model?.openApiBinding?.path &&
+    (model?.openApiBinding?.operationId == null || candidate.operationId === model.openApiBinding.operationId)
+  ))
+  const selectedOpenApiResponse = selectedOpenApiOperation?.responses.find((candidate) => (
+    candidate.status === model?.openApiBinding?.responseStatus
+  ))
+  const selectedOpenApiRequestRepresentation = selectedOpenApiOperation?.requestRepresentations?.find(
+    (candidate) => candidate.mediaType === model?.openApiBinding?.requestMediaType,
+  )
+  const selectedOpenApiResponseRepresentation = selectedOpenApiResponse?.representations?.find(
+    (candidate) => candidate.mediaType === model?.openApiBinding?.responseMediaType,
+  )
   const blockers = model ? localBlockers(
     model,
     destination?.capabilities ?? [],
@@ -573,6 +629,35 @@ export default function IntegrationDesigner() {
   ) : []
   if (model?.catalogBinding && !selectedCatalogTemplate) {
     blockers.push('The bound organization connector template is no longer available. Refresh the signed catalog.')
+  }
+  if (model?.openApiBinding && !selectedOpenApiContract) {
+    blockers.push('The bound OpenAPI contract changed or is unavailable. Refresh and review the contract before generation.')
+  } else if (model?.openApiBinding && (!selectedOpenApiOperation || !selectedOpenApiOperation.supported)) {
+    blockers.push('The bound OpenAPI operation is missing or cannot be represented safely.')
+  }
+  if (selectedOpenApiRequestRepresentation && !selectedOpenApiRequestRepresentation.supported) {
+    blockers.push(selectedOpenApiRequestRepresentation.issue ?? 'The request representation is not supported.')
+  }
+  if (selectedOpenApiResponseRepresentation && !selectedOpenApiResponseRepresentation.supported) {
+    blockers.push(selectedOpenApiResponseRepresentation.issue ?? 'The response representation is not supported.')
+  }
+  if (
+    selectedOpenApiOperation &&
+    model &&
+    (selectedOpenApiOperation.securityRequirements ?? []).length > 0 &&
+    !selectedOpenApiOperation.securityRequirements.some((requirement) => (
+      openApiSecurityRequirementSatisfied(model, requirement)
+    ))
+  ) {
+    blockers.push(
+      `Authentication does not satisfy an OpenAPI security alternative: ${
+        selectedOpenApiOperation.securityRequirements.map((requirement) => (
+          requirement.schemes.map((scheme) => (
+            `${scheme.name}${scheme.requiredScopes.length ? ` [${scheme.requiredScopes.join(', ')}]` : ''}`
+          )).join(' + ')
+        )).join(' OR ')
+      }.`,
+    )
   }
   if (
     selectedCatalogTemplate &&
@@ -602,6 +687,93 @@ export default function IntegrationDesigner() {
   const chooseCatalogTemplate = (catalog: IntegrationOrganizationConnectorTemplateSnapshot) => {
     if (!workspace) return
     replaceModel(modelFromCatalog(workspace, catalog, destination?.id))
+  }
+
+  const bindOpenApiOperation = (
+    contract: OpenApiContractSnapshot,
+    operation: OpenApiOperationSnapshot,
+  ) => {
+    if (!operation.defaultBinding) return
+    commit((draft) => {
+      draft.openApiBinding = { ...operation.defaultBinding! }
+      draft.httpMethod = operation.method
+      if (operation.defaultBinding?.requestMediaType) {
+        draft.contentType = operation.defaultBinding.requestMediaType
+      }
+      const preferredSecurity = (operation.securityRequirements ?? []).find((requirement) => (
+        requirement.schemes.filter((scheme) => scheme.kind !== 'MUTUAL_TLS').length <= 1
+      ))
+      if (preferredSecurity) {
+        const applicationScheme = preferredSecurity.schemes.find((scheme) => scheme.kind !== 'MUTUAL_TLS')
+        const requiresMutualTls = preferredSecurity.schemes.some((scheme) => scheme.kind === 'MUTUAL_TLS')
+        if (requiresMutualTls) {
+          draft.transportSecurity.mutualTlsEnabled = true
+          draft.transportSecurity.sslBundleNameProperty ??= `${draft.configurationPrefix}.ssl-bundle`
+        }
+        if (draft.authentication.kind === 'NONE' && applicationScheme) {
+          switch (applicationScheme.kind) {
+            case 'API_KEY':
+              draft.authentication.kind = 'API_KEY'
+              draft.authentication.headerName = applicationScheme.parameterName
+              draft.authentication.secretProperty ??= `${draft.configurationPrefix}.api-key`
+              break
+            case 'HTTP_BASIC':
+              draft.authentication.kind = 'BASIC'
+              draft.authentication.usernameProperty ??= `${draft.configurationPrefix}.username`
+              draft.authentication.secretProperty ??= `${draft.configurationPrefix}.password`
+              break
+            case 'OAUTH2_CLIENT_CREDENTIALS':
+              draft.authentication.kind = 'OAUTH2_CLIENT_CREDENTIALS'
+              draft.authentication.scopes = [...applicationScheme.requiredScopes]
+              draft.authentication.clientRegistrationIdProperty ??= `${draft.configurationPrefix}.registration-id`
+              draft.authentication.principalNameProperty ??= `${draft.configurationPrefix}.principal-name`
+              break
+            case 'HTTP_BEARER':
+            case 'OAUTH2_OTHER':
+            case 'OPEN_ID_CONNECT':
+              draft.authentication.kind = 'BEARER'
+              draft.authentication.secretProperty ??= `${draft.configurationPrefix}.token`
+              break
+            case 'MUTUAL_TLS':
+              break
+          }
+        }
+      }
+    })
+  }
+
+  const chooseOpenApiContract = async () => {
+    setChoosingOpenApi(true)
+    setError(null)
+    try {
+      const result = await bridge.chooseOpenApiContract()
+      if (!result.selected || !result.contract) {
+        if (result.message && result.message !== 'Selection cancelled.') setError(result.message)
+        return
+      }
+      const contract = result.contract
+      setWorkspace((current) => current ? {
+        ...current,
+        openApiContracts: [
+          ...current.openApiContracts.filter((candidate) => (
+            candidate.relativePath !== contract.relativePath ||
+            candidate.documentSha256 !== contract.documentSha256
+          )),
+          contract,
+        ].sort((left, right) => left.title.localeCompare(right.title)),
+      } : current)
+      const operation = contract.operations.find((candidate) => candidate.supported && candidate.defaultBinding)
+      if (!operation) {
+        setError(contract.issues[0] ?? 'The selected contract has no safely generatable operation.')
+        return
+      }
+      bindOpenApiOperation(contract, operation)
+      addToast(`Bound ${contract.title} · ${operation.operationId ?? operation.key}.`, 'success')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'OpenAPI contract selection failed.')
+    } finally {
+      setChoosingOpenApi(false)
+    }
   }
 
   const approveCatalogTemplate = async () => {
@@ -919,6 +1091,244 @@ export default function IntegrationDesigner() {
           </div>
 
           <div className="integration-canvas-scroll p-3">
+            {httpKinds.has(model.kind) && (
+              <section className="mb-3 rounded-lg border border-cyan-500/25 bg-cyan-500/[0.045] p-3" aria-label="OpenAPI operation contract">
+                <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2">
+                  <FileJson2 size={15} className="shrink-0 text-cyan-300" />
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-[11px] font-semibold text-cyan-100">Contract-first OpenAPI client</h3>
+                    <p className="text-[9px] leading-4 text-gray-500">OpenAPI 3.0/3.1 · project-owned · SHA-256 bound · network resolution disabled</p>
+                  </div>
+                  {model.openApiBinding && (
+                    <button
+                      className="btn-secondary flex items-center gap-1 text-[10px]"
+                      onClick={() => commit((draft) => { draft.openApiBinding = undefined })}
+                    >
+                      <Unlink size={12} /> Detach
+                    </button>
+                  )}
+                  <button
+                    className="btn-secondary flex items-center gap-1 text-[10px]"
+                    disabled={choosingOpenApi || Boolean(model.sourceLocator)}
+                    onClick={() => void chooseOpenApiContract()}
+                  >
+                    {choosingOpenApi ? <Loader2 size={12} className="animate-spin" /> : <FolderOpen size={12} />}
+                    Choose project file…
+                  </button>
+                </div>
+
+                <div className="grid min-w-0 gap-3 lg:grid-cols-2">
+                  <label>
+                    <span className={labelClass}>API contract</span>
+                    <select
+                      value={selectedOpenApiContract ? `${selectedOpenApiContract.relativePath}\u0000${selectedOpenApiContract.documentSha256}` : ''}
+                      onChange={(event) => {
+                        const contract = workspace.openApiContracts.find((candidate) => (
+                          `${candidate.relativePath}\u0000${candidate.documentSha256}` === event.target.value
+                        ))
+                        const operation = contract?.operations.find((candidate) => candidate.supported && candidate.defaultBinding)
+                        if (contract && operation) bindOpenApiOperation(contract, operation)
+                        else if (!event.target.value) commit((draft) => { draft.openApiBinding = undefined })
+                      }}
+                      disabled={Boolean(model.sourceLocator)}
+                      className={fieldClass}
+                    >
+                      <option value="">Manual HTTP contract</option>
+                      {workspace.openApiContracts.map((contract) => (
+                        <option
+                          key={`${contract.relativePath}:${contract.documentSha256}`}
+                          value={`${contract.relativePath}\u0000${contract.documentSha256}`}
+                          disabled={!contract.valid}
+                        >
+                          {contract.title} · {contract.specificationVersion} · {contract.moduleId ?? 'shared'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span className={labelClass}>Operation</span>
+                    <select
+                      value={selectedOpenApiOperation?.key ?? ''}
+                      disabled={!selectedOpenApiContract || Boolean(model.sourceLocator)}
+                      onChange={(event) => {
+                        const operation = selectedOpenApiContract?.operations.find((candidate) => candidate.key === event.target.value)
+                        if (selectedOpenApiContract && operation) bindOpenApiOperation(selectedOpenApiContract, operation)
+                      }}
+                      className={fieldClass}
+                    >
+                      <option value="">Select operation…</option>
+                      {selectedOpenApiContract?.operations.map((operation) => (
+                        <option key={operation.key} value={operation.key} disabled={!operation.supported}>
+                          {operation.method} {operation.path} · {operation.operationId ?? operation.javaMethodName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                {selectedOpenApiContract && selectedOpenApiOperation && model.openApiBinding && (
+                  <div className="mt-3 space-y-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border border-cyan-500/15 bg-surface/50 p-2">
+                      <span className="rounded bg-cyan-500/10 px-2 py-1 text-[9px] font-semibold text-cyan-200">
+                        {selectedOpenApiOperation.method} {selectedOpenApiOperation.path}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-[9px] text-gray-400">
+                        {selectedOpenApiOperation.summary || selectedOpenApiOperation.operationId || 'Contract operation'}
+                      </span>
+                      <span className="font-mono text-[8px] text-gray-600" title={selectedOpenApiContract.documentSha256}>
+                        {selectedOpenApiContract.documentSha256.slice(0, 12)}
+                      </span>
+                    </div>
+
+                    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                      <label>
+                        <span className={labelClass}>Request representation</span>
+                        <select
+                          value={model.openApiBinding.requestMediaType ?? ''}
+                          onChange={(event) => commit((draft) => {
+                            if (draft.openApiBinding) {
+                              draft.openApiBinding.requestMediaType = event.target.value || undefined
+                              if (event.target.value) draft.contentType = event.target.value
+                            }
+                          })}
+                          disabled={!selectedOpenApiOperation.requestMediaTypes.length || Boolean(model.sourceLocator)}
+                          className={fieldClass}
+                        >
+                          {!selectedOpenApiOperation.requestMediaTypes.length && <option value="">No request body</option>}
+                          {selectedOpenApiOperation.requestRepresentations.map((representation) => (
+                            <option
+                              key={representation.mediaType}
+                              value={representation.mediaType}
+                              disabled={!representation.supported}
+                              title={representation.issue}
+                            >
+                              {representation.mediaType}{representation.supported ? '' : ' · unsupported'}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span className={labelClass}>Success response</span>
+                        <select
+                          value={model.openApiBinding.responseStatus ?? ''}
+                          onChange={(event) => {
+                            const response = selectedOpenApiOperation.responses.find((candidate) => candidate.status === event.target.value)
+                            const representation = response?.representations.find((candidate) => (
+                              candidate.supported && candidate.mediaType === 'application/json'
+                            )) ?? response?.representations.find((candidate) => candidate.supported)
+                            commit((draft) => {
+                              if (draft.openApiBinding) {
+                                draft.openApiBinding.responseStatus = event.target.value || undefined
+                                draft.openApiBinding.responseMediaType = representation?.mediaType
+                              }
+                            })
+                          }}
+                          disabled={Boolean(model.sourceLocator)}
+                          className={fieldClass}
+                        >
+                          {selectedOpenApiOperation.responses.map((response) => (
+                            <option
+                              key={response.status}
+                              value={response.status}
+                              disabled={
+                                !/^2(?:\d\d|XX)$/i.test(response.status) ||
+                                (response.hasBody && !response.representations.some((representation) => representation.supported))
+                              }
+                            >
+                              {response.status} · {response.description ?? (response.hasBody ? 'response body' : 'no body')}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span className={labelClass}>Response representation</span>
+                        <select
+                          value={model.openApiBinding.responseMediaType ?? ''}
+                          onChange={(event) => commit((draft) => {
+                            if (draft.openApiBinding) draft.openApiBinding.responseMediaType = event.target.value || undefined
+                          })}
+                          disabled={!selectedOpenApiResponse?.mediaTypes.length || Boolean(model.sourceLocator)}
+                          className={fieldClass}
+                        >
+                          {!selectedOpenApiResponse?.mediaTypes.length && <option value="">No response body</option>}
+                          {selectedOpenApiResponse?.representations.map((representation) => (
+                            <option
+                              key={representation.mediaType}
+                              value={representation.mediaType}
+                              disabled={!representation.supported}
+                              title={representation.issue}
+                            >
+                              {representation.mediaType}{representation.supported ? '' : ' · unsupported'}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+
+                    <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                      <div className="rounded-md border border-surface-border bg-surface/45 p-2">
+                        <span className={labelClass}>Generated method</span>
+                        <code className="block truncate text-[10px] text-cyan-200">{selectedOpenApiOperation.javaMethodName}</code>
+                      </div>
+                      <div className="rounded-md border border-surface-border bg-surface/45 p-2">
+                        <span className={labelClass}>Request DTO</span>
+                        <code className="block truncate text-[10px] text-gray-200">
+                          {selectedOpenApiRequestRepresentation?.typeLabel ?? selectedOpenApiOperation.requestTypeLabel ?? 'none'}
+                        </code>
+                      </div>
+                      <div className="rounded-md border border-surface-border bg-surface/45 p-2">
+                        <span className={labelClass}>Response DTO</span>
+                        <code className="block truncate text-[10px] text-gray-200">
+                          {selectedOpenApiResponseRepresentation?.typeLabel ?? selectedOpenApiOperation.responseTypeLabel ?? 'void'}
+                        </code>
+                      </div>
+                      <div className="rounded-md border border-surface-border bg-surface/45 p-2">
+                        <span className={labelClass}>Security</span>
+                        <span className="block text-[10px] leading-4 text-gray-200">
+                          {(selectedOpenApiOperation.securityRequirements ?? []).map((requirement) => (
+                            requirement.schemes.map((scheme) => (
+                              `${scheme.name}${scheme.requiredScopes.length ? ` (${scheme.requiredScopes.join(', ')})` : ''}`
+                            )).join(' + ')
+                          )).join(' OR ') || 'anonymous allowed'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {selectedOpenApiOperation.parameters.length > 0 && (
+                      <div>
+                        <span className={labelClass}>Typed operation parameters</span>
+                        <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                          {selectedOpenApiOperation.parameters.map((parameter) => (
+                            <div key={`${parameter.location}:${parameter.name}`} className="min-w-0 rounded-md border border-surface-border bg-surface/45 p-2">
+                              <div className="flex items-center gap-1.5">
+                                <span className="rounded bg-surface-lighter px-1.5 py-0.5 text-[8px] font-semibold text-gray-400">{parameter.location}</span>
+                                <code className="min-w-0 flex-1 truncate text-[10px] text-gray-200">{parameter.name}</code>
+                                {parameter.required && <span className="text-[8px] text-amber-300">required</span>}
+                              </div>
+                              <p className="mt-1 truncate font-mono text-[9px] text-gray-600">{parameter.typeLabel} → {parameter.javaName}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {(selectedOpenApiOperation.deprecated || selectedOpenApiContract.parserMessages.length > 0) && (
+                      <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-2 text-[9px] leading-4 text-amber-200">
+                        {selectedOpenApiOperation.deprecated && <p>This operation is deprecated by its provider contract.</p>}
+                        {selectedOpenApiContract.parserMessages.slice(0, 3).map((message) => <p key={message}>{message}</p>)}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!workspace.openApiContracts.length && (
+                  <div className="mt-3 rounded-md border border-dashed border-cyan-500/20 p-3 text-center text-[10px] leading-4 text-gray-500">
+                    Add an OpenAPI JSON/YAML file under a module resource root, or choose an existing project-owned contract.
+                  </div>
+                )}
+              </section>
+            )}
+
             <section className="mb-3 rounded-lg border border-surface-border bg-surface/45 p-3">
               <h3 className="mb-3 flex items-center gap-2 text-[11px] font-semibold text-gray-200"><SlidersHorizontal size={14} className="text-jmix-400" /> Adapter contract</h3>
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
@@ -974,24 +1384,34 @@ export default function IntegrationDesigner() {
                   <input value={model.addressProperty} onChange={(event) => commit((draft) => { draft.addressProperty = event.target.value })} className={fieldClass} />
                 </label>
                 <label>
-                  <span className={labelClass}>Payload Java type</span>
-                  <input value={model.payloadJavaType} onChange={(event) => commit((draft) => { draft.payloadJavaType = event.target.value })} className={fieldClass} />
+                  <span className={labelClass}>{model.openApiBinding ? 'Request DTO (contract-owned)' : 'Payload Java type'}</span>
+                  <input
+                    value={model.openApiBinding ? (selectedOpenApiOperation?.requestTypeLabel ?? 'none') : model.payloadJavaType}
+                    disabled={Boolean(model.openApiBinding)}
+                    onChange={(event) => commit((draft) => { draft.payloadJavaType = event.target.value })}
+                    className={fieldClass}
+                  />
                 </label>
                 <label>
-                  <span className={labelClass}>Response Java type</span>
-                  <input value={model.responseJavaType} onChange={(event) => commit((draft) => { draft.responseJavaType = event.target.value })} className={fieldClass} />
+                  <span className={labelClass}>{model.openApiBinding ? 'Response DTO (contract-owned)' : 'Response Java type'}</span>
+                  <input
+                    value={model.openApiBinding ? (selectedOpenApiOperation?.responseTypeLabel ?? 'void') : model.responseJavaType}
+                    disabled={Boolean(model.openApiBinding)}
+                    onChange={(event) => commit((draft) => { draft.responseJavaType = event.target.value })}
+                    className={fieldClass}
+                  />
                 </label>
                 {httpKinds.has(model.kind) && (
                   <>
                     <label>
                       <span className={labelClass}>HTTP method</span>
-                      <select value={model.httpMethod} onChange={(event) => commit((draft) => { draft.httpMethod = event.target.value as IntegrationHttpMethod })} className={fieldClass}>
+                      <select disabled={Boolean(model.openApiBinding)} value={model.httpMethod} onChange={(event) => commit((draft) => { draft.httpMethod = event.target.value as IntegrationHttpMethod })} className={fieldClass}>
                         {(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as IntegrationHttpMethod[]).map((method) => <option key={method}>{method}</option>)}
                       </select>
                     </label>
                     <label>
                       <span className={labelClass}>Content type</span>
-                      <input value={model.contentType} onChange={(event) => commit((draft) => { draft.contentType = event.target.value })} className={fieldClass} />
+                      <input disabled={Boolean(model.openApiBinding)} value={model.contentType} onChange={(event) => commit((draft) => { draft.contentType = event.target.value })} className={fieldClass} />
                     </label>
                   </>
                 )}
@@ -1088,6 +1508,20 @@ export default function IntegrationDesigner() {
                       </select>
                       <input aria-label="Client registration ID property" placeholder="Client registration ID property" value={model.authentication.clientRegistrationIdProperty ?? ''} onChange={(event) => commit((draft) => { draft.authentication.clientRegistrationIdProperty = event.target.value || undefined })} className={fieldClass} />
                       <input aria-label="OAuth2 principal property" placeholder="Application principal property" value={model.authentication.principalNameProperty ?? ''} onChange={(event) => commit((draft) => { draft.authentication.principalNameProperty = event.target.value || undefined })} className={fieldClass} />
+                      <label className="sm:col-span-2">
+                        <span className={labelClass}>Approved scopes</span>
+                        <input
+                          aria-label="OAuth2 approved scopes"
+                          placeholder="payments.read, payments.write"
+                          value={model.authentication.scopes.join(', ')}
+                          onChange={(event) => commit((draft) => {
+                            draft.authentication.scopes = [...new Set(
+                              event.target.value.split(',').map((scope) => scope.trim()).filter(Boolean),
+                            )]
+                          })}
+                          className={fieldClass}
+                        />
+                      </label>
                       <div className="sm:col-span-2">
                         <Toggle
                           checked={model.authentication.evictInvalidAuthorizedClient}

@@ -1849,6 +1849,104 @@ export interface IntegrationConnectorCatalogBinding {
   approvalCapability?: string
 }
 
+export type IntegrationOpenApiParameterLocation = 'PATH' | 'QUERY' | 'HEADER' | 'COOKIE'
+export type IntegrationOpenApiSecuritySchemeKind =
+  | 'API_KEY'
+  | 'HTTP_BASIC'
+  | 'HTTP_BEARER'
+  | 'OAUTH2_CLIENT_CREDENTIALS'
+  | 'OAUTH2_OTHER'
+  | 'OPEN_ID_CONNECT'
+  | 'MUTUAL_TLS'
+
+export interface IntegrationOpenApiSecurityScheme {
+  name: string
+  kind: IntegrationOpenApiSecuritySchemeKind
+  parameterName?: string
+  parameterLocation?: IntegrationOpenApiParameterLocation
+  requiredScopes: string[]
+}
+
+export interface IntegrationOpenApiSecurityRequirement {
+  schemes: IntegrationOpenApiSecurityScheme[]
+}
+
+export interface IntegrationOpenApiBinding {
+  relativePath: string
+  documentSha256: string
+  specificationVersion: string
+  operationId?: string
+  method: IntegrationHttpMethod
+  path: string
+  requestMediaType?: string
+  responseStatus?: string
+  responseMediaType?: string
+}
+
+export interface OpenApiParameterSnapshot {
+  name: string
+  javaName: string
+  location: IntegrationOpenApiParameterLocation
+  required: boolean
+  typeLabel: string
+}
+
+export interface OpenApiResponseSnapshot {
+  status: string
+  mediaTypes: string[]
+  hasBody: boolean
+  description?: string
+  representations: OpenApiRepresentationSnapshot[]
+}
+
+export interface OpenApiRepresentationSnapshot {
+  mediaType: string
+  typeLabel?: string
+  supported: boolean
+  issue?: string
+}
+
+export interface OpenApiOperationSnapshot {
+  key: string
+  operationId?: string
+  javaMethodName: string
+  method: IntegrationHttpMethod
+  path: string
+  summary: string
+  tags: string[]
+  deprecated: boolean
+  requestMediaTypes: string[]
+  requestTypeLabel?: string
+  requestRepresentations: OpenApiRepresentationSnapshot[]
+  responses: OpenApiResponseSnapshot[]
+  responseTypeLabel?: string
+  parameters: OpenApiParameterSnapshot[]
+  securitySchemes: string[]
+  securityRequirements: IntegrationOpenApiSecurityRequirement[]
+  defaultBinding?: IntegrationOpenApiBinding
+  supported: boolean
+  issues: string[]
+}
+
+export interface OpenApiContractSnapshot {
+  relativePath: string
+  documentSha256: string
+  specificationVersion: string
+  title: string
+  apiVersion?: string
+  moduleId?: string
+  operations: OpenApiOperationSnapshot[]
+  parserMessages: string[]
+  issues: string[]
+  valid: boolean
+}
+
+export interface OpenApiContractSelectionResponse {
+  selected: boolean
+  contract?: OpenApiContractSnapshot
+  message?: string
+}
+
 export type IntegrationOrganizationConnectorRisk = 'STANDARD' | 'SENSITIVE' | 'RESTRICTED'
 
 export interface IntegrationOrganizationConnectorHeader {
@@ -2031,6 +2129,7 @@ export interface IntegrationConnectorModel {
   profiles: string[]
   enabled: boolean
   catalogBinding?: IntegrationConnectorCatalogBinding
+  openApiBinding?: IntegrationOpenApiBinding
   sourceLocator?: GraphSourceLocator
 }
 
@@ -2062,6 +2161,7 @@ export interface IntegrationConnectorWorkspaceResponse {
   oauth2Managers: IntegrationOAuth2ManagerSnapshot[]
   oauth2Services: IntegrationOAuth2ServiceSnapshot[]
   dataStores: SchemaDataStoreSnapshot[]
+  openApiContracts: OpenApiContractSnapshot[]
   organizationConnectorTemplates: IntegrationOrganizationConnectorTemplateSnapshot[]
   existingDocuments: IntegrationConnectorDocumentSnapshot[]
   issues: WorkspaceChangeIssue[]
