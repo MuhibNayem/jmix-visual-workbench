@@ -13,8 +13,13 @@ import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationAuthenticationKind
 import org.jmixworkbench.model.IntegrationAuthenticationModel
 import org.jmixworkbench.model.IntegrationDeliveryGuarantee
+import org.jmixworkbench.model.IntegrationIdempotencyModel
+import org.jmixworkbench.model.IntegrationInboxModel
+import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationOutboxModel
 import org.jmixworkbench.model.IntegrationReliabilityModel
+import org.jmixworkbench.model.IntegrationRetryMode
+import org.jmixworkbench.model.IntegrationRetryPolicyModel
 import kotlin.test.assertContains
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -226,6 +231,7 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                     implementation("org.springframework.kafka:spring-kafka")
                     implementation("org.springframework.amqp:spring-rabbit")
                     implementation("org.springframework.integration:spring-integration-sftp")
+                    implementation("io.github.resilience4j:resilience4j-spring-boot3")
                     implementation("io.jmix.email:jmix-email-starter")
                     implementation("io.jmix.core:jmix-core")
                     implementation("org.springframework.boot:spring-boot-starter-oauth2-client")
@@ -262,7 +268,25 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                 }
                 """.trimIndent(),
             )
-            write(root, "src/main/resources/application.properties", "spring.application.name=integration")
+            write(
+                root,
+                "src/main/resources/application.properties",
+                """
+                spring.application.name=integration
+                main.liquibase.change-log=classpath:db/changelog/db.changelog-master.xml
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/resources/db/changelog/db.changelog-master.xml",
+                """
+                <databaseChangeLog
+                    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+                </databaseChangeLog>
+                """.trimIndent(),
+            )
         }
         PsiTestUtil.addContentRoot(module, root)
         PsiTestUtil.addSourceRoot(
@@ -278,6 +302,9 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         val service = IntegrationConnectorWorkspaceService.getInstance(project)
         val workspace = service.load(forceRefresh = true)
         val destination = requireNotNull(workspace.destinations.firstOrNull())
+        val store = requireNotNull(workspace.dataStores.firstOrNull { it.moduleId == destination.moduleId }) {
+            "No schema data store was indexed: ${workspace.issues}"
+        }
         assertTrue(workspace.oauth2Managers.any { it.beanName == "authorizedClientManager" })
         val supported = IntegrationConnectorKind.entries
 
@@ -322,6 +349,33 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                 } else {
                     IntegrationAuthenticationModel()
                 },
+                reliability = if (consumer) {
+                    IntegrationReliabilityModel(
+                        deliveryGuarantee = IntegrationDeliveryGuarantee.AT_LEAST_ONCE,
+                        transactional = true,
+                        retry = IntegrationRetryPolicyModel(
+                            mode = IntegrationRetryMode.BLOCKING,
+                            attempts = 3,
+                            deadLetterDestinationProperty = "cert.${classStem.lowercase()}.dead-letter",
+                        ),
+                        idempotency = IntegrationIdempotencyModel(
+                            enabled = true,
+                            headerName = "jvw-outbox-id",
+                            keyParameterName = "messageId",
+                        ),
+                        inboxEnabled = true,
+                        inbox = IntegrationInboxModel(
+                            storeId = store.id,
+                            tableName = "jvw_${classStem.take(12).lowercase()}_inbox",
+                            jsonApi = IntegrationJsonApi.JACKSON_3,
+                            dataSourceBean = "forgedInboxDataSource",
+                            transactionManagerBean = "forgedInboxTransactionManager",
+                            messageIdHeader = "jvw-outbox-id",
+                        ),
+                    )
+                } else {
+                    IntegrationReliabilityModel()
+                },
             )
 
             val proposal = service.propose(model)
@@ -329,11 +383,20 @@ class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                 "$kind connector rejected: ${proposal.issues}"
             }
             assertTrue(proposal.issues.isEmpty(), "$kind: ${proposal.issues}")
-            assertTrue(changeSet.files.size == 2, "$kind did not produce the owned Java/policy pair")
-            assertContains(
-                requireNotNull(changeSet.files.single { it.relativePath.endsWith(".java") }.createContent),
-                "@SuppressWarnings(\"JVW-INTEGRATION-CONNECTOR\")",
+            assertTrue(
+                changeSet.files.size == if (consumer) 4 else 2,
+                "$kind did not produce the expected owned source and migration unit: ${changeSet.files}",
             )
+            val generatedJava = requireNotNull(
+                changeSet.files.single { it.relativePath.endsWith(".java") }.createContent,
+            )
+            assertContains(generatedJava, "@SuppressWarnings(\"JVW-INTEGRATION-CONNECTOR\")")
+            if (consumer) {
+                assertContains(generatedJava, "com.fasterxml.jackson.databind.ObjectMapper")
+                assertFalse(generatedJava.contains("tools.jackson.databind.ObjectMapper"))
+                assertFalse(generatedJava.contains("forgedInboxDataSource"))
+                assertFalse(generatedJava.contains("forgedInboxTransactionManager"))
+            }
         }
     }
 

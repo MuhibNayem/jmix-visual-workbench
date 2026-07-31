@@ -116,9 +116,14 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 "The selected module destination is no longer available. Refresh the workspace.",
             )
         val schema = SchemaWorkspaceService.getInstance(project).load()
-        val selectedStore = model.reliability.outbox
-            ?.takeIf { model.reliability.outboxEnabled }
-            ?.let { outbox -> schema.stores.firstOrNull { it.id == outbox.storeId } }
+        val selectedStoreId = when {
+            model.reliability.outboxEnabled -> model.reliability.outbox?.storeId
+            model.reliability.inboxEnabled -> model.reliability.inbox?.storeId
+            else -> null
+        }
+        val selectedStore = selectedStoreId?.let { storeId ->
+            schema.stores.firstOrNull { it.id == storeId }
+        }
         val normalized = normalizeBackendContracts(model, destination, selectedStore)
         val validation = IntegrationConnectorGenerator.validate(normalized, destination.capabilities)
         val issues = validation.diagnostics
@@ -151,21 +156,22 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 )
             }
         }
-        if (normalized.reliability.outboxEnabled) {
+        if (normalized.reliability.outboxEnabled || normalized.reliability.inboxEnabled) {
+            val ledger = if (normalized.reliability.outboxEnabled) "outbox" else "inbox"
             if (selectedStore == null) {
                 issues += WorkspaceChangeIssue(
-                    "JVW-INTEGRATION-OUTBOX-STORE-NOT-INDEXED",
-                    "The selected outbox data store is not present in the current schema index.",
+                    "JVW-INTEGRATION-${ledger.uppercase()}-STORE-NOT-INDEXED",
+                    "The selected $ledger data store is not present in the current schema index.",
                 )
             } else if (selectedStore.moduleId != destination.moduleId) {
                 issues += WorkspaceChangeIssue(
-                    "JVW-INTEGRATION-OUTBOX-STORE-CROSS-MODULE",
-                    "The durable outbox must use a data store owned by the connector's module.",
+                    "JVW-INTEGRATION-${ledger.uppercase()}-STORE-CROSS-MODULE",
+                    "The persistent $ledger must use a data store owned by the connector's module.",
                 )
             } else if (selectedStore.rootChangelogPath == null || selectedStore.generatedDirectory == null) {
                 issues += WorkspaceChangeIssue(
-                    "JVW-INTEGRATION-OUTBOX-STORE-NOT-MIGRATABLE",
-                    "The selected data store has no source-safe Liquibase root and generated migration directory.",
+                    "JVW-INTEGRATION-${ledger.uppercase()}-STORE-NOT-MIGRATABLE",
+                    "The selected $ledger data store has no source-safe Liquibase root and generated migration directory.",
                     selectedStore.rootChangelogPath,
                 )
             }
@@ -174,14 +180,30 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
 
         var stored = normalized.copy(sourceLocator = null)
         var migrationChanges = emptyList<WorkspaceFileChange>()
-        if (normalized.sourceLocator == null && stored.reliability.outboxEnabled) {
-            val outbox = requireNotNull(stored.reliability.outbox)
-            if (outbox.migrationPath == null) {
+        if (
+            normalized.sourceLocator == null &&
+            (stored.reliability.outboxEnabled || stored.reliability.inboxEnabled)
+        ) {
+            val migrationPath = stored.reliability.outbox?.takeIf { stored.reliability.outboxEnabled }?.migrationPath
+                ?: stored.reliability.inbox?.takeIf { stored.reliability.inboxEnabled }?.migrationPath
+            if (migrationPath == null) {
+                val isOutbox = stored.reliability.outboxEnabled
+                val storeId = if (isOutbox) {
+                    requireNotNull(stored.reliability.outbox).storeId
+                } else {
+                    requireNotNull(stored.reliability.inbox).storeId
+                }
+                val migration = if (isOutbox) {
+                    IntegrationConnectorGenerator.outboxMigration(stored)
+                } else {
+                    IntegrationConnectorGenerator.inboxMigration(stored)
+                }
+                val suffix = if (isOutbox) "outbox" else "inbox"
                 val migrationProposal = SchemaWorkspaceService.getInstance(project).migrationProposal(
                     SchemaMigrationChangeRequest(
-                        storeId = outbox.storeId,
-                        migration = IntegrationConnectorGenerator.outboxMigration(stored),
-                        fileName = "jvw-${stored.beanName}-outbox.xml",
+                        storeId = storeId,
+                        migration = migration,
+                        fileName = "jvw-${stored.beanName}-$suffix.xml",
                     ),
                 )
                 val migrationChangeSet = migrationProposal.changeSet
@@ -189,14 +211,24 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 val migrationFile = migrationChangeSet.files.singleOrNull {
                     it.mode == WorkspaceFileChangeMode.CREATE && it.relativePath.endsWith(".xml")
                 } ?: return rejected(
-                    "JVW-INTEGRATION-OUTBOX-MIGRATION-MISSING",
-                    "Schema planning did not produce exactly one durable outbox migration.",
+                    "JVW-INTEGRATION-LEDGER-MIGRATION-MISSING",
+                    "Schema planning did not produce exactly one persistent integration-ledger migration.",
                 )
-                stored = stored.copy(
-                    reliability = stored.reliability.copy(
-                        outbox = outbox.copy(migrationPath = migrationFile.relativePath),
-                    ),
-                )
+                stored = if (isOutbox) {
+                    val outbox = requireNotNull(stored.reliability.outbox)
+                    stored.copy(
+                        reliability = stored.reliability.copy(
+                            outbox = outbox.copy(migrationPath = migrationFile.relativePath),
+                        ),
+                    )
+                } else {
+                    val inbox = requireNotNull(stored.reliability.inbox)
+                    stored.copy(
+                        reliability = stored.reliability.copy(
+                            inbox = inbox.copy(migrationPath = migrationFile.relativePath),
+                        ),
+                    )
+                }
                 migrationChanges = migrationChangeSet.files
             }
         }
@@ -211,16 +243,16 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         if (migrationChanges.isNotEmpty()) {
             val generatedMigration = generated.migrationXml
                 ?: return rejected(
-                    "JVW-INTEGRATION-OUTBOX-MIGRATION-GENERATION",
-                    "The normalized outbox connector did not regenerate its migration.",
+                    "JVW-INTEGRATION-LEDGER-MIGRATION-GENERATION",
+                    "The normalized connector did not regenerate its persistent integration-ledger migration.",
                 )
             val plannedMigration = migrationChanges.single {
                 it.mode == WorkspaceFileChangeMode.CREATE && it.relativePath.endsWith(".xml")
             }
             if (plannedMigration.createContent != generatedMigration) {
                 return rejected(
-                    "JVW-INTEGRATION-OUTBOX-MIGRATION-DRIFT",
-                    "The schema plan and connector-owned migration differ; no files will be written.",
+                    "JVW-INTEGRATION-LEDGER-MIGRATION-DRIFT",
+                    "The schema plan and connector-owned ledger migration differ; no files will be written.",
                     plannedMigration.relativePath,
                 )
             }
@@ -244,11 +276,16 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 owned.model.reliability.outbox?.storeId != stored.reliability.outbox?.storeId ||
                 owned.model.reliability.outbox?.tableName != stored.reliability.outbox?.tableName ||
                 owned.model.reliability.outbox?.migrationPath != stored.reliability.outbox?.migrationPath ||
+                owned.model.reliability.inboxEnabled != stored.reliability.inboxEnabled ||
+                owned.model.reliability.inbox?.storeId != stored.reliability.inbox?.storeId ||
+                owned.model.reliability.inbox?.tableName != stored.reliability.inbox?.tableName ||
+                owned.model.reliability.inbox?.migrationPath != stored.reliability.inbox?.migrationPath ||
+                owned.model.reliability.inbox?.messageIdHeader != stored.reliability.inbox?.messageIdHeader ||
                 owned.model.reliability.orderingRequired != stored.reliability.orderingRequired
             ) {
                 return rejected(
-                    "JVW-INTEGRATION-OUTBOX-SCHEMA-IMMUTABLE",
-                    "Outbox mode, data store, table, migration and ordering shape cannot be changed after creation. Create a replacement connector and migrate callers explicitly.",
+                    "JVW-INTEGRATION-LEDGER-SCHEMA-IMMUTABLE",
+                    "Outbox/inbox mode, data store, table, migration, message identity and ordering shape cannot be changed after creation. Create a replacement connector and migrate callers explicitly.",
                     owned.javaPath,
                 )
             }
@@ -347,6 +384,12 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 ).any(buildText::contains)
             ) add(IntegrationCapability.SPRING_WEB)
             if ("kafka" in buildText) add(IntegrationCapability.SPRING_KAFKA)
+            if (
+                listOf("spring-boot-starter-kafka", "spring-boot-kafka")
+                    .any(buildText::contains)
+            ) {
+                add(IntegrationCapability.SPRING_BOOT_KAFKA)
+            }
             if (listOf("spring-rabbit", "spring.amqp", "spring-amqp", "rabbitmq").any(buildText::contains)) {
                 add(IntegrationCapability.SPRING_AMQP)
             }
@@ -463,7 +506,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 val regenerated = runCatching {
                     IntegrationConnectorGenerator.generate(model, encoded)
                 }.getOrNull()
-                val migrationContent = model.reliability.outbox?.migrationPath
+                val migrationContent = ledgerMigrationPath(model)
                     ?.let { resolver.resolveFile(it)?.file?.let(::fileText) }
                 val owned = regenerated != null &&
                     regenerated.javaSource == javaContent &&
@@ -503,7 +546,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             IntegrationConnectorGenerator.generate(model, encoded)
         }.getOrNull() ?: return null
         if (generated.javaSource != javaContent || generated.reliabilityProperties != policyContent) return null
-        val migrationPath = model.reliability.outbox?.migrationPath
+        val migrationPath = ledgerMigrationPath(model)
         val migrationContent = migrationPath?.let { resolver.resolveFile(it)?.file?.let(::fileText) }
         if (generated.migrationXml != null && generated.migrationXml != migrationContent) return null
         return OwnedIntegrationConnector(
@@ -526,8 +569,10 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
     ): IntegrationConnectorModel {
         val reliability = model.reliability
         val outbox = reliability.outbox
-        val normalizedReliability = if (reliability.outboxEnabled && outbox != null) {
-            reliability.copy(
+        val inbox = reliability.inbox
+        var normalizedReliability = reliability
+        if (reliability.outboxEnabled && outbox != null) {
+            normalizedReliability = normalizedReliability.copy(
                 outbox = outbox.copy(
                     jsonApi = destination.jsonApi,
                     dataSourceBean = selectedStore?.name
@@ -540,12 +585,26 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                         ?: "",
                 ),
             )
-        } else {
-            reliability
+        }
+        if (reliability.inboxEnabled && inbox != null) {
+            normalizedReliability = normalizedReliability.copy(
+                inbox = inbox.copy(
+                    jsonApi = destination.jsonApi,
+                    dataSourceBean = selectedStore?.name
+                        ?.let { storeName -> if (storeName == "main") "dataSource" else "${storeName}DataSource" }
+                        ?: "",
+                    transactionManagerBean = selectedStore?.name
+                        ?.let { storeName ->
+                            if (storeName == "main") "transactionManager" else "${storeName}TransactionManager"
+                        }
+                        ?: "",
+                ),
+            )
         }
         return model.copy(
             reliability = normalizedReliability,
             observability = model.observability.copy(runtimeApi = destination.observabilityApi),
+            runtimeJsonApi = destination.jsonApi,
         )
     }
 
@@ -620,6 +679,10 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         destination: IntegrationConnectorDestinationSnapshot,
         beanName: String,
     ): String = join(destination.resourceRoot, "META-INF/jvw/integration/$beanName.properties")
+
+    private fun ledgerMigrationPath(model: IntegrationConnectorModel): String? =
+        model.reliability.outbox?.takeIf { model.reliability.outboxEnabled }?.migrationPath
+            ?: model.reliability.inbox?.takeIf { model.reliability.inboxEnabled }?.migrationPath
 
     private fun create(path: String, content: String): WorkspaceFileChange =
         WorkspaceFileChange(path, WorkspaceFileChangeMode.CREATE, null, createContent = content)

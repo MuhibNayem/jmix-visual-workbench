@@ -94,6 +94,10 @@ function outboxTableName(beanName: string) {
   return `${prefix}${core}${suffix}`
 }
 
+function inboxTableName(beanName: string) {
+  return outboxTableName(beanName).replace(/_outbox$/, '_inbox')
+}
+
 function prefixFor(kind: IntegrationConnectorKind) {
   return `app.integration.${kind.toLowerCase().replace(/_/g, '-')}`
 }
@@ -119,6 +123,13 @@ function addressLabel(kind: IntegrationConnectorKind) {
 function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: IntegrationConnectorKind = 'HTTP_CLIENT'): IntegrationConnectorModel {
   const destination = workspace.destinations.find((candidate) => candidate.id === workspace.defaultDestinationId)
     ?? workspace.destinations[0]
+  const inboxStore = consumerKinds.has(kind)
+    ? workspace.dataStores.find((candidate) => (
+      candidate.moduleId === destination?.moduleId &&
+      candidate.rootChangelogPath &&
+      candidate.generatedDirectory
+    ))
+    : undefined
   const className = classNameFor(kind)
   const prefix = prefixFor(kind)
   const model: IntegrationConnectorModel = {
@@ -142,12 +153,13 @@ function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: In
       connectTimeoutMs: 5000,
       requestTimeoutMs: 30000,
       retry: {
-        mode: 'NONE',
-        attempts: 1,
+        mode: consumerKinds.has(kind) ? 'BLOCKING' : 'NONE',
+        attempts: consumerKinds.has(kind) ? 4 : 1,
         backoff: 'EXPONENTIAL',
         initialDelayMs: 500,
         multiplier: 2,
         maximumDelayMs: 30000,
+        deadLetterDestinationProperty: consumerKinds.has(kind) ? `${prefix}.dead-letter-destination` : undefined,
       },
       circuitBreaker: {
         enabled: false,
@@ -158,9 +170,25 @@ function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: In
       },
       bulkhead: { enabled: false, maximumConcurrentCalls: 25, maximumWaitMs: 0 },
       rateLimit: { enabled: false, callsPerPeriod: 100, periodMs: 1000, timeoutMs: 0 },
-      idempotency: { enabled: false, headerName: 'Idempotency-Key', keyParameterName: 'idempotencyKey' },
-      transactional: false,
+      idempotency: {
+        enabled: consumerKinds.has(kind),
+        headerName: consumerKinds.has(kind) ? 'jvw-outbox-id' : 'Idempotency-Key',
+        keyParameterName: consumerKinds.has(kind) ? 'messageId' : 'idempotencyKey',
+      },
+      transactional: consumerKinds.has(kind),
       outboxEnabled: false,
+      inboxEnabled: consumerKinds.has(kind),
+      inbox: consumerKinds.has(kind) ? {
+        storeId: inboxStore?.id ?? '',
+        tableName: inboxTableName(beanNameFor(className)),
+        jsonApi: destination?.jsonApi,
+        messageIdHeader: 'jvw-outbox-id',
+        maximumPayloadBytes: 1048576,
+        maintenanceBatchSize: 1000,
+        retentionDays: 90,
+        replayPermission: 'jvw.integration.inbox.replay',
+        maintenancePermission: 'jvw.integration.inbox.maintain',
+      } : undefined,
       orderingRequired: false,
     },
     observability: {
@@ -238,6 +266,19 @@ function localBlockers(
     else if (!store.rootChangelogPath || !store.generatedDirectory) blockers.push('Selected data store has no safe Liquibase migration destination.')
     if (!model.reliability.transactional) blockers.push('Durable enqueue requires a transaction.')
     if (model.reliability.deliveryGuarantee === 'EXACTLY_ONCE') blockers.push('Database-to-broker delivery is at-least-once; exactly-once would be a false guarantee.')
+  }
+  if (consumerKinds.has(model.kind)) {
+    const inbox = model.reliability.inbox
+    const store = stores.find((candidate) => candidate.id === inbox?.storeId)
+    if (!model.reliability.inboxEnabled || !inbox || !store) {
+      blockers.push('Enterprise consumers require a persistent inbox in an indexed Liquibase data store.')
+    } else if (store.moduleId !== moduleId) {
+      blockers.push('Inbox data store must belong to the selected connector module.')
+    } else if (!store.rootChangelogPath || !store.generatedDirectory) {
+      blockers.push('Selected inbox data store has no safe Liquibase migration destination.')
+    }
+    if (!model.reliability.transactional) blockers.push('Persistent inbox processing requires a transaction.')
+    if (!model.reliability.idempotency.enabled) blockers.push('Persistent consumers require a stable message ID.')
   }
   if (model.kind === 'IDENTITY_PROVIDER' && model.authentication.kind !== 'OAUTH2_CLIENT_CREDENTIALS') {
     blockers.push('Identity-provider connectors require OAuth2 client credentials.')
@@ -607,6 +648,17 @@ export default function IntegrationDesigner() {
                               draft.reliability.outbox.jsonApi = nextDestination.jsonApi
                             }
                           }
+                          if (draft.reliability.inboxEnabled) {
+                            const store = workspace.dataStores.find((candidate) => (
+                              candidate.moduleId === nextDestination.moduleId &&
+                              candidate.rootChangelogPath &&
+                              candidate.generatedDirectory
+                            ))
+                            if (draft.reliability.inbox) {
+                              draft.reliability.inbox.storeId = store?.id ?? ''
+                              draft.reliability.inbox.jsonApi = nextDestination.jsonApi
+                            }
+                          }
                           draft.observability.runtimeApi = nextDestination.observabilityApi
                         }
                       })
@@ -851,6 +903,81 @@ export default function IntegrationDesigner() {
                 </div>
               </div>
             )}
+            {consumerKinds.has(model.kind) && (
+              <>
+                <Toggle
+                  checked={model.reliability.inboxEnabled}
+                  onChange={(checked) => commit((draft) => {
+                    draft.reliability.inboxEnabled = checked
+                    if (checked) {
+                      const store = workspace.dataStores.find((candidate) => (
+                        candidate.moduleId === destination?.moduleId &&
+                        candidate.rootChangelogPath &&
+                        candidate.generatedDirectory
+                      ))
+                      draft.reliability.transactional = true
+                      draft.reliability.deliveryGuarantee = 'AT_LEAST_ONCE'
+                      draft.reliability.idempotency = {
+                        enabled: true,
+                        headerName: 'jvw-outbox-id',
+                        keyParameterName: 'messageId',
+                      }
+                      draft.reliability.inbox = {
+                        storeId: store?.id ?? '',
+                        tableName: inboxTableName(draft.beanName),
+                        jsonApi: destination?.jsonApi,
+                        messageIdHeader: 'jvw-outbox-id',
+                        maximumPayloadBytes: 1048576,
+                        maintenanceBatchSize: 1000,
+                        retentionDays: 90,
+                        replayPermission: 'jvw.integration.inbox.replay',
+                        maintenancePermission: 'jvw.integration.inbox.maintain',
+                      }
+                    } else {
+                      draft.reliability.inbox = undefined
+                    }
+                  })}
+                  label="Persistent idempotent inbox"
+                  description="Deduplicate stable event IDs, transact handler changes, retain terminal payloads, and authorize replay."
+                  disabled={Boolean(model.sourceLocator)}
+                />
+                {model.reliability.inboxEnabled && model.reliability.inbox && (
+                  <div className="space-y-2 rounded-md border border-sky-500/25 bg-sky-500/5 p-2.5">
+                    <p className="text-[9px] leading-4 text-sky-200">
+                      The message ID and handler changes commit together. Successful duplicates are acknowledged without invoking the handler again.
+                    </p>
+                    <label>
+                      <span className={labelClass}>Data store</span>
+                      <select
+                        value={model.reliability.inbox.storeId}
+                        disabled={Boolean(model.sourceLocator)}
+                        onChange={(event) => commit((draft) => {
+                          if (draft.reliability.inbox) draft.reliability.inbox.storeId = event.target.value
+                        })}
+                        className={fieldClass}
+                      >
+                        <option value="">Select migratable store…</option>
+                        {workspace.dataStores
+                          .filter((store) => store.moduleId === destination?.moduleId && store.rootChangelogPath && store.generatedDirectory)
+                          .map((store) => <option key={store.id} value={store.id}>{store.name} · {store.includeMode}</option>)}
+                      </select>
+                    </label>
+                    <label><span className={labelClass}>Inbox table</span><input disabled={Boolean(model.sourceLocator)} value={model.reliability.inbox.tableName} onChange={(event) => commit((draft) => { if (draft.reliability.inbox) draft.reliability.inbox.tableName = event.target.value })} className={fieldClass} /></label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label><span className={labelClass}>Message ID header</span><input value={model.reliability.inbox.messageIdHeader} onChange={(event) => commit((draft) => {
+                        if (draft.reliability.inbox) draft.reliability.inbox.messageIdHeader = event.target.value
+                        draft.reliability.idempotency.headerName = event.target.value
+                      })} className={fieldClass} /></label>
+                      <label><span className={labelClass}>Maximum payload bytes</span><input type="number" min={1024} max={10485760} value={model.reliability.inbox.maximumPayloadBytes} onChange={(event) => commit((draft) => { if (draft.reliability.inbox) draft.reliability.inbox.maximumPayloadBytes = Number(event.target.value) })} className={fieldClass} /></label>
+                      <label><span className={labelClass}>Maintenance batch</span><input type="number" min={1} max={10000} value={model.reliability.inbox.maintenanceBatchSize} onChange={(event) => commit((draft) => { if (draft.reliability.inbox) draft.reliability.inbox.maintenanceBatchSize = Number(event.target.value) })} className={fieldClass} /></label>
+                      <label><span className={labelClass}>Retention days</span><input type="number" min={1} max={3650} value={model.reliability.inbox.retentionDays} onChange={(event) => commit((draft) => { if (draft.reliability.inbox) draft.reliability.inbox.retentionDays = Number(event.target.value) })} className={fieldClass} /></label>
+                      <label><span className={labelClass}>Replay permission</span><input value={model.reliability.inbox.replayPermission} onChange={(event) => commit((draft) => { if (draft.reliability.inbox) draft.reliability.inbox.replayPermission = event.target.value })} className={fieldClass} /></label>
+                      <label className="col-span-2"><span className={labelClass}>Maintenance permission</span><input value={model.reliability.inbox.maintenancePermission} onChange={(event) => commit((draft) => { if (draft.reliability.inbox) draft.reliability.inbox.maintenancePermission = event.target.value })} className={fieldClass} /></label>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </Section>
 
           <Section title="Retry and dead letter" icon={History}>
@@ -858,8 +985,15 @@ export default function IntegrationDesigner() {
               const mode = event.target.value as IntegrationRetryMode
               draft.reliability.retry.mode = mode
               draft.reliability.retry.attempts = mode === 'NONE' ? 1 : Math.max(3, draft.reliability.retry.attempts)
+              if (mode !== 'NONE' && consumerKinds.has(draft.kind) && !draft.reliability.retry.deadLetterDestinationProperty) {
+                draft.reliability.retry.deadLetterDestinationProperty = `${draft.configurationPrefix}.dead-letter-destination`
+              }
             })} className={fieldClass}>
-              {(['NONE', 'BLOCKING', 'NON_BLOCKING'] as IntegrationRetryMode[]).map((value) => <option key={value} value={value}>{value.replace(/_/g, ' ')}</option>)}
+              {(['NONE', 'BLOCKING', 'NON_BLOCKING'] as IntegrationRetryMode[]).map((value) => (
+                <option key={value} value={value} disabled={model.kind === 'RABBIT_CONSUMER' && value === 'NON_BLOCKING'}>
+                  {value.replace(/_/g, ' ')}
+                </option>
+              ))}
             </select></label>
             {model.reliability.retry.mode !== 'NONE' && (
               <>
@@ -882,7 +1016,13 @@ export default function IntegrationDesigner() {
             </div>}
             <Toggle checked={model.reliability.bulkhead.enabled} onChange={(checked) => commit((draft) => { draft.reliability.bulkhead.enabled = checked })} label="Bulkhead" description="Bound concurrent external calls." />
             <Toggle checked={model.reliability.rateLimit.enabled} onChange={(checked) => commit((draft) => { draft.reliability.rateLimit.enabled = checked })} label="Rate limit" description="Protect provider quotas and internal capacity." />
-            <Toggle checked={model.reliability.idempotency.enabled} onChange={(checked) => commit((draft) => { draft.reliability.idempotency.enabled = checked })} label="Idempotency key" description="Required before retrying non-idempotent HTTP operations." />
+            <Toggle
+              checked={model.reliability.idempotency.enabled}
+              onChange={(checked) => commit((draft) => { draft.reliability.idempotency.enabled = checked })}
+              label="Idempotency key"
+              description={consumerKinds.has(model.kind) ? 'Required by the persistent inbox and locked to the configured message ID header.' : 'Required before retrying non-idempotent HTTP operations.'}
+              disabled={consumerKinds.has(model.kind) && model.reliability.inboxEnabled}
+            />
           </Section>
 
           <Section title="Observability" icon={Gauge}>

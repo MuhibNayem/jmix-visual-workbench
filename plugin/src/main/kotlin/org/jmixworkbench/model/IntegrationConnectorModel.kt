@@ -22,6 +22,7 @@ enum class IntegrationConnectorKind {
 enum class IntegrationCapability {
     SPRING_WEB,
     SPRING_KAFKA,
+    SPRING_BOOT_KAFKA,
     SPRING_AMQP,
     SPRING_INTEGRATION_SFTP,
     RESILIENCE4J,
@@ -165,6 +166,28 @@ data class IntegrationOutboxModel(
     val maintenancePermission: String = "jvw.integration.outbox.maintain",
 )
 
+/**
+ * Persistent idempotent-receiver and dead-message ledger for broker consumers.
+ *
+ * The backend owns the selected store, migration, JSON API and Spring bean
+ * identities. A browser request can choose an indexed store, but cannot forge
+ * the concrete data source or transaction manager used by generated code.
+ */
+data class IntegrationInboxModel(
+    val storeId: String,
+    val migrationPath: String? = null,
+    val tableName: String,
+    val jsonApi: IntegrationJsonApi? = null,
+    val dataSourceBean: String = "dataSource",
+    val transactionManagerBean: String = "transactionManager",
+    val messageIdHeader: String = "jvw-outbox-id",
+    val maximumPayloadBytes: Int = 1_048_576,
+    val maintenanceBatchSize: Int = 1_000,
+    val retentionDays: Int = 90,
+    val replayPermission: String = "jvw.integration.inbox.replay",
+    val maintenancePermission: String = "jvw.integration.inbox.maintain",
+)
+
 data class IntegrationReliabilityModel(
     val deliveryGuarantee: IntegrationDeliveryGuarantee = IntegrationDeliveryGuarantee.AT_LEAST_ONCE,
     val connectTimeoutMs: Long = 5_000,
@@ -177,6 +200,8 @@ data class IntegrationReliabilityModel(
     val transactional: Boolean = false,
     val outboxEnabled: Boolean = false,
     val outbox: IntegrationOutboxModel? = null,
+    val inboxEnabled: Boolean = false,
+    val inbox: IntegrationInboxModel? = null,
     val orderingRequired: Boolean = false,
 )
 
@@ -216,6 +241,7 @@ data class IntegrationConnectorModel(
     val authentication: IntegrationAuthenticationModel = IntegrationAuthenticationModel(),
     val reliability: IntegrationReliabilityModel = IntegrationReliabilityModel(),
     val observability: IntegrationObservabilityModel = IntegrationObservabilityModel(),
+    val runtimeJsonApi: IntegrationJsonApi? = null,
     val profiles: List<String> = emptyList(),
     val enabled: Boolean = true,
     val sourceLocator: SourceLocator? = null,

@@ -48,6 +48,7 @@ java {
 }
 
 sourceSets.main {
+    java.srcDir(generatedRoot.map { it.resolve("common/java") })
     java.srcDir(generatedRoot.map { it.resolve("${jmixLine.get()}/java") })
     java.include(
         "org/jmixworkbench/certification/integration/**",
@@ -61,7 +62,11 @@ dependencies {
     implementation("io.jmix.core:jmix-core-starter")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
     implementation("org.springframework.boot:spring-boot-starter-amqp")
-    implementation("org.springframework.kafka:spring-kafka")
+    if (jmixLine.get() == "jmix30") {
+        implementation("org.springframework.boot:spring-boot-starter-kafka:${springBootVersion.get()}")
+    } else {
+        implementation("org.springframework.kafka:spring-kafka")
+    }
     implementation("org.springframework.integration:spring-integration-sftp")
     implementation("org.springframework:spring-web")
     implementation(

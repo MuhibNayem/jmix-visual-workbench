@@ -32,16 +32,20 @@ transactional aggregate update service. The corpus deliberately exercises the
 repository fetch-plan type/annotation name collision, named JPQL parameters,
 paging, query hints, constraints and the Jmix 3 `SaveDelegate` /
 `RemoveDelegate` contracts. Each line also compiles the production-generated
-Kafka durable-outbox adapter with its matching Jackson 2/3 API, JDBC leases,
-Jmix permission/audit boundary, Micrometer metrics, Observation tracing and
-Spring Kafka broker acknowledgement contract.
+Kafka durable-outbox and persistent consumer-inbox adapters with their matching
+Jackson 2/3 API, JDBC leases, transaction-qualified handler boundary,
+duplicate/collision quarantine, Jmix permission/audit boundary, Micrometer
+metrics, Observation tracing and Spring Kafka acknowledgement/dead-letter
+contracts. Jmix 3 additionally requires the modular Spring Boot 4 Kafka runtime
+capability rather than treating the lower-level `spring-kafka` library as
+sufficient auto-configuration.
 
 | Exact Jmix | Target-project JDK | Languages | Generated artifacts | Current evidence |
 | --- | --- | --- | --- | --- |
-| 2.8.2 | 17 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable integration outbox | Strict compile passed; class major 61 |
-| 2.8.2 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable integration outbox | Strict compile passed; class major 65 |
-| 3.0.0 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable integration outbox | Strict compile passed; class major 65 |
-| 3.0.0 | 25 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable integration outbox | Strict compile passed; class major 69 |
+| 2.8.2 | 17 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 61 |
+| 2.8.2 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 65 |
+| 3.0.0 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 65 |
+| 3.0.0 | 25 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable broker outbox and consumer inbox | Strict compile passed; class major 69 |
 
 This follows Jmix's published runtime boundary: the Jmix 2 line supports Java
 17/21, while [Jmix 3.0 requires Java 21 or

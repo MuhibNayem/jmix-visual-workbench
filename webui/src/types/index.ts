@@ -1798,7 +1798,7 @@ export type IntegrationConnectorKind =
   | 'SMS_GATEWAY' | 'PAYMENT_GATEWAY' | 'IDENTITY_PROVIDER'
 
 export type IntegrationCapability =
-  | 'SPRING_WEB' | 'SPRING_KAFKA' | 'SPRING_AMQP'
+  | 'SPRING_WEB' | 'SPRING_KAFKA' | 'SPRING_BOOT_KAFKA' | 'SPRING_AMQP'
   | 'SPRING_INTEGRATION_SFTP' | 'RESILIENCE4J'
   | 'JMIX_EMAIL' | 'JMIX_FILE_STORAGE' | 'OAUTH2_CLIENT'
 
@@ -1884,6 +1884,19 @@ export interface IntegrationOutboxModel {
   maintenancePermission: string
 }
 
+export interface IntegrationInboxModel {
+  storeId: string
+  migrationPath?: string
+  tableName: string
+  jsonApi?: IntegrationJsonApi
+  messageIdHeader: string
+  maximumPayloadBytes: number
+  maintenanceBatchSize: number
+  retentionDays: number
+  replayPermission: string
+  maintenancePermission: string
+}
+
 export interface IntegrationReliabilityModel {
   deliveryGuarantee: IntegrationDeliveryGuarantee
   connectTimeoutMs: number
@@ -1896,6 +1909,8 @@ export interface IntegrationReliabilityModel {
   transactional: boolean
   outboxEnabled: boolean
   outbox?: IntegrationOutboxModel
+  inboxEnabled: boolean
+  inbox?: IntegrationInboxModel
   orderingRequired: boolean
 }
 
@@ -1929,6 +1944,7 @@ export interface IntegrationConnectorModel {
   authentication: IntegrationAuthenticationModel
   reliability: IntegrationReliabilityModel
   observability: IntegrationObservabilityModel
+  runtimeJsonApi?: IntegrationJsonApi
   profiles: string[]
   enabled: boolean
   sourceLocator?: GraphSourceLocator

@@ -53,7 +53,12 @@ object IntegrationConnectorGenerator {
 
             IntegrationConnectorKind.KAFKA_PUBLISHER,
             IntegrationConnectorKind.KAFKA_CONSUMER,
-            -> add(IntegrationCapability.SPRING_KAFKA)
+            -> {
+                add(IntegrationCapability.SPRING_KAFKA)
+                if (model.runtimeJsonApi == IntegrationJsonApi.JACKSON_3) {
+                    add(IntegrationCapability.SPRING_BOOT_KAFKA)
+                }
+            }
 
             IntegrationConnectorKind.RABBIT_PUBLISHER,
             IntegrationConnectorKind.RABBIT_CONSUMER,
@@ -223,16 +228,6 @@ object IntegrationConnectorGenerator {
         if (
             retry.mode == IntegrationRetryMode.NON_BLOCKING &&
             model.kind == IntegrationConnectorKind.KAFKA_CONSUMER &&
-            reliability.transactional
-        ) {
-            error(
-                "INTEGRATION_KAFKA_RETRY_TRANSACTION_CONFLICT",
-                "Kafka non-blocking retry cannot be combined with container transactions.",
-            )
-        }
-        if (
-            retry.mode == IntegrationRetryMode.NON_BLOCKING &&
-            model.kind == IntegrationConnectorKind.KAFKA_CONSUMER &&
             reliability.orderingRequired
         ) {
             error(
@@ -292,6 +287,23 @@ object IntegrationConnectorGenerator {
                 "Remove persisted outbox configuration when transactional outbox is disabled.",
             )
         }
+        if (reliability.inboxEnabled && model.kind !in MESSAGE_CONSUMER_KINDS) {
+            error("INTEGRATION_INBOX_KIND", "Persistent inbox is valid only for Kafka or Rabbit consumers.")
+        }
+        if (model.kind in MESSAGE_CONSUMER_KINDS && !reliability.inboxEnabled) {
+            error(
+                "INTEGRATION_INBOX_REQUIRED",
+                "Enterprise broker consumers require a persistent inbox for transaction-bound deduplication and terminal replay.",
+            )
+        }
+        if (reliability.inboxEnabled) {
+            validateInbox(model, ::error)
+        } else if (reliability.inbox != null) {
+            error(
+                "INTEGRATION_INBOX_DISABLED_CONFIGURATION",
+                "Remove persisted inbox configuration when the persistent inbox is disabled.",
+            )
+        }
         if (reliability.transactional && model.kind in HTTP_KINDS) {
             warning(
                 "INTEGRATION_REMOTE_CALL_IN_TRANSACTION",
@@ -340,15 +352,16 @@ object IntegrationConnectorGenerator {
                 "${it.code}: ${it.message}"
             }
         }
-        if (model.reliability.outboxEnabled) {
+        if (model.reliability.outboxEnabled || model.reliability.inboxEnabled) {
             val migrationPath = model.reliability.outbox?.migrationPath
+                ?: model.reliability.inbox?.migrationPath
             require(
                 migrationPath != null &&
                     !migrationPath.startsWith('/') &&
                     migrationPath.endsWith(".xml") &&
                     ".." !in migrationPath.replace('\\', '/').split('/'),
             ) {
-                "INTEGRATION_OUTBOX_MIGRATION_PATH_REQUIRED: Backend-owned relative Liquibase migration evidence is required."
+                "INTEGRATION_LEDGER_MIGRATION_PATH_REQUIRED: Backend-owned relative Liquibase migration evidence is required."
             }
         }
         return GeneratedIntegrationConnector(
@@ -358,7 +371,18 @@ object IntegrationConnectorGenerator {
                 ?.takeIf { model.reliability.outboxEnabled && it.migrationPath != null }
                 ?.let { MigrationGenerator.generate(outboxMigration(model, requireNotNull(it.migrationPath))) },
             requiredCapabilities = validation.requiredCapabilities,
-        )
+        ).let { generated ->
+            if (!model.reliability.inboxEnabled) {
+                generated
+            } else {
+                val inbox = requireNotNull(model.reliability.inbox)
+                generated.copy(
+                    migrationXml = MigrationGenerator.generate(
+                        inboxMigration(model, requireNotNull(inbox.migrationPath)),
+                    ),
+                )
+            }
+        }
     }
 
     fun outboxMigration(model: IntegrationConnectorModel, migrationPath: String? = null): MigrationModel {
@@ -432,6 +456,61 @@ object IntegrationConnectorGenerator {
         )
     }
 
+    fun inboxMigration(model: IntegrationConnectorModel, migrationPath: String? = null): MigrationModel {
+        val inbox = requireNotNull(model.reliability.inbox) {
+            "INTEGRATION_INBOX_CONFIGURATION_REQUIRED: Persistent inbox configuration is required."
+        }
+        val statusIndex = databaseName("ix", inbox.tableName, "status")
+        return MigrationModel(
+            changelogId = "jvw-inbox-${model.beanName}",
+            logicalFilePath = migrationPath?.let(::classpathPath),
+            changes = mutableListOf(
+                ChangeSetModel(
+                    id = "jvw-inbox-${model.beanName}-1",
+                    comment = "Create persistent idempotent inbox for ${model.beanName}",
+                    preConditions = mutableListOf(
+                        PreCondition(
+                            PreConditionType.TABLE_NOT_EXISTS,
+                            mutableMapOf("tableName" to inbox.tableName),
+                        ),
+                    ),
+                    preConditionOnFail = PreConditionOutcome.HALT,
+                    preConditionOnError = PreConditionOutcome.HALT,
+                    changes = mutableListOf(
+                        DbChange.CreateTable(
+                            tableName = inbox.tableName,
+                            remarks = "Jmix Visual Workbench persistent integration inbox",
+                            columns = mutableListOf(
+                                ColumnDef("id", "varchar(200)", nullable = false, primaryKey = true),
+                                ColumnDef("payload", "clob"),
+                                ColumnDef("payload_sha256", "varchar(64)", nullable = false),
+                                ColumnDef("status", "varchar(24)", nullable = false),
+                                ColumnDef("attempts", "int", nullable = false, defaultValue = "1"),
+                                ColumnDef("source_destination", "varchar(255)", nullable = false),
+                                ColumnDef("first_seen_at", "datetime", nullable = false),
+                                ColumnDef("completed_at", "datetime"),
+                                ColumnDef("dead_at", "datetime"),
+                                ColumnDef("replayed_at", "datetime"),
+                                ColumnDef("last_error", "varchar(2000)"),
+                                ColumnDef("version", "bigint", nullable = false, defaultValue = "0"),
+                            ),
+                        ),
+                        DbChange.CreateIndex(
+                            tableName = inbox.tableName,
+                            indexName = statusIndex,
+                            columns = listOf(
+                                IndexColumnDef("status"),
+                                IndexColumnDef("dead_at"),
+                                IndexColumnDef("completed_at"),
+                            ),
+                        ),
+                    ),
+                    rollback = mutableListOf(DbChange.DropTable(inbox.tableName)),
+                ),
+            ),
+        )
+    }
+
     fun encode(model: IntegrationConnectorModel): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(
             gson.toJson(model.copy(sourceLocator = null)).toByteArray(Charsets.UTF_8),
@@ -466,8 +545,10 @@ object IntegrationConnectorGenerator {
                 append("    private static final Logger log = LoggerFactory.getLogger(")
                     .append(model.className).append(".class);\n")
             }
-            if (model.reliability.outboxEnabled) {
+            if (model.reliability.outboxEnabled || model.reliability.inboxEnabled) {
                 append("    private final Clock clock = Clock.systemUTC();\n")
+            }
+            if (model.reliability.outboxEnabled) {
                 append("    private final String dispatcherId = \"")
                     .append(escapeJava(model.beanName)).append("-\" + UUID.randomUUID();\n")
             }
@@ -512,10 +593,17 @@ object IntegrationConnectorGenerator {
                 append("        this.jdbcTemplate = new JdbcTemplate(dataSource);\n")
                 append("        this.outboxTransactions = new TransactionTemplate(transactionManager);\n")
             }
+            if (model.reliability.inboxEnabled) {
+                append("        this.jdbcTemplate = new JdbcTemplate(dataSource);\n")
+                append("        this.inboxTransactions = new TransactionTemplate(transactionManager);\n")
+            }
             append("    }\n\n")
             append(renderOperation(model))
             if (model.reliability.outboxEnabled) {
                 append('\n').append(renderOutboxRuntime(model))
+            }
+            if (model.reliability.inboxEnabled) {
+                append('\n').append(renderInboxRuntime(model))
             }
             append("}\n")
         }
@@ -633,12 +721,20 @@ object IntegrationConnectorGenerator {
                 append(", multiplier = ").append(model.reliability.retry.multiplier)
                     .append(", maxDelay = ").append(model.reliability.retry.maximumDelayMs)
             }
-            append("), dltTopicSuffix = \"-dlt\")\n")
+            append("), dltTopicSuffix = \"")
+                .append(propertyExpression(requireNotNull(model.reliability.retry.deadLetterDestinationProperty)))
+                .append("\", autoCreateTopics = \"false\", dltProcessingFailureStrategy = DltStrategy.FAIL_ON_ERROR)\n")
         }
         append("    @KafkaListener(topics = \"").append(propertyExpression(model.addressProperty)).append("\")\n")
-        append("    public void consume(").append(model.payloadJavaType).append(" payload) {\n")
-        appendHandlerInvocation(model)
+        append("    public void consume(Message<").append(model.payloadJavaType).append("> message) {\n")
+        append("        consumeInbound(message);\n")
         append("    }\n")
+        if (model.reliability.retry.mode == IntegrationRetryMode.NON_BLOCKING) {
+            append("\n    @DltHandler\n")
+            append("    public void consumeDeadLetter(Message<").append(model.payloadJavaType).append("> message) {\n")
+            append("        markDead(message, \"Kafka retry attempts exhausted\");\n")
+            append("    }\n")
+        }
     }
 
     private fun renderRabbitPublisher(model: IntegrationConnectorModel): String = buildString {
@@ -967,10 +1063,424 @@ object IntegrationConnectorGenerator {
         }
     }
 
+    private fun renderInboxRuntime(model: IntegrationConnectorModel): String {
+        val inbox = requireNotNull(model.reliability.inbox)
+        val table = inbox.tableName
+        val payloadType = model.payloadJavaType
+        val jacksonException = if (inbox.jsonApi == IntegrationJsonApi.JACKSON_3) {
+            "JacksonException"
+        } else {
+            "JsonProcessingException"
+        }
+        return buildString {
+            append("    private void consumeInbound(Message<").append(payloadType).append("> message) {\n")
+            append("        String eventId;\n")
+            append("        try {\n")
+            append("            eventId = messageId(message);\n")
+            append("        } catch (RuntimeException invalidIdentity) {\n")
+            if (model.reliability.retry.mode == IntegrationRetryMode.BLOCKING) {
+                append("            String quarantineId = deadLetterMessageId(message);\n")
+                append("            publishDeadLetter(quarantineId, message.getPayload());\n")
+                append("            markDead(quarantineId, message.getPayload(), invalidIdentity);\n")
+                append("            return;\n")
+            } else {
+                append("            throw invalidIdentity;\n")
+            }
+            append("        }\n")
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("        ObservationRegistry registry = observationRegistryProvider.getIfAvailable();\n")
+                append("        Observation observation = registry == null ? null : Observation.start(\"jvw.integration.inbox.consume\", registry)\n")
+                append("                .lowCardinalityKeyValue(\"connector\", \"").append(escapeJava(model.beanName))
+                    .append("\");\n")
+            }
+            append("        try {\n")
+            if (model.reliability.retry.mode == IntegrationRetryMode.BLOCKING) {
+                append("            Retry.decorateCheckedRunnable(retryRegistry.retry(\"")
+                    .append(escapeJava(model.beanName))
+                    .append("\"), () -> processInbound(eventId, message.getPayload())).run();\n")
+            } else {
+                append("            processInbound(eventId, message.getPayload());\n")
+            }
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("            if (observation != null) observation.lowCardinalityKeyValue(\"outcome\", \"handled\");\n")
+            }
+            append("        } catch (Throwable failure) {\n")
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("            if (observation != null) observation.error(failure).lowCardinalityKeyValue(\"outcome\", \"failed\");\n")
+            }
+            if (model.reliability.retry.mode == IntegrationRetryMode.BLOCKING) {
+                append("            Exception exception = failure instanceof Exception candidate ? candidate : new IllegalStateException(failure);\n")
+                append("            publishDeadLetter(eventId, message.getPayload());\n")
+                append("            markDead(eventId, message.getPayload(), exception);\n")
+            } else {
+                append("            if (failure instanceof RuntimeException runtime) throw runtime;\n")
+                append("            throw new IllegalStateException(\"Inbound handler failed\", failure);\n")
+            }
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("        } finally {\n")
+                append("            if (observation != null) observation.stop();\n")
+            }
+            append("        }\n")
+            append("    }\n\n")
+
+            if (model.reliability.retry.mode == IntegrationRetryMode.NON_BLOCKING) {
+                append("    private void markDead(Message<").append(payloadType).append("> message, String reason) {\n")
+                append("        markDead(deadLetterMessageId(message), message.getPayload(), new IllegalStateException(reason));\n")
+                append("    }\n\n")
+            }
+
+            append("    private void processInbound(String eventId, ").append(payloadType).append(" payload) {\n")
+            append("        String payloadJson = payloadJson(payload);\n")
+            append("        String payloadSha256 = sha256(payloadJson);\n")
+            append("        try {\n")
+            append("            Boolean processed = inboxTransactions.execute(status -> {\n")
+            append("                Instant now = Instant.now(clock);\n")
+            append("                jdbcTemplate.update(\"INSERT INTO ").append(table)
+                .append(" (id, payload, payload_sha256, status, attempts, source_destination, first_seen_at, version) VALUES (?, NULL, ?, 'PROCESSING', 1, ?, ?, 0)\",\n")
+            append("                        eventId, payloadSha256, address, Timestamp.from(now));\n")
+            append("                invokeHandler(payload);\n")
+            append("                int completed = jdbcTemplate.update(\"UPDATE ").append(table)
+                .append(" SET status = 'DONE', completed_at = ?, payload = NULL, last_error = NULL, version = version + 1 WHERE id = ? AND status = 'PROCESSING'\",\n")
+            append("                        Timestamp.from(Instant.now(clock)), eventId);\n")
+            append("                if (completed != 1) throw new IllegalStateException(\"Inbox completion could not be persisted\");\n")
+            append("                return true;\n")
+            append("            });\n")
+            append("            if (Boolean.TRUE.equals(processed)) recordInboxMetric(\"processed\");\n")
+            append("        } catch (DuplicateKeyException duplicate) {\n")
+            append("            InboxIdentity identity = inboxIdentity(eventId);\n")
+            append("            if (identity == null) throw duplicate;\n")
+            append("            if (!payloadSha256.equals(identity.payloadSha256())) {\n")
+            append("                recordInboxMetric(\"message_id_collision\");\n")
+            append("                publishInboxAudit(\"MESSAGE_ID_COLLISION\", eventId, \"stable message ID reused with a different payload\", 0L);\n")
+            append("                throw new IllegalStateException(\"Stable message ID was reused with a different payload\");\n")
+            append("            }\n")
+            append("            Boolean replayProcessed = inboxTransactions.execute(status -> {\n")
+            append("                int claimed = jdbcTemplate.update(\"UPDATE ").append(table)
+                .append(" SET status = 'PROCESSING', attempts = attempts + 1, last_error = NULL, version = version + 1 WHERE id = ? AND payload_sha256 = ? AND status IN ('REPLAY_PENDING', 'REPLAYED')\",\n")
+            append("                        eventId, payloadSha256);\n")
+            append("                if (claimed == 0) return false;\n")
+            append("                invokeHandler(payload);\n")
+            append("                int completed = jdbcTemplate.update(\"UPDATE ").append(table)
+                .append(" SET status = 'DONE', completed_at = ?, payload = NULL, last_error = NULL, version = version + 1 WHERE id = ? AND status = 'PROCESSING'\",\n")
+            append("                        Timestamp.from(Instant.now(clock)), eventId);\n")
+            append("                if (completed != 1) throw new IllegalStateException(\"Replayed inbox completion could not be persisted\");\n")
+            append("                return true;\n")
+            append("            });\n")
+            append("            recordInboxMetric(Boolean.TRUE.equals(replayProcessed) ? \"replay_processed\" : \"duplicate\");\n")
+            append("        }\n")
+            append("    }\n\n")
+
+            append("    private void invokeHandler(").append(payloadType).append(" payload) {\n")
+            if (model.observability.structuredLoggingEnabled) {
+                append("        log.debug(\"Consuming integration message connector=")
+                    .append(escapeJava(model.beanName)).append("\");\n")
+            }
+            append("        ").append(model.handlerFieldName).append('.')
+                .append(model.handlerMethod).append("(payload);\n")
+            append("    }\n\n")
+
+            append("    private void markDead(String eventId, ").append(payloadType).append(" payload, Exception exception) {\n")
+            append("        String payloadJson = payloadJson(payload);\n")
+            append("        String payloadSha256 = sha256(payloadJson);\n")
+            append("        Boolean retained;\n")
+            append("        try {\n")
+            append("            retained = inboxTransactions.execute(status -> {\n")
+            append("                List<InboxIdentity> existing = jdbcTemplate.query(\"SELECT status, payload_sha256 FROM ").append(table)
+                .append(" WHERE id = ?\", (resultSet, rowNumber) -> new InboxIdentity(resultSet.getString(1), resultSet.getString(2)), eventId);\n")
+            append("                if (existing.isEmpty()) {\n")
+            append("                    jdbcTemplate.update(\"INSERT INTO ").append(table)
+                .append(" (id, payload, payload_sha256, status, attempts, source_destination, first_seen_at, dead_at, last_error, version) VALUES (?, ?, ?, 'DEAD', ")
+                .append(model.reliability.retry.attempts)
+                .append(", ?, ?, ?, ?, 0)\",\n")
+            append("                            eventId, payloadJson, payloadSha256, address, Timestamp.from(Instant.now(clock)), Timestamp.from(Instant.now(clock)), safeError(exception));\n")
+            append("                    return true;\n")
+            append("                }\n")
+            append("                InboxIdentity identity = existing.get(0);\n")
+            append("                if (!payloadSha256.equals(identity.payloadSha256()) || \"DONE\".equals(identity.status())) return false;\n")
+            append("                int updated = jdbcTemplate.update(\"UPDATE ").append(table)
+                .append(" SET payload = ?, status = 'DEAD', attempts = ?, dead_at = ?, last_error = ?, version = version + 1 WHERE id = ? AND payload_sha256 = ? AND status <> 'DONE'\",\n")
+            append("                            payloadJson, ").append(model.reliability.retry.attempts)
+                .append(", Timestamp.from(Instant.now(clock)), safeError(exception), eventId, payloadSha256);\n")
+            append("                return updated == 1;\n")
+            append("            });\n")
+            append("        } catch (DuplicateKeyException duplicate) {\n")
+            append("            InboxIdentity identity = inboxIdentity(eventId);\n")
+            append("            if (identity == null || (!\"DONE\".equals(identity.status()) && !\"DEAD\".equals(identity.status()))) throw duplicate;\n")
+            append("            retained = false;\n")
+            append("        }\n")
+            append("        InboxIdentity identity = inboxIdentity(eventId);\n")
+            append("        boolean collision = identity != null && !payloadSha256.equals(identity.payloadSha256());\n")
+            append("        String outcome = collision ? \"collision_dead_letter\" : Boolean.TRUE.equals(retained) ? \"dead\" : \"dead_letter_duplicate\";\n")
+            append("        recordInboxMetric(outcome);\n")
+            append("        publishInboxAudit(collision ? \"COLLISION_DLT\" : \"DEAD\", eventId, exception.getClass().getName(), Boolean.TRUE.equals(retained) ? 1L : 0L);\n")
+            append("    }\n\n")
+
+            if (model.reliability.retry.mode == IntegrationRetryMode.BLOCKING) {
+                append("    private void publishDeadLetter(String eventId, ").append(payloadType).append(" payload) {\n")
+                when (model.kind) {
+                    IntegrationConnectorKind.KAFKA_CONSUMER -> {
+                        append("        ProducerRecord<String, ").append(payloadType)
+                            .append("> record = new ProducerRecord<>(deadLetterDestination, null, payload);\n")
+                        append("        record.headers().add(\"").append(escapeJava(inbox.messageIdHeader))
+                            .append("\", eventId.getBytes(StandardCharsets.UTF_8));\n")
+                        append("        try {\n")
+                        append("            kafkaTemplate.send(record).get(").append(model.reliability.requestTimeoutMs)
+                            .append("L, TimeUnit.MILLISECONDS);\n")
+                        append("        } catch (Exception exception) {\n")
+                        append("            throw new IllegalStateException(\"Kafka dead-letter publication was not acknowledged\", exception);\n")
+                        append("        }\n")
+                    }
+                    IntegrationConnectorKind.RABBIT_CONSUMER -> {
+                        append("        CorrelationData correlation = new CorrelationData(eventId);\n")
+                        append("        rabbitTemplate.convertAndSend(deadLetterDestination, payload, message -> {\n")
+                        append("            message.getMessageProperties().setMessageId(eventId);\n")
+                        append("            message.getMessageProperties().setHeader(\"")
+                            .append(escapeJava(inbox.messageIdHeader)).append("\", eventId);\n")
+                        append("            return message;\n")
+                        append("        }, correlation);\n")
+                        append("        try {\n")
+                        append("            CorrelationData.Confirm confirm = correlation.getFuture().get(")
+                            .append(model.reliability.requestTimeoutMs).append("L, TimeUnit.MILLISECONDS);\n")
+                        append("            if (!rabbitAcknowledged(confirm)) throw new IllegalStateException(\"RabbitMQ dead-letter publisher confirm was negative\");\n")
+                        append("            if (correlation.getReturned() != null) throw new IllegalStateException(\"RabbitMQ returned the dead-letter message\");\n")
+                        append("        } catch (RuntimeException exception) {\n")
+                        append("            throw exception;\n")
+                        append("        } catch (Exception exception) {\n")
+                        append("            throw new IllegalStateException(\"RabbitMQ dead-letter publication was not confirmed\", exception);\n")
+                        append("        }\n")
+                    }
+                    else -> error("Unsupported inbox kind ${model.kind}")
+                }
+                append("    }\n\n")
+            }
+
+            append("    /** Re-publishes one terminal inbox event under an explicit Jmix specific permission. */\n")
+            append("    public void replay(String eventId, String reason) {\n")
+            append("        requireInboxPermission(\"").append(escapeJava(inbox.replayPermission)).append("\");\n")
+            append("        String canonicalEventId = canonicalMessageId(eventId);\n")
+            append("        if (reason == null || reason.isBlank() || reason.length() > 500) {\n")
+            append("            throw new IllegalArgumentException(\"A replay reason of 1 to 500 characters is required\");\n")
+            append("        }\n")
+            append("        InboxRecord event = loadDeadInbox(canonicalEventId);\n")
+            append("        if (!sha256(event.payload()).equals(event.payloadSha256())) {\n")
+            append("            throw new IllegalStateException(\"Inbox payload checksum mismatch\");\n")
+            append("        }\n")
+            append("        ").append(payloadType).append(" payload;\n")
+            append("        try {\n")
+            append("            payload = objectMapper.readValue(event.payload(), ").append(rawClassLiteral(payloadType)).append(");\n")
+            append("        } catch (").append(jacksonException).append(" exception) {\n")
+            append("            throw new IllegalStateException(\"Retained inbox payload cannot be deserialized\", exception);\n")
+            append("        }\n")
+            append("        Integer prepared = inboxTransactions.execute(status -> jdbcTemplate.update(\"UPDATE ").append(table)
+                .append(" SET status = 'REPLAY_PENDING', replayed_at = ?, last_error = NULL, version = version + 1 WHERE id = ? AND status = 'DEAD'\",\n")
+            append("                Timestamp.from(Instant.now(clock)), canonicalEventId));\n")
+            append("        if (prepared == null || prepared != 1) throw new IllegalStateException(\"Only one existing DEAD inbox event can be replayed\");\n")
+            append("        try {\n")
+            append("            publishOriginal(canonicalEventId, payload);\n")
+            append("        } catch (RuntimeException exception) {\n")
+            append("            inboxTransactions.executeWithoutResult(status -> jdbcTemplate.update(\"UPDATE ").append(table)
+                .append(" SET status = 'DEAD', last_error = ?, version = version + 1 WHERE id = ? AND status = 'REPLAY_PENDING'\", safeError(exception), canonicalEventId));\n")
+            append("            throw exception;\n")
+            append("        }\n")
+            append("        Integer completed = inboxTransactions.execute(status -> jdbcTemplate.update(\"UPDATE ").append(table)
+                .append(" SET status = 'REPLAYED', version = version + 1 WHERE id = ? AND status = 'REPLAY_PENDING'\", canonicalEventId));\n")
+            append("        if (completed == null || completed == 0) {\n")
+            append("            InboxIdentity current = inboxIdentity(canonicalEventId);\n")
+            append("            if (current == null || !\"DONE\".equals(current.status())) throw new IllegalStateException(\"Inbox replay acknowledgement could not be persisted\");\n")
+            append("        }\n")
+            append("        recordInboxMetric(\"replayed\");\n")
+            append("        publishInboxAudit(\"REPLAY\", canonicalEventId, reason, 1L);\n")
+            append("    }\n\n")
+
+            append("    private void publishOriginal(String eventId, ").append(payloadType).append(" payload) {\n")
+            when (model.kind) {
+                IntegrationConnectorKind.KAFKA_CONSUMER -> {
+                    append("        ProducerRecord<String, ").append(payloadType)
+                        .append("> record = new ProducerRecord<>(address, null, payload);\n")
+                    append("        record.headers().add(\"").append(escapeJava(inbox.messageIdHeader))
+                        .append("\", eventId.getBytes(StandardCharsets.UTF_8));\n")
+                    append("        try {\n")
+                    append("            kafkaTemplate.send(record).get(").append(model.reliability.requestTimeoutMs)
+                        .append("L, TimeUnit.MILLISECONDS);\n")
+                    append("        } catch (Exception exception) {\n")
+                    append("            throw new IllegalStateException(\"Kafka inbox replay was not acknowledged\", exception);\n")
+                    append("        }\n")
+                }
+                IntegrationConnectorKind.RABBIT_CONSUMER -> {
+                    append("        CorrelationData correlation = new CorrelationData(eventId);\n")
+                    append("        rabbitTemplate.convertAndSend(address, payload, message -> {\n")
+                    append("            message.getMessageProperties().setMessageId(eventId);\n")
+                    append("            message.getMessageProperties().setHeader(\"")
+                        .append(escapeJava(inbox.messageIdHeader)).append("\", eventId);\n")
+                    append("            return message;\n")
+                    append("        }, correlation);\n")
+                    append("        try {\n")
+                    append("            CorrelationData.Confirm confirm = correlation.getFuture().get(")
+                        .append(model.reliability.requestTimeoutMs).append("L, TimeUnit.MILLISECONDS);\n")
+                    append("            if (!rabbitAcknowledged(confirm)) throw new IllegalStateException(\"RabbitMQ inbox replay publisher confirm was negative\");\n")
+                    append("            if (correlation.getReturned() != null) throw new IllegalStateException(\"RabbitMQ returned the replay message\");\n")
+                    append("        } catch (RuntimeException exception) {\n")
+                    append("            throw exception;\n")
+                    append("        } catch (Exception exception) {\n")
+                    append("            throw new IllegalStateException(\"RabbitMQ inbox replay was not confirmed\", exception);\n")
+                    append("        }\n")
+                }
+                else -> error("Unsupported inbox kind ${model.kind}")
+            }
+            append("    }\n\n")
+
+            if (model.kind == IntegrationConnectorKind.RABBIT_CONSUMER) {
+                append("    private static boolean rabbitAcknowledged(CorrelationData.Confirm confirm) {\n")
+                append("        for (String accessor : List.of(\"ack\", \"isAck\")) {\n")
+                append("            try {\n")
+                append("                return Boolean.TRUE.equals(confirm.getClass().getMethod(accessor).invoke(confirm));\n")
+                append("            } catch (NoSuchMethodException ignored) {\n")
+                append("                // Spring AMQP 3 exposes isAck(); Spring AMQP 4 adds ack().\n")
+                append("            } catch (ReflectiveOperationException exception) {\n")
+                append("                throw new IllegalStateException(\"RabbitMQ confirm state could not be read\", exception);\n")
+                append("            }\n")
+                append("        }\n")
+                append("        throw new IllegalStateException(\"Unsupported Spring AMQP confirm contract\");\n")
+                append("    }\n\n")
+            }
+
+            append("    public InboxHealth reconcileInbox() {\n")
+            append("        Long done = jdbcTemplate.queryForObject(\"SELECT COUNT(*) FROM ").append(table)
+                .append(" WHERE status = 'DONE'\", Long.class);\n")
+            append("        Long dead = jdbcTemplate.queryForObject(\"SELECT COUNT(*) FROM ").append(table)
+                .append(" WHERE status = 'DEAD'\", Long.class);\n")
+            append("        Long replayPending = jdbcTemplate.queryForObject(\"SELECT COUNT(*) FROM ").append(table)
+                .append(" WHERE status IN ('REPLAY_PENDING', 'REPLAYED')\", Long.class);\n")
+            append("        Timestamp oldest = jdbcTemplate.queryForObject(\"SELECT MIN(dead_at) FROM ").append(table)
+                .append(" WHERE status = 'DEAD'\", Timestamp.class);\n")
+            append("        long oldestDeadAgeMs = oldest == null ? 0L : Math.max(0L, Duration.between(oldest.toInstant(), Instant.now(clock)).toMillis());\n")
+            append("        return new InboxHealth(value(done), value(dead), value(replayPending), oldestDeadAgeMs);\n")
+            append("    }\n\n")
+
+            append("    @Transactional(\"").append(escapeJava(inbox.transactionManagerBean)).append("\")\n")
+            append("    public int purgeInboxBefore(Instant cutoff, String reason) {\n")
+            append("        requireInboxPermission(\"").append(escapeJava(inbox.maintenancePermission)).append("\");\n")
+            append("        if (reason == null || reason.isBlank() || reason.length() > 500) {\n")
+            append("            throw new IllegalArgumentException(\"A maintenance reason of 1 to 500 characters is required\");\n")
+            append("        }\n")
+            append("        Instant retentionFloor = Instant.now(clock).minus(Duration.ofDays(")
+                .append(inbox.retentionDays).append("L));\n")
+            append("        if (cutoff == null || cutoff.isAfter(retentionFloor)) {\n")
+            append("            throw new IllegalArgumentException(\"Purge cutoff must honor the configured inbox retention period\");\n")
+            append("        }\n")
+            append("        List<String> candidates = jdbcTemplate.query(connection -> {\n")
+            append("            java.sql.PreparedStatement statement = connection.prepareStatement(\"SELECT id FROM ").append(table)
+                .append(" WHERE status = 'DONE' AND completed_at < ? ORDER BY completed_at, id\");\n")
+            append("            statement.setTimestamp(1, Timestamp.from(cutoff));\n")
+            append("            statement.setMaxRows(").append(inbox.maintenanceBatchSize).append(");\n")
+            append("            return statement;\n")
+            append("        }, (resultSet, rowNumber) -> resultSet.getString(1));\n")
+            append("        int deleted = 0;\n")
+            append("        for (String eventId : candidates) {\n")
+            append("            deleted += jdbcTemplate.update(\"DELETE FROM ").append(table)
+                .append(" WHERE id = ? AND status = 'DONE' AND completed_at < ?\", eventId, Timestamp.from(cutoff));\n")
+            append("        }\n")
+            append("        publishInboxAudit(\"PURGE\", cutoff.toString(), reason, deleted);\n")
+            append("        return deleted;\n")
+            append("    }\n\n")
+
+            append("    private InboxRecord loadDeadInbox(String eventId) {\n")
+            append("        List<InboxRecord> rows = jdbcTemplate.query(\"SELECT payload, payload_sha256 FROM ").append(table)
+                .append(" WHERE id = ? AND status = 'DEAD'\", (resultSet, rowNumber) -> new InboxRecord(resultSet.getString(1), resultSet.getString(2)), eventId);\n")
+            append("        if (rows.size() != 1 || rows.get(0).payload() == null) throw new IllegalStateException(\"Exactly one retained DEAD inbox event is required\");\n")
+            append("        return rows.get(0);\n")
+            append("    }\n\n")
+            append("    private InboxIdentity inboxIdentity(String eventId) {\n")
+            append("        List<InboxIdentity> identities = jdbcTemplate.query(\"SELECT status, payload_sha256 FROM ").append(table)
+                .append(" WHERE id = ?\", (resultSet, rowNumber) -> new InboxIdentity(resultSet.getString(1), resultSet.getString(2)), eventId);\n")
+            append("        return identities.size() == 1 ? identities.get(0) : null;\n")
+            append("    }\n\n")
+
+            append("    private String messageId(Message<?> message) {\n")
+            append("        Object raw = message.getHeaders().get(\"").append(escapeJava(inbox.messageIdHeader)).append("\");\n")
+            append("        if (raw == null) throw new IllegalArgumentException(\"Required stable message-ID header is missing: ")
+                .append(escapeJava(inbox.messageIdHeader)).append("\");\n")
+            append("        String value = raw instanceof byte[] bytes ? new String(bytes, StandardCharsets.UTF_8) : raw.toString();\n")
+            append("        return canonicalMessageId(value);\n")
+            append("    }\n\n")
+            append("    private String deadLetterMessageId(Message<?> message) {\n")
+            append("        try {\n")
+            append("            return messageId(message);\n")
+            append("        } catch (RuntimeException invalidIdentity) {\n")
+            append("            Object transportId = message.getHeaders().getId();\n")
+            append("            String fingerprint = transportId == null\n")
+            append("                    ? message.getPayload().getClass().getName() + ':' + String.valueOf(message.getPayload())\n")
+            append("                    : transportId.toString();\n")
+            append("            return \"quarantine-\" + sha256(fingerprint);\n")
+            append("        }\n")
+            append("    }\n\n")
+            append("    private static String canonicalMessageId(String eventId) {\n")
+            append("        if (eventId == null) throw new IllegalArgumentException(\"message ID is required\");\n")
+            append("        String canonical = eventId.trim();\n")
+            append("        if (canonical.isEmpty() || canonical.length() > 200 || canonical.chars().anyMatch(Character::isISOControl)) {\n")
+            append("            throw new IllegalArgumentException(\"message ID must contain 1 to 200 visible characters\");\n")
+            append("        }\n")
+            append("        return canonical;\n")
+            append("    }\n\n")
+
+            append("    private String payloadJson(").append(payloadType).append(" payload) {\n")
+            append("        Objects.requireNonNull(payload, \"payload is required\");\n")
+            append("        try {\n")
+            append("            String json = objectMapper.writeValueAsString(payload);\n")
+            append("            if (json.getBytes(StandardCharsets.UTF_8).length > ").append(inbox.maximumPayloadBytes).append(") {\n")
+            append("                throw new IllegalArgumentException(\"Inbound payload exceeds the certified retained-payload limit\");\n")
+            append("            }\n")
+            append("            return json;\n")
+            append("        } catch (").append(jacksonException).append(" exception) {\n")
+            append("            throw new IllegalArgumentException(\"Inbound payload cannot be serialized\", exception);\n")
+            append("        }\n")
+            append("    }\n\n")
+
+            append("    private void requireInboxPermission(String permission) {\n")
+            append("        SpecificOperationAccessContext context = new SpecificOperationAccessContext(permission);\n")
+            append("        accessManager.applyRegisteredConstraints(context);\n")
+            append("        if (!context.isPermitted()) throw new AccessDeniedException(\"Specific permission denied: \" + permission);\n")
+            append("    }\n\n")
+            append("    private void publishInboxAudit(String action, String subject, String reason, long affected) {\n")
+            append("        String actor = currentAuthentication.isSet() ? currentAuthentication.getUser().getUsername() : \"system\";\n")
+            append("        eventPublisher.publishEvent(new InboxAuditEvent(\"").append(escapeJava(model.beanName))
+                .append("\", action, subject, actor, sha256(reason), affected, Instant.now(clock)));\n")
+            append("    }\n\n")
+            append("    private void recordInboxMetric(String outcome) {\n")
+            if (usesMicrometerObservation(model) && model.observability.metricsEnabled) {
+                append("        MeterRegistry registry = meterRegistryProvider.getIfAvailable();\n")
+                append("        if (registry != null) registry.counter(\"jvw.integration.inbox\", \"connector\", \"")
+                    .append(escapeJava(model.beanName)).append("\", \"outcome\", outcome).increment();\n")
+            } else {
+                append("        eventPublisher.publishEvent(new InboxTelemetryEvent(\"")
+                    .append(escapeJava(model.beanName)).append("\", outcome, Instant.now(clock)));\n")
+            }
+            append("    }\n\n")
+            append("    private static long value(Long value) { return value == null ? 0L : value; }\n\n")
+            append("    private static String safeError(Exception exception) {\n")
+            append("        String message = exception.getClass().getSimpleName() + \": \" + String.valueOf(exception.getMessage());\n")
+            append("        message = message.replace('\\r', ' ').replace('\\n', ' ');\n")
+            append("        return message.length() <= 1500 ? message : message.substring(0, 1500);\n")
+            append("    }\n\n")
+            append("    private static String sha256(String value) {\n")
+            append("        try {\n")
+            append("            return HexFormat.of().formatHex(MessageDigest.getInstance(\"SHA-256\").digest(value.getBytes(StandardCharsets.UTF_8)));\n")
+            append("        } catch (NoSuchAlgorithmException exception) {\n")
+            append("            throw new IllegalStateException(\"SHA-256 is unavailable\", exception);\n")
+            append("        }\n")
+            append("    }\n\n")
+            append("    private record InboxRecord(String payload, String payloadSha256) {}\n")
+            append("    private record InboxIdentity(String status, String payloadSha256) {}\n")
+            append("    public record InboxHealth(long done, long dead, long replayPending, long oldestDeadAgeMs) {}\n")
+            append("    public record InboxTelemetryEvent(String connector, String outcome, Instant occurredAt) {}\n")
+            append("    public record InboxAuditEvent(String connector, String action, String subject, String actor, String justificationSha256, long affected, Instant occurredAt) {}\n")
+        }
+    }
+
     private fun renderRabbitConsumer(model: IntegrationConnectorModel): String = buildString {
         append("    @RabbitListener(queues = \"").append(propertyExpression(model.addressProperty)).append("\")\n")
-        append("    public void consume(").append(model.payloadJavaType).append(" payload) {\n")
-        appendHandlerInvocation(model)
+        append("    public void consume(Message<").append(model.payloadJavaType).append("> message) {\n")
+        append("        consumeInbound(message);\n")
         append("    }\n")
     }
 
@@ -1082,10 +1592,20 @@ object IntegrationConnectorGenerator {
             }
             IntegrationConnectorKind.KAFKA_PUBLISHER ->
                 add(InjectedField("KafkaTemplate<String, ${model.payloadJavaType}>", "kafkaTemplate"))
-            IntegrationConnectorKind.KAFKA_CONSUMER -> Unit
+            IntegrationConnectorKind.KAFKA_CONSUMER -> {
+                if (model.reliability.inboxEnabled) {
+                    add(InjectedField("KafkaTemplate<String, ${model.payloadJavaType}>", "kafkaTemplate"))
+                    add(InjectedField("String", "address", model.addressProperty))
+                }
+            }
             IntegrationConnectorKind.RABBIT_PUBLISHER ->
                 add(InjectedField("RabbitTemplate", "rabbitTemplate"))
-            IntegrationConnectorKind.RABBIT_CONSUMER -> Unit
+            IntegrationConnectorKind.RABBIT_CONSUMER -> {
+                if (model.reliability.inboxEnabled) {
+                    add(InjectedField("RabbitTemplate", "rabbitTemplate"))
+                    add(InjectedField("String", "address", model.addressProperty))
+                }
+            }
             IntegrationConnectorKind.SFTP_UPLOAD,
             IntegrationConnectorKind.SFTP_DOWNLOAD,
             -> {
@@ -1127,6 +1647,39 @@ object IntegrationConnectorGenerator {
                 add(InjectedField("ObjectProvider<ObservationRegistry>", "observationRegistryProvider"))
             }
             add(InjectedField("TransactionTemplate", "outboxTransactions", constructorParameter = false))
+        }
+        if (model.reliability.inboxEnabled) {
+            val inbox = requireNotNull(model.reliability.inbox)
+            add(InjectedField("DataSource", "dataSource", qualifier = inbox.dataSourceBean))
+            add(InjectedField("JdbcTemplate", "jdbcTemplate", constructorParameter = false))
+            add(InjectedField("ObjectMapper", "objectMapper"))
+            add(
+                InjectedField(
+                    "PlatformTransactionManager",
+                    "transactionManager",
+                    qualifier = inbox.transactionManagerBean,
+                ),
+            )
+            add(InjectedField("AccessManager", "accessManager"))
+            add(InjectedField("CurrentAuthentication", "currentAuthentication"))
+            add(InjectedField("ApplicationEventPublisher", "eventPublisher"))
+            if (usesMicrometerObservation(model) && model.observability.metricsEnabled) {
+                add(InjectedField("ObjectProvider<MeterRegistry>", "meterRegistryProvider"))
+            }
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                add(InjectedField("ObjectProvider<ObservationRegistry>", "observationRegistryProvider"))
+            }
+            if (model.reliability.retry.mode == IntegrationRetryMode.BLOCKING) {
+                add(InjectedField("RetryRegistry", "retryRegistry"))
+                add(
+                    InjectedField(
+                        "String",
+                        "deadLetterDestination",
+                        model.reliability.retry.deadLetterDestinationProperty,
+                    ),
+                )
+            }
+            add(InjectedField("TransactionTemplate", "inboxTransactions", constructorParameter = false))
         }
         if (model.kind in CONSUMER_KINDS) {
             add(InjectedField(model.handlerBeanClass.orEmpty(), model.handlerFieldName.orEmpty()))
@@ -1184,7 +1737,12 @@ object IntegrationConnectorGenerator {
         }
         if (usesResilience(model)) {
             if (model.reliability.retry.mode == IntegrationRetryMode.BLOCKING) {
-                add("io.github.resilience4j.retry.annotation.Retry")
+                if (model.reliability.inboxEnabled && model.kind in MESSAGE_CONSUMER_KINDS) {
+                    add("io.github.resilience4j.retry.Retry")
+                    add("io.github.resilience4j.retry.RetryRegistry")
+                } else {
+                    add("io.github.resilience4j.retry.annotation.Retry")
+                }
             }
             if (model.reliability.circuitBreaker.enabled) {
                 add("io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker")
@@ -1248,6 +1806,53 @@ object IntegrationConnectorGenerator {
                 add("org.apache.kafka.clients.producer.ProducerRecord")
             }
         }
+        if (model.reliability.inboxEnabled) {
+            when (model.reliability.inbox?.jsonApi) {
+                IntegrationJsonApi.JACKSON_2 -> {
+                    add("com.fasterxml.jackson.core.JsonProcessingException")
+                    add("com.fasterxml.jackson.databind.ObjectMapper")
+                }
+                IntegrationJsonApi.JACKSON_3 -> {
+                    add("tools.jackson.core.JacksonException")
+                    add("tools.jackson.databind.ObjectMapper")
+                }
+                null -> Unit
+            }
+            add("io.jmix.core.AccessManager")
+            add("io.jmix.core.accesscontext.SpecificOperationAccessContext")
+            add("io.jmix.core.security.CurrentAuthentication")
+            add("java.nio.charset.StandardCharsets")
+            add("java.security.MessageDigest")
+            add("java.security.NoSuchAlgorithmException")
+            add("java.sql.Timestamp")
+            add("java.time.Clock")
+            add("java.time.Duration")
+            add("java.time.Instant")
+            add("java.util.HexFormat")
+            add("java.util.List")
+            add("java.util.Objects")
+            add("java.util.concurrent.TimeUnit")
+            add("javax.sql.DataSource")
+            add("org.springframework.beans.factory.ObjectProvider")
+            add("org.springframework.beans.factory.annotation.Qualifier")
+            add("org.springframework.context.ApplicationEventPublisher")
+            add("org.springframework.dao.DuplicateKeyException")
+            add("org.springframework.jdbc.core.JdbcTemplate")
+            add("org.springframework.messaging.Message")
+            add("org.springframework.security.access.AccessDeniedException")
+            add("org.springframework.transaction.PlatformTransactionManager")
+            add("org.springframework.transaction.annotation.Transactional")
+            add("org.springframework.transaction.support.TransactionTemplate")
+            if (usesMicrometerObservation(model)) {
+                if (model.observability.metricsEnabled) {
+                    add("io.micrometer.core.instrument.MeterRegistry")
+                }
+                if (model.observability.tracingEnabled) {
+                    add("io.micrometer.observation.Observation")
+                    add("io.micrometer.observation.ObservationRegistry")
+                }
+            }
+        }
         when (model.kind) {
             in HTTP_KINDS -> {
                 add("java.net.http.HttpClient")
@@ -1275,17 +1880,28 @@ object IntegrationConnectorGenerator {
             }
             IntegrationConnectorKind.KAFKA_CONSUMER -> {
                 add("org.springframework.kafka.annotation.KafkaListener")
+                if (model.reliability.inboxEnabled) {
+                    add("org.apache.kafka.clients.producer.ProducerRecord")
+                    add("org.springframework.kafka.core.KafkaTemplate")
+                }
                 if (model.reliability.retry.mode == IntegrationRetryMode.NON_BLOCKING) {
+                    add("org.springframework.kafka.annotation.DltHandler")
                     add("org.springframework.kafka.annotation.RetryableTopic")
                     add("org.springframework.retry.annotation.Backoff")
+                    add("org.springframework.kafka.retrytopic.DltStrategy")
                 }
             }
             IntegrationConnectorKind.RABBIT_PUBLISHER -> {
                 add("org.springframework.amqp.rabbit.connection.CorrelationData")
                 add("org.springframework.amqp.rabbit.core.RabbitTemplate")
             }
-            IntegrationConnectorKind.RABBIT_CONSUMER ->
+            IntegrationConnectorKind.RABBIT_CONSUMER -> {
                 add("org.springframework.amqp.rabbit.annotation.RabbitListener")
+                if (model.reliability.inboxEnabled) {
+                    add("org.springframework.amqp.rabbit.connection.CorrelationData")
+                    add("org.springframework.amqp.rabbit.core.RabbitTemplate")
+                }
+            }
             IntegrationConnectorKind.SFTP_UPLOAD -> {
                 add("java.io.ByteArrayInputStream")
                 add("java.util.Objects")
@@ -1394,6 +2010,42 @@ object IntegrationConnectorGenerator {
                         append("spring.rabbitmq.publisher-confirm-type=correlated\n")
                         append("spring.rabbitmq.publisher-returns=true\n")
                         append("spring.rabbitmq.template.mandatory=true\n")
+                    }
+                    else -> Unit
+                }
+            }
+            if (model.reliability.inboxEnabled) {
+                val inbox = requireNotNull(model.reliability.inbox)
+                append("# Persistent inbox provides at-least-once delivery with transaction-bound handler deduplication.\n")
+                append("# Every producer must supply stable header ").append(inbox.messageIdHeader).append(".\n")
+                append(model.configurationPrefix).append(".inbox.retention-days=")
+                    .append(inbox.retentionDays).append('\n')
+                append(model.configurationPrefix).append(".inbox.maximum-payload-bytes=")
+                    .append(inbox.maximumPayloadBytes).append('\n')
+                append(model.configurationPrefix).append(".inbox.maintenance-batch-size=")
+                    .append(inbox.maintenanceBatchSize).append('\n')
+                if (model.reliability.retry.mode != IntegrationRetryMode.NONE) {
+                    append("# Externalize the dead-letter target. Kafka NON_BLOCKING uses this value as a topic suffix;\n")
+                    append("# blocking Kafka and Rabbit consumers use it as the exact target destination.\n")
+                }
+                when (model.kind) {
+                    IntegrationConnectorKind.KAFKA_CONSUMER -> {
+                        append("spring.kafka.consumer.enable-auto-commit=false\n")
+                        append("spring.kafka.listener.ack-mode=record\n")
+                        append("spring.kafka.producer.acks=all\n")
+                        append("spring.kafka.producer.properties.enable.idempotence=true\n")
+                        append("spring.kafka.producer.properties.max.block.ms=")
+                            .append(model.reliability.requestTimeoutMs).append('\n')
+                        append("spring.kafka.producer.properties.request.timeout.ms=")
+                            .append(model.reliability.requestTimeoutMs).append('\n')
+                        append("spring.kafka.producer.properties.delivery.timeout.ms=")
+                            .append(model.reliability.requestTimeoutMs + 1_000).append('\n')
+                    }
+                    IntegrationConnectorKind.RABBIT_CONSUMER -> {
+                        append("spring.rabbitmq.publisher-confirm-type=correlated\n")
+                        append("spring.rabbitmq.publisher-returns=true\n")
+                        append("spring.rabbitmq.template.mandatory=true\n")
+                        append("spring.rabbitmq.listener.simple.default-requeue-rejected=true\n")
                     }
                     else -> Unit
                 }
@@ -1555,6 +2207,119 @@ object IntegrationConnectorGenerator {
             warning(
                 "INTEGRATION_OUTBOX_DOWNSTREAM_IDEMPOTENCY",
                 "Consumers must deduplicate the generated jvw-outbox-id because durable dispatch is at-least-once.",
+            )
+        }
+    }
+
+    private fun validateInbox(
+        model: IntegrationConnectorModel,
+        error: (String, String) -> Unit,
+    ) {
+        val inbox = model.reliability.inbox
+        if (inbox == null) {
+            error(
+                "INTEGRATION_INBOX_CONFIGURATION_REQUIRED",
+                "Select a persisted data store and configure the idempotent inbox.",
+            )
+            return
+        }
+        if (inbox.storeId.isBlank()) {
+            error("INTEGRATION_INBOX_STORE_REQUIRED", "A resolved Jmix data store is required.")
+        }
+        if (!DATABASE_IDENTIFIER.matches(inbox.tableName) || inbox.tableName.length > 30) {
+            error(
+                "INTEGRATION_INBOX_TABLE_INVALID",
+                "Inbox table name must be a portable lower snake-case identifier of at most 30 characters.",
+            )
+        }
+        if (inbox.jsonApi == null) {
+            error(
+                "INTEGRATION_INBOX_JSON_API_REQUIRED",
+                "The backend must resolve the module's Jackson generation contract before inbox generation.",
+            )
+        }
+        if (!SPRING_BEAN_IDENTIFIER.matches(inbox.dataSourceBean)) {
+            error(
+                "INTEGRATION_INBOX_DATASOURCE_BEAN_INVALID",
+                "The backend must resolve a valid DataSource bean for the selected Jmix data store.",
+            )
+        }
+        if (!SPRING_BEAN_IDENTIFIER.matches(inbox.transactionManagerBean)) {
+            error(
+                "INTEGRATION_INBOX_TRANSACTION_MANAGER_BEAN_INVALID",
+                "The backend must resolve a valid transaction-manager bean for the selected Jmix data store.",
+            )
+        }
+        if (!HTTP_HEADER.matches(inbox.messageIdHeader) || inbox.messageIdHeader.length > 100) {
+            error(
+                "INTEGRATION_INBOX_MESSAGE_ID_HEADER_INVALID",
+                "Persistent inbox requires a valid stable message-ID header of at most 100 characters.",
+            )
+        }
+        if (
+            !model.reliability.idempotency.enabled ||
+            model.reliability.idempotency.headerName != inbox.messageIdHeader
+        ) {
+            error(
+                "INTEGRATION_INBOX_IDEMPOTENCY_MISMATCH",
+                "The connector idempotency header must exactly match the persistent inbox message-ID header.",
+            )
+        }
+        if (!model.reliability.transactional) {
+            error(
+                "INTEGRATION_INBOX_TRANSACTION_REQUIRED",
+                "Inbox claim, handler changes and completion must share the selected store transaction.",
+            )
+        }
+        if (model.reliability.retry.mode == IntegrationRetryMode.NONE) {
+            error(
+                "INTEGRATION_INBOX_TERMINAL_ROUTE_REQUIRED",
+                "Persistent inbox consumers require bounded retry and an acknowledged dead-letter route so poison messages cannot block a partition or queue indefinitely.",
+            )
+        }
+        if (model.reliability.deliveryGuarantee != IntegrationDeliveryGuarantee.AT_LEAST_ONCE) {
+            error(
+                "INTEGRATION_INBOX_DELIVERY_GUARANTEE",
+                "Persistent inbox consumers explicitly provide at-least-once delivery with effectively-once handler effects.",
+            )
+        }
+        if (model.payloadJavaType == "void" || model.payloadJavaType == "byte[]" || '<' in model.payloadJavaType) {
+            error(
+                "INTEGRATION_INBOX_PAYLOAD_TYPE",
+                "Persistent inbox payload must be a concrete non-generic JSON-mappable Java type.",
+            )
+        }
+        if (inbox.maximumPayloadBytes !in 1_024..10_485_760) {
+            error(
+                "INTEGRATION_INBOX_PAYLOAD_LIMIT",
+                "Retained terminal payload limit must be between 1 KiB and 10 MiB.",
+            )
+        }
+        if (inbox.maintenanceBatchSize !in 1..10_000) {
+            error(
+                "INTEGRATION_INBOX_MAINTENANCE_BATCH_RANGE",
+                "Inbox maintenance batch size must be between 1 and 10,000 rows.",
+            )
+        }
+        if (inbox.retentionDays !in 1..3_650) {
+            error("INTEGRATION_INBOX_RETENTION_RANGE", "Inbox retention must be between 1 day and 10 years.")
+        }
+        if (!SPECIFIC_PERMISSION.matches(inbox.replayPermission)) {
+            error(
+                "INTEGRATION_INBOX_REPLAY_PERMISSION_INVALID",
+                "Inbox replay permission must be a valid Jmix specific-policy resource name.",
+            )
+        }
+        if (!SPECIFIC_PERMISSION.matches(inbox.maintenancePermission)) {
+            error(
+                "INTEGRATION_INBOX_MAINTENANCE_PERMISSION_INVALID",
+                "Inbox maintenance permission must be a valid Jmix specific-policy resource name.",
+            )
+        }
+        if (inbox.replayPermission == inbox.maintenancePermission) {
+            error(
+                "INTEGRATION_INBOX_PERMISSION_SEPARATION",
+                "Replay and destructive inbox-retention maintenance require separate Jmix specific permissions.",
             )
         }
     }

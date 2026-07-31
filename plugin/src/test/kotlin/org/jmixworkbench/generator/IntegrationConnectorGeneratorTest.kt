@@ -10,6 +10,7 @@ import org.jmixworkbench.model.IntegrationDeliveryGuarantee
 import org.jmixworkbench.model.IntegrationDiagnosticSeverity
 import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationIdempotencyModel
+import org.jmixworkbench.model.IntegrationInboxModel
 import org.jmixworkbench.model.IntegrationReliabilityModel
 import org.jmixworkbench.model.IntegrationOutboxModel
 import org.jmixworkbench.model.IntegrationJsonApi
@@ -23,6 +24,26 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class IntegrationConnectorGeneratorTest {
+    @Test
+    fun `requires Spring Boot 4 Kafka runtime module for Jmix 3 connectors`() {
+        val model = connector(
+            kind = IntegrationConnectorKind.KAFKA_PUBLISHER,
+        ).copy(runtimeJsonApi = IntegrationJsonApi.JACKSON_3)
+
+        val validation = IntegrationConnectorGenerator.validate(
+            model,
+            setOf(IntegrationCapability.SPRING_KAFKA),
+        )
+
+        assertFalse(validation.valid)
+        assertTrue(
+            validation.diagnostics.any {
+                it.code == "INTEGRATION_DEPENDENCY_MISSING" &&
+                    "SPRING_BOOT_KAFKA" in it.message
+            },
+        )
+    }
+
     @Test
     fun `generates externalized resilient webhook without endpoint or secret literals`() {
         val model = connector(
@@ -70,7 +91,7 @@ class IntegrationConnectorGeneratorTest {
     }
 
     @Test
-    fun `rejects kafka retry transaction and ordering conflicts`() {
+    fun `allows database inbox transactions but rejects kafka non blocking ordering`() {
         val model = connector(
             kind = IntegrationConnectorKind.KAFKA_CONSUMER,
             payloadJavaType = "com.acme.loan.LoanEvent",
@@ -85,6 +106,17 @@ class IntegrationConnectorGeneratorTest {
                 ),
                 transactional = true,
                 orderingRequired = true,
+                idempotency = IntegrationIdempotencyModel(
+                    enabled = true,
+                    headerName = "jvw-outbox-id",
+                    keyParameterName = "messageId",
+                ),
+                inboxEnabled = true,
+                inbox = IntegrationInboxModel(
+                    storeId = "loan:main",
+                    tableName = "jvw_loan_event_inbox",
+                    jsonApi = IntegrationJsonApi.JACKSON_2,
+                ),
             ),
         )
 
@@ -94,8 +126,80 @@ class IntegrationConnectorGeneratorTest {
         )
 
         assertFalse(validation.valid)
-        assertTrue(validation.diagnostics.any { it.code == "INTEGRATION_KAFKA_RETRY_TRANSACTION_CONFLICT" })
+        assertFalse(validation.diagnostics.any { it.code == "INTEGRATION_KAFKA_RETRY_TRANSACTION_CONFLICT" })
         assertTrue(validation.diagnostics.any { it.code == "INTEGRATION_KAFKA_RETRY_ORDERING_CONFLICT" })
+    }
+
+    @Test
+    fun `generates persistent transaction-bound Kafka inbox dead letter and secured replay`() {
+        val model = connector(
+            kind = IntegrationConnectorKind.KAFKA_CONSUMER,
+            addressProperty = "payroll.loan-events.topic",
+            payloadJavaType = "com.acme.loan.LoanEvent",
+            handlerBeanClass = "com.acme.loan.LoanEventHandler",
+            handlerFieldName = "loanEventHandler",
+            handlerMethod = "handle",
+            reliability = IntegrationReliabilityModel(
+                deliveryGuarantee = IntegrationDeliveryGuarantee.AT_LEAST_ONCE,
+                transactional = true,
+                retry = IntegrationRetryPolicyModel(
+                    mode = IntegrationRetryMode.BLOCKING,
+                    attempts = 4,
+                    initialDelayMs = 250,
+                    deadLetterDestinationProperty = "payroll.loan-events.dlt",
+                ),
+                idempotency = IntegrationIdempotencyModel(
+                    enabled = true,
+                    headerName = "jvw-outbox-id",
+                    keyParameterName = "messageId",
+                ),
+                inboxEnabled = true,
+                inbox = IntegrationInboxModel(
+                    storeId = "loan:main",
+                    migrationPath = "loan/src/main/resources/db/changelog/2026/07/31-jvw-loan-inbox.xml",
+                    tableName = "jvw_loan_event_inbox",
+                    jsonApi = IntegrationJsonApi.JACKSON_2,
+                ),
+            ),
+            observability = IntegrationObservabilityModel(
+                metricsEnabled = true,
+                tracingEnabled = true,
+                auditEnabled = true,
+                runtimeApi = IntegrationObservabilityApi.MICROMETER_OBSERVATION,
+            ),
+        )
+
+        val validation = IntegrationConnectorGenerator.validate(
+            model,
+            setOf(IntegrationCapability.SPRING_KAFKA, IntegrationCapability.RESILIENCE4J),
+        )
+        assertTrue(validation.valid, validation.diagnostics.joinToString())
+        val generated = IntegrationConnectorGenerator.generate(model)
+
+        assertContains(generated.javaSource, "Message<com.acme.loan.LoanEvent> message")
+        assertContains(generated.javaSource, "Retry.decorateCheckedRunnable")
+        assertContains(generated.javaSource, "INSERT INTO jvw_loan_event_inbox")
+        assertContains(generated.javaSource, "catch (DuplicateKeyException duplicate)")
+        assertContains(generated.javaSource, "MESSAGE_ID_COLLISION")
+        assertContains(generated.javaSource, "Stable message ID was reused with a different payload")
+        assertContains(generated.javaSource, "deadLetterMessageId(message)")
+        assertContains(generated.javaSource, "\"quarantine-\" + sha256(fingerprint)")
+        assertContains(generated.javaSource, "status IN ('REPLAY_PENDING', 'REPLAYED')")
+        assertContains(generated.javaSource, "public void replay(String eventId, String reason)")
+        assertContains(generated.javaSource, "jvw.integration.inbox.replay")
+        assertContains(generated.javaSource, "Kafka dead-letter publication was not acknowledged")
+        assertContains(generated.javaSource, "record.headers().add(\"jvw-outbox-id\"")
+        assertContains(generated.javaSource, "Inbox payload checksum mismatch")
+        assertContains(generated.javaSource, "@Transactional(\"transactionManager\")")
+        assertContains(generated.javaSource, "statement.setMaxRows(1000)")
+        assertContains(requireNotNull(generated.migrationXml), "jvw_loan_event_inbox")
+        assertContains(requireNotNull(generated.migrationXml), "source_destination")
+        assertContains(generated.reliabilityProperties, "spring.kafka.listener.ack-mode=record")
+        assertContains(generated.reliabilityProperties, "inbox.maintenance-batch-size=1000")
+        assertContains(
+            generated.reliabilityProperties,
+            "resilience4j.retry.instances.partnerWebhook.max-attempts=4",
+        )
     }
 
     @Test

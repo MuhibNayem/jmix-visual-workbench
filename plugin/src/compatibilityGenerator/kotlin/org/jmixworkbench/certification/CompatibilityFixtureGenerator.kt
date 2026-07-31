@@ -23,6 +23,7 @@ import org.jmixworkbench.model.IntegrationAuthenticationKind
 import org.jmixworkbench.model.IntegrationAuthenticationModel
 import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationIdempotencyModel
+import org.jmixworkbench.model.IntegrationInboxModel
 import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationOutboxModel
 import org.jmixworkbench.model.IntegrationRetryMode
@@ -146,6 +147,52 @@ object CompatibilityFixtureGenerator {
     }
 
     private fun generateDurableIntegrationAdapters(sources: MutableMap<String, String>) {
+        sources["common/java/com/acme/cert/integration/LoanEventHandler.java"] =
+            """
+            package com.acme.cert.integration;
+
+            import java.util.Set;
+            import java.util.concurrent.ConcurrentHashMap;
+            import java.util.concurrent.ConcurrentMap;
+            import org.springframework.jdbc.core.JdbcTemplate;
+            import org.springframework.stereotype.Service;
+
+            @Service
+            public class LoanEventHandler {
+                private final JdbcTemplate jdbcTemplate;
+                private final ConcurrentMap<String, Integer> attempts = new ConcurrentHashMap<>();
+                private final Set<String> releasedPoisonMessages = ConcurrentHashMap.newKeySet();
+
+                public LoanEventHandler(JdbcTemplate jdbcTemplate) {
+                    this.jdbcTemplate = jdbcTemplate;
+                }
+
+                public void handle(String payload) {
+                    if (payload == null) {
+                        throw new IllegalArgumentException("payload is required");
+                    }
+                    int attempt = attempts.merge(payload, 1, Integer::sum);
+                    if (payload.startsWith("retry-once:") && attempt == 1) {
+                        throw new IllegalStateException("certified transient handler failure");
+                    }
+                    if (payload.startsWith("poison:")
+                            && !releasedPoisonMessages.contains(payload)) {
+                        throw new IllegalStateException("certified poison message");
+                    }
+                    jdbcTemplate.update(
+                            "INSERT INTO jvw_cert_handler_effect (payload, handled_at) VALUES (?, CURRENT_TIMESTAMP)",
+                            payload);
+                }
+
+                public int attempts(String payload) {
+                    return attempts.getOrDefault(payload, 0);
+                }
+
+                public void releasePoison(String payload) {
+                    releasedPoisonMessages.add(payload);
+                }
+            }
+            """.trimIndent() + "\n"
         listOf(
             "jmix28" to IntegrationJsonApi.JACKSON_2,
             "jmix30" to IntegrationJsonApi.JACKSON_3,
@@ -157,6 +204,7 @@ object CompatibilityFixtureGenerator {
                 className = "LoanEventPublisher",
                 beanName = "loanEventPublisher",
                 kind = IntegrationConnectorKind.KAFKA_PUBLISHER,
+                runtimeJsonApi = jsonApi,
                 configurationPrefix = "cert.loan-events",
                 addressProperty = "cert.loan-events.topic",
                 payloadJavaType = "java.lang.String",
@@ -215,6 +263,86 @@ object CompatibilityFixtureGenerator {
                 generatedRabbit.reliabilityProperties
             sources["$line/resources/db/changelog/jvw-payroll-outbox.xml"] =
                 requireNotNull(generatedRabbit.migrationXml)
+
+            val kafkaConsumerModel = IntegrationConnectorModel(
+                name = "Certified idempotent loan consumer",
+                destinationId = "certified:main",
+                packageName = "com.acme.cert.integration",
+                className = "LoanEventConsumer",
+                beanName = "loanEventConsumer",
+                kind = IntegrationConnectorKind.KAFKA_CONSUMER,
+                runtimeJsonApi = jsonApi,
+                configurationPrefix = "cert.loan-consumer",
+                addressProperty = "cert.loan-consumer.topic",
+                payloadJavaType = "java.lang.String",
+                handlerBeanClass = "com.acme.cert.integration.LoanEventHandler",
+                handlerFieldName = "loanEventHandler",
+                handlerMethod = "handle",
+                reliability = IntegrationReliabilityModel(
+                    deliveryGuarantee = IntegrationDeliveryGuarantee.AT_LEAST_ONCE,
+                    connectTimeoutMs = 500,
+                    requestTimeoutMs = 2_000,
+                    retry = IntegrationRetryPolicyModel(
+                        mode = IntegrationRetryMode.BLOCKING,
+                        attempts = 3,
+                        initialDelayMs = 100,
+                        maximumDelayMs = 1_000,
+                        deadLetterDestinationProperty = "cert.loan-consumer.dead-letter-topic",
+                    ),
+                    idempotency = IntegrationIdempotencyModel(
+                        enabled = true,
+                        headerName = "jvw-outbox-id",
+                        keyParameterName = "messageId",
+                    ),
+                    transactional = true,
+                    inboxEnabled = true,
+                    inbox = IntegrationInboxModel(
+                        storeId = "certified:main",
+                        migrationPath = "src/main/resources/db/changelog/jvw-loan-inbox.xml",
+                        tableName = "jvw_loan_event_inbox",
+                        jsonApi = jsonApi,
+                    ),
+                ),
+                observability = IntegrationObservabilityModel(
+                    metricsEnabled = true,
+                    tracingEnabled = true,
+                    structuredLoggingEnabled = true,
+                    auditEnabled = true,
+                    runtimeApi = IntegrationObservabilityApi.MICROMETER_OBSERVATION,
+                ),
+            )
+            val generatedKafkaConsumer = IntegrationConnectorGenerator.generate(kafkaConsumerModel)
+            sources["$line/java/com/acme/cert/integration/LoanEventConsumer.java"] =
+                generatedKafkaConsumer.javaSource
+            sources["$line/resources/META-INF/jvw/integration/loanEventConsumer.properties"] =
+                generatedKafkaConsumer.reliabilityProperties
+            sources["$line/resources/db/changelog/jvw-loan-inbox.xml"] =
+                requireNotNull(generatedKafkaConsumer.migrationXml)
+
+            val rabbitConsumerModel = kafkaConsumerModel.copy(
+                name = "Certified idempotent payroll consumer",
+                className = "PayrollEventConsumer",
+                beanName = "payrollEventConsumer",
+                kind = IntegrationConnectorKind.RABBIT_CONSUMER,
+                configurationPrefix = "cert.payroll-consumer",
+                addressProperty = "cert.payroll-consumer.queue",
+                reliability = kafkaConsumerModel.reliability.copy(
+                    retry = kafkaConsumerModel.reliability.retry.copy(
+                        deadLetterDestinationProperty = "cert.payroll-consumer.dead-letter-queue",
+                    ),
+                    inbox = kafkaConsumerModel.reliability.inbox?.copy(
+                        migrationPath = "src/main/resources/db/changelog/jvw-payroll-inbox.xml",
+                        tableName = "jvw_payroll_event_inbox",
+                    ),
+                ),
+            )
+            val generatedRabbitConsumer = IntegrationConnectorGenerator.generate(rabbitConsumerModel)
+            sources["$line/java/com/acme/cert/integration/PayrollEventConsumer.java"] =
+                generatedRabbitConsumer.javaSource
+            sources["$line/resources/META-INF/jvw/integration/payrollEventConsumer.properties"] =
+                generatedRabbitConsumer.reliabilityProperties
+            sources["$line/resources/db/changelog/jvw-payroll-inbox.xml"] =
+                requireNotNull(generatedRabbitConsumer.migrationXml)
 
             val sftpUploadModel = IntegrationConnectorModel(
                 name = "Certified atomic document upload",

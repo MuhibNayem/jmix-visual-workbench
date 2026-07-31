@@ -157,6 +157,24 @@ run_cell() {
     echo "Broker recovery evidence failed for $cell_id." >&2
     exit 1
   fi
+  if ! grep -q '"inboundKafkaScenarios":6' "$EVIDENCE_DIR/$cell_id.json"; then
+    echo "Kafka inbound scenario evidence failed for $cell_id." >&2
+    exit 1
+  fi
+  if ! grep -q '"inboundRabbitScenarios":6' "$EVIDENCE_DIR/$cell_id.json"; then
+    echo "RabbitMQ inbound scenario evidence failed for $cell_id." >&2
+    exit 1
+  fi
+  for required_flag in \
+    missingIdentityQuarantined \
+    conflictingIdentityRejected \
+    transactionalEffectsCertified
+  do
+    if ! grep -q "\"$required_flag\":true" "$EVIDENCE_DIR/$cell_id.json"; then
+      echo "$required_flag evidence failed for $cell_id." >&2
+      exit 1
+    fi
+  done
 }
 
 if [[ "$CELL_FILTER" == "all" || "$CELL_FILTER" == "jmix28-jdk17" ]]; then

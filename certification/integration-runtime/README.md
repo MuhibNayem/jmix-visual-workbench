@@ -8,7 +8,8 @@ The current matrix proves on Jmix 2.8/Java 17 and Jmix 3.0/Java 21:
 
 - Spring can proxy the generated connectors and apply store-qualified
   transactions;
-- generated Liquibase migrations create both outbox schemas in PostgreSQL;
+- generated Liquibase migrations create Kafka/RabbitMQ outbox and inbox
+  schemas in PostgreSQL;
 - Kafka acknowledgements and RabbitMQ correlated publisher confirms/returns
   advance events to `SENT`;
 - Toxiproxy broker outages produce bounded retry state and recovery retains
@@ -25,7 +26,21 @@ The current matrix proves on Jmix 2.8/Java 17 and Jmix 3.0/Java 21:
   open a Resilience4j circuit breaker that fails fast without contacting the
   provider;
 - the Jmix 2 cell uses the Resilience4j Spring Boot 3 integration and the Jmix 3
-  cell uses its Spring Boot 4 integration.
+  cell uses its Spring Boot 4 integration;
+- Kafka and RabbitMQ consumers persist message identity and payload checksum
+  before invoking the selected application handler, commit the inbox record and
+  handler database effect in one transaction, and acknowledge successful
+  duplicates without invoking the handler twice;
+- both brokers pass six inbound scenarios: identical redelivery, conflicting
+  payload under the same message ID, transient handler failure with bounded
+  retry, poison-message dead-letter routing, missing-ID quarantine, and
+  permission-controlled replay;
+- conflicting IDs never overwrite a completed payload, missing IDs receive a
+  transport-derived non-forgeable quarantine identity, and replay and
+  maintenance use separate Jmix specific permissions;
+- the Jmix 3 cell proves the modular Spring Boot 4 Kafka runtime and the
+  generator rejects a target that declares only `spring-kafka` without the
+  required Boot 4 Kafka auto-configuration capability.
 
 Run:
 
@@ -40,8 +55,8 @@ endpoint, credential or developer database is used. A single cell can be
 selected with `CERT_INTEGRATION_CELL=jmix28-jdk17` or
 `CERT_INTEGRATION_CELL=jmix30-jdk21`.
 
-This lab does not yet certify inbound Kafka/Rabbit consumer idempotency and
-poison-message retry/DLQ, OAuth2 token refresh or mTLS rotation, multi-node
-dispatcher contention, sustained load/soak behavior, every supported database,
-or installed-IDE runtime launching. Those remain separate gates rather than
-being inferred from the passing publisher/provider scenarios.
+This lab does not yet certify OAuth2 token refresh or mTLS rotation, multi-node
+dispatcher/consumer contention, sustained load/soak behavior, every supported
+database, remaining provider families, or installed-IDE runtime launching.
+Those remain separate gates rather than being inferred from the passing
+publisher, consumer and provider scenarios.

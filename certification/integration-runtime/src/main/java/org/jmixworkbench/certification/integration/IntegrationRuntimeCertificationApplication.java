@@ -3,7 +3,10 @@ package org.jmixworkbench.certification.integration;
 import com.acme.cert.integration.DocumentDownloadConnector;
 import com.acme.cert.integration.DocumentUploadConnector;
 import com.acme.cert.integration.HrmsPartnerClient;
+import com.acme.cert.integration.LoanEventConsumer;
+import com.acme.cert.integration.LoanEventHandler;
 import com.acme.cert.integration.LoanEventPublisher;
+import com.acme.cert.integration.PayrollEventConsumer;
 import com.acme.cert.integration.PayrollEventPublisher;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -20,10 +23,12 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.sshd.client.auth.password.UserAuthPasswordFactory;
 import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.rabbit.annotation.EnableRabbit;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -38,6 +43,7 @@ import org.springframework.jdbc.support.JdbcTransactionManager;
 import org.springframework.integration.sftp.session.DefaultSftpSessionFactory;
 import org.springframework.integration.sftp.session.SftpRemoteFileTemplate;
 import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.kafka.annotation.EnableKafka;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -70,21 +76,34 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 
 @SpringBootApplication
 @JmixModule(id = "org.jmixworkbench.certification.integration")
+@EnableKafka
+@EnableRabbit
 @Import({
         DocumentDownloadConnector.class,
         DocumentUploadConnector.class,
         HrmsPartnerClient.class,
+        LoanEventConsumer.class,
+        LoanEventHandler.class,
         LoanEventPublisher.class,
+        PayrollEventConsumer.class,
         PayrollEventPublisher.class
 })
 public class IntegrationRuntimeCertificationApplication {
     private static final String KAFKA_TOPIC = "jvw-cert-loan-events";
     private static final String RABBIT_QUEUE = "jvw-cert-payroll-events";
+    private static final String KAFKA_INBOUND_TOPIC = "jvw-cert-loan-inbound";
+    private static final String KAFKA_INBOUND_DLT = "jvw-cert-loan-inbound-dlt";
+    private static final String RABBIT_INBOUND_QUEUE = "jvw-cert-payroll-inbound";
+    private static final String RABBIT_INBOUND_DLT = "jvw-cert-payroll-inbound-dlt";
     private static final String KAFKA_TABLE = "jvw_loan_event_outbox";
     private static final String RABBIT_TABLE = "jvw_payroll_event_outbox";
+    private static final String KAFKA_INBOX = "jvw_loan_event_inbox";
+    private static final String RABBIT_INBOX = "jvw_payroll_event_inbox";
+    private static final String HANDLER_EFFECT = "jvw_cert_handler_effect";
 
     @Bean(name = "dataSource")
     @Primary
@@ -123,6 +142,16 @@ public class IntegrationRuntimeCertificationApplication {
     }
 
     @Bean
+    NewTopic certificationKafkaInboundTopic() {
+        return TopicBuilder.name(KAFKA_INBOUND_TOPIC).partitions(1).replicas(1).build();
+    }
+
+    @Bean
+    NewTopic certificationKafkaInboundDeadLetterTopic() {
+        return TopicBuilder.name(KAFKA_INBOUND_DLT).partitions(1).replicas(1).build();
+    }
+
+    @Bean
     KafkaAdmin kafkaAdmin(RuntimeTarget target) {
         return new KafkaAdmin(Map.of(
                 ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
@@ -156,6 +185,16 @@ public class IntegrationRuntimeCertificationApplication {
     @Bean
     Queue certificationRabbitQueue() {
         return new Queue(RABBIT_QUEUE, false, false, false);
+    }
+
+    @Bean
+    Queue certificationRabbitInboundQueue() {
+        return new Queue(RABBIT_INBOUND_QUEUE, false, false, false);
+    }
+
+    @Bean
+    Queue certificationRabbitInboundDeadLetterQueue() {
+        return new Queue(RABBIT_INBOUND_DLT, false, false, false);
     }
 
     @Bean
@@ -257,6 +296,7 @@ public class IntegrationRuntimeCertificationApplication {
         SftpRemoteFileTemplate sftpTemplate =
                 context.getBean(SftpRemoteFileTemplate.class);
         RabbitTemplate rabbitTemplate = context.getBean(RabbitTemplate.class);
+        KafkaTemplate<String, String> kafkaTemplate = context.getBean(KafkaTemplate.class);
         JdbcTemplate jdbc = context.getBean(JdbcTemplate.class);
         SystemAuthenticator systemAuthenticator = context.getBean(SystemAuthenticator.class);
         MeterRegistry meterRegistry = context.getBean(MeterRegistry.class);
@@ -268,15 +308,32 @@ public class IntegrationRuntimeCertificationApplication {
                 "Generated Kafka connector blocks Spring class proxies");
         require(!Modifier.isFinal(PayrollEventPublisher.class.getModifiers()),
                 "Generated Rabbit connector blocks Spring class proxies");
-        require(tableExists(jdbc, KAFKA_TABLE) && tableExists(jdbc, RABBIT_TABLE),
-                "Generated Liquibase outbox migrations were not applied");
+        require(tableExists(jdbc, KAFKA_TABLE)
+                        && tableExists(jdbc, RABBIT_TABLE)
+                        && tableExists(jdbc, KAFKA_INBOX)
+                        && tableExists(jdbc, RABBIT_INBOX)
+                        && tableExists(jdbc, HANDLER_EFFECT),
+                "Generated Liquibase outbox/inbox migrations were not applied");
 
         jdbc.update("DELETE FROM " + KAFKA_TABLE);
         jdbc.update("DELETE FROM " + RABBIT_TABLE);
+        jdbc.update("DELETE FROM " + KAFKA_INBOX);
+        jdbc.update("DELETE FROM " + RABBIT_INBOX);
+        jdbc.update("DELETE FROM " + HANDLER_EFFECT);
         rabbitTemplate.execute(channel -> {
             channel.queuePurge(RABBIT_QUEUE);
+            channel.queuePurge(RABBIT_INBOUND_QUEUE);
+            channel.queuePurge(RABBIT_INBOUND_DLT);
             return null;
         });
+
+        InboundCertification inbound = certifyInbound(
+                context,
+                target,
+                jdbc,
+                kafkaTemplate,
+                rabbitTemplate,
+                systemAuthenticator);
 
         try (KafkaConsumer<String, String> consumer = kafkaConsumer(target)) {
             consumer.subscribe(Collections.singleton(KAFKA_TOPIC));
@@ -460,20 +517,210 @@ public class IntegrationRuntimeCertificationApplication {
                     true,
                     true,
                     true,
-                    kafkaDelivered
+                    kafkaDelivered,
+                    inbound.kafkaScenarios(),
+                    inbound.rabbitScenarios(),
+                    inbound.missingIdentityQuarantined(),
+                    inbound.conflictingIdentityRejected(),
+                    inbound.transactionalEffectsCertified()
             );
         }
     }
 
+    private static InboundCertification certifyInbound(
+            ConfigurableApplicationContext context,
+            RuntimeTarget target,
+            JdbcTemplate jdbc,
+            KafkaTemplate<String, String> kafkaTemplate,
+            RabbitTemplate rabbitTemplate,
+            SystemAuthenticator systemAuthenticator
+    ) throws Exception {
+        LoanEventConsumer kafkaConsumerConnector = context.getBean(LoanEventConsumer.class);
+        PayrollEventConsumer rabbitConsumerConnector =
+                context.getBean(PayrollEventConsumer.class);
+        LoanEventHandler handler = context.getBean(LoanEventHandler.class);
+
+        try (KafkaConsumer<String, String> dltConsumer =
+                     kafkaConsumer(target, "jvw-cert-inbound-dlt-" + UUID.randomUUID())) {
+            dltConsumer.subscribe(Collections.singleton(KAFKA_INBOUND_DLT));
+            awaitAssignment(dltConsumer);
+
+            String kafkaDuplicateId = "kafka-duplicate-1";
+            String kafkaDuplicatePayload = "ok:kafka-duplicate";
+            sendKafka(kafkaTemplate, KAFKA_INBOUND_TOPIC,
+                    kafkaDuplicateId, kafkaDuplicatePayload);
+            awaitStatus(jdbc, KAFKA_INBOX, kafkaDuplicateId, "DONE");
+            sendKafka(kafkaTemplate, KAFKA_INBOUND_TOPIC,
+                    kafkaDuplicateId, kafkaDuplicatePayload);
+            awaitCondition(
+                    () -> handler.attempts(kafkaDuplicatePayload) == 1,
+                    Duration.ofSeconds(5),
+                    "Kafka successful duplicate invoked the handler twice");
+            require(effectCount(jdbc, kafkaDuplicatePayload) == 1,
+                    "Kafka duplicate created more than one transactional business effect");
+
+            String kafkaCollisionPayload = "ok:kafka-collision";
+            sendKafka(kafkaTemplate, KAFKA_INBOUND_TOPIC,
+                    kafkaDuplicateId, kafkaCollisionPayload);
+            ConsumerRecord<String, String> kafkaCollisionDlt =
+                    receiveKafka(dltConsumer, 1, Duration.ofSeconds(15)).get(0);
+            require(kafkaCollisionPayload.equals(kafkaCollisionDlt.value()),
+                    "Kafka conflicting message identity was not routed to DLT");
+            require(status(jdbc, KAFKA_INBOX, kafkaDuplicateId).equals("DONE")
+                            && effectCount(jdbc, kafkaCollisionPayload) == 0,
+                    "Kafka identity collision overwrote a completed inbox event");
+
+            String kafkaRetryId = "kafka-retry-1";
+            String kafkaRetryPayload = "retry-once:kafka";
+            sendKafka(kafkaTemplate, KAFKA_INBOUND_TOPIC, kafkaRetryId, kafkaRetryPayload);
+            awaitStatus(jdbc, KAFKA_INBOX, kafkaRetryId, "DONE");
+            require(handler.attempts(kafkaRetryPayload) == 2
+                            && effectCount(jdbc, kafkaRetryPayload) == 1,
+                    "Kafka retry did not preserve one transactional business effect");
+
+            String kafkaPoisonId = "kafka-poison-1";
+            String kafkaPoisonPayload = "poison:kafka";
+            sendKafka(kafkaTemplate, KAFKA_INBOUND_TOPIC, kafkaPoisonId, kafkaPoisonPayload);
+            ConsumerRecord<String, String> kafkaPoisonDlt =
+                    receiveKafka(dltConsumer, 1, Duration.ofSeconds(15)).get(0);
+            awaitStatus(jdbc, KAFKA_INBOX, kafkaPoisonId, "DEAD");
+            require(kafkaPoisonPayload.equals(kafkaPoisonDlt.value())
+                            && handler.attempts(kafkaPoisonPayload) == 3
+                            && retainedPayload(jdbc, KAFKA_INBOX, kafkaPoisonId) != null,
+                    "Kafka poison message retry, DLT, or terminal retention failed");
+
+            long kafkaDeadBeforeMissing = countStatus(jdbc, KAFKA_INBOX, "DEAD");
+            sendKafka(kafkaTemplate, KAFKA_INBOUND_TOPIC, null, "missing-id:kafka");
+            ConsumerRecord<String, String> kafkaMissingDlt =
+                    receiveKafka(dltConsumer, 1, Duration.ofSeconds(15)).get(0);
+            awaitCondition(
+                    () -> countStatus(jdbc, KAFKA_INBOX, "DEAD")
+                            == kafkaDeadBeforeMissing + 1,
+                    Duration.ofSeconds(15),
+                    "Kafka missing-ID message was not quarantined");
+            require(outboxId(kafkaMissingDlt).startsWith("quarantine-"),
+                    "Kafka missing-ID DLT record lacks a non-forgeable quarantine identity");
+
+            handler.releasePoison(kafkaPoisonPayload);
+            systemAuthenticator.runWithSystem(() ->
+                    kafkaConsumerConnector.replay(
+                            kafkaPoisonId, "certified Kafka poison replay"));
+            awaitStatus(jdbc, KAFKA_INBOX, kafkaPoisonId, "DONE");
+            require(effectCount(jdbc, kafkaPoisonPayload) == 1,
+                    "Kafka replay did not create exactly one transactional business effect");
+        }
+
+        String rabbitDuplicateId = "rabbit-duplicate-1";
+        String rabbitDuplicatePayload = "ok:rabbit-duplicate";
+        sendRabbit(rabbitTemplate, RABBIT_INBOUND_QUEUE,
+                rabbitDuplicateId, rabbitDuplicatePayload);
+        awaitStatus(jdbc, RABBIT_INBOX, rabbitDuplicateId, "DONE");
+        sendRabbit(rabbitTemplate, RABBIT_INBOUND_QUEUE,
+                rabbitDuplicateId, rabbitDuplicatePayload);
+        awaitCondition(
+                () -> handler.attempts(rabbitDuplicatePayload) == 1,
+                Duration.ofSeconds(5),
+                "Rabbit successful duplicate invoked the handler twice");
+        require(effectCount(jdbc, rabbitDuplicatePayload) == 1,
+                "Rabbit duplicate created more than one transactional business effect");
+
+        String rabbitCollisionPayload = "ok:rabbit-collision";
+        sendRabbit(rabbitTemplate, RABBIT_INBOUND_QUEUE,
+                rabbitDuplicateId, rabbitCollisionPayload);
+        require(rabbitCollisionPayload.equals(
+                        receiveRabbit(rabbitTemplate, RABBIT_INBOUND_DLT, 1).get(0)),
+                "Rabbit conflicting message identity was not routed to DLT");
+        require(status(jdbc, RABBIT_INBOX, rabbitDuplicateId).equals("DONE")
+                        && effectCount(jdbc, rabbitCollisionPayload) == 0,
+                "Rabbit identity collision overwrote a completed inbox event");
+
+        String rabbitRetryId = "rabbit-retry-1";
+        String rabbitRetryPayload = "retry-once:rabbit";
+        sendRabbit(rabbitTemplate, RABBIT_INBOUND_QUEUE, rabbitRetryId, rabbitRetryPayload);
+        awaitStatus(jdbc, RABBIT_INBOX, rabbitRetryId, "DONE");
+        require(handler.attempts(rabbitRetryPayload) == 2
+                        && effectCount(jdbc, rabbitRetryPayload) == 1,
+                "Rabbit retry did not preserve one transactional business effect");
+
+        String rabbitPoisonId = "rabbit-poison-1";
+        String rabbitPoisonPayload = "poison:rabbit";
+        sendRabbit(rabbitTemplate, RABBIT_INBOUND_QUEUE, rabbitPoisonId, rabbitPoisonPayload);
+        require(rabbitPoisonPayload.equals(
+                        receiveRabbit(rabbitTemplate, RABBIT_INBOUND_DLT, 1).get(0)),
+                "Rabbit poison message was not routed to DLT");
+        awaitStatus(jdbc, RABBIT_INBOX, rabbitPoisonId, "DEAD");
+        require(handler.attempts(rabbitPoisonPayload) == 3
+                        && retainedPayload(jdbc, RABBIT_INBOX, rabbitPoisonId) != null,
+                "Rabbit poison retry or terminal payload retention failed");
+
+        long rabbitDeadBeforeMissing = countStatus(jdbc, RABBIT_INBOX, "DEAD");
+        sendRabbit(rabbitTemplate, RABBIT_INBOUND_QUEUE, null, "missing-id:rabbit");
+        require("missing-id:rabbit".equals(
+                        receiveRabbit(rabbitTemplate, RABBIT_INBOUND_DLT, 1).get(0)),
+                "Rabbit missing-ID message was not routed to DLT");
+        awaitCondition(
+                () -> countStatus(jdbc, RABBIT_INBOX, "DEAD")
+                        == rabbitDeadBeforeMissing + 1,
+                Duration.ofSeconds(15),
+                "Rabbit missing-ID message was not quarantined");
+
+        handler.releasePoison(rabbitPoisonPayload);
+        systemAuthenticator.runWithSystem(() ->
+                rabbitConsumerConnector.replay(
+                        rabbitPoisonId, "certified Rabbit poison replay"));
+        awaitStatus(jdbc, RABBIT_INBOX, rabbitPoisonId, "DONE");
+        require(effectCount(jdbc, rabbitPoisonPayload) == 1,
+                "Rabbit replay did not create exactly one transactional business effect");
+
+        return new InboundCertification(6, 6, true, true, true);
+    }
+
     private static KafkaConsumer<String, String> kafkaConsumer(RuntimeTarget target) {
+        return kafkaConsumer(target, "jvw-cert-" + UUID.randomUUID());
+    }
+
+    private static KafkaConsumer<String, String> kafkaConsumer(
+            RuntimeTarget target,
+            String groupId
+    ) {
         Properties properties = new Properties();
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, target.kafkaBootstrap());
-        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "jvw-cert-" + UUID.randomUUID());
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         return new KafkaConsumer<>(properties);
+    }
+
+    private static void sendKafka(
+            KafkaTemplate<String, String> template,
+            String topic,
+            String messageId,
+            String payload
+    ) throws Exception {
+        ProducerRecord<String, String> record = new ProducerRecord<>(topic, payload);
+        if (messageId != null) {
+            record.headers().add(
+                    "jvw-outbox-id",
+                    messageId.getBytes(StandardCharsets.UTF_8));
+        }
+        template.send(record).get();
+    }
+
+    private static void sendRabbit(
+            RabbitTemplate template,
+            String queue,
+            String messageId,
+            String payload
+    ) {
+        template.convertAndSend(queue, payload, message -> {
+            if (messageId != null) {
+                message.getMessageProperties().setMessageId(messageId);
+                message.getMessageProperties().setHeader("jvw-outbox-id", messageId);
+            }
+            return message;
+        });
     }
 
     private static void awaitAssignment(KafkaConsumer<String, String> consumer) {
@@ -505,13 +752,46 @@ public class IntegrationRuntimeCertificationApplication {
     }
 
     private static List<String> receiveRabbit(RabbitTemplate template, int expected) {
+        return receiveRabbit(template, RABBIT_QUEUE, expected);
+    }
+
+    private static List<String> receiveRabbit(
+            RabbitTemplate template,
+            String queue,
+            int expected
+    ) {
         List<String> values = new ArrayList<>();
         for (int index = 0; index < expected; index++) {
-            Object value = template.receiveAndConvert(RABBIT_QUEUE, 10_000);
+            Object value = template.receiveAndConvert(queue, 10_000);
             require(value instanceof String, "RabbitMQ message was missing or had the wrong type");
             values.add((String) value);
         }
         return values;
+    }
+
+    private static void awaitStatus(
+            JdbcTemplate jdbc,
+            String table,
+            String id,
+            String expected
+    ) throws InterruptedException {
+        awaitCondition(
+                () -> expected.equals(statusOrNull(jdbc, table, id)),
+                Duration.ofSeconds(15),
+                "Timed out waiting for " + table + " event " + id
+                        + " to reach " + expected);
+    }
+
+    private static void awaitCondition(
+            BooleanSupplier condition,
+            Duration timeout,
+            String failureMessage
+    ) throws InterruptedException {
+        Instant deadline = Instant.now().plus(timeout);
+        while (!condition.getAsBoolean() && Instant.now().isBefore(deadline)) {
+            Thread.sleep(50);
+        }
+        require(condition.getAsBoolean(), failureMessage);
     }
 
     private static void setProxy(RuntimeTarget target, String proxy, boolean enabled)
@@ -642,6 +922,38 @@ public class IntegrationRuntimeCertificationApplication {
                 "SELECT status FROM " + table + " WHERE id = ?", String.class, id);
     }
 
+    private static String statusOrNull(JdbcTemplate jdbc, String table, String id) {
+        List<String> statuses = jdbc.query(
+                "SELECT status FROM " + table + " WHERE id = ?",
+                (resultSet, rowNumber) -> resultSet.getString(1),
+                id);
+        return statuses.size() == 1 ? statuses.get(0) : null;
+    }
+
+    private static long countStatus(JdbcTemplate jdbc, String table, String status) {
+        Long value = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM " + table + " WHERE status = ?",
+                Long.class,
+                status);
+        return value == null ? 0L : value;
+    }
+
+    private static long effectCount(JdbcTemplate jdbc, String payload) {
+        Long value = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM " + HANDLER_EFFECT + " WHERE payload = ?",
+                Long.class,
+                payload);
+        return value == null ? 0L : value;
+    }
+
+    private static String retainedPayload(JdbcTemplate jdbc, String table, String id) {
+        List<String> payloads = jdbc.query(
+                "SELECT payload FROM " + table + " WHERE id = ?",
+                (resultSet, rowNumber) -> resultSet.getString(1),
+                id);
+        return payloads.size() == 1 ? payloads.get(0) : null;
+    }
+
     private static int attempts(JdbcTemplate jdbc, String table, String id) {
         Integer value = jdbc.queryForObject(
                 "SELECT attempts FROM " + table + " WHERE id = ?", Integer.class, id);
@@ -764,6 +1076,15 @@ public class IntegrationRuntimeCertificationApplication {
         }
     }
 
+    record InboundCertification(
+            int kafkaScenarios,
+            int rabbitScenarios,
+            boolean missingIdentityQuarantined,
+            boolean conflictingIdentityRejected,
+            boolean transactionalEffectsCertified
+    ) {
+    }
+
     record CertificationEvidence(
             String cellId,
             String jmixVersion,
@@ -781,7 +1102,12 @@ public class IntegrationRuntimeCertificationApplication {
             boolean stableIdempotencyIdCertified,
             boolean sftpAtomicTransferCertified,
             boolean httpProviderContractCertified,
-            double kafkaDeliveredMetric
+            double kafkaDeliveredMetric,
+            int inboundKafkaScenarios,
+            int inboundRabbitScenarios,
+            boolean missingIdentityQuarantined,
+            boolean conflictingIdentityRejected,
+            boolean transactionalEffectsCertified
     ) {
         void write(Path file) throws Exception {
             Files.createDirectories(file.getParent());
@@ -790,7 +1116,7 @@ public class IntegrationRuntimeCertificationApplication {
 
         String toJson() {
             return "{"
-                    + "\"schemaVersion\":\"integration-runtime-certification-v2\","
+                    + "\"schemaVersion\":\"integration-runtime-certification-v3\","
                     + "\"cellId\":\"" + escape(cellId) + "\","
                     + "\"jmixVersion\":\"" + escape(jmixVersion) + "\","
                     + "\"runtimeJava\":" + runtimeJava + ","
@@ -810,7 +1136,15 @@ public class IntegrationRuntimeCertificationApplication {
                     + sftpAtomicTransferCertified + ","
                     + "\"httpProviderContractCertified\":"
                     + httpProviderContractCertified + ","
-                    + "\"kafkaDeliveredMetric\":" + kafkaDeliveredMetric
+                    + "\"kafkaDeliveredMetric\":" + kafkaDeliveredMetric + ","
+                    + "\"inboundKafkaScenarios\":" + inboundKafkaScenarios + ","
+                    + "\"inboundRabbitScenarios\":" + inboundRabbitScenarios + ","
+                    + "\"missingIdentityQuarantined\":"
+                    + missingIdentityQuarantined + ","
+                    + "\"conflictingIdentityRejected\":"
+                    + conflictingIdentityRejected + ","
+                    + "\"transactionalEffectsCertified\":"
+                    + transactionalEffectsCertified
                     + "}";
         }
 
