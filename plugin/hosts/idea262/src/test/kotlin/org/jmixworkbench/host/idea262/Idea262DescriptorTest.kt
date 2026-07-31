@@ -23,6 +23,8 @@ class Idea262DescriptorTest {
         )
         assertTrue(descriptor.contains("org.jmixworkbench.project.JmixTemplateCatalogConfigurable"))
         assertTrue(descriptor.contains("org.jmixworkbench.project.JmixTemplateCatalogSigningProvider"))
+        assertTrue(descriptor.contains("org.jmixworkbench.services.JmixProjectPropertiesService"))
+        assertTrue(descriptor.contains("""id="JmixWorkbench.OpenProjectProperties""""))
         assertTrue(
             Regex(
                 """<fileEditorProvider\s+implementation="org\.jmixworkbench\.editor\.JmixFlowUiFileEditorProvider"\s*/>""",

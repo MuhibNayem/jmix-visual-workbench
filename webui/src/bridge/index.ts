@@ -41,6 +41,7 @@ import type {
   GraphSourceLocator,
   IntegrationConnectorModel,
   IntegrationConnectorWorkspaceResponse,
+  JmixProjectPropertiesWorkspace,
   JmixFlowUiHotDeployRequest,
   JmixRuntimeActionResponse,
   JmixRuntimeInspectionResponse,
@@ -86,6 +87,7 @@ import {
   developmentDmnDecisionWorkspace,
   developmentFlowUiWorkspace,
   developmentIntegrationConnectorWorkspace,
+  developmentProjectPropertiesWorkspace,
   developmentProjectConfig,
   developmentRestApiWorkspace,
   developmentScenarioWorkspace,
@@ -219,6 +221,8 @@ class Bridge {
             switch (action) {
               case 'getApplicationGraph':
                 return developmentApplicationGraph
+              case 'getProjectPropertiesWorkspace':
+                return developmentProjectPropertiesWorkspace
               case 'getScenarioWorkspace':
                 return developmentScenarioWorkspace
               case 'getVisualLogicWorkspace':
@@ -2651,6 +2655,10 @@ ${javaMethods}
 
   getProjectConfig() {
     return this.request<ProjectConfig>('getProjectConfig')
+  }
+
+  getProjectPropertiesWorkspace() {
+    return this.request<JmixProjectPropertiesWorkspace>('getProjectPropertiesWorkspace')
   }
 
   getApplicationGraph(forceRefresh: boolean = false) {

@@ -21,6 +21,7 @@ enum class WorkbenchSurface {
     ENTITY_DESIGNER,
     VIEW_DESIGNER,
     CRUD_DESIGNER,
+    PROJECT_PROPERTIES,
 }
 
 data class WorkbenchSurfaceOpenRequest(

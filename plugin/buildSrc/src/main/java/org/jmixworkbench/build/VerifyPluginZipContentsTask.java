@@ -219,6 +219,16 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
         );
         requireEntry(
                 contents,
+                "org/jmixworkbench/services/JmixProjectPropertiesService.class",
+                archive
+        );
+        requireEntry(
+                contents,
+                "org/jmixworkbench/actions/OpenProjectPropertiesAction.class",
+                archive
+        );
+        requireEntry(
+                contents,
                 "org/jmixworkbench/actions/InjectJmixRepositoryAction.class",
                 archive
         );
@@ -288,6 +298,13 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 descriptor,
                 "projectService",
                 "serviceImplementation",
+                "org.jmixworkbench.services.JmixProjectPropertiesService",
+                archive
+        );
+        requireExtensionRegistration(
+                descriptor,
+                "projectService",
+                "serviceImplementation",
                 "org.jmixworkbench.services.RepositoryMethodRefactorService",
                 archive
         );
@@ -303,6 +320,13 @@ public abstract class VerifyPluginZipContentsTask extends DefaultTask implements
                 "JmixWorkbench.InjectRepository",
                 "org.jmixworkbench.actions.InjectJmixRepositoryAction",
                 "GenerateGroup",
+                archive
+        );
+        requireActionRegistration(
+                descriptor,
+                "JmixWorkbench.OpenProjectProperties",
+                "org.jmixworkbench.actions.OpenProjectPropertiesAction",
+                "ToolsMenu",
                 archive
         );
         if ("idea253".equals(lane)) {

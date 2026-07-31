@@ -4,6 +4,7 @@ import type {
   FlowUiElementSnapshot,
   FlowUiWorkspaceResponse,
   IntegrationConnectorWorkspaceResponse,
+  JmixProjectPropertiesWorkspace,
   ProjectConfig,
   RestApiWorkspaceResponse,
   ScenarioWorkspaceResponse,
@@ -27,6 +28,55 @@ export const developmentProjectConfig: ProjectConfig = {
   jmixVersion: '2.7',
   projectId: 'payroll',
   databaseType: 'PostgreSQL',
+}
+
+export const developmentProjectPropertiesWorkspace: JmixProjectPropertiesWorkspace = {
+  jmixVersion: '2.8.2',
+  jmixVersionConfidence: 'STRONG',
+  observedJmixVersions: ['2.8.2'],
+  targetJava: 21,
+  targetJavaConfidence: 'STRONG',
+  observedTargetJavaVersions: [21],
+  addOns: [
+    {
+      coordinate: 'io.jmix.flowui:jmix-flowui-starter:2.8.2',
+      kind: 'PUBLIC',
+      sourceKind: 'STATIC_BUILD_FILE',
+      sourceId: 'build.gradle',
+    },
+  ],
+  buildFiles: [locator('build.gradle'), locator('loan/build.gradle')],
+  settingsFiles: [locator('settings.gradle')],
+  profiles: [
+    {
+      modulePath: '',
+      profile: 'default',
+      locator: locator('src/main/resources/application.properties'),
+      serverPort: '8080',
+      contextPath: '/payroll',
+      availableLocales: ['en', 'bn'],
+      stores: [
+        {
+          name: 'main',
+          declaredAdditional: true,
+          url: 'jdbc:postgresql://localhost/payroll',
+          username: 'payroll',
+          passwordConfigured: true,
+          passwordUsesPlaceholder: true,
+          liquibaseChangeLog: 'com/company/payroll/liquibase/changelog.xml',
+        },
+      ],
+      properties: [
+        {
+          key: 'main.datasource.password',
+          displayValue: '${DB_PASSWORD:••••••••}',
+          secret: true,
+        },
+      ],
+    },
+  ],
+  issues: [],
+  snapshotDigest: 'development-project-properties',
 }
 
 export const developmentApplicationGraph: ApplicationGraphResponse = {

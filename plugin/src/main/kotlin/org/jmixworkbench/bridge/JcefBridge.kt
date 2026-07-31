@@ -95,6 +95,7 @@ import org.jmixworkbench.services.JmixFlowUiHotDeployRequest
 import org.jmixworkbench.services.JmixRuntimeInspectionRequest
 import org.jmixworkbench.services.JmixRuntimeOpenPreviewRequest
 import org.jmixworkbench.services.JmixRuntimeService
+import org.jmixworkbench.services.JmixProjectPropertiesService
 import org.jmixworkbench.services.PreparedWorkspaceChange
 import org.jmixworkbench.services.PreparedSourceNavigation
 import org.jmixworkbench.services.SourceNavigationRequest
@@ -245,6 +246,10 @@ class JcefBridge(
 
             if (action == "getApplicationGraph") {
                 handleGetApplicationGraph(action, requestId, payload)
+                return
+            }
+            if (action == "getProjectPropertiesWorkspace") {
+                handleGetProjectPropertiesWorkspace(action, requestId)
                 return
             }
             if (action == "getMenuWorkspace") {
@@ -761,6 +766,21 @@ class JcefBridge(
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
         ReadAction.nonBlocking<org.jmixworkbench.services.ApplicationGraphResponse> {
             ApplicationGraphService.getInstance(project).graph(forceRefresh)
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { result ->
+                sendResponse(action, requestId, gson.toJson(result))
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    private fun handleGetProjectPropertiesWorkspace(
+        action: String,
+        requestId: String?,
+    ) {
+        ReadAction.nonBlocking<org.jmixworkbench.services.JmixProjectPropertiesWorkspace> {
+            JmixProjectPropertiesService.getInstance(project).inspect()
         }
             .inSmartMode(project)
             .expireWith(project)

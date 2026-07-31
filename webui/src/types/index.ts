@@ -1162,6 +1162,64 @@ export interface ProjectConfig {
   databaseType: string
 }
 
+export type ProjectEvidenceConfidence = 'EXACT' | 'STRONG' | 'WEAK' | 'CONFLICTING'
+
+export interface ProjectPropertiesIssue {
+  code: string
+  message: string
+  relativePath?: string
+}
+
+export interface ProjectAddOnSnapshot {
+  coordinate: string
+  kind: 'PUBLIC' | 'THIRD_PARTY' | 'INTERNAL'
+  sourceKind: string
+  sourceId: string
+}
+
+export interface ProjectApplicationPropertySnapshot {
+  key: string
+  displayValue: string
+  secret: boolean
+}
+
+export interface ProjectDataStorePropertySnapshot {
+  name: string
+  declaredAdditional: boolean
+  url?: string
+  username?: string
+  passwordConfigured: boolean
+  passwordUsesPlaceholder: boolean
+  driverClassName?: string
+  liquibaseChangeLog?: string
+}
+
+export interface ProjectApplicationProfileSnapshot {
+  modulePath: string
+  profile: string
+  locator: GraphSourceLocator
+  serverPort?: string
+  contextPath?: string
+  availableLocales: string[]
+  stores: ProjectDataStorePropertySnapshot[]
+  properties: ProjectApplicationPropertySnapshot[]
+}
+
+export interface JmixProjectPropertiesWorkspace {
+  jmixVersion?: string
+  jmixVersionConfidence: ProjectEvidenceConfidence
+  observedJmixVersions: string[]
+  targetJava?: number
+  targetJavaConfidence: ProjectEvidenceConfidence
+  observedTargetJavaVersions: number[]
+  addOns: ProjectAddOnSnapshot[]
+  buildFiles: GraphSourceLocator[]
+  settingsFiles: GraphSourceLocator[]
+  profiles: ProjectApplicationProfileSnapshot[]
+  issues: ProjectPropertiesIssue[]
+  snapshotDigest: string
+}
+
 // ─── Connected Application Graph ─────────────────────────────────────────────
 
 export interface GraphSourceLocator {
@@ -1180,6 +1238,7 @@ export interface WorkbenchLaunchContext {
     | 'ENTITY_DESIGNER'
     | 'VIEW_DESIGNER'
     | 'CRUD_DESIGNER'
+    | 'PROJECT_PROPERTIES'
   sourceLocator?: GraphSourceLocator
 }
 

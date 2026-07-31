@@ -41,6 +41,7 @@
                     icon="/icons/workbench.svg"/>
 
         <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectPropertiesService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.ApplicationGraphService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.WorkspaceChangeService"/>
         <projectService serviceImplementation="org.jmixworkbench.services.FlowUiWorkspaceService"/>
@@ -209,6 +210,13 @@
                 class="org.jmixworkbench.actions.OpenDesignerAction"
                 text="Open Jmix Visual Workbench"
                 description="Open the Jmix Visual Workbench">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+
+        <action id="JmixWorkbench.OpenProjectProperties"
+                class="org.jmixworkbench.actions.OpenProjectPropertiesAction"
+                text="Jmix Project Configuration"
+                description="Inspect the effective Jmix project, profiles, locales, add-ons and data stores">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
 

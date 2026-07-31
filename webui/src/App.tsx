@@ -11,6 +11,7 @@ import RoleDesigner from './components/RoleDesigner/RoleDesigner'
 import WorkflowDesigner from './components/WorkflowDesigner/WorkflowDesigner'
 import MigrationPanel from './components/MigrationPanel/MigrationPanel'
 import ProjectMap from './components/ProjectMap/ProjectMap'
+import ProjectProperties from './components/ProjectProperties/ProjectProperties'
 import ApiDesigner from './components/ApiDesigner/ApiDesigner'
 import IntegrationDesigner from './components/IntegrationDesigner/IntegrationDesigner'
 import ScenarioDesigner from './components/ScenarioDesigner/ScenarioDesigner'
@@ -19,6 +20,7 @@ import RuleDesigner from './components/RuleDesigner/RuleDesigner'
 import Toast from './components/shared/Toast'
 
 const workspaces: { id: ActiveTab; label: string; icon: string }[] = [
+  { id: 'projectProperties', label: 'Project Configuration', icon: '⚙' },
   { id: 'projectMap', label: 'Application Map', icon: '◎' },
   { id: 'entity', label: 'Entity Designer', icon: '◆' },
   { id: 'view', label: 'View Designer', icon: '▦' },
@@ -131,6 +133,9 @@ export default function App() {
               }
             })
           break
+        case 'PROJECT_PROPERTIES':
+          setActiveTab('projectProperties')
+          break
       }
     }
     applyLaunchContext(bridge.getLaunchContext())
@@ -234,6 +239,7 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {activeTab === 'projectProperties' && <ProjectProperties />}
         {activeTab === 'projectMap' && <ProjectMap />}
         {activeTab === 'entity' && <EntityDesigner key={entityDesignerKey} />}
         {activeTab === 'view' && <ViewDesigner />}

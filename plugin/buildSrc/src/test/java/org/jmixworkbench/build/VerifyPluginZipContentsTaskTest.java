@@ -135,6 +135,35 @@ class VerifyPluginZipContentsTaskTest {
     }
 
     @Test
+    void rejectsAPluginWhosePackagedDescriptorOmitsProjectPropertiesWorkspace() throws Exception {
+        byte[] pluginJar = validPluginJar();
+        byte[] withoutProjectProperties = rewriteNestedEntry(
+                pluginJar,
+                "META-INF/plugin.xml",
+                text(pluginJar, "META-INF/plugin.xml")
+                        .replace(
+                                "<projectService serviceImplementation=\"org.jmixworkbench.services.JmixProjectPropertiesService\" />",
+                                ""
+                        )
+                        .replace(
+                                "<action id=\"JmixWorkbench.OpenProjectProperties\" "
+                                        + "class=\"org.jmixworkbench.actions.OpenProjectPropertiesAction\">"
+                                        + "<add-to-group group-id=\"ToolsMenu\"/></action>",
+                                ""
+                        )
+        );
+        Path archive = writeArchive("missing-project-properties.zip", Map.of(
+                "plugin/lib/main.jar", withoutProjectProperties
+        ));
+
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> VerifyPluginZipContentsTask.inspectArchive(archive, "idea253")
+        );
+        assertTrue(error.getMessage().contains("JmixProjectPropertiesService"));
+    }
+
+    @Test
     void rejectsAPluginWhosePackagedDescriptorOmitsRepositoryMethodRefactoring() throws Exception {
         byte[] pluginJar = validPluginJar();
         byte[] withoutRefactorService = rewriteNestedEntry(
@@ -204,10 +233,14 @@ class VerifyPluginZipContentsTaskTest {
                         + "<fileEditorProvider implementation=\"org.jmixworkbench.editor.JmixEntityFileEditorProvider\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.toolwindow.WorkbenchNavigationService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.EntityEventListenerService\" />"
+                        + "<projectService serviceImplementation=\"org.jmixworkbench.services.JmixProjectPropertiesService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.RepositoryMethodRefactorService\" />"
                         + "<projectService serviceImplementation=\"org.jmixworkbench.services.AggregateUpdateServiceChangeService\" />"
                         + "</extensions>"
-                        + "<actions><action id=\"JmixWorkbench.InjectRepository\" "
+                        + "<actions><action id=\"JmixWorkbench.OpenProjectProperties\" "
+                        + "class=\"org.jmixworkbench.actions.OpenProjectPropertiesAction\">"
+                        + "<add-to-group group-id=\"ToolsMenu\"/></action>"
+                        + "<action id=\"JmixWorkbench.InjectRepository\" "
                         + "class=\"org.jmixworkbench.actions.InjectJmixRepositoryAction\">"
                         + "<add-to-group group-id=\"GenerateGroup\"/></action></actions>"
                         + "<idea-version since-build=\"253\" until-build=\"253.*\"/></idea-plugin>"
@@ -263,6 +296,14 @@ class VerifyPluginZipContentsTaskTest {
         );
         entries.put(
                 "org/jmixworkbench/services/EntityEventListenerService.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/services/JmixProjectPropertiesService.class",
+                new byte[]{0, 1, 2}
+        );
+        entries.put(
+                "org/jmixworkbench/actions/OpenProjectPropertiesAction.class",
                 new byte[]{0, 1, 2}
         );
         entries.put(

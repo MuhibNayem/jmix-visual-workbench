@@ -30,6 +30,21 @@ class OpenDesignerAction : AnAction() {
 }
 
 /**
+ * Opens the revision-bound project configuration workspace.
+ */
+class OpenProjectPropertiesAction : AnAction() {
+    override fun actionPerformed(e: AnActionEvent) {
+        openWorkbench(e, WorkbenchSurface.PROJECT_PROPERTIES)
+    }
+
+    override fun update(e: AnActionEvent) {
+        val project = e.project
+        e.presentation.isEnabledAndVisible = project != null &&
+            JmixProjectService.getInstance(project).isJmixProject()
+    }
+}
+
+/**
  * Opens the Entity Designer tab in the tool window.
  */
 class NewEntityAction : AnAction() {

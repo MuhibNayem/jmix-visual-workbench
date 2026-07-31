@@ -609,6 +609,12 @@ val verifyNativeIndexArchitecture = tasks.register("verifyNativeIndexArchitectur
             check("org.jmixworkbench.project.JmixTemplateCatalogSigningProvider" in descriptorText) {
                 "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register enterprise template signing."
             }
+            check("org.jmixworkbench.services.JmixProjectPropertiesService" in descriptorText) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register project configuration discovery."
+            }
+            check("JmixWorkbench.OpenProjectProperties" in descriptorText) {
+                "${descriptor.relativeTo(layout.projectDirectory.asFile)} must register native project configuration access."
+            }
             check(
                 """<projectService serviceImplementation="org.jmixworkbench.toolwindow.WorkbenchNavigationService"/>""" in
                     descriptorText,

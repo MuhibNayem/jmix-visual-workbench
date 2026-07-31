@@ -118,13 +118,13 @@ nested ZIP verifier enforce these requirements.
 
 ## Release evidence
 
-The final clean `phase1Check` release gate passed in 8 minutes 25 seconds on
+The final clean `phase1Check` release gate passed in 7 minutes 24 seconds on
 2026-07-31:
 
 | Host | Regression + smoke tests | Plugin Verifier | Installable ZIP SHA-256 |
 |---|---:|---|---|
-| IntelliJ IDEA 2025.3 | 357 passed (354 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `a08b172417c0e930f03fb6cc04aadfaa3d4606600ec027e3ec06437eb84d5610` |
-| IntelliJ IDEA 2026.2 | 357 passed (354 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `0600d17a2697de3c191f7f436306c7363cceb468f86174dc340315b2c1c5e482` |
+| IntelliJ IDEA 2025.3 | 360 passed (357 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `85e741da504900ec32bf2ebccb38b5e241acb404867a0eae12477b32ea4ebf4a` |
+| IntelliJ IDEA 2026.2 | 360 passed (357 regression + 3 smoke), 0 skipped/failed/error | Compatible; no internal API usage | `4cb0282b159be4e743975d9bd2e437cc815fdfbc7efd2565ecbdc6b80f422767` |
 
 The same gate passed strict dependency verification, generated-code
 compatibility for all four Jmix/JDK cells, mutation/index architecture checks,
