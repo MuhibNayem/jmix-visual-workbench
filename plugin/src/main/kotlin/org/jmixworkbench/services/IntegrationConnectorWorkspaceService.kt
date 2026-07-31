@@ -25,6 +25,8 @@ import org.jmixworkbench.model.IntegrationAuthenticationKind
 import org.jmixworkbench.model.IntegrationConnectorKind
 import org.jmixworkbench.model.IntegrationConnectorModel
 import org.jmixworkbench.model.IntegrationDiagnosticSeverity
+import org.jmixworkbench.model.IntegrationJsonApi
+import org.jmixworkbench.model.IntegrationObservabilityApi
 import java.util.Base64
 
 /**
@@ -42,12 +44,14 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
     fun load(forceRefresh: Boolean = false): IntegrationConnectorWorkspaceResponse {
         val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh)
         val destinations = destinations(graph)
+        val schema = SchemaWorkspaceService.getInstance(project).load(forceRefresh)
         return IntegrationConnectorWorkspaceResponse(
             graphDigest = graph.snapshotDigest,
             destinations = destinations,
             defaultDestinationId = destinations.firstOrNull(IntegrationConnectorDestinationSnapshot::recommended)?.id,
             contextArtifacts = graph.artifacts.filter { it.kind in CONTEXT_KINDS },
             oauth2Managers = oauth2Managers(graph),
+            dataStores = schema.stores,
             existingDocuments = discoverExisting(destinations),
             issues = buildList {
                 if (!graph.indexHealth.complete) {
@@ -66,6 +70,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                         ),
                     )
                 }
+                addAll(schema.issues)
             },
         )
     }
@@ -110,21 +115,26 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 "JVW-INTEGRATION-DESTINATION-INVALID",
                 "The selected module destination is no longer available. Refresh the workspace.",
             )
-        val validation = IntegrationConnectorGenerator.validate(model, destination.capabilities)
+        val normalized = normalizeBackendContracts(model, destination)
+        val schema = SchemaWorkspaceService.getInstance(project).load()
+        val selectedStore = normalized.reliability.outbox
+            ?.takeIf { normalized.reliability.outboxEnabled }
+            ?.let { outbox -> schema.stores.firstOrNull { it.id == outbox.storeId } }
+        val validation = IntegrationConnectorGenerator.validate(normalized, destination.capabilities)
         val issues = validation.diagnostics
             .filter { it.severity == IntegrationDiagnosticSeverity.ERROR }
             .map { WorkspaceChangeIssue(it.code, it.message) }
             .toMutableList()
         if (
-            model.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS &&
-            oauth2Managers(graph).none { it.beanName == model.authentication.authorizedClientManagerBeanName }
+            normalized.authentication.kind == IntegrationAuthenticationKind.OAUTH2_CLIENT_CREDENTIALS &&
+            oauth2Managers(graph).none { it.beanName == normalized.authentication.authorizedClientManagerBeanName }
         ) {
             issues += WorkspaceChangeIssue(
                 "JVW-INTEGRATION-OAUTH-MANAGER-NOT-INDEXED",
                 "The selected OAuth2AuthorizedClientManager bean is not present in the current application graph.",
             )
         }
-        if (model.kind in CONSUMER_KINDS) {
+        if (normalized.kind in CONSUMER_KINDS) {
             val indexedHandlers = graph.artifacts.filter {
                 it.kind in setOf(
                     ArtifactKind.SERVICE,
@@ -134,16 +144,62 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     ArtifactKind.SOURCE_TYPE,
                 )
             }.flatMap { listOf(it.semanticKey, it.displayName) }.toSet()
-            if (model.handlerBeanClass !in indexedHandlers) {
+            if (normalized.handlerBeanClass !in indexedHandlers) {
                 issues += WorkspaceChangeIssue(
                     "JVW-INTEGRATION-HANDLER-NOT-INDEXED",
                     "The selected inbound handler type is not present in the current application graph.",
                 )
             }
         }
+        if (normalized.reliability.outboxEnabled) {
+            if (selectedStore == null) {
+                issues += WorkspaceChangeIssue(
+                    "JVW-INTEGRATION-OUTBOX-STORE-NOT-INDEXED",
+                    "The selected outbox data store is not present in the current schema index.",
+                )
+            } else if (selectedStore.moduleId != destination.moduleId) {
+                issues += WorkspaceChangeIssue(
+                    "JVW-INTEGRATION-OUTBOX-STORE-CROSS-MODULE",
+                    "The durable outbox must use a data store owned by the connector's module.",
+                )
+            } else if (selectedStore.rootChangelogPath == null || selectedStore.generatedDirectory == null) {
+                issues += WorkspaceChangeIssue(
+                    "JVW-INTEGRATION-OUTBOX-STORE-NOT-MIGRATABLE",
+                    "The selected data store has no source-safe Liquibase root and generated migration directory.",
+                    selectedStore.rootChangelogPath,
+                )
+            }
+        }
         if (issues.isNotEmpty()) return IntegrationConnectorProposal(null, issues.distinct().sortedBy(WorkspaceChangeIssue::code))
 
-        val stored = model.copy(sourceLocator = null)
+        var stored = normalized.copy(sourceLocator = null)
+        var migrationChanges = emptyList<WorkspaceFileChange>()
+        if (normalized.sourceLocator == null && stored.reliability.outboxEnabled) {
+            val outbox = requireNotNull(stored.reliability.outbox)
+            if (outbox.migrationPath == null) {
+                val migrationProposal = SchemaWorkspaceService.getInstance(project).migrationProposal(
+                    SchemaMigrationChangeRequest(
+                        storeId = outbox.storeId,
+                        migration = IntegrationConnectorGenerator.outboxMigration(stored),
+                        fileName = "jvw-${stored.beanName}-outbox.xml",
+                    ),
+                )
+                val migrationChangeSet = migrationProposal.changeSet
+                    ?: return IntegrationConnectorProposal(null, migrationProposal.issues)
+                val migrationFile = migrationChangeSet.files.singleOrNull {
+                    it.mode == WorkspaceFileChangeMode.CREATE && it.relativePath.endsWith(".xml")
+                } ?: return rejected(
+                    "JVW-INTEGRATION-OUTBOX-MIGRATION-MISSING",
+                    "Schema planning did not produce exactly one durable outbox migration.",
+                )
+                stored = stored.copy(
+                    reliability = stored.reliability.copy(
+                        outbox = outbox.copy(migrationPath = migrationFile.relativePath),
+                    ),
+                )
+                migrationChanges = migrationChangeSet.files
+            }
+        }
         val encoded = IntegrationConnectorGenerator.encode(stored)
         val generated = IntegrationConnectorGenerator.generate(stored, encoded)
         javaSyntaxError("${model.className}.java", generated.javaSource)?.let { syntax ->
@@ -152,20 +208,50 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 "Generated Java is not syntactically valid: ${syntax.errorDescription}",
             )
         }
-        val javaPath = javaPath(destination, model)
-        val policyPath = policyPath(destination, model.beanName)
-        val changes = if (model.sourceLocator == null) {
-            listOf(
+        if (migrationChanges.isNotEmpty()) {
+            val generatedMigration = generated.migrationXml
+                ?: return rejected(
+                    "JVW-INTEGRATION-OUTBOX-MIGRATION-GENERATION",
+                    "The normalized outbox connector did not regenerate its migration.",
+                )
+            val plannedMigration = migrationChanges.single {
+                it.mode == WorkspaceFileChangeMode.CREATE && it.relativePath.endsWith(".xml")
+            }
+            if (plannedMigration.createContent != generatedMigration) {
+                return rejected(
+                    "JVW-INTEGRATION-OUTBOX-MIGRATION-DRIFT",
+                    "The schema plan and connector-owned migration differ; no files will be written.",
+                    plannedMigration.relativePath,
+                )
+            }
+        }
+        val javaPath = javaPath(destination, stored)
+        val policyPath = policyPath(destination, stored.beanName)
+        val changes = if (normalized.sourceLocator == null) {
+            migrationChanges + listOf(
                 create(javaPath, generated.javaSource),
                 create(policyPath, generated.reliabilityProperties),
             )
         } else {
-            val owned = loadOwned(model.sourceLocator, destination)
+            val owned = loadOwned(normalized.sourceLocator, destination)
                 ?: return rejected(
                     "JVW-INTEGRATION-SOURCE-NOT-OWNED",
                     "The Java adapter or its reliability policy was manually changed. Neither file will be overwritten.",
-                    model.sourceLocator.relativePath,
+                    normalized.sourceLocator.relativePath,
                 )
+            if (
+                owned.model.reliability.outboxEnabled != stored.reliability.outboxEnabled ||
+                owned.model.reliability.outbox?.storeId != stored.reliability.outbox?.storeId ||
+                owned.model.reliability.outbox?.tableName != stored.reliability.outbox?.tableName ||
+                owned.model.reliability.outbox?.migrationPath != stored.reliability.outbox?.migrationPath ||
+                owned.model.reliability.orderingRequired != stored.reliability.orderingRequired
+            ) {
+                return rejected(
+                    "JVW-INTEGRATION-OUTBOX-SCHEMA-IMMUTABLE",
+                    "Outbox mode, data store, table, migration and ordering shape cannot be changed after creation. Create a replacement connector and migrate callers explicitly.",
+                    owned.javaPath,
+                )
+            }
             if (owned.javaPath != javaPath || owned.policyPath != policyPath) {
                 return rejected(
                     "JVW-INTEGRATION-MOVE-UNSUPPORTED",
@@ -173,7 +259,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     owned.javaPath,
                 )
             }
-            if (model.sourceLocator.revisionFingerprint != owned.javaFingerprint) {
+            if (normalized.sourceLocator.revisionFingerprint != owned.javaFingerprint) {
                 return rejected(
                     "JVW-INTEGRATION-SOURCE-STALE",
                     "The connector source changed after it was loaded. Refresh before editing.",
@@ -217,6 +303,8 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     resourceRoot = resourceRoot.sourceRoot,
                     defaultPackage = "${moduleBasePackage(javaRoot.moduleId, graph, fallbackPackage)}.integration",
                     capabilities = detectCapabilities(javaRoot, graph),
+                    jsonApi = detectJsonApi(javaRoot, graph),
+                    observabilityApi = detectObservabilityApi(javaRoot, graph),
                     recommended = false,
                 )
             }
@@ -375,9 +463,15 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 val regenerated = runCatching {
                     IntegrationConnectorGenerator.generate(model, encoded)
                 }.getOrNull()
+                val migrationContent = model.reliability.outbox?.migrationPath
+                    ?.let { resolver.resolveFile(it)?.file?.let(::fileText) }
                 val owned = regenerated != null &&
                     regenerated.javaSource == javaContent &&
-                    regenerated.reliabilityProperties == policyContent
+                    regenerated.reliabilityProperties == policyContent &&
+                    (
+                        regenerated.migrationXml == null ||
+                            regenerated.migrationXml == migrationContent
+                        )
                 documents += IntegrationConnectorDocumentSnapshot(
                     locator = locator,
                     model = model.copy(destinationId = destination.id, sourceLocator = locator),
@@ -409,14 +503,98 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             IntegrationConnectorGenerator.generate(model, encoded)
         }.getOrNull() ?: return null
         if (generated.javaSource != javaContent || generated.reliabilityProperties != policyContent) return null
+        val migrationPath = model.reliability.outbox?.migrationPath
+        val migrationContent = migrationPath?.let { resolver.resolveFile(it)?.file?.let(::fileText) }
+        if (generated.migrationXml != null && generated.migrationXml != migrationContent) return null
         return OwnedIntegrationConnector(
+            model = model,
             javaPath = locator.relativePath,
             javaContent = javaContent,
             javaFingerprint = javaFingerprint,
             policyPath = policyPath,
             policyContent = policyContent,
             policyFingerprint = policyFingerprint,
+            migrationPath = migrationPath,
+            migrationContent = migrationContent,
         )
+    }
+
+    private fun normalizeBackendContracts(
+        model: IntegrationConnectorModel,
+        destination: IntegrationConnectorDestinationSnapshot,
+    ): IntegrationConnectorModel {
+        val reliability = model.reliability
+        val outbox = reliability.outbox
+        val normalizedReliability = if (reliability.outboxEnabled && outbox != null) {
+            reliability.copy(
+                    outbox = outbox.copy(jsonApi = destination.jsonApi),
+            )
+        } else {
+            reliability
+        }
+        return model.copy(
+            reliability = normalizedReliability,
+            observability = model.observability.copy(runtimeApi = destination.observabilityApi),
+        )
+    }
+
+    private fun detectJsonApi(
+        javaRoot: ProjectSourceDestination,
+        graph: ApplicationGraphResponse,
+    ): IntegrationJsonApi {
+        val buildText = moduleBuildText(javaRoot, graph)
+        val major = Regex("""(?:id\s*\(\s*["']io\.jmix["']\s*\)|io\.jmix[^:\s"']*)[\s\S]{0,100}?([23])\.""")
+            .find(buildText)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+        return if (
+            major != null && major >= 3 ||
+            "tools.jackson" in buildText ||
+            "jackson-databind:3." in buildText
+        ) {
+            IntegrationJsonApi.JACKSON_3
+        } else {
+            IntegrationJsonApi.JACKSON_2
+        }
+    }
+
+    private fun detectObservabilityApi(
+        javaRoot: ProjectSourceDestination,
+        graph: ApplicationGraphResponse,
+    ): IntegrationObservabilityApi {
+        val buildText = moduleBuildText(javaRoot, graph)
+        return if (
+            listOf(
+                "spring-boot-starter-actuator",
+                "micrometer-core",
+                "micrometer-observation",
+                "micrometer-registry-",
+            ).any(buildText::contains)
+        ) {
+            IntegrationObservabilityApi.MICROMETER_OBSERVATION
+        } else {
+            IntegrationObservabilityApi.APPLICATION_EVENTS
+        }
+    }
+
+    private fun moduleBuildText(
+        javaRoot: ProjectSourceDestination,
+        graph: ApplicationGraphResponse,
+    ): String {
+        val resolver = ProjectFileResolver.getInstance(project)
+        val moduleRoot = graph.modules.firstOrNull { it.moduleId == javaRoot.moduleId }?.moduleRoot
+            ?.trim('/', '\\')
+            .orEmpty()
+        return listOf(
+            join(moduleRoot, "build.gradle.kts"),
+            join(moduleRoot, "build.gradle"),
+            "gradle/libs.versions.toml",
+        ).mapNotNull { path ->
+            resolver.resolveFile(path)?.file?.let { file ->
+                runCatching { String(file.contentsToByteArray(false), file.charset) }.getOrNull()
+            }
+        }.joinToString("\n").lowercase()
     }
 
     private fun javaPath(
@@ -532,6 +710,8 @@ data class IntegrationConnectorDestinationSnapshot(
     val resourceRoot: String,
     val defaultPackage: String,
     val capabilities: Set<IntegrationCapability>,
+    val jsonApi: IntegrationJsonApi,
+    val observabilityApi: IntegrationObservabilityApi,
     val recommended: Boolean,
 )
 
@@ -548,6 +728,7 @@ data class IntegrationConnectorWorkspaceResponse(
     val defaultDestinationId: String?,
     val contextArtifacts: List<ArtifactSnapshot>,
     val oauth2Managers: List<IntegrationOAuth2ManagerSnapshot>,
+    val dataStores: List<SchemaDataStoreSnapshot>,
     val existingDocuments: List<IntegrationConnectorDocumentSnapshot>,
     val issues: List<WorkspaceChangeIssue>,
 )
@@ -570,10 +751,13 @@ data class IntegrationConnectorProposal(
 )
 
 private data class OwnedIntegrationConnector(
+    val model: IntegrationConnectorModel,
     val javaPath: String,
     val javaContent: String,
     val javaFingerprint: String,
     val policyPath: String,
     val policyContent: String,
     val policyFingerprint: String,
+    val migrationPath: String?,
+    val migrationContent: String?,
 )

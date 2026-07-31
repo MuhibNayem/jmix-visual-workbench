@@ -10,8 +10,18 @@ import org.jmixworkbench.model.IntegrationDeliveryGuarantee
 import org.jmixworkbench.model.IntegrationDiagnostic
 import org.jmixworkbench.model.IntegrationDiagnosticSeverity
 import org.jmixworkbench.model.IntegrationHttpMethod
+import org.jmixworkbench.model.IntegrationJsonApi
+import org.jmixworkbench.model.IntegrationObservabilityApi
 import org.jmixworkbench.model.IntegrationRetryMode
 import org.jmixworkbench.model.IntegrationValidationResult
+import org.jmixworkbench.model.ChangeSetModel
+import org.jmixworkbench.model.ColumnDef
+import org.jmixworkbench.model.DbChange
+import org.jmixworkbench.model.IndexColumnDef
+import org.jmixworkbench.model.MigrationModel
+import org.jmixworkbench.model.PreCondition
+import org.jmixworkbench.model.PreConditionOutcome
+import org.jmixworkbench.model.PreConditionType
 import java.util.Base64
 
 /**
@@ -275,9 +285,11 @@ object IntegrationConnectorGenerator {
             error("INTEGRATION_OUTBOX_KIND", "Transactional outbox is valid only for broker publishers.")
         }
         if (reliability.outboxEnabled) {
+            validateOutbox(model, ::error, ::warning)
+        } else if (reliability.outbox != null) {
             error(
-                "INTEGRATION_OUTBOX_RUNTIME_PENDING",
-                "Outbox generation requires a selected persisted outbox entity and dispatcher schedule; implicit infrastructure is never generated.",
+                "INTEGRATION_OUTBOX_DISABLED_CONFIGURATION",
+                "Remove persisted outbox configuration when transactional outbox is disabled.",
             )
         }
         if (reliability.transactional && model.kind in HTTP_KINDS) {
@@ -328,10 +340,95 @@ object IntegrationConnectorGenerator {
                 "${it.code}: ${it.message}"
             }
         }
+        if (model.reliability.outboxEnabled) {
+            val migrationPath = model.reliability.outbox?.migrationPath
+            require(
+                migrationPath != null &&
+                    !migrationPath.startsWith('/') &&
+                    migrationPath.endsWith(".xml") &&
+                    ".." !in migrationPath.replace('\\', '/').split('/'),
+            ) {
+                "INTEGRATION_OUTBOX_MIGRATION_PATH_REQUIRED: Backend-owned relative Liquibase migration evidence is required."
+            }
+        }
         return GeneratedIntegrationConnector(
             javaSource = renderJava(model, encodedModel),
             reliabilityProperties = renderReliabilityProperties(model, encodedModel),
+            migrationXml = model.reliability.outbox
+                ?.takeIf { model.reliability.outboxEnabled && it.migrationPath != null }
+                ?.let { MigrationGenerator.generate(outboxMigration(model, requireNotNull(it.migrationPath))) },
             requiredCapabilities = validation.requiredCapabilities,
+        )
+    }
+
+    fun outboxMigration(model: IntegrationConnectorModel, migrationPath: String? = null): MigrationModel {
+        val outbox = requireNotNull(model.reliability.outbox) {
+            "INTEGRATION_OUTBOX_CONFIGURATION_REQUIRED: Persisted outbox configuration is required."
+        }
+        val readyIndex = databaseName("ix", outbox.tableName, "ready")
+        val orderIndex = databaseName("ix", outbox.tableName, "order")
+        val changes = mutableListOf<DbChange>(
+            DbChange.CreateTable(
+                tableName = outbox.tableName,
+                remarks = "Jmix Visual Workbench durable integration outbox",
+                columns = mutableListOf(
+                    ColumnDef("id", "varchar(36)", nullable = false, primaryKey = true),
+                    ColumnDef("partition_key", "varchar(255)"),
+                    ColumnDef("payload", "clob", nullable = false),
+                    ColumnDef("payload_sha256", "varchar(64)", nullable = false),
+                    ColumnDef("status", "varchar(24)", nullable = false),
+                    ColumnDef("attempts", "int", nullable = false, defaultValue = "0"),
+                    ColumnDef("available_at", "datetime", nullable = false),
+                    ColumnDef("locked_by", "varchar(128)"),
+                    ColumnDef("locked_until", "datetime"),
+                    ColumnDef("created_at", "datetime", nullable = false),
+                    ColumnDef("sent_at", "datetime"),
+                    ColumnDef("last_error", "varchar(2000)"),
+                    ColumnDef("version", "bigint", nullable = false, defaultValue = "0"),
+                ),
+            ),
+            DbChange.CreateIndex(
+                tableName = outbox.tableName,
+                indexName = readyIndex,
+                columns = listOf(
+                    IndexColumnDef("status"),
+                    IndexColumnDef("available_at"),
+                    IndexColumnDef("locked_until"),
+                ),
+            ),
+        )
+        if (model.reliability.orderingRequired) {
+            changes += DbChange.CreateIndex(
+                tableName = outbox.tableName,
+                indexName = orderIndex,
+                columns = listOf(
+                    IndexColumnDef("partition_key"),
+                    IndexColumnDef("created_at"),
+                    IndexColumnDef("id"),
+                ),
+            )
+        }
+        val rollback = mutableListOf<DbChange>()
+        rollback += DbChange.DropTable(outbox.tableName)
+        return MigrationModel(
+            changelogId = "jvw-outbox-${model.beanName}",
+            logicalFilePath = migrationPath?.let(::classpathPath),
+            changes = mutableListOf(
+                ChangeSetModel(
+                    id = "jvw-outbox-${model.beanName}-1",
+                    comment = "Create durable at-least-once outbox for ${model.beanName}",
+                    preConditions = mutableListOf(
+                        PreCondition(
+                            PreConditionType.TABLE_NOT_EXISTS,
+                            mutableMapOf("tableName" to outbox.tableName),
+                        ),
+                    ),
+                    preConditionOnFail = PreConditionOutcome.HALT,
+                    preConditionOnError = PreConditionOutcome.HALT,
+                    changes = changes,
+                    rollback = rollback,
+                ),
+            ),
         )
     }
 
@@ -349,6 +446,9 @@ object IntegrationConnectorGenerator {
             append('\n').append(MARKER_PREFIX).append(encodedModel).append('\n')
             append("@SuppressWarnings(\"JVW-INTEGRATION-CONNECTOR\")\n")
             append("@Component(\"").append(escapeJava(model.beanName)).append("\")\n")
+            if (model.reliability.outboxEnabled) {
+                append("@EnableScheduling\n")
+            }
             if (model.profiles.isNotEmpty()) {
                 append("@Profile({")
                 append(model.profiles.joinToString { "\"${escapeJava(it)}\"" })
@@ -363,6 +463,11 @@ object IntegrationConnectorGenerator {
             if (model.observability.structuredLoggingEnabled) {
                 append("    private static final Logger log = LoggerFactory.getLogger(")
                     .append(model.className).append(".class);\n")
+            }
+            if (model.reliability.outboxEnabled) {
+                append("    private final Clock clock = Clock.systemUTC();\n")
+                append("    private final String dispatcherId = \"")
+                    .append(escapeJava(model.beanName)).append("-\" + UUID.randomUUID();\n")
             }
             constructorFields.forEach { field ->
                 append("    private final ").append(field.javaType).append(' ').append(field.name).append(";\n")
@@ -401,17 +506,25 @@ object IntegrationConnectorGenerator {
             if (model.kind in setOf(IntegrationConnectorKind.JMIX_FILE_STORAGE, IntegrationConnectorKind.OBJECT_STORAGE)) {
                 append("        this.fileStorage = fileStorageLocator.getByName(storageName);\n")
             }
+            if (model.reliability.outboxEnabled) {
+                append("        this.outboxTransactions = new TransactionTemplate(transactionManager);\n")
+            }
             append("    }\n\n")
             append(renderOperation(model))
+            if (model.reliability.outboxEnabled) {
+                append('\n').append(renderOutboxRuntime(model))
+            }
             append("}\n")
         }
     }
 
     private fun renderOperation(model: IntegrationConnectorModel): String = when (model.kind) {
         in HTTP_KINDS -> renderHttpOperation(model)
-        IntegrationConnectorKind.KAFKA_PUBLISHER -> renderKafkaPublisher(model)
+        IntegrationConnectorKind.KAFKA_PUBLISHER ->
+            if (model.reliability.outboxEnabled) renderOutboxEnqueue(model) else renderKafkaPublisher(model)
         IntegrationConnectorKind.KAFKA_CONSUMER -> renderKafkaConsumer(model)
-        IntegrationConnectorKind.RABBIT_PUBLISHER -> renderRabbitPublisher(model)
+        IntegrationConnectorKind.RABBIT_PUBLISHER ->
+            if (model.reliability.outboxEnabled) renderOutboxEnqueue(model) else renderRabbitPublisher(model)
         IntegrationConnectorKind.RABBIT_CONSUMER -> renderRabbitConsumer(model)
         IntegrationConnectorKind.SFTP_UPLOAD -> renderSftpUpload(model)
         IntegrationConnectorKind.SFTP_DOWNLOAD -> renderSftpDownload(model)
@@ -542,6 +655,275 @@ object IntegrationConnectorGenerator {
         append("    }\n")
     }
 
+    private fun renderOutboxEnqueue(model: IntegrationConnectorModel): String {
+        val outbox = requireNotNull(model.reliability.outbox)
+        return buildString {
+            append("    /**\n")
+            append("     * Persists an event in the same database transaction as the caller's business change.\n")
+            append("     * Delivery is durable at-least-once; consumers must deduplicate by the returned event ID.\n")
+            append("     */\n")
+            append("    @Transactional\n")
+            append("    public String enqueue(String orderingKey, ").append(model.payloadJavaType).append(" payload) {\n")
+            append("        Objects.requireNonNull(payload, \"payload is required\");\n")
+            if (model.reliability.orderingRequired) {
+                append("        if (orderingKey == null || orderingKey.isBlank()) {\n")
+                append("            throw new IllegalArgumentException(\"orderingKey is required when strict ordering is enabled\");\n")
+                append("        }\n")
+            }
+            append("        String eventId = UUID.randomUUID().toString();\n")
+            append("        String payloadJson;\n")
+            append("        try {\n")
+            append("            payloadJson = objectMapper.writeValueAsString(payload);\n")
+            append("        } catch (").append(
+                if (outbox.jsonApi == IntegrationJsonApi.JACKSON_3) "JacksonException" else "JsonProcessingException",
+            ).append(" exception) {\n")
+            append("            throw new IllegalArgumentException(\"Integration payload cannot be serialized\", exception);\n")
+            append("        }\n")
+            append("        Instant now = Instant.now(clock);\n")
+            append("        jdbcTemplate.update(\"INSERT INTO ").append(outbox.tableName)
+                .append(" (id, partition_key, payload, payload_sha256, status, attempts, available_at, created_at, version) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, ?, 0)\",\n")
+            append("                eventId, orderingKey, payloadJson, sha256(payloadJson), Timestamp.from(now), Timestamp.from(now));\n")
+            append("        recordMetric(\"enqueued\");\n")
+            append("        return eventId;\n")
+            append("    }\n")
+        }
+    }
+
+    private fun renderOutboxRuntime(model: IntegrationConnectorModel): String {
+        val outbox = requireNotNull(model.reliability.outbox)
+        val table = outbox.tableName
+        val orderingPredicate = if (model.reliability.orderingRequired) {
+            " AND NOT EXISTS (SELECT 1 FROM $table earlier WHERE earlier.partition_key = candidate.partition_key AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.status NOT IN ('SENT', 'DEAD'))"
+        } else {
+            ""
+        }
+        return buildString {
+            append("    @Scheduled(fixedDelayString = \"\${").append(model.configurationPrefix)
+                .append(".outbox.poll-delay-ms:").append(outbox.pollDelayMs).append("}\")\n")
+            append("    public void dispatchOutbox() {\n")
+            append("        Instant now = Instant.now(clock);\n")
+            append("        List<String> candidates = jdbcTemplate.query(connection -> {\n")
+            append("            PreparedStatement statement = connection.prepareStatement(\n")
+            append("                    \"SELECT candidate.id FROM ").append(table)
+                .append(" candidate WHERE candidate.status IN ('PENDING', 'RETRY', 'IN_FLIGHT') AND candidate.available_at <= ? AND (candidate.locked_until IS NULL OR candidate.locked_until < ?)")
+                .append(orderingPredicate)
+                .append(" ORDER BY candidate.created_at\");\n")
+            append("            statement.setTimestamp(1, Timestamp.from(now));\n")
+            append("            statement.setTimestamp(2, Timestamp.from(now));\n")
+            append("            statement.setMaxRows(").append(outbox.batchSize).append(");\n")
+            append("            return statement;\n")
+            append("        }, (resultSet, rowNumber) -> resultSet.getString(1));\n")
+            append("        candidates.forEach(this::claimAndDispatch);\n")
+            append("    }\n\n")
+
+            append("    private void claimAndDispatch(String eventId) {\n")
+            append("        Instant now = Instant.now(clock);\n")
+            append("        Boolean claimed = outboxTransactions.execute(status -> {\n")
+            if (model.reliability.orderingRequired) {
+                append("            Long blockers = jdbcTemplate.queryForObject(\n")
+                append("                    \"SELECT COUNT(*) FROM ").append(table)
+                    .append(" candidate WHERE candidate.id = ? AND EXISTS (SELECT 1 FROM ").append(table)
+                    .append(" earlier WHERE earlier.partition_key = candidate.partition_key AND (earlier.created_at < candidate.created_at OR (earlier.created_at = candidate.created_at AND earlier.id < candidate.id)) AND earlier.status NOT IN ('SENT', 'DEAD'))\",\n")
+                append("                    Long.class, eventId);\n")
+                append("            if (value(blockers) != 0L) return false;\n")
+            }
+            append("            return jdbcTemplate.update(\n")
+            append("                \"UPDATE ").append(table)
+                .append(" SET status = 'IN_FLIGHT', locked_by = ?, locked_until = ?, version = version + 1 WHERE id = ? AND status IN ('PENDING', 'RETRY', 'IN_FLIGHT') AND available_at <= ? AND (locked_until IS NULL OR locked_until < ?)\",\n")
+            append("                dispatcherId, Timestamp.from(now.plusMillis(").append(outbox.leaseDurationMs)
+                .append("L)), eventId, Timestamp.from(now), Timestamp.from(now)) == 1;\n")
+            append("        });\n")
+            append("        if (!Boolean.TRUE.equals(claimed)) return;\n")
+            append("        OutboxRecord event = jdbcTemplate.queryForObject(\n")
+            append("                \"SELECT id, partition_key, payload, payload_sha256, attempts FROM ").append(table)
+                .append(" WHERE id = ? AND locked_by = ?\",\n")
+            append("                (resultSet, rowNumber) -> new OutboxRecord(resultSet.getString(1), resultSet.getString(2), resultSet.getString(3), resultSet.getString(4), resultSet.getInt(5)), eventId, dispatcherId);\n")
+            append("        if (event == null) return;\n")
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("        Observation observation = startObservation();\n")
+            }
+            append("        try {\n")
+            append("            if (!MessageDigest.isEqual(event.payloadSha256().getBytes(StandardCharsets.US_ASCII), sha256(event.payload()).getBytes(StandardCharsets.US_ASCII))) {\n")
+            append("                throw new IllegalStateException(\"Persisted integration payload checksum mismatch\");\n")
+            append("            }\n")
+            append("            ").append(model.payloadJavaType).append(" payload = objectMapper.readValue(event.payload(), ")
+                .append(rawClassLiteral(model.payloadJavaType)).append(");\n")
+            append("            deliver(event, payload);\n")
+            append("            outboxTransactions.executeWithoutResult(status -> jdbcTemplate.update(\n")
+            append("                    \"UPDATE ").append(table)
+                .append(" SET status = 'SENT', sent_at = ?, locked_by = NULL, locked_until = NULL, last_error = NULL, version = version + 1 WHERE id = ? AND locked_by = ?\",\n")
+            append("                    Timestamp.from(Instant.now(clock)), event.id(), dispatcherId));\n")
+            append("            recordMetric(\"delivered\");\n")
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("            if (observation != null) observation.lowCardinalityKeyValue(\"outcome\", \"delivered\");\n")
+            }
+            append("        } catch (Exception exception) {\n")
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("            if (observation != null) observation.error(exception).lowCardinalityKeyValue(\"outcome\", \"failed\");\n")
+            }
+            append("            markDeliveryFailure(event, exception);\n")
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("        } finally {\n")
+                append("            if (observation != null) observation.stop();\n")
+            }
+            append("        }\n")
+            append("    }\n\n")
+
+            append("    private void deliver(OutboxRecord event, ").append(model.payloadJavaType).append(" payload) throws Exception {\n")
+            when (model.kind) {
+                IntegrationConnectorKind.KAFKA_PUBLISHER -> {
+                    append("        ProducerRecord<String, ").append(model.payloadJavaType)
+                        .append("> record = new ProducerRecord<>(address, event.partitionKey(), payload);\n")
+                    append("        record.headers().add(\"jvw-outbox-id\", event.id().getBytes(StandardCharsets.UTF_8));\n")
+                    append("        kafkaTemplate.send(record).get(").append(model.reliability.requestTimeoutMs)
+                        .append("L, TimeUnit.MILLISECONDS);\n")
+                }
+                IntegrationConnectorKind.RABBIT_PUBLISHER -> {
+                    append("        CorrelationData correlation = new CorrelationData(event.id());\n")
+                    append("        rabbitTemplate.convertAndSend(address, payload, message -> {\n")
+                    append("            message.getMessageProperties().setMessageId(event.id());\n")
+                    append("            message.getMessageProperties().setHeader(\"jvw-outbox-id\", event.id());\n")
+                    append("            return message;\n")
+                    append("        }, correlation);\n")
+                    append("        CorrelationData.Confirm confirm = correlation.getFuture().get(")
+                        .append(model.reliability.requestTimeoutMs).append("L, TimeUnit.MILLISECONDS);\n")
+                    append("        if (!confirm.isAck()) throw new IllegalStateException(\"RabbitMQ publisher confirm was negative\");\n")
+                    append("        if (correlation.getReturned() != null) throw new IllegalStateException(\"RabbitMQ returned the unroutable outbox message\");\n")
+                }
+                else -> error("Unsupported outbox kind ${model.kind}")
+            }
+            append("    }\n\n")
+
+            append("    private void markDeliveryFailure(OutboxRecord event, Exception exception) {\n")
+            append("        int attempts = event.attempts() + 1;\n")
+            append("        boolean dead = attempts >= ").append(outbox.maxAttempts).append(";\n")
+            append("        long exponent = Math.min(30, Math.max(0, attempts - 1));\n")
+            append("        long delay = Math.min(").append(outbox.maximumBackoffMs)
+                .append("L, Math.multiplyExact(").append(outbox.initialBackoffMs)
+                .append("L, 1L << exponent));\n")
+            append("        Instant availableAt = Instant.now(clock).plusMillis(delay);\n")
+            append("        outboxTransactions.executeWithoutResult(status -> jdbcTemplate.update(\n")
+            append("                \"UPDATE ").append(table)
+                .append(" SET status = ?, attempts = ?, available_at = ?, locked_by = NULL, locked_until = NULL, last_error = ?, version = version + 1 WHERE id = ? AND locked_by = ?\",\n")
+            append("                dead ? \"DEAD\" : \"RETRY\", attempts, Timestamp.from(availableAt), safeError(exception), event.id(), dispatcherId));\n")
+            append("        recordMetric(dead ? \"dead\" : \"retry\");\n")
+            if (model.observability.structuredLoggingEnabled) {
+                append("        log.warn(\"Integration delivery failed connector=")
+                    .append(escapeJava(model.beanName))
+                    .append(" eventId={} attempt={} terminal={}\", event.id(), attempts, dead);\n")
+            }
+            append("    }\n\n")
+
+            append("    /** Replays only terminal events and requires an explicit Jmix specific permission. */\n")
+            append("    @Transactional\n")
+            append("    public void replay(String eventId, String reason) {\n")
+            append("        requirePermission(\"").append(escapeJava(outbox.replayPermission)).append("\");\n")
+            append("        String canonicalEventId = canonicalEventId(eventId);\n")
+            append("        if (reason == null || reason.isBlank() || reason.length() > 500) {\n")
+            append("            throw new IllegalArgumentException(\"A replay reason of 1 to 500 characters is required\");\n")
+            append("        }\n")
+            append("        int updated = jdbcTemplate.update(\"UPDATE ").append(table)
+                .append(" SET status = 'RETRY', attempts = 0, available_at = ?, locked_by = NULL, locked_until = NULL, last_error = NULL, version = version + 1 WHERE id = ? AND status = 'DEAD'\",\n")
+            append("                Timestamp.from(Instant.now(clock)), canonicalEventId);\n")
+            append("        if (updated != 1) throw new IllegalStateException(\"Only one existing DEAD event can be replayed\");\n")
+            if (model.observability.structuredLoggingEnabled) {
+                append("        log.info(\"Integration outbox replay authorized connector=")
+                    .append(escapeJava(model.beanName))
+                    .append(" eventId={} reasonLength={}\", canonicalEventId, reason.length());\n")
+            }
+            append("        publishAudit(\"REPLAY\", canonicalEventId, reason, 1L);\n")
+            append("        recordMetric(\"replayed\");\n")
+            append("    }\n\n")
+
+            append("    public OutboxHealth reconcile() {\n")
+            append("        Instant now = Instant.now(clock);\n")
+            append("        Long pending = jdbcTemplate.queryForObject(\"SELECT COUNT(*) FROM ").append(table)
+                .append(" WHERE status IN ('PENDING', 'RETRY', 'IN_FLIGHT')\", Long.class);\n")
+            append("        Long dead = jdbcTemplate.queryForObject(\"SELECT COUNT(*) FROM ").append(table)
+                .append(" WHERE status = 'DEAD'\", Long.class);\n")
+            append("        Long expiredLeases = jdbcTemplate.queryForObject(\"SELECT COUNT(*) FROM ").append(table)
+                .append(" WHERE status = 'IN_FLIGHT' AND locked_until < ?\", Long.class, Timestamp.from(now));\n")
+            append("        Timestamp oldest = jdbcTemplate.queryForObject(\"SELECT MIN(created_at) FROM ").append(table)
+                .append(" WHERE status IN ('PENDING', 'RETRY', 'IN_FLIGHT')\", Timestamp.class);\n")
+            append("        long oldestAgeMs = oldest == null ? 0L : Math.max(0L, Duration.between(oldest.toInstant(), now).toMillis());\n")
+            append("        return new OutboxHealth(value(pending), value(dead), value(expiredLeases), oldestAgeMs);\n")
+            append("    }\n\n")
+
+            append("    @Transactional\n")
+            append("    public int purgeDeliveredBefore(Instant cutoff, String reason) {\n")
+            append("        requirePermission(\"").append(escapeJava(outbox.maintenancePermission)).append("\");\n")
+            append("        if (reason == null || reason.isBlank() || reason.length() > 500) {\n")
+            append("            throw new IllegalArgumentException(\"A purge reason of 1 to 500 characters is required\");\n")
+            append("        }\n")
+            append("        Instant retentionFloor = Instant.now(clock).minus(Duration.ofDays(").append(outbox.retentionDays).append("L));\n")
+            append("        if (cutoff == null || cutoff.isAfter(retentionFloor)) {\n")
+            append("            throw new IllegalArgumentException(\"Purge cutoff must honor the configured retention period\");\n")
+            append("        }\n")
+            append("        int deleted = jdbcTemplate.update(\"DELETE FROM ").append(table)
+                .append(" WHERE status = 'SENT' AND sent_at < ?\", Timestamp.from(cutoff));\n")
+            append("        publishAudit(\"PURGE\", cutoff.toString(), reason, deleted);\n")
+            append("        return deleted;\n")
+            append("    }\n\n")
+
+            append("    private void requirePermission(String permission) {\n")
+            append("        SpecificOperationAccessContext context = new SpecificOperationAccessContext(permission);\n")
+            append("        accessManager.applyRegisteredConstraints(context);\n")
+            append("        if (!context.isPermitted()) throw new AccessDeniedException(\"Specific permission is required: \" + permission);\n")
+            append("    }\n\n")
+            append("    private void recordMetric(String outcome) {\n")
+            append("        eventPublisher.publishEvent(new OutboxTelemetryEvent(\"")
+                .append(escapeJava(model.beanName)).append("\", outcome, Instant.now(clock)));\n")
+            if (usesMicrometerObservation(model) && model.observability.metricsEnabled) {
+                append("        MeterRegistry registry = meterRegistryProvider.getIfAvailable();\n")
+                append("        if (registry != null) registry.counter(\"jvw.integration.outbox.events\", \"connector\", \"")
+                    .append(escapeJava(model.beanName))
+                    .append("\", \"kind\", \"").append(model.kind.name.lowercase())
+                    .append("\", \"outcome\", outcome).increment();\n")
+            }
+            append("    }\n\n")
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                append("    private Observation startObservation() {\n")
+                append("        ObservationRegistry registry = observationRegistryProvider.getIfAvailable();\n")
+                append("        if (registry == null || registry == ObservationRegistry.NOOP) return null;\n")
+                append("        return Observation.start(\"jvw.integration.outbox.dispatch\", registry)\n")
+                append("                .lowCardinalityKeyValue(\"connector\", \"")
+                    .append(escapeJava(model.beanName)).append("\")\n")
+                append("                .lowCardinalityKeyValue(\"kind\", \"")
+                    .append(model.kind.name.lowercase()).append("\");\n")
+                append("    }\n\n")
+            }
+            append("    private void publishAudit(String action, String subject, String reason, long affected) {\n")
+            append("        String actor = currentAuthentication.isSet() ? currentAuthentication.getUser().getUsername() : \"system\";\n")
+            append("        eventPublisher.publishEvent(new OutboxAuditEvent(\"")
+                .append(escapeJava(model.beanName))
+                .append("\", action, subject, actor, sha256(reason), affected, Instant.now(clock)));\n")
+            append("    }\n\n")
+            append("    private static String canonicalEventId(String eventId) {\n")
+            append("        if (eventId == null) throw new IllegalArgumentException(\"eventId is required\");\n")
+            append("        String canonical = UUID.fromString(eventId).toString();\n")
+            append("        if (!canonical.equals(eventId)) throw new IllegalArgumentException(\"eventId must be a canonical UUID\");\n")
+            append("        return canonical;\n")
+            append("    }\n\n")
+            append("    private static long value(Long value) { return value == null ? 0L : value; }\n\n")
+            append("    private static String safeError(Exception exception) {\n")
+            append("        String message = exception.getClass().getSimpleName() + \": \" + String.valueOf(exception.getMessage());\n")
+            append("        message = message.replace('\\r', ' ').replace('\\n', ' ');\n")
+            append("        return message.length() <= 1500 ? message : message.substring(0, 1500);\n")
+            append("    }\n\n")
+            append("    private static String sha256(String value) {\n")
+            append("        try {\n")
+            append("            return HexFormat.of().formatHex(MessageDigest.getInstance(\"SHA-256\").digest(value.getBytes(StandardCharsets.UTF_8)));\n")
+            append("        } catch (NoSuchAlgorithmException exception) {\n")
+            append("            throw new IllegalStateException(\"SHA-256 is unavailable\", exception);\n")
+            append("        }\n")
+            append("    }\n\n")
+            append("    private record OutboxRecord(String id, String partitionKey, String payload, String payloadSha256, int attempts) {}\n")
+            append("    public record OutboxHealth(long pending, long dead, long expiredLeases, long oldestPendingAgeMs) {}\n")
+            append("    public record OutboxTelemetryEvent(String connector, String outcome, Instant occurredAt) {}\n")
+            append("    public record OutboxAuditEvent(String connector, String action, String subject, String actor, String justificationSha256, long affected, Instant occurredAt) {}\n")
+        }
+    }
+
     private fun renderRabbitConsumer(model: IntegrationConnectorModel): String = buildString {
         append("    @RabbitListener(queues = \"").append(propertyExpression(model.addressProperty)).append("\")\n")
         append("    public void consume(").append(model.payloadJavaType).append(" payload) {\n")
@@ -656,6 +1038,21 @@ object IntegrationConnectorGenerator {
         if (model.kind in MESSAGE_PUBLISHER_KINDS) {
             add(InjectedField("String", "address", model.addressProperty))
         }
+        if (model.reliability.outboxEnabled) {
+            add(InjectedField("JdbcTemplate", "jdbcTemplate"))
+            add(InjectedField("ObjectMapper", "objectMapper"))
+            add(InjectedField("PlatformTransactionManager", "transactionManager"))
+            add(InjectedField("AccessManager", "accessManager"))
+            add(InjectedField("CurrentAuthentication", "currentAuthentication"))
+            add(InjectedField("ApplicationEventPublisher", "eventPublisher"))
+            if (usesMicrometerObservation(model) && model.observability.metricsEnabled) {
+                add(InjectedField("ObjectProvider<MeterRegistry>", "meterRegistryProvider"))
+            }
+            if (usesMicrometerObservation(model) && model.observability.tracingEnabled) {
+                add(InjectedField("ObjectProvider<ObservationRegistry>", "observationRegistryProvider"))
+            }
+            add(InjectedField("TransactionTemplate", "outboxTransactions", constructorParameter = false))
+        }
         if (model.kind in CONSUMER_KINDS) {
             add(InjectedField(model.handlerBeanClass.orEmpty(), model.handlerFieldName.orEmpty()))
         }
@@ -722,6 +1119,56 @@ object IntegrationConnectorGenerator {
             }
             if (model.reliability.rateLimit.enabled) {
                 add("io.github.resilience4j.ratelimiter.annotation.RateLimiter")
+            }
+        }
+        if (model.reliability.outboxEnabled) {
+            when (model.reliability.outbox?.jsonApi) {
+                IntegrationJsonApi.JACKSON_2 -> {
+                    add("com.fasterxml.jackson.core.JsonProcessingException")
+                    add("com.fasterxml.jackson.databind.ObjectMapper")
+                }
+                IntegrationJsonApi.JACKSON_3 -> {
+                    add("tools.jackson.core.JacksonException")
+                    add("tools.jackson.databind.ObjectMapper")
+                }
+                null -> Unit
+            }
+            add("io.jmix.core.AccessManager")
+            add("io.jmix.core.accesscontext.SpecificOperationAccessContext")
+            add("io.jmix.core.security.CurrentAuthentication")
+            add("java.nio.charset.StandardCharsets")
+            add("java.security.MessageDigest")
+            add("java.security.NoSuchAlgorithmException")
+            add("java.sql.PreparedStatement")
+            add("java.sql.Timestamp")
+            add("java.time.Clock")
+            add("java.time.Duration")
+            add("java.time.Instant")
+            add("java.util.HexFormat")
+            add("java.util.List")
+            add("java.util.Objects")
+            add("java.util.UUID")
+            add("java.util.concurrent.TimeUnit")
+            add("org.springframework.context.ApplicationEventPublisher")
+            if (usesMicrometerObservation(model)) {
+                add("org.springframework.beans.factory.ObjectProvider")
+                if (model.observability.metricsEnabled) {
+                    add("io.micrometer.core.instrument.MeterRegistry")
+                }
+                if (model.observability.tracingEnabled) {
+                    add("io.micrometer.observation.Observation")
+                    add("io.micrometer.observation.ObservationRegistry")
+                }
+            }
+            add("org.springframework.jdbc.core.JdbcTemplate")
+            add("org.springframework.scheduling.annotation.EnableScheduling")
+            add("org.springframework.scheduling.annotation.Scheduled")
+            add("org.springframework.security.access.AccessDeniedException")
+            add("org.springframework.transaction.PlatformTransactionManager")
+            add("org.springframework.transaction.annotation.Transactional")
+            add("org.springframework.transaction.support.TransactionTemplate")
+            if (model.kind == IntegrationConnectorKind.KAFKA_PUBLISHER) {
+                add("org.apache.kafka.clients.producer.ProducerRecord")
             }
         }
         when (model.kind) {
@@ -838,6 +1285,34 @@ object IntegrationConnectorGenerator {
                 append("resilience4j.ratelimiter.instances.").append(model.beanName)
                     .append(".timeout-duration=").append(rate.timeoutMs).append("ms\n")
             }
+            if (model.reliability.outboxEnabled) {
+                val outbox = requireNotNull(model.reliability.outbox)
+                append("# Durable database-to-broker delivery is at-least-once; deduplicate jvw-outbox-id downstream.\n")
+                append(model.configurationPrefix).append(".outbox.poll-delay-ms=")
+                    .append(outbox.pollDelayMs).append('\n')
+                append(model.configurationPrefix).append(".outbox.batch-size=")
+                    .append(outbox.batchSize).append('\n')
+                append(model.configurationPrefix).append(".outbox.lease-duration-ms=")
+                    .append(outbox.leaseDurationMs).append('\n')
+                append(model.configurationPrefix).append(".outbox.max-attempts=")
+                    .append(outbox.maxAttempts).append('\n')
+                append(model.configurationPrefix).append(".outbox.retention-days=")
+                    .append(outbox.retentionDays).append('\n')
+                when (model.kind) {
+                    IntegrationConnectorKind.KAFKA_PUBLISHER -> {
+                        append("# Broker acknowledgement is mandatory for durable dispatch.\n")
+                        append("spring.kafka.producer.acks=all\n")
+                        append("spring.kafka.producer.properties.enable.idempotence=true\n")
+                    }
+                    IntegrationConnectorKind.RABBIT_PUBLISHER -> {
+                        append("# Correlated confirms plus returned-message detection are mandatory.\n")
+                        append("spring.rabbitmq.publisher-confirm-type=correlated\n")
+                        append("spring.rabbitmq.publisher-returns=true\n")
+                        append("spring.rabbitmq.template.mandatory=true\n")
+                    }
+                    else -> Unit
+                }
+            }
         }
     }
 
@@ -889,6 +1364,104 @@ object IntegrationConnectorGenerator {
         }
     }
 
+    private fun validateOutbox(
+        model: IntegrationConnectorModel,
+        error: (String, String) -> Unit,
+        warning: (String, String) -> Unit,
+    ) {
+        val outbox = model.reliability.outbox
+        if (outbox == null) {
+            error(
+                "INTEGRATION_OUTBOX_CONFIGURATION_REQUIRED",
+                "Select a persisted data store and configure the durable outbox.",
+            )
+            return
+        }
+        if (outbox.storeId.isBlank()) {
+            error("INTEGRATION_OUTBOX_STORE_REQUIRED", "A resolved Jmix data store is required.")
+        }
+        if (!DATABASE_IDENTIFIER.matches(outbox.tableName) || outbox.tableName.length > 30) {
+            error(
+                "INTEGRATION_OUTBOX_TABLE_INVALID",
+                "Outbox table name must be a portable lower snake-case identifier of at most 30 characters.",
+            )
+        }
+        if (outbox.jsonApi == null) {
+            error(
+                "INTEGRATION_OUTBOX_JSON_API_REQUIRED",
+                "The backend must resolve the module's Jackson generation contract before outbox generation.",
+            )
+        }
+        if (model.payloadJavaType == "void" || model.payloadJavaType == "byte[]" || '<' in model.payloadJavaType) {
+            error(
+                "INTEGRATION_OUTBOX_PAYLOAD_TYPE",
+                "Durable outbox payload must be a concrete non-generic JSON-mappable Java type.",
+            )
+        }
+        if (!model.reliability.transactional) {
+            error(
+                "INTEGRATION_OUTBOX_TRANSACTION_REQUIRED",
+                "Durable enqueue must join a Spring database transaction.",
+            )
+        }
+        if (model.reliability.deliveryGuarantee == IntegrationDeliveryGuarantee.EXACTLY_ONCE) {
+            error(
+                "INTEGRATION_OUTBOX_EXACTLY_ONCE_FALSE_CLAIM",
+                "A database-to-broker outbox is at-least-once: a crash after broker acknowledgement can redeliver the stable event ID.",
+            )
+        }
+        if (outbox.batchSize !in 1..10_000) {
+            error("INTEGRATION_OUTBOX_BATCH_RANGE", "Outbox batch size must be between 1 and 10,000.")
+        }
+        if (outbox.pollDelayMs !in 100..3_600_000) {
+            error("INTEGRATION_OUTBOX_POLL_RANGE", "Outbox poll delay must be between 100 ms and one hour.")
+        }
+        val minimumLease = model.reliability.requestTimeoutMs +
+            maxOf(5_000, outbox.pollDelayMs)
+        if (outbox.leaseDurationMs !in minimumLease..3_600_000) {
+            error(
+                "INTEGRATION_OUTBOX_LEASE_RANGE",
+                "Outbox lease must exceed the provider timeout by at least one poll interval (minimum $minimumLease ms) and be no more than one hour.",
+            )
+        }
+        if (outbox.maxAttempts !in 1..30) {
+            error("INTEGRATION_OUTBOX_ATTEMPTS_RANGE", "Outbox delivery attempts must be between 1 and 30.")
+        }
+        if (
+            outbox.initialBackoffMs !in 100..3_600_000 ||
+            outbox.maximumBackoffMs !in outbox.initialBackoffMs..86_400_000
+        ) {
+            error("INTEGRATION_OUTBOX_BACKOFF_RANGE", "Outbox backoff is outside reviewed enterprise bounds.")
+        }
+        if (outbox.retentionDays !in 1..3_650) {
+            error("INTEGRATION_OUTBOX_RETENTION_RANGE", "Delivered-event retention must be between 1 day and 10 years.")
+        }
+        if (!SPECIFIC_PERMISSION.matches(outbox.replayPermission)) {
+            error(
+                "INTEGRATION_OUTBOX_REPLAY_PERMISSION_INVALID",
+                "Replay permission must be an externalizable Jmix specific-policy resource name.",
+            )
+        }
+        if (!SPECIFIC_PERMISSION.matches(outbox.maintenancePermission)) {
+            error(
+                "INTEGRATION_OUTBOX_MAINTENANCE_PERMISSION_INVALID",
+                "Maintenance permission must be an externalizable Jmix specific-policy resource name.",
+            )
+        }
+        if (outbox.maintenancePermission == outbox.replayPermission) {
+            error(
+                "INTEGRATION_OUTBOX_PERMISSION_SEPARATION",
+                "Replay and destructive retention maintenance require separate Jmix specific permissions.",
+            )
+        }
+        if (!model.reliability.idempotency.enabled) {
+            warning(
+                "INTEGRATION_OUTBOX_DOWNSTREAM_IDEMPOTENCY",
+                "Consumers must deduplicate the generated jvw-outbox-id because durable dispatch is at-least-once.",
+            )
+        }
+    }
+
     private fun requireProperty(
         property: String?,
         code: String,
@@ -915,6 +1488,10 @@ object IntegrationConnectorGenerator {
             model.reliability.bulkhead.enabled ||
             model.reliability.rateLimit.enabled
 
+    private fun usesMicrometerObservation(model: IntegrationConnectorModel): Boolean =
+        model.observability.runtimeApi == IntegrationObservabilityApi.MICROMETER_OBSERVATION &&
+            (model.observability.metricsEnabled || model.observability.tracingEnabled)
+
     private fun isJavaIdentifier(value: String): Boolean =
         JAVA_IDENTIFIER.matches(value) && value !in JAVA_KEYWORDS
 
@@ -939,6 +1516,21 @@ object IntegrationConnectorGenerator {
         value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
 
     private fun safeComment(value: String): String = value.replace("*/", "* /").replace(Regex("""\s+"""), " ").trim()
+
+    private fun databaseName(prefix: String, table: String, suffix: String): String {
+        val digest = table.hashCode().toUInt().toString(16).padStart(8, '0')
+        val base = "${prefix}_${table.take(14)}_${suffix.take(5)}_$digest"
+        return base.take(30)
+    }
+
+    private fun classpathPath(path: String): String {
+        val marker = "/src/main/resources/"
+        val normalized = path.replace('\\', '/')
+        return normalized.substringAfter(
+            marker,
+            normalized.removePrefix("src/main/resources/"),
+        ).trimStart('/')
+    }
 
     private data class InjectedField(
         val javaType: String,
@@ -974,6 +1566,8 @@ object IntegrationConnectorGenerator {
     private val PROFILE = Regex("""[A-Za-z0-9_.-]+""")
     private val SPRING_BEAN_IDENTIFIER = Regex("""[A-Za-z_][A-Za-z0-9_.-]*""")
     private val HTTP_HEADER = Regex("""[!#$%&'*+\-.^_`|~0-9A-Za-z]+""")
+    private val DATABASE_IDENTIFIER = Regex("""[a-z][a-z0-9_]*""")
+    private val SPECIFIC_PERMISSION = Regex("""[A-Za-z][A-Za-z0-9_.:-]{2,199}""")
     private val JAVA_KEYWORDS = setOf(
         "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
         "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
@@ -987,5 +1581,6 @@ object IntegrationConnectorGenerator {
 data class GeneratedIntegrationConnector(
     val javaSource: String,
     val reliabilityProperties: String,
+    val migrationXml: String? = null,
     val requiredCapabilities: Set<IntegrationCapability>,
 )

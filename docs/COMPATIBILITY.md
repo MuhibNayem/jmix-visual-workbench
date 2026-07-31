@@ -31,14 +31,17 @@ entity, an advanced `JmixDataRepository`, a FlowUI detail controller and a
 transactional aggregate update service. The corpus deliberately exercises the
 repository fetch-plan type/annotation name collision, named JPQL parameters,
 paging, query hints, constraints and the Jmix 3 `SaveDelegate` /
-`RemoveDelegate` contracts.
+`RemoveDelegate` contracts. Each line also compiles the production-generated
+Kafka durable-outbox adapter with its matching Jackson 2/3 API, JDBC leases,
+Jmix permission/audit boundary, Micrometer metrics, Observation tracing and
+Spring Kafka broker acknowledgement contract.
 
 | Exact Jmix | Target-project JDK | Languages | Generated artifacts | Current evidence |
 | --- | --- | --- | --- | --- |
-| 2.8.2 | 17 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service | Strict compile passed; class major 61 |
-| 2.8.2 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service | Strict compile passed; class major 65 |
-| 3.0.0 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service | Strict compile passed; class major 65 |
-| 3.0.0 | 25 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service | Strict compile passed; class major 69 |
+| 2.8.2 | 17 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable integration outbox | Strict compile passed; class major 61 |
+| 2.8.2 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable integration outbox | Strict compile passed; class major 65 |
+| 3.0.0 | 21 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable integration outbox | Strict compile passed; class major 65 |
+| 3.0.0 | 25 | Java and Kotlin | entity, repository, FlowUI controller, aggregate update service, durable integration outbox | Strict compile passed; class major 69 |
 
 This follows Jmix's published runtime boundary: the Jmix 2 line supports Java
 17/21, while [Jmix 3.0 requires Java 21 or

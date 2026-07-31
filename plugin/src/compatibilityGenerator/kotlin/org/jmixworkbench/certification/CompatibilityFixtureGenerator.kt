@@ -6,6 +6,7 @@ import org.jmixworkbench.generator.DataRepositoryGenerator
 import org.jmixworkbench.generator.EntityGenerator
 import org.jmixworkbench.generator.KotlinDataRepositoryGenerator
 import org.jmixworkbench.generator.KotlinEntityGenerator
+import org.jmixworkbench.generator.IntegrationConnectorGenerator
 import org.jmixworkbench.generator.ViewControllerGenerator
 import org.jmixworkbench.model.AttributeModel
 import org.jmixworkbench.model.AttributeType
@@ -15,6 +16,14 @@ import org.jmixworkbench.model.DataRepositoryConfig
 import org.jmixworkbench.model.EntitySourceLanguage
 import org.jmixworkbench.model.EntityModel
 import org.jmixworkbench.model.MethodParameter
+import org.jmixworkbench.model.IntegrationConnectorKind
+import org.jmixworkbench.model.IntegrationConnectorModel
+import org.jmixworkbench.model.IntegrationDeliveryGuarantee
+import org.jmixworkbench.model.IntegrationJsonApi
+import org.jmixworkbench.model.IntegrationOutboxModel
+import org.jmixworkbench.model.IntegrationReliabilityModel
+import org.jmixworkbench.model.IntegrationObservabilityApi
+import org.jmixworkbench.model.IntegrationObservabilityModel
 import org.jmixworkbench.model.QueryType
 import org.jmixworkbench.model.RepositoryMethod
 import org.jmixworkbench.model.RepositoryParameterRole
@@ -50,6 +59,7 @@ object CompatibilityFixtureGenerator {
         generateJavaCorpus(sources)
         generateKotlinCorpus(sources)
         generateAggregateServices(sources)
+        generateDurableIntegrationAdapters(sources)
 
         sources.toSortedMap().forEach { (relativePath, source) ->
             val target = outputRoot.resolve(relativePath).normalize()
@@ -125,6 +135,46 @@ object CompatibilityFixtureGenerator {
                         platformDelegates = platformDelegates,
                     ),
                 )
+        }
+    }
+
+    private fun generateDurableIntegrationAdapters(sources: MutableMap<String, String>) {
+        listOf(
+            "jmix28" to IntegrationJsonApi.JACKSON_2,
+            "jmix30" to IntegrationJsonApi.JACKSON_3,
+        ).forEach { (line, jsonApi) ->
+            val model = IntegrationConnectorModel(
+                name = "Certified durable loan publisher",
+                destinationId = "certified:main",
+                packageName = "com.acme.cert.integration",
+                className = "LoanEventPublisher",
+                beanName = "loanEventPublisher",
+                kind = IntegrationConnectorKind.KAFKA_PUBLISHER,
+                configurationPrefix = "cert.loan-events",
+                addressProperty = "cert.loan-events.topic",
+                payloadJavaType = "java.lang.String",
+                reliability = IntegrationReliabilityModel(
+                    deliveryGuarantee = IntegrationDeliveryGuarantee.AT_LEAST_ONCE,
+                    transactional = true,
+                    orderingRequired = true,
+                    outboxEnabled = true,
+                    outbox = IntegrationOutboxModel(
+                        storeId = "certified:main",
+                        migrationPath = "src/main/resources/db/changelog/jvw-loan-outbox.xml",
+                        tableName = "jvw_loan_event_outbox",
+                        jsonApi = jsonApi,
+                    ),
+                ),
+                observability = IntegrationObservabilityModel(
+                    metricsEnabled = true,
+                    tracingEnabled = true,
+                    structuredLoggingEnabled = true,
+                    auditEnabled = true,
+                    runtimeApi = IntegrationObservabilityApi.MICROMETER_OBSERVATION,
+                ),
+            )
+            sources["$line/java/com/acme/cert/integration/LoanEventPublisher.java"] =
+                IntegrationConnectorGenerator.generate(model).javaSource
         }
     }
 

@@ -11,6 +11,10 @@ import org.jmixworkbench.model.IntegrationDiagnosticSeverity
 import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationIdempotencyModel
 import org.jmixworkbench.model.IntegrationReliabilityModel
+import org.jmixworkbench.model.IntegrationOutboxModel
+import org.jmixworkbench.model.IntegrationJsonApi
+import org.jmixworkbench.model.IntegrationObservabilityApi
+import org.jmixworkbench.model.IntegrationObservabilityModel
 import org.jmixworkbench.model.IntegrationRetryMode
 import org.jmixworkbench.model.IntegrationRetryPolicyModel
 import kotlin.test.Test
@@ -108,12 +112,72 @@ class IntegrationConnectorGeneratorTest {
 
         assertFalse(validation.valid)
         assertTrue(validation.diagnostics.any { it.code == "INTEGRATION_EXACTLY_ONCE_UNSUPPORTED" })
-        assertTrue(validation.diagnostics.any { it.code == "INTEGRATION_OUTBOX_RUNTIME_PENDING" })
+        assertTrue(validation.diagnostics.any { it.code == "INTEGRATION_OUTBOX_CONFIGURATION_REQUIRED" })
         assertTrue(validation.diagnostics.any { it.code == "INTEGRATION_DEPENDENCY_MISSING" })
         assertTrue(validation.diagnostics.all {
             it.severity != IntegrationDiagnosticSeverity.ERROR ||
                 it.code.startsWith("INTEGRATION_")
         })
+    }
+
+    @Test
+    fun `generates portable durable outbox dispatcher migration replay and reconciliation`() {
+        val model = connector(
+            kind = IntegrationConnectorKind.KAFKA_PUBLISHER,
+            payloadJavaType = "com.acme.loan.LoanEvent",
+            reliability = IntegrationReliabilityModel(
+                deliveryGuarantee = IntegrationDeliveryGuarantee.AT_LEAST_ONCE,
+                transactional = true,
+                orderingRequired = true,
+                outboxEnabled = true,
+                outbox = IntegrationOutboxModel(
+                    storeId = "loan:main",
+                    migrationPath = "loan/src/main/resources/db/changelog/2026/07/31-jvw-loan-outbox.xml",
+                    tableName = "jvw_loan_event_outbox",
+                    jsonApi = IntegrationJsonApi.JACKSON_2,
+                ),
+            ),
+            observability = IntegrationObservabilityModel(
+                metricsEnabled = true,
+                tracingEnabled = true,
+                auditEnabled = true,
+                runtimeApi = IntegrationObservabilityApi.MICROMETER_OBSERVATION,
+            ),
+        )
+
+        val validation = IntegrationConnectorGenerator.validate(
+            model,
+            setOf(IntegrationCapability.SPRING_KAFKA),
+        )
+        assertTrue(validation.valid, validation.diagnostics.joinToString())
+        val generated = IntegrationConnectorGenerator.generate(model)
+
+        assertContains(generated.javaSource, "public String enqueue(String orderingKey, com.acme.loan.LoanEvent payload)")
+        assertContains(generated.javaSource, "INSERT INTO jvw_loan_event_outbox")
+        assertContains(generated.javaSource, "PreparedStatement statement")
+        assertContains(generated.javaSource, "statement.setMaxRows(100)")
+        assertContains(generated.javaSource, "jvw-outbox-id")
+        assertContains(generated.javaSource, "ProducerRecord<String, com.acme.loan.LoanEvent>")
+        assertFalse(generated.javaSource.contains("CorrelationData"))
+        assertContains(generated.javaSource, "public void replay(String eventId, String reason)")
+        assertContains(generated.javaSource, "SpecificOperationAccessContext")
+        assertContains(generated.javaSource, "jvw.integration.outbox.replay")
+        assertContains(generated.javaSource, "jvw.integration.outbox.maintain")
+        assertContains(generated.javaSource, "OutboxAuditEvent")
+        assertContains(generated.javaSource, "sha256(reason)")
+        assertContains(generated.javaSource, "MeterRegistry")
+        assertContains(generated.javaSource, "Observation.start(\"jvw.integration.outbox.dispatch\"")
+        assertContains(generated.javaSource, "lowCardinalityKeyValue(\"connector\"")
+        assertContains(generated.javaSource, "public OutboxHealth reconcile()")
+        assertContains(generated.javaSource, "status IN ('PENDING', 'RETRY', 'IN_FLIGHT')")
+        assertFalse(generated.javaSource.contains("exactly-once", ignoreCase = true))
+        assertContains(requireNotNull(generated.migrationXml), "<createTable tableName=\"jvw_loan_event_outbox\"")
+        assertContains(requireNotNull(generated.migrationXml), "<tableExists tableName=\"jvw_loan_event_outbox\"")
+        assertContains(requireNotNull(generated.migrationXml), "<rollback>")
+        assertContains(
+            generated.reliabilityProperties,
+            "Durable database-to-broker delivery is at-least-once",
+        )
     }
 
     @Test
@@ -182,6 +246,7 @@ class IntegrationConnectorGeneratorTest {
         httpMethod: IntegrationHttpMethod = IntegrationHttpMethod.POST,
         authentication: IntegrationAuthenticationModel = IntegrationAuthenticationModel(),
         reliability: IntegrationReliabilityModel = IntegrationReliabilityModel(),
+        observability: IntegrationObservabilityModel = IntegrationObservabilityModel(),
         handlerBeanClass: String? = null,
         handlerFieldName: String? = null,
         handlerMethod: String? = null,
@@ -199,6 +264,7 @@ class IntegrationConnectorGeneratorTest {
         httpMethod = httpMethod,
         authentication = authentication,
         reliability = reliability,
+        observability = observability,
         handlerBeanClass = handlerBeanClass,
         handlerFieldName = handlerFieldName,
         handlerMethod = handlerMethod,

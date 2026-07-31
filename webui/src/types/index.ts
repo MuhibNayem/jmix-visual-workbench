@@ -1806,6 +1806,8 @@ export type IntegrationHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 export type IntegrationDeliveryGuarantee = 'AT_MOST_ONCE' | 'AT_LEAST_ONCE' | 'EXACTLY_ONCE'
 export type IntegrationRetryMode = 'NONE' | 'BLOCKING' | 'NON_BLOCKING'
 export type IntegrationBackoffMode = 'FIXED' | 'EXPONENTIAL'
+export type IntegrationJsonApi = 'JACKSON_2' | 'JACKSON_3'
+export type IntegrationObservabilityApi = 'APPLICATION_EVENTS' | 'MICROMETER_OBSERVATION'
 export type IntegrationAuthenticationKind =
   | 'NONE' | 'BASIC' | 'BEARER' | 'API_KEY'
   | 'OAUTH2_CLIENT_CREDENTIALS' | 'SSH_KEY'
@@ -1866,6 +1868,22 @@ export interface IntegrationIdempotencyModel {
   keyParameterName: string
 }
 
+export interface IntegrationOutboxModel {
+  storeId: string
+  migrationPath?: string
+  tableName: string
+  jsonApi?: IntegrationJsonApi
+  batchSize: number
+  pollDelayMs: number
+  leaseDurationMs: number
+  maxAttempts: number
+  initialBackoffMs: number
+  maximumBackoffMs: number
+  retentionDays: number
+  replayPermission: string
+  maintenancePermission: string
+}
+
 export interface IntegrationReliabilityModel {
   deliveryGuarantee: IntegrationDeliveryGuarantee
   connectTimeoutMs: number
@@ -1877,6 +1895,7 @@ export interface IntegrationReliabilityModel {
   idempotency: IntegrationIdempotencyModel
   transactional: boolean
   outboxEnabled: boolean
+  outbox?: IntegrationOutboxModel
   orderingRequired: boolean
 }
 
@@ -1885,6 +1904,7 @@ export interface IntegrationObservabilityModel {
   tracingEnabled: boolean
   structuredLoggingEnabled: boolean
   auditEnabled: boolean
+  runtimeApi?: IntegrationObservabilityApi
   redactHeaders: string[]
 }
 
@@ -1921,6 +1941,8 @@ export interface IntegrationConnectorDestinationSnapshot {
   resourceRoot: string
   defaultPackage: string
   capabilities: IntegrationCapability[]
+  jsonApi: IntegrationJsonApi
+  observabilityApi: IntegrationObservabilityApi
   recommended: boolean
 }
 
@@ -1937,6 +1959,7 @@ export interface IntegrationConnectorWorkspaceResponse {
   defaultDestinationId?: string
   contextArtifacts: GraphArtifact[]
   oauth2Managers: IntegrationOAuth2ManagerSnapshot[]
+  dataStores: SchemaDataStoreSnapshot[]
   existingDocuments: IntegrationConnectorDocumentSnapshot[]
   issues: WorkspaceChangeIssue[]
   error?: string

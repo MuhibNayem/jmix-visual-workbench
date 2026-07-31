@@ -656,12 +656,31 @@ public class ${model.className} {
                 ) ?? developmentIntegrationConnectorWorkspace.destinations[0]
                 const javaPath = `${destination.sourceRoot}/${model.packageName.replace(/\./g, '/')}/${model.className}.java`
                 const policyPath = `${destination.resourceRoot}/META-INF/jvw/integration/${model.beanName}.properties`
+                const outboxStore = developmentIntegrationConnectorWorkspace.dataStores.find(
+                  (candidate) => candidate.id === model.reliability.outbox?.storeId,
+                )
+                const outboxFiles = model.reliability.outboxEnabled && model.reliability.outbox && !model.sourceLocator && outboxStore?.generatedDirectory
+                  ? [{
+                    relativePath: `${outboxStore.generatedDirectory}/jvw-${model.beanName}-outbox.xml`,
+                    mode: 'CREATE' as const,
+                    afterFingerprint: 'development-integration-outbox-migration',
+                    resultContent: `<databaseChangeLog>
+  <changeSet id="jvw-outbox-${model.beanName}-1" author="jmix-visual-workbench">
+    <createTable tableName="${model.reliability.outbox.tableName}"/>
+    <rollback><dropTable tableName="${model.reliability.outbox.tableName}"/></rollback>
+  </changeSet>
+</databaseChangeLog>
+`,
+                    appliedEditCount: 0,
+                  }]
+                  : []
                 return {
                   accepted: true,
                   changeSetId: 'integration-connector:development',
                   label: `${model.sourceLocator ? 'Update' : 'Create'} integration connector ${model.name}`,
                   planDigest: 'development-integration-connector',
                   files: [
+                    ...outboxFiles,
                     {
                       relativePath: javaPath,
                       mode: model.sourceLocator ? 'MODIFY' : 'CREATE',
@@ -672,6 +691,7 @@ public class ${model.className} {
 // JVW-INTEGRATION-MODEL: development
 public final class ${model.className} {
     // ${model.kind} adapter with externalized configuration and reliability policies
+    ${model.reliability.outboxEnabled ? '// Transactional enqueue + leased at-least-once dispatcher + replay/reconciliation' : ''}
 }
 `,
                       appliedEditCount: model.sourceLocator ? 1 : 0,
@@ -682,6 +702,7 @@ public final class ${model.className} {
                       afterFingerprint: 'development-integration-policy',
                       resultContent: `# Owned reliability policy for ${model.beanName}
 # endpoint/topic/queue and secrets remain externalized
+${model.reliability.outboxEnabled ? '# durable at-least-once outbox; deduplicate jvw-outbox-id downstream' : ''}
 `,
                       appliedEditCount: model.sourceLocator ? 1 : 0,
                     },

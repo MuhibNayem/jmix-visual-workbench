@@ -55,6 +55,16 @@ enum class IntegrationBackoffMode {
     EXPONENTIAL,
 }
 
+enum class IntegrationJsonApi {
+    JACKSON_2,
+    JACKSON_3,
+}
+
+enum class IntegrationObservabilityApi {
+    APPLICATION_EVENTS,
+    MICROMETER_OBSERVATION,
+}
+
 enum class IntegrationAuthenticationKind {
     NONE,
     BASIC,
@@ -126,6 +136,29 @@ data class IntegrationIdempotencyModel(
     val keyParameterName: String = "idempotencyKey",
 )
 
+/**
+ * Persisted broker outbox configuration.
+ *
+ * [migrationPath] is assigned by the backend when the connector is first
+ * created. It is deliberately source-owned so later visual edits can prove
+ * that the adapter, policy and Liquibase migration still form one unit.
+ */
+data class IntegrationOutboxModel(
+    val storeId: String,
+    val migrationPath: String? = null,
+    val tableName: String,
+    val jsonApi: IntegrationJsonApi? = null,
+    val batchSize: Int = 100,
+    val pollDelayMs: Long = 1_000,
+    val leaseDurationMs: Long = 60_000,
+    val maxAttempts: Int = 12,
+    val initialBackoffMs: Long = 1_000,
+    val maximumBackoffMs: Long = 900_000,
+    val retentionDays: Int = 30,
+    val replayPermission: String = "jvw.integration.outbox.replay",
+    val maintenancePermission: String = "jvw.integration.outbox.maintain",
+)
+
 data class IntegrationReliabilityModel(
     val deliveryGuarantee: IntegrationDeliveryGuarantee = IntegrationDeliveryGuarantee.AT_LEAST_ONCE,
     val connectTimeoutMs: Long = 5_000,
@@ -137,6 +170,7 @@ data class IntegrationReliabilityModel(
     val idempotency: IntegrationIdempotencyModel = IntegrationIdempotencyModel(),
     val transactional: Boolean = false,
     val outboxEnabled: Boolean = false,
+    val outbox: IntegrationOutboxModel? = null,
     val orderingRequired: Boolean = false,
 )
 
@@ -145,6 +179,7 @@ data class IntegrationObservabilityModel(
     val tracingEnabled: Boolean = true,
     val structuredLoggingEnabled: Boolean = true,
     val auditEnabled: Boolean = false,
+    val runtimeApi: IntegrationObservabilityApi? = null,
     val redactHeaders: List<String> = listOf(
         "Authorization",
         "Proxy-Authorization",

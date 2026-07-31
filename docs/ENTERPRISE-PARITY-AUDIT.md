@@ -130,7 +130,7 @@ inspection control rather than relying on a hard-to-hit table-row target.
 | Workflow and case management | Substantial | BPMN states/transitions, roles, forms, listeners, mappings, timers, messages, signals, retries, multi-instance/quorum, compensation, embedded/event/transaction subprocesses, cancel/terminate/error semantics, Jmix email task, Flowable DMN business-rule tasks linked to indexed decision keys, unresolved-decision diagnostics, deterministic simulation and UI-transition bypass diagnostics | Live process-instance trace, assignee hierarchy/delegation resolution, deployed version migration and ad-hoc case management |
 | Security designer | Strong | Resource roles, row roles, entity/attribute/view/menu/specific policies, native and visual UI component constraints across view actions, component actions and nested fragments, effective-access workspace, runtime evidence and unconstrained-access diagnostics | Full OIDC claim-to-role simulation, organization/session-context matrices and end-to-end “run real screen as role” |
 | Jmix REST/API studio | Substantial | `rest-services.xml` and `rest-queries.xml` discovery/editing, method/query parameters, fetch plans, authorization/transaction warnings, saved invocation payloads and redacted token input | OpenAPI-first authoring, GraphQL/gRPC/SOAP, consumer/provider contract suites and schema-evolution governance |
-| Integration designer | Substantial | Responsive permanent catalog/canvas/inspector workspace; dependency-aware HTTP/webhook, Kafka, RabbitMQ, SFTP, Jmix email, Jmix file/object storage, SMS, payment and identity-provider adapter models; indexed `OAuth2AuthorizedClientManager` selection with externalized registration/principal properties; externalized endpoints/secrets; indexed inbound-handler binding; bounded timeout, retry/backoff/DLT, delivery, transaction, ordering, idempotency, circuit-breaker, bulkhead, rate-limit and observability policies; fail-closed conflict validation; two-file digest-bound preview/apply; exact owned-source rediscovery/lock; first-class connector/method/service-call graph edges | Implement persisted outbox/dispatcher design, Rabbit listener retry-interceptor selection, provider-specific metrics/tracing/audit runtime emission, organization catalog/versioning, exact Spring Security version adapters and real broker/SFTP/provider fault-injection suites |
+| Integration designer | Substantial | Responsive permanent catalog/canvas/inspector workspace; dependency-aware HTTP/webhook, Kafka, RabbitMQ, SFTP, Jmix email, Jmix file/object storage, SMS, payment and identity-provider adapter models; indexed `OAuth2AuthorizedClientManager` selection with externalized registration/principal properties; externalized endpoints/secrets; indexed inbound-handler binding; bounded timeout, retry/backoff/DLT, delivery, transaction, ordering, idempotency, circuit-breaker, bulkhead, rate-limit and observability policies; fail-closed conflict validation; exact owned-source rediscovery/lock; first-class connector/method/service-call graph edges. Kafka/Rabbit publishers can add a selected-store durable outbox whose Java adapter, external policy, portable Liquibase migration and root include are one atomic source-owned change. The runtime uses transactional enqueue, checksums, bounded JDBC fetches, optimistic expiring leases, stable deduplication IDs, broker acknowledgements/returns, retry/terminal states, race-safe per-key ordering, permission-gated replay, retention, reconciliation and payload-free telemetry events; it explicitly promises at-least-once rather than false database-to-broker exactly-once. Jackson 2/3 source selection and generated compilation cover all four certified Jmix/JDK cells | Rabbit listener retry-interceptor selection, provider-native Micrometer/Observation/audit adapters, organization catalog/versioning, broader Spring Security adapters, real broker/SFTP/provider fault-injection suites and installed runtime certification |
 | Migration designer | Substantial | Visual Liquibase changes, module/store ownership, include chains, indexes/FKs/unique constraints, rollback and portability-oriented types | Live database diff, data-preserving destructive changes, upgrade rehearsal against populated snapshots and workflow-instance migration |
 | Production diagnostics | Substantial | Money/`Double`, UI workflow transitions, unconstrained data access, native SQL writes, missing transactions, unsafe logging, REST mismatches, schema/index/migration and source-link diagnostics; visual-logic recursion, invalid control branches, typed subflow signature mismatches, unsupported exception boundaries and writes reachable through read-only entry points | Duplicate-calculation detection, outbound timeout/retry proof, circular build wiring, full job side-effect analysis and release policy profiles |
 | Scenario/test studio | Substantial | Visual isolated entity seeding, system/named-user execution, service invocation, entity/property/count assertions, direct result assertions, required-failure assertions, deterministic Java preview and owned-source round trip | Recorded FlowUI journeys, workflow-runtime actions, REST contract steps, async eventual assertions, migration rehearsal, performance/fuzz/accessibility tests |
@@ -309,6 +309,16 @@ inspection control rather than relying on a hard-to-hit table-row target.
   at the viewport edge with no horizontal overflow. Deterministic iframe
   viewport fixtures measured 1000/1000 and 640/640 document widths; all three
   regions remained rendered and stacked in order without right-side clipping.
+- The durable-outbox workflow was subsequently exercised through the real
+  Integration Designer at 1280, 640 and 320 pixels. Kafka selection, outbox
+  enablement, automatic transaction/at-least-once normalization, indexed-store
+  selection and every lease/retry/retention/replay control remained available.
+  The 320-pixel document and viewport widths were both exactly 320 pixels, the
+  catalog and inspector ended inside the viewport, all visible form fields were
+  at least 40 pixels high, and the immutable preview showed the Java adapter,
+  policy and include-all Liquibase migration as three files. The explicit-root
+  workspace fixture separately proves the root include is the fourth file in
+  the same atomic plan. No browser warning or error was emitted.
 - Connector workspace tests on IntelliJ 2025.3 and 2026.2 force every connector
   kind through target-workspace capability validation,
   Java PSI syntax validation and the owned Java/policy source-pair pipeline.
@@ -552,9 +562,10 @@ inspection control rather than relying on a hard-to-hit table-row target.
    primitives and richer expression semantics to typed visual logic.
 3. Add real runtime debugging, process-instance migration and assignee/security
    context simulation.
-4. Finish the integration runtime tranche: persisted outbox/dispatch, Rabbit
-   retry infrastructure, provider-specific observability, signed organization
-   catalogs, version adapters and real failure simulation.
+4. Finish the integration runtime tranche: Rabbit listener retry
+   infrastructure, provider-native observability, signed organization
+   catalogs, remaining version adapters, installed outbox/runtime proof and
+   real broker/SFTP/provider failure simulation.
 5. Complete recorded UI/API/workflow/migration scenario execution.
 6. Add collaboration, CI governance, signed distribution and enterprise
    operational controls.

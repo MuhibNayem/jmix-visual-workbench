@@ -63,7 +63,14 @@ val compatibilityGeneratorSourceSet = sourceSets.create("compatibilityGenerator"
     kotlin.include(
         "org/jmixworkbench/model/EntityModel.kt",
         "org/jmixworkbench/model/ViewModel.kt",
+        "org/jmixworkbench/model/IntegrationConnectorModel.kt",
+        "org/jmixworkbench/model/MigrationModel.kt",
+        "org/jmixworkbench/model/ProjectConfig.kt",
+        "org/jmixworkbench/discovery/model/DiscoveryModel.kt",
         "org/jmixworkbench/generator/JavaClassBuilder.kt",
+        "org/jmixworkbench/generator/XmlBuilder.kt",
+        "org/jmixworkbench/generator/MigrationGenerator.kt",
+        "org/jmixworkbench/generator/IntegrationConnectorGenerator.kt",
         "org/jmixworkbench/generator/EntityGenerator.kt",
         "org/jmixworkbench/generator/KotlinEntityGenerator.kt",
         "org/jmixworkbench/generator/DataRepositoryGenerator.kt",
@@ -171,6 +178,22 @@ val targetCompatibilityCompileTasks = targetCompatibilityCells.flatMap { cell ->
             sourceSet.implementationConfigurationName,
             "io.jmix.flowui:jmix-flowui:${cell.jmixVersion}",
         )
+        add(
+            sourceSet.implementationConfigurationName,
+            "org.springframework.kafka:spring-kafka",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            "org.springframework:spring-jdbc",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            "io.micrometer:micrometer-core",
+        )
+        add(
+            sourceSet.implementationConfigurationName,
+            "io.micrometer:micrometer-observation",
+        )
     }
 
     val compiler = javaToolchains.compilerFor {
@@ -210,7 +233,7 @@ val certifyGeneratedCodeCompatibility = tasks.register(
             "Compatibility source manifest was not generated."
         }
         val sourceManifest = manifest.readText()
-        check(Regex("\"path\"").findAll(sourceManifest).count() >= 9) {
+        check(Regex("\"path\"").findAll(sourceManifest).count() >= 11) {
             "Compatibility source corpus is unexpectedly small."
         }
         targetCompatibilityCompileTasks.forEach { taskProvider ->
@@ -310,7 +333,7 @@ val certifyGeneratedCodeCompatibility = tasks.register(
                         .append("\",\"bytecodeMajor\":").append(expectedBytecodeMajor)
                         .append(",\"languages\":[\"java\",\"kotlin\"],")
                         .append("\"artifacts\":[\"entity\",\"repository\",\"flowui-controller\",")
-                        .append("\"aggregate-update-service\"],")
+                        .append("\"aggregate-update-service\",\"durable-integration-outbox\"],")
                         .append("\"classCounts\":{\"java\":").append(classCounts.getValue("java"))
                         .append(",\"kotlin\":").append(classCounts.getValue("kotlin")).append("},")
                         .append("\"compileClasspathArtifacts\":").append(compileClasspath.size)

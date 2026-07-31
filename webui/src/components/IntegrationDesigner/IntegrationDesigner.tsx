@@ -19,6 +19,7 @@ import type {
   IntegrationHttpMethod,
   IntegrationRetryMode,
   IntegrationConnectorWorkspaceResponse,
+  SchemaDataStoreSnapshot,
   WorkspaceChangePreviewResponse,
 } from '../../types'
 
@@ -49,7 +50,7 @@ const definitions: ConnectorDefinition[] = [
   { kind: 'IDENTITY_PROVIDER', label: 'Identity provider', description: 'Integrate an OAuth2 identity service through an approved client manager.', group: 'Enterprise gateways', direction: 'Outbound', capability: 'OAUTH2_CLIENT', icon: KeyRound },
 ]
 
-const fieldClass = 'w-full min-w-0 rounded-md border border-surface-border bg-surface px-2.5 py-2 text-xs text-gray-100 outline-none transition focus:border-jmix-500'
+const fieldClass = 'min-h-10 w-full min-w-0 rounded-md border border-surface-border bg-surface px-2.5 py-2 text-xs text-gray-100 outline-none transition focus:border-jmix-500'
 const labelClass = 'mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-500'
 const panelClass = 'min-w-0 border-surface-border bg-surface-light/35'
 const consumerKinds = new Set<IntegrationConnectorKind>(['KAFKA_CONSUMER', 'RABBIT_CONSUMER'])
@@ -79,6 +80,18 @@ function classNameFor(kind: IntegrationConnectorKind) {
 
 function beanNameFor(className: string) {
   return className ? className.charAt(0).toLowerCase() + className.slice(1) : ''
+}
+
+function outboxTableName(beanName: string) {
+  const snake = beanName
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .toLowerCase()
+    .replace(/^_+|_+$/g, '')
+  const prefix = 'jvw_'
+  const suffix = '_outbox'
+  const core = (snake || 'integration').slice(0, 30 - prefix.length - suffix.length).replace(/_+$/g, '')
+  return `${prefix}${core}${suffix}`
 }
 
 function prefixFor(kind: IntegrationConnectorKind) {
@@ -155,6 +168,7 @@ function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: In
       tracingEnabled: true,
       structuredLoggingEnabled: true,
       auditEnabled: false,
+      runtimeApi: destination?.observabilityApi,
       redactHeaders: ['Authorization', 'Proxy-Authorization', 'X-Api-Key', 'Cookie', 'Set-Cookie'],
     },
     profiles: [],
@@ -189,7 +203,12 @@ function requiredCapabilities(model: IntegrationConnectorModel): IntegrationCapa
   return [...result]
 }
 
-function localBlockers(model: IntegrationConnectorModel, available: IntegrationCapability[]) {
+function localBlockers(
+  model: IntegrationConnectorModel,
+  available: IntegrationCapability[],
+  stores: SchemaDataStoreSnapshot[],
+  moduleId?: string,
+) {
   const blockers: string[] = []
   if (!model.name.trim() || !model.packageName.trim() || !model.className.trim() || !model.beanName.trim()) {
     blockers.push('Name, package, class, and bean identity are required.')
@@ -211,7 +230,15 @@ function localBlockers(model: IntegrationConnectorModel, available: IntegrationC
     model.reliability.retry.mode !== 'NONE' &&
     !model.reliability.idempotency.enabled
   ) blockers.push('Retrying this non-idempotent HTTP operation requires an idempotency key.')
-  if (model.reliability.outboxEnabled) blockers.push('Outbox generation is blocked until a persisted outbox entity and dispatcher are selected.')
+  if (model.reliability.outboxEnabled) {
+    const outbox = model.reliability.outbox
+    const store = stores.find((candidate) => candidate.id === outbox?.storeId)
+    if (!outbox || !store) blockers.push('Select an indexed Liquibase data store for the durable outbox.')
+    else if (store.moduleId !== moduleId) blockers.push('Outbox data store must belong to the selected connector module.')
+    else if (!store.rootChangelogPath || !store.generatedDirectory) blockers.push('Selected data store has no safe Liquibase migration destination.')
+    if (!model.reliability.transactional) blockers.push('Durable enqueue requires a transaction.')
+    if (model.reliability.deliveryGuarantee === 'EXACTLY_ONCE') blockers.push('Database-to-broker delivery is at-least-once; exactly-once would be a false guarantee.')
+  }
   if (model.kind === 'IDENTITY_PROVIDER' && model.authentication.kind !== 'OAUTH2_CLIENT_CREDENTIALS') {
     blockers.push('Identity-provider connectors require OAuth2 client credentials.')
   }
@@ -251,7 +278,7 @@ function Toggle({
   disabled?: boolean
 }) {
   return (
-    <label className={`flex items-start gap-2 rounded-md border border-surface-border bg-surface/50 p-2 ${disabled ? 'opacity-50' : 'cursor-pointer'}`}>
+    <label className={`flex min-h-10 items-start gap-2 rounded-md border border-surface-border bg-surface/50 p-2 ${disabled ? 'opacity-50' : 'cursor-pointer'}`}>
       <input
         type="checkbox"
         checked={checked}
@@ -347,7 +374,12 @@ export default function IntegrationDesigner() {
   const handlers = workspace?.contextArtifacts.filter((artifact) => (
     ['SERVICE', 'BUSINESS_RULE', 'REPOSITORY', 'VALIDATOR', 'SOURCE_TYPE'].includes(artifact.kind)
   )) ?? []
-  const blockers = model ? localBlockers(model, destination?.capabilities ?? []) : []
+  const blockers = model ? localBlockers(
+    model,
+    destination?.capabilities ?? [],
+    workspace?.dataStores ?? [],
+    destination?.moduleId,
+  ) : []
   const groups = [...new Set(definitions.map((candidate) => candidate.group))]
   const normalizedQuery = query.trim().toLowerCase()
   const visibleDefinitions = definitions.filter((candidate) => (
@@ -531,7 +563,7 @@ export default function IntegrationDesigner() {
                 <input
                   value={model.name}
                   onChange={(event) => commit((draft) => { draft.name = event.target.value })}
-                  className="w-full min-w-0 border-0 bg-transparent text-base font-semibold text-gray-100 outline-none"
+                  className="min-h-10 w-full min-w-0 border-0 bg-transparent text-base font-semibold text-gray-100 outline-none"
                   aria-label="Connector name"
                 />
                 <p className="text-[10px] text-gray-500">{definition?.direction} · {definition?.description}</p>
@@ -562,7 +594,21 @@ export default function IntegrationDesigner() {
                       const nextDestination = workspace.destinations.find((candidate) => candidate.id === event.target.value)
                       commit((draft) => {
                         draft.destinationId = event.target.value
-                        if (!draft.sourceLocator && nextDestination) draft.packageName = nextDestination.defaultPackage
+                        if (!draft.sourceLocator && nextDestination) {
+                          draft.packageName = nextDestination.defaultPackage
+                          if (draft.reliability.outboxEnabled) {
+                            const store = workspace.dataStores.find((candidate) => (
+                              candidate.moduleId === nextDestination.moduleId &&
+                              candidate.rootChangelogPath &&
+                              candidate.generatedDirectory
+                            ))
+                          if (draft.reliability.outbox) {
+                              draft.reliability.outbox.storeId = store?.id ?? ''
+                              draft.reliability.outbox.jsonApi = nextDestination.jsonApi
+                            }
+                          }
+                          draft.observability.runtimeApi = nextDestination.observabilityApi
+                        }
                       })
                     }}
                     disabled={Boolean(model.sourceLocator)}
@@ -736,7 +782,75 @@ export default function IntegrationDesigner() {
             </div>
             <Toggle checked={model.reliability.transactional} onChange={(checked) => commit((draft) => { draft.reliability.transactional = checked })} label="Transactional boundary" description="Use only where the provider and generated adapter can honor it." />
             <Toggle checked={model.reliability.orderingRequired} onChange={(checked) => commit((draft) => { draft.reliability.orderingRequired = checked })} label="Strict ordering required" />
-            <Toggle checked={model.reliability.outboxEnabled} onChange={(checked) => commit((draft) => { draft.reliability.outboxEnabled = checked })} label="Transactional outbox" description={publisherKinds.has(model.kind) ? 'Requires an explicit entity and dispatcher selection.' : 'Available only for broker publishers.'} disabled={!publisherKinds.has(model.kind)} />
+            <Toggle
+              checked={model.reliability.outboxEnabled}
+              onChange={(checked) => commit((draft) => {
+                draft.reliability.outboxEnabled = checked
+                if (checked) {
+                  const store = workspace.dataStores.find((candidate) => (
+                    candidate.moduleId === destination?.moduleId &&
+                    candidate.rootChangelogPath &&
+                    candidate.generatedDirectory
+                  ))
+                  draft.reliability.transactional = true
+                  draft.reliability.deliveryGuarantee = 'AT_LEAST_ONCE'
+                  draft.reliability.outbox = {
+                    storeId: store?.id ?? '',
+                    tableName: outboxTableName(draft.beanName),
+                    jsonApi: destination?.jsonApi,
+                    batchSize: 100,
+                    pollDelayMs: 1000,
+                    leaseDurationMs: Math.max(60000, draft.reliability.requestTimeoutMs),
+                    maxAttempts: 12,
+                    initialBackoffMs: 1000,
+                    maximumBackoffMs: 900000,
+                    retentionDays: 30,
+                    replayPermission: 'jvw.integration.outbox.replay',
+                    maintenancePermission: 'jvw.integration.outbox.maintain',
+                  }
+                } else {
+                  draft.reliability.outbox = undefined
+                }
+              })}
+              label="Transactional outbox"
+              description={publisherKinds.has(model.kind) ? 'Persist, lease, confirm, retry, replay, and reconcile broker events.' : 'Available only for broker publishers.'}
+              disabled={!publisherKinds.has(model.kind) || Boolean(model.sourceLocator)}
+            />
+            {model.reliability.outboxEnabled && model.reliability.outbox && (
+              <div className="space-y-2 rounded-md border border-jmix-500/25 bg-jmix-500/5 p-2.5">
+                <p className="text-[9px] leading-4 text-jmix-200">
+                  Durable at-least-once delivery. Every broker message carries a stable <code>jvw-outbox-id</code> for downstream deduplication.
+                </p>
+                <label>
+                  <span className={labelClass}>Data store</span>
+                  <select
+                    value={model.reliability.outbox.storeId}
+                    disabled={Boolean(model.sourceLocator)}
+                    onChange={(event) => commit((draft) => {
+                      if (draft.reliability.outbox) draft.reliability.outbox.storeId = event.target.value
+                    })}
+                    className={fieldClass}
+                  >
+                    <option value="">Select migratable store…</option>
+                    {workspace.dataStores
+                      .filter((store) => store.moduleId === destination?.moduleId && store.rootChangelogPath && store.generatedDirectory)
+                      .map((store) => <option key={store.id} value={store.id}>{store.name} · {store.includeMode}</option>)}
+                  </select>
+                </label>
+                <label><span className={labelClass}>Table</span><input disabled={Boolean(model.sourceLocator)} value={model.reliability.outbox.tableName} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.tableName = event.target.value })} className={fieldClass} /></label>
+                <div className="grid grid-cols-2 gap-2">
+                  <label><span className={labelClass}>Batch</span><input type="number" min={1} max={10000} value={model.reliability.outbox.batchSize} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.batchSize = Number(event.target.value) })} className={fieldClass} /></label>
+                  <label><span className={labelClass}>Poll ms</span><input type="number" min={100} value={model.reliability.outbox.pollDelayMs} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.pollDelayMs = Number(event.target.value) })} className={fieldClass} /></label>
+                  <label><span className={labelClass}>Lease ms</span><input type="number" min={1000} value={model.reliability.outbox.leaseDurationMs} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.leaseDurationMs = Number(event.target.value) })} className={fieldClass} /></label>
+                  <label><span className={labelClass}>Attempts</span><input type="number" min={1} max={30} value={model.reliability.outbox.maxAttempts} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.maxAttempts = Number(event.target.value) })} className={fieldClass} /></label>
+                  <label><span className={labelClass}>Initial backoff</span><input type="number" min={100} value={model.reliability.outbox.initialBackoffMs} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.initialBackoffMs = Number(event.target.value) })} className={fieldClass} /></label>
+                  <label><span className={labelClass}>Max backoff</span><input type="number" min={100} value={model.reliability.outbox.maximumBackoffMs} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.maximumBackoffMs = Number(event.target.value) })} className={fieldClass} /></label>
+                  <label><span className={labelClass}>Retention days</span><input type="number" min={1} max={3650} value={model.reliability.outbox.retentionDays} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.retentionDays = Number(event.target.value) })} className={fieldClass} /></label>
+                  <label><span className={labelClass}>Replay permission</span><input value={model.reliability.outbox.replayPermission} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.replayPermission = event.target.value })} className={fieldClass} /></label>
+                  <label><span className={labelClass}>Maintenance permission</span><input value={model.reliability.outbox.maintenancePermission} onChange={(event) => commit((draft) => { if (draft.reliability.outbox) draft.reliability.outbox.maintenancePermission = event.target.value })} className={fieldClass} /></label>
+                </div>
+              </div>
+            )}
           </Section>
 
           <Section title="Retry and dead letter" icon={History}>
@@ -772,6 +886,12 @@ export default function IntegrationDesigner() {
           </Section>
 
           <Section title="Observability" icon={Gauge}>
+            <div className="rounded-md border border-surface-border bg-surface/45 p-2 text-[9px] leading-4 text-gray-400">
+              Runtime: <span className="font-semibold text-gray-200">
+                {model.observability.runtimeApi === 'MICROMETER_OBSERVATION' ? 'Micrometer metrics + Observation tracing' : 'Spring application events'}
+              </span>
+              {model.reliability.outboxEnabled && ' · replay and purge always emit payload-free audit events'}
+            </div>
             <div className="grid grid-cols-2 gap-2">
               <Toggle checked={model.observability.metricsEnabled} onChange={(checked) => commit((draft) => { draft.observability.metricsEnabled = checked })} label="Metrics" />
               <Toggle checked={model.observability.tracingEnabled} onChange={(checked) => commit((draft) => { draft.observability.tracingEnabled = checked })} label="Tracing" />

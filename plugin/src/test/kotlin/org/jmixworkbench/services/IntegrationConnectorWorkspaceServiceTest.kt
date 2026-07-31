@@ -12,11 +12,114 @@ import org.jmixworkbench.model.IntegrationConnectorModel
 import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationAuthenticationKind
 import org.jmixworkbench.model.IntegrationAuthenticationModel
+import org.jmixworkbench.model.IntegrationDeliveryGuarantee
+import org.jmixworkbench.model.IntegrationOutboxModel
+import org.jmixworkbench.model.IntegrationReliabilityModel
 import kotlin.test.assertContains
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class IntegrationConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
+    fun testPlansConnectorOutboxMigrationAndRootIncludeAsOneAtomicChange() {
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "build.gradle.kts",
+                """
+                plugins { id("io.jmix") version "2.8.3" }
+                dependencies {
+                    implementation("io.jmix.flowui:jmix-flowui-starter")
+                    implementation("org.springframework.kafka:spring-kafka")
+                }
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/java/com/acme/loan/LoanEvent.java",
+                """
+                package com.acme.loan;
+                public record LoanEvent(String loanId) {}
+                """.trimIndent(),
+            )
+            write(
+                root,
+                "src/main/resources/application.properties",
+                "main.liquibase.change-log=classpath:db/changelog/db.changelog-master.xml",
+            )
+            write(
+                root,
+                "src/main/resources/db/changelog/db.changelog-master.xml",
+                """
+                <databaseChangeLog
+                    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+                </databaseChangeLog>
+                """.trimIndent(),
+            )
+        }
+        PsiTestUtil.addContentRoot(module, root)
+        PsiTestUtil.addSourceRoot(
+            module,
+            requireNotNull(root.findFileByRelativePath("src/main/java")),
+            JavaSourceRootType.SOURCE,
+        )
+        PsiTestUtil.addSourceRoot(
+            module,
+            requireNotNull(root.findFileByRelativePath("src/main/resources")),
+            JavaResourceRootType.RESOURCE,
+        )
+        val service = IntegrationConnectorWorkspaceService.getInstance(project)
+        val workspace = service.load(forceRefresh = true)
+        val destination = requireNotNull(workspace.destinations.firstOrNull())
+        val store = requireNotNull(workspace.dataStores.firstOrNull { it.moduleId == destination.moduleId }) {
+            "No schema data store was indexed: ${workspace.issues}"
+        }
+        val model = IntegrationConnectorModel(
+            name = "Durable loan events",
+            destinationId = destination.id,
+            packageName = "com.acme.loan.integration",
+            className = "LoanEventPublisher",
+            beanName = "loanEventPublisher",
+            kind = IntegrationConnectorKind.KAFKA_PUBLISHER,
+            configurationPrefix = "loan.events",
+            addressProperty = "loan.events.topic",
+            payloadJavaType = "com.acme.loan.LoanEvent",
+            reliability = IntegrationReliabilityModel(
+                deliveryGuarantee = IntegrationDeliveryGuarantee.AT_LEAST_ONCE,
+                transactional = true,
+                outboxEnabled = true,
+                outbox = IntegrationOutboxModel(
+                    storeId = store.id,
+                    tableName = "jvw_loan_event_outbox",
+                ),
+            ),
+        )
+
+        val proposal = service.propose(model)
+        val changeSet = requireNotNull(proposal.changeSet) {
+            "Outbox connector proposal rejected: ${proposal.issues}"
+        }
+        assertTrue(proposal.issues.isEmpty(), proposal.issues.joinToString())
+        assertTrue(changeSet.files.size == 4, "Expected Java, policy, migration and root include: ${changeSet.files}")
+        val migration = changeSet.files.single {
+            it.relativePath.endsWith(".xml") && it.mode.name == "CREATE"
+        }
+        val rootEdit = changeSet.files.single {
+            it.relativePath.endsWith("db.changelog-master.xml") && it.mode.name == "MODIFY"
+        }
+        val java = changeSet.files.single { it.relativePath.endsWith("LoanEventPublisher.java") }
+
+        assertContains(requireNotNull(migration.createContent), "jvw_loan_event_outbox")
+        assertContains(requireNotNull(migration.createContent), "<rollback>")
+        assertContains(rootEdit.edits.single().replacement, "<include file=\"")
+        assertContains(requireNotNull(java.createContent), "com.fasterxml.jackson.databind.ObjectMapper")
+        assertContains(requireNotNull(java.createContent), "public String enqueue")
+        assertContains(requireNotNull(java.createContent), "SpecificOperationAccessContext")
+        assertTrue(service.preview(model).accepted)
+    }
+
     fun testCreatesTwoFileOwnedConnectorAndLocksWhenPolicyChanges() {
         val root = getOrCreateProjectBaseDir()
         WriteAction.run<RuntimeException> {
