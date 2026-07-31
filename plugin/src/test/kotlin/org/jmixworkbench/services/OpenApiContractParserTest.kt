@@ -307,6 +307,105 @@ class OpenApiContractParserTest {
     }
 
     @Test
+    fun `generates multiple operations with one canonical shared model registry`() {
+        val parsed = OpenApiContractParser.parse(
+            "customer-api.yaml",
+            """
+                openapi: 3.1.1
+                info: { title: Customer API, version: "1" }
+                paths:
+                  /customers:
+                    post:
+                      operationId: createCustomer
+                      requestBody:
+                        required: true
+                        content:
+                          application/json:
+                            schema: { ${'$'}ref: '#/components/schemas/CustomerDraft' }
+                      responses:
+                        "201":
+                          description: created
+                          content:
+                            application/json:
+                              schema: { ${'$'}ref: '#/components/schemas/Customer' }
+                  /customers/{id}:
+                    get:
+                      operationId: getCustomer
+                      parameters:
+                        - name: id
+                          in: path
+                          required: true
+                          schema: { type: string, format: uuid }
+                      responses:
+                        "200":
+                          description: found
+                          content:
+                            application/json:
+                              schema: { ${'$'}ref: '#/components/schemas/Address' }
+                components:
+                  schemas:
+                    CustomerDraft:
+                      type: object
+                      required: [name, address]
+                      properties:
+                        name: { type: string }
+                        address: { ${'$'}ref: '#/components/schemas/Address' }
+                    Customer:
+                      type: object
+                      required: [id, name, address]
+                      properties:
+                        id: { type: string, format: uuid }
+                        name: { type: string }
+                        address: { ${'$'}ref: '#/components/schemas/Address' }
+                    Address:
+                      type: object
+                      required: [city]
+                      properties:
+                        city: { type: string }
+            """.trimIndent().toByteArray(),
+        )
+        val snapshots = parsed.snapshot(null).operations.associateBy { it.operationId }
+        val createBinding = assertNotNull(snapshots["createCustomer"]?.defaultBinding)
+        val getBinding = assertNotNull(snapshots["getCustomer"]?.defaultBinding)
+        val operations = parsed.resolveAll(listOf(createBinding, getBinding))
+        val create = operations[0]
+        val get = operations[1]
+
+        assertEquals(create.schemas, get.schemas)
+        assertEquals(1, create.schemas.count { it.id == "component:Customer" })
+        assertEquals(1, create.schemas.count { it.id == "component:Address" })
+
+        val model = connector().copy(
+            openApiBinding = createBinding,
+            openApiAdditionalBindings = listOf(getBinding),
+            resolvedOpenApiOperation = create,
+            resolvedOpenApiAdditionalOperations = listOf(get),
+            httpMethod = create.method,
+            contentType = requireNotNull(create.requestMediaType),
+            payloadJavaType = IntegrationConnectorGenerator.openApiPayloadJavaType(create, "PaymentConnector"),
+            responseJavaType = IntegrationConnectorGenerator.openApiResponseJavaType(create, "PaymentConnector"),
+            authentication = IntegrationAuthenticationModel(),
+        )
+        val validation = IntegrationConnectorGenerator.validate(
+            model,
+            setOf(IntegrationCapability.SPRING_WEB),
+        )
+        assertTrue(validation.valid, validation.diagnostics.joinToString())
+        val generated = IntegrationConnectorGenerator.generate(model).javaSource
+        assertContains(generated, "createCustomer(")
+        assertContains(generated, "getCustomer(")
+        assertContains(generated, "public PaymentConnector.Address getCustomer(")
+        assertEquals(1, Regex("public record Customer\\(").findAll(generated).count())
+        assertEquals(1, Regex("public record Address\\(").findAll(generated).count())
+        val marker = generated.lineSequence()
+            .first { it.startsWith(IntegrationConnectorGenerator.markerPrefix()) }
+            .removePrefix(IntegrationConnectorGenerator.markerPrefix())
+        val persisted = String(java.util.Base64.getUrlDecoder().decode(marker))
+        assertFalse(persisted.contains("resolvedOpenApiAdditionalOperations"))
+        assertTrue(persisted.contains("openApiAdditionalBindings"))
+    }
+
+    @Test
     fun `blocks external references ambiguous polymorphism and stale coordinates`() {
         val external = OpenApiContractParser.parse(
             "openapi.yaml",

@@ -636,6 +636,23 @@ object CompatibilityFixtureGenerator {
                 ),
             ),
         )
+        val lookupBinding = binding.copy(
+            operationId = "findCertifiedPayment",
+            method = IntegrationHttpMethod.GET,
+            path = "/payments/{accountId}",
+            requestMediaType = null,
+            responseStatus = "200",
+        )
+        val lookupOperation = operation.copy(
+            operationId = lookupBinding.operationId,
+            javaMethodName = "findCertifiedPayment",
+            method = lookupBinding.method,
+            path = lookupBinding.path,
+            requestMediaType = null,
+            requestRequired = false,
+            requestSchemaId = null,
+            responseStatus = lookupBinding.responseStatus,
+        )
         val initial = IntegrationConnectorModel(
             name = "Certified OpenAPI payment client",
             destinationId = "certified:main",
@@ -650,6 +667,7 @@ object CompatibilityFixtureGenerator {
             httpMethod = binding.method,
             contentType = requireNotNull(binding.requestMediaType),
             openApiBinding = binding,
+            openApiAdditionalBindings = listOf(lookupBinding),
             openApiJmixLayer = IntegrationOpenApiJmixLayerModel(
                 enabled = true,
                 dtoPackage = "com.acme.cert.entity.payment",
@@ -696,6 +714,7 @@ object CompatibilityFixtureGenerator {
                 ),
             ),
             resolvedOpenApiOperation = operation,
+            resolvedOpenApiAdditionalOperations = listOf(lookupOperation),
         )
         val model = initial.copy(
             payloadJavaType = IntegrationConnectorGenerator.openApiPayloadJavaType(
@@ -713,6 +732,7 @@ object CompatibilityFixtureGenerator {
             OpenApiJmixLayerGenerator.Input(
                 connector = model,
                 operation = operation,
+                operations = listOf(operation, lookupOperation),
                 layer = requireNotNull(model.openApiJmixLayer),
                 entityNamePrefix = "cert",
                 existingTargets = emptyMap(),

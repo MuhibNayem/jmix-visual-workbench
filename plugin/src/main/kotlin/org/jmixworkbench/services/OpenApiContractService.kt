@@ -115,23 +115,56 @@ class OpenApiContractService(private val project: Project) {
     }
 
     fun resolve(binding: IntegrationOpenApiBinding): OpenApiContractResolution {
-        val resolved = ProjectFileResolver.getInstance(project).resolveFile(binding.relativePath)
-            ?: throw IllegalArgumentException(
-                "OpenAPI contract '${binding.relativePath}' is no longer available in the project.",
-            )
-        val contract = inspect(binding.relativePath, resolved.file, null)
-        require(contract.documentSha256 == binding.documentSha256) {
-            "OpenAPI contract '${binding.relativePath}' changed. Refresh and review the new contract before generation."
+        val bundle = resolveAll(listOf(binding))
+        return OpenApiContractResolution(bundle.contract, bundle.operations.single())
+    }
+
+    /**
+     * Resolves several selected operations against one exact project-owned
+     * contract bundle. A single schema collector gives every shared component
+     * one canonical Java type and detects cross-operation name collisions.
+     */
+    fun resolveAll(bindings: List<IntegrationOpenApiBinding>): OpenApiContractBundleResolution {
+        require(bindings.isNotEmpty()) { "At least one OpenAPI operation binding is required." }
+        require(bindings.size <= MAX_SELECTED_OPERATIONS) {
+            "An OpenAPI client can contain at most $MAX_SELECTED_OPERATIONS selected operations."
         }
-        require(contract.referencedDocuments == binding.referencedDocuments) {
+        val primary = bindings.first()
+        require(bindings.all { binding ->
+            binding.relativePath == primary.relativePath &&
+                binding.documentSha256 == primary.documentSha256 &&
+                binding.referencedDocuments == primary.referencedDocuments &&
+                binding.specificationVersion == primary.specificationVersion
+        }) {
+            "Every operation in one OpenAPI client must belong to the same exact contract bundle revision."
+        }
+        val duplicateBindings = bindings.groupingBy { binding ->
+            listOf(
+                binding.method.name,
+                binding.path,
+                binding.operationId.orEmpty(),
+                binding.requestMediaType.orEmpty(),
+                binding.responseStatus.orEmpty(),
+                binding.responseMediaType.orEmpty(),
+            ).joinToString("\u0000")
+        }.eachCount().filterValues { it > 1 }
+        require(duplicateBindings.isEmpty()) { "The OpenAPI client contains a duplicate operation binding." }
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(primary.relativePath)
+            ?: throw IllegalArgumentException(
+                "OpenAPI contract '${primary.relativePath}' is no longer available in the project.",
+            )
+        val contract = inspect(primary.relativePath, resolved.file, null)
+        require(contract.documentSha256 == primary.documentSha256) {
+            "OpenAPI contract '${primary.relativePath}' changed. Refresh and review the new contract before generation."
+        }
+        require(contract.referencedDocuments == primary.referencedDocuments) {
             "A referenced OpenAPI document changed. Refresh and review the complete contract bundle before generation."
         }
-        require(contract.specificationVersion == binding.specificationVersion) {
+        require(contract.specificationVersion == primary.specificationVersion) {
             "OpenAPI specification version changed. Refresh and review the contract."
         }
-        val parsed = parseFile(binding.relativePath, resolved.file)
-        val operation = parsed.resolve(binding)
-        return OpenApiContractResolution(contract, operation)
+        val parsed = parseFile(primary.relativePath, resolved.file)
+        return OpenApiContractBundleResolution(contract, parsed.resolveAll(bindings))
     }
 
     /**
@@ -141,12 +174,45 @@ class OpenApiContractService(private val project: Project) {
      * backend-issued baseline and obtain explicit evolution approval.
      */
     fun resolveCurrent(binding: IntegrationOpenApiBinding): OpenApiContractResolution {
-        val resolved = ProjectFileResolver.getInstance(project).resolveFile(binding.relativePath)
+        val bundle = resolveCurrentAll(listOf(binding))
+        return OpenApiContractResolution(bundle.contract, bundle.operations.single())
+    }
+
+    /**
+     * Matches an existing client operation set against the current revision of
+     * one project-owned contract. Matching and representation fallback happen
+     * for the whole set before a shared schema registry is rebuilt, so callers
+     * can review and approve one coherent contract evolution.
+     */
+    fun resolveCurrentAll(bindings: List<IntegrationOpenApiBinding>): OpenApiContractBundleResolution {
+        require(bindings.isNotEmpty()) { "At least one OpenAPI operation binding is required." }
+        require(bindings.size <= MAX_SELECTED_OPERATIONS) {
+            "An OpenAPI client can contain at most $MAX_SELECTED_OPERATIONS selected operations."
+        }
+        val primary = bindings.first()
+        require(bindings.all { binding ->
+            binding.relativePath == primary.relativePath &&
+                binding.documentSha256 == primary.documentSha256 &&
+                binding.referencedDocuments == primary.referencedDocuments &&
+                binding.specificationVersion == primary.specificationVersion
+        }) {
+            "Every existing operation must belong to the same previous OpenAPI contract bundle revision."
+        }
+        val resolved = ProjectFileResolver.getInstance(project).resolveFile(primary.relativePath)
             ?: throw IllegalArgumentException(
-                "OpenAPI contract '${binding.relativePath}' is no longer available in the project.",
+                "OpenAPI contract '${primary.relativePath}' is no longer available in the project.",
             )
-        val contract = inspect(binding.relativePath, resolved.file, null)
+        val contract = inspect(primary.relativePath, resolved.file, null)
         val supported = contract.operations.filter(OpenApiOperationSnapshot::supported)
+        val currentBindings = bindings.map { binding -> currentBinding(binding, supported) }
+        val parsed = parseFile(primary.relativePath, resolved.file)
+        return OpenApiContractBundleResolution(contract, parsed.resolveAll(currentBindings))
+    }
+
+    private fun currentBinding(
+        binding: IntegrationOpenApiBinding,
+        supported: List<OpenApiOperationSnapshot>,
+    ): IntegrationOpenApiBinding {
         val byOperationId = binding.operationId?.let { operationId ->
             supported.filter { it.operationId == operationId }.singleOrNull()
         }
@@ -181,8 +247,7 @@ class OpenApiContractService(private val project: Project) {
             responseStatus = responseStatus,
             responseMediaType = responseMediaType,
         )
-        val parsed = parseFile(binding.relativePath, resolved.file)
-        return OpenApiContractResolution(contract, parsed.resolve(currentBinding))
+        return currentBinding
     }
 
     private fun inspect(
@@ -303,6 +368,7 @@ class OpenApiContractService(private val project: Project) {
         private const val MAX_DOCUMENT_BYTES = 5L * 1024 * 1024
         private const val MAX_DISCOVERY_FILES = 100_000
         private const val MAX_CACHED_CONTRACTS = 128
+        private const val MAX_SELECTED_OPERATIONS = 64
         private val SUPPORTED_EXTENSIONS = setOf("json", "yaml", "yml")
         private val IGNORED_DIRECTORIES = setOf(
             ".git",
@@ -423,6 +489,11 @@ data class OpenApiParameterSnapshot(
 data class OpenApiContractResolution(
     val contract: OpenApiContractSnapshot,
     val operation: IntegrationOpenApiOperationModel,
+)
+
+data class OpenApiContractBundleResolution(
+    val contract: OpenApiContractSnapshot,
+    val operations: List<IntegrationOpenApiOperationModel>,
 )
 
 data class OpenApiContractSelectionResponse(
@@ -592,24 +663,46 @@ internal class ParsedOpenApiContract(
     }
 
     fun resolve(binding: IntegrationOpenApiBinding): IntegrationOpenApiOperationModel {
-        require(binding.relativePath == relativePath) { "OpenAPI contract path does not match the selected document." }
-        require(binding.documentSha256 == sha256) { "OpenAPI contract digest is stale." }
-        require(binding.referencedDocuments == referencedDocuments) {
-            "One or more referenced OpenAPI documents changed or are missing from the binding."
+        return resolveAll(listOf(binding)).single()
+    }
+
+    fun resolveAll(bindings: List<IntegrationOpenApiBinding>): List<IntegrationOpenApiOperationModel> {
+        require(bindings.isNotEmpty()) { "At least one OpenAPI operation binding is required." }
+        val collector = SchemaCollector(components, limits)
+        val operations = bindings.map { binding ->
+            require(binding.relativePath == relativePath) {
+                "OpenAPI contract path does not match the selected document."
+            }
+            require(binding.documentSha256 == sha256) { "OpenAPI contract digest is stale." }
+            require(binding.referencedDocuments == referencedDocuments) {
+                "One or more referenced OpenAPI documents changed or are missing from the binding."
+            }
+            require(binding.specificationVersion == openApi.openapi) {
+                "OpenAPI specification version is stale."
+            }
+            val candidates = operationEntries.filter { it.method == binding.method && it.path == binding.path }
+            val entry = candidates.singleOrNull {
+                binding.operationId == null || it.operation.operationId == binding.operationId
+            } ?: throw IllegalArgumentException(
+                "OpenAPI operation ${binding.method} ${binding.path} is missing or ambiguous.",
+            )
+            buildOperation(
+                entry = entry,
+                requestMediaType = binding.requestMediaType,
+                responseStatus = binding.responseStatus,
+                responseMediaType = binding.responseMediaType,
+                collector = collector,
+            )
         }
-        require(binding.specificationVersion == openApi.openapi) { "OpenAPI specification version is stale." }
-        val candidates = operationEntries.filter { it.method == binding.method && it.path == binding.path }
-        val entry = candidates.singleOrNull {
-            binding.operationId == null || it.operation.operationId == binding.operationId
-        } ?: throw IllegalArgumentException(
-            "OpenAPI operation ${binding.method} ${binding.path} is missing or ambiguous.",
-        )
-        return buildOperation(
-            entry = entry,
-            requestMediaType = binding.requestMediaType,
-            responseStatus = binding.responseStatus,
-            responseMediaType = binding.responseMediaType,
-        )
+        collector.validateComplete()
+        val sharedSchemas = collector.models()
+        val duplicateMethods = operations.groupingBy(IntegrationOpenApiOperationModel::javaMethodName)
+            .eachCount().filterValues { it > 1 }.keys
+        require(duplicateMethods.isEmpty()) {
+            "Selected OpenAPI operations collapse to duplicate Java method names: " +
+                duplicateMethods.sorted().joinToString() + "."
+        }
+        return operations.map { operation -> operation.copy(schemas = sharedSchemas) }
     }
 
     private fun snapshotOperation(entry: OperationEntry): OpenApiOperationSnapshot {
@@ -790,6 +883,7 @@ internal class ParsedOpenApiContract(
         requestMediaType: String?,
         responseStatus: String?,
         responseMediaType: String?,
+        collector: SchemaCollector = SchemaCollector(components, limits),
     ): IntegrationOpenApiOperationModel {
         require(entry.path.startsWith('/') && entry.path.length <= 2_048) {
             "Operation path must start with '/' and be at most 2048 characters."
@@ -798,7 +892,6 @@ internal class ParsedOpenApiContract(
             "Referenced Path Item objects are not supported."
         }
         val methodName = javaMethodName(entry)
-        val collector = SchemaCollector(components, limits)
         val parameters = mergedParameters(entry).map { parameter ->
             val location = when (parameter.`in`?.lowercase()) {
                 "path" -> IntegrationOpenApiParameterLocation.PATH

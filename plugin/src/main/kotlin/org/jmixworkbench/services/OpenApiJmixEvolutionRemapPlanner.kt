@@ -59,12 +59,24 @@ object OpenApiJmixEvolutionRemapPlanner {
         baseline: IntegrationOpenApiOperationModel,
         candidate: IntegrationOpenApiOperationModel,
         layer: IntegrationOpenApiJmixLayerModel?,
+    ): List<OpenApiSchemaRemapPlan> = plan(baseline, listOf(candidate), layer)
+
+    fun plan(
+        baseline: IntegrationOpenApiOperationModel,
+        candidates: List<IntegrationOpenApiOperationModel>,
+        layer: IntegrationOpenApiJmixLayerModel?,
     ): List<OpenApiSchemaRemapPlan> {
         if (layer?.enabled != true) return emptyList()
+        require(candidates.isNotEmpty()) { "At least one candidate OpenAPI operation is required." }
+        require(candidates.all { it.schemas == candidates.first().schemas }) {
+            "Every candidate operation must use the same canonical shared schema registry."
+        }
         val previousSchemas = baseline.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
-        val candidateSchemas = candidate.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
-        val outboundSchemas = reachable(candidate, listOfNotNull(candidate.requestSchemaId))
-        val reachableCandidates = reachable(candidate)
+        val candidateSchemas = candidates.first().schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        val outboundSchemas = candidates.flatMapTo(linkedSetOf()) { candidate ->
+            reachable(candidate, listOfNotNull(candidate.requestSchemaId))
+        }
+        val reachableCandidates = candidates.flatMapTo(linkedSetOf()) { candidate -> reachable(candidate) }
             .mapNotNull(candidateSchemas::get)
             .filter { it.kind == IntegrationOpenApiSchemaKind.OBJECT }
             .sortedWith(compareBy(IntegrationOpenApiSchemaModel::javaName, IntegrationOpenApiSchemaModel::id))

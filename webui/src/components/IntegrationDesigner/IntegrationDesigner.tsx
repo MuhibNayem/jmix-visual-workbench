@@ -18,6 +18,7 @@ import type {
   IntegrationDeliveryGuarantee,
   IntegrationHttpMethod,
   IntegrationOrganizationConnectorTemplateSnapshot,
+  IntegrationOpenApiBinding,
   IntegrationOpenApiJmixLayerModel,
   IntegrationOpenApiJmixTypeMapping,
   IntegrationOpenApiReferencedDocument,
@@ -118,6 +119,26 @@ function sameOpenApiBundle(
   )
 }
 
+function sameOpenApiOperation(
+  operation: OpenApiOperationSnapshot,
+  binding: IntegrationOpenApiBinding,
+): boolean {
+  return operation.method === binding.method &&
+    operation.path === binding.path &&
+    (binding.operationId == null || operation.operationId === binding.operationId)
+}
+
+function sameOpenApiBinding(left: IntegrationOpenApiBinding, right: IntegrationOpenApiBinding): boolean {
+  return sameOpenApiBundle(left, right) &&
+    left.specificationVersion === right.specificationVersion &&
+    left.operationId === right.operationId &&
+    left.method === right.method &&
+    left.path === right.path &&
+    left.requestMediaType === right.requestMediaType &&
+    left.responseStatus === right.responseStatus &&
+    left.responseMediaType === right.responseMediaType
+}
+
 function safeJavaTypeName(value: string, fallback: string) {
   const cleaned = value.replace(/[^A-Za-z0-9_$]/g, '_')
   const prefixed = /^[0-9]/.test(cleaned) ? `Type_${cleaned}` : cleaned
@@ -166,15 +187,21 @@ function defaultOpenApiJmixLayer(
   model: IntegrationConnectorModel,
   operation: OpenApiOperationSnapshot,
   defaultPackage: string,
+  additionalOperations: OpenApiOperationSnapshot[] = [],
 ): IntegrationOpenApiJmixLayerModel {
   const basePackage = defaultPackage.endsWith('.integration')
     ? defaultPackage.slice(0, -'.integration'.length)
     : defaultPackage
-  const schemas = new Map((operation.schemas ?? []).map((schema) => [schema.id, schema]))
-  const reachable = reachableOpenApiSchemaIds(operation)
+  const operations = [operation, ...additionalOperations]
+  const schemas = new Map(
+    operations.flatMap((selected) => selected.schemas ?? []).map((schema) => [schema.id, schema]),
+  )
+  const reachable = [...new Set(operations.flatMap(reachableOpenApiSchemaIds))]
     .map((schemaId) => schemas.get(schemaId))
     .filter((schema): schema is OpenApiSchemaSnapshot => schema?.kind === 'OBJECT')
-  const responseRoot = rootObjectSchemaId(operation, operation.responseSchemaId)
+  const responseRoots = new Set(operations.map((selected) => (
+    rootObjectSchemaId(selected, selected.responseSchemaId)
+  )).filter(Boolean))
   const used = new Set<string>()
   const mappings: IntegrationOpenApiJmixTypeMapping[] = reachable.map((schema) => {
     let base = safeJavaTypeName(
@@ -194,7 +221,7 @@ function defaultOpenApiJmixLayer(
       schemaId: schema.id,
       targetKind: 'GENERATED_DTO',
       generatedClassName: className,
-      idProperty: schema.id === responseRoot ? idProperty : undefined,
+      idProperty: responseRoots.has(schema.id) ? idProperty : undefined,
       instanceNameProperty,
       properties: schema.properties.map((property) => ({
         schemaProperty: property.javaName,
@@ -339,6 +366,8 @@ function defaultModel(workspace: IntegrationConnectorWorkspaceResponse, kind: In
     runtimeSpringBootApi: destination?.springBootApi,
     profiles: [],
     enabled: true,
+    openApiAdditionalBindings: [],
+    openApiAdditionalBaselines: [],
   }
   if (kind === 'IDENTITY_PROVIDER') {
     model.authentication = {
@@ -764,6 +793,9 @@ export default function IntegrationDesigner() {
       openApiEvolution.candidateBinding.documentSha256,
       openApiEvolution.candidateBinding.referencedDocuments,
     ) : '',
+    openApiEvolution?.candidateAdditionalBindings.map((binding) => (
+      `${openApiBundleKey(binding.relativePath, binding.documentSha256, binding.referencedDocuments)}:${binding.operationId ?? ''}:${binding.method}:${binding.path}`
+    )).join('|') ?? '',
   ])
   const selectedOpenApiContract = workspace?.openApiContracts.find((candidate) => (
     sameOpenApiBundle(candidate, model?.openApiBinding)
@@ -773,6 +805,15 @@ export default function IntegrationDesigner() {
     candidate.path === model?.openApiBinding?.path &&
     (model?.openApiBinding?.operationId == null || candidate.operationId === model.openApiBinding.operationId)
   ))
+  const selectedAdditionalOpenApiOperations = (model?.openApiAdditionalBindings ?? []).map((binding) => (
+    selectedOpenApiContract?.operations.find((candidate) => sameOpenApiOperation(candidate, binding))
+  ))
+  const selectedOpenApiSchemas = [...new Map(
+    [selectedOpenApiOperation, ...selectedAdditionalOpenApiOperations]
+      .filter((operation): operation is OpenApiOperationSnapshot => Boolean(operation))
+      .flatMap((operation) => operation.schemas ?? [])
+      .map((schema) => [schema.id, schema]),
+  ).values()]
   const selectedOpenApiResponse = selectedOpenApiOperation?.responses.find((candidate) => (
     candidate.status === model?.openApiBinding?.responseStatus
   ))
@@ -796,13 +837,17 @@ export default function IntegrationDesigner() {
   } else if (model?.openApiBinding && (!selectedOpenApiOperation || !selectedOpenApiOperation.supported)) {
     blockers.push('The bound OpenAPI operation is missing or cannot be represented safely.')
   }
+  if (selectedAdditionalOpenApiOperations.some((operation) => !operation?.supported)) {
+    blockers.push('One or more additional OpenAPI operations are missing or cannot be represented safely.')
+  }
   const evolutionPrepared = Boolean(
     openApiEvolution &&
     model?.openApiBinding &&
-    sameOpenApiBundle(openApiEvolution.candidateBinding, model.openApiBinding) &&
-    model.openApiBinding.operationId === openApiEvolution.candidateBinding.operationId &&
-    model.openApiBinding.method === openApiEvolution.candidateBinding.method &&
-    model.openApiBinding.path === openApiEvolution.candidateBinding.path,
+    sameOpenApiBinding(openApiEvolution.candidateBinding, model.openApiBinding) &&
+    model.openApiAdditionalBindings.length === openApiEvolution.candidateAdditionalBindings.length &&
+    model.openApiAdditionalBindings.every((binding, index) => (
+      sameOpenApiBinding(binding, openApiEvolution.candidateAdditionalBindings[index])
+    )),
   )
   const unresolvedEvolutionRemaps = openApiEvolution?.remapPlans.filter((plan) => (
     !evolutionRemapSelections[plan.previousSchemaId]
@@ -823,32 +868,44 @@ export default function IntegrationDesigner() {
   if (selectedOpenApiResponseRepresentation && !selectedOpenApiResponseRepresentation.supported) {
     blockers.push(selectedOpenApiResponseRepresentation.issue ?? 'The response representation is not supported.')
   }
-  if (
-    selectedOpenApiOperation &&
-    model &&
-    (selectedOpenApiOperation.securityRequirements ?? []).length > 0 &&
-    !selectedOpenApiOperation.securityRequirements.some((requirement) => (
-      openApiSecurityRequirementSatisfied(model, requirement)
-    ))
-  ) {
-    blockers.push(
-      `Authentication does not satisfy an OpenAPI security alternative: ${
-        selectedOpenApiOperation.securityRequirements.map((requirement) => (
-          requirement.schemes.map((scheme) => (
-            `${scheme.name}${scheme.requiredScopes.length ? ` [${scheme.requiredScopes.join(', ')}]` : ''}`
-          )).join(' + ')
-        )).join(' OR ')
-      }.`,
-    )
+  if (model) {
+    [selectedOpenApiOperation, ...selectedAdditionalOpenApiOperations].filter(Boolean).forEach((operation) => {
+      if (
+        operation &&
+        (operation.securityRequirements ?? []).length > 0 &&
+        !operation.securityRequirements.some((requirement) => (
+          openApiSecurityRequirementSatisfied(model, requirement)
+        ))
+      ) {
+        blockers.push(
+          `Authentication does not satisfy ${operation.operationId ?? operation.key}: ${
+            operation.securityRequirements.map((requirement) => (
+              requirement.schemes.map((scheme) => (
+                `${scheme.name}${scheme.requiredScopes.length ? ` [${scheme.requiredScopes.join(', ')}]` : ''}`
+              )).join(' + ')
+            )).join(' OR ')
+          }.`,
+        )
+      }
+    })
   }
   if (model?.openApiJmixLayer?.enabled) {
     const layer = model.openApiJmixLayer
     if (!selectedOpenApiOperation) {
       blockers.push('The Jmix entity/service layer requires a selected OpenAPI operation.')
     } else {
-      const schemas = selectedOpenApiOperation.schemas ?? []
+      const mappedOperations = [
+        selectedOpenApiOperation,
+        ...selectedAdditionalOpenApiOperations.filter(
+          (operation): operation is OpenApiOperationSnapshot => Boolean(operation),
+        ),
+      ]
+      const schemas = [...new Map(
+        mappedOperations.flatMap((operation) => operation.schemas ?? [])
+          .map((schema) => [schema.id, schema]),
+      ).values()]
       const schemaById = new Map(schemas.map((schema) => [schema.id, schema]))
-      const objectSchemaIds = reachableOpenApiSchemaIds(selectedOpenApiOperation)
+      const objectSchemaIds = [...new Set(mappedOperations.flatMap(reachableOpenApiSchemaIds))]
         .filter((schemaId) => schemaById.get(schemaId)?.kind === 'OBJECT')
       const mappings = new Map(layer.mappings.map((mapping) => [mapping.schemaId, mapping]))
       const missing = objectSchemaIds.filter((schemaId) => !mappings.has(schemaId))
@@ -862,7 +919,9 @@ export default function IntegrationDesigner() {
           !/^[a-z_$][\w$]*$/.test(layer.serviceBeanName)) {
         blockers.push('Application service class and bean names are invalid.')
       }
-      const responseRoot = rootObjectSchemaId(selectedOpenApiOperation, selectedOpenApiOperation.responseSchemaId)
+      const responseRoots = new Set(mappedOperations.map((operation) => (
+        rootObjectSchemaId(operation, operation.responseSchemaId)
+      )).filter(Boolean))
       layer.mappings.forEach((mapping) => {
         const schema = schemaById.get(mapping.schemaId)
         if (!schema) return
@@ -870,7 +929,7 @@ export default function IntegrationDesigner() {
           if (!mapping.generatedClassName || !/^[A-Za-z_$][\w$]*$/.test(mapping.generatedClassName)) {
             blockers.push(`Generated DTO for ${schema.javaName} needs a valid class name.`)
           }
-          if (mapping.schemaId === responseRoot && !mapping.idProperty) {
+          if (responseRoots.has(mapping.schemaId) && !mapping.idProperty) {
             blockers.push(`Response DTO ${schema.javaName} needs a stable identifier property.`)
           }
         } else if (!mapping.existingEntity) {
@@ -947,6 +1006,8 @@ export default function IntegrationDesigner() {
     if (!operation.defaultBinding) return
     commit((draft) => {
       draft.openApiBinding = { ...operation.defaultBinding! }
+      draft.openApiAdditionalBindings = []
+      draft.openApiAdditionalBaselines = []
       draft.openApiJmixLayer = undefined
       draft.httpMethod = operation.method
       if (operation.defaultBinding?.requestMediaType) {
@@ -1067,18 +1128,31 @@ export default function IntegrationDesigner() {
       (openApiEvolution.candidateBinding.operationId == null ||
         candidate.operationId === openApiEvolution.candidateBinding.operationId)
     ))
-    if (!operation) {
-      setError('The reviewed replacement operation is no longer present. Refresh the workspace.')
+    const additionalOperations = openApiEvolution.candidateAdditionalBindings.map((binding) => (
+      contract?.operations.find((candidate) => sameOpenApiOperation(candidate, binding))
+    ))
+    if (!operation || additionalOperations.some((candidate) => !candidate)) {
+      setError('One or more reviewed replacement operations are no longer present. Refresh the workspace.')
       return
     }
+    const completeAdditionalOperations = additionalOperations.filter(
+      (candidate): candidate is OpenApiOperationSnapshot => Boolean(candidate),
+    )
     const next = cloneModel(model)
     next.openApiBinding = { ...openApiEvolution.candidateBinding }
+    next.openApiAdditionalBindings = openApiEvolution.candidateAdditionalBindings.map((binding) => ({ ...binding }))
+    next.openApiAdditionalBaselines = []
     next.openApiEvolutionCapability = undefined
     next.httpMethod = operation.method
     if (operation.defaultBinding?.requestMediaType) next.contentType = operation.defaultBinding.requestMediaType
     if (next.openApiJmixLayer?.enabled) {
       const previousLayer = next.openApiJmixLayer
-      const defaults = defaultOpenApiJmixLayer(next, operation, destination.defaultPackage)
+      const defaults = defaultOpenApiJmixLayer(
+        next,
+        operation,
+        destination.defaultPackage,
+        completeAdditionalOperations,
+      )
       const previousMappings = new Map(previousLayer.mappings.map((mapping) => [mapping.schemaId, mapping]))
       defaults.mappings = defaults.mappings.map((fresh) => {
         const selectedPlan = openApiEvolution.remapPlans.find((plan) => (
@@ -1134,7 +1208,10 @@ export default function IntegrationDesigner() {
       }
     }
     replaceModel(next)
-    addToast('Prepared the current contract with the explicitly selected schema remaps and exact property identities.', 'success')
+    addToast(
+      `Prepared ${1 + completeAdditionalOperations.length} contract operations with the explicitly selected schema remaps and exact property identities.`,
+      'success',
+    )
   }
 
   const approveOpenApiEvolution = async () => {
@@ -1560,6 +1637,8 @@ export default function IntegrationDesigner() {
                       className="btn-secondary flex items-center gap-1 text-[10px]"
                       onClick={() => commit((draft) => {
                         draft.openApiBinding = undefined
+                        draft.openApiAdditionalBindings = []
+                        draft.openApiAdditionalBaselines = []
                         draft.openApiJmixLayer = undefined
                       })}
                     >
@@ -1595,7 +1674,12 @@ export default function IntegrationDesigner() {
                         ))
                         const operation = contract?.operations.find((candidate) => candidate.supported && candidate.defaultBinding)
                         if (contract && operation) bindOpenApiOperation(contract, operation)
-                        else if (!event.target.value) commit((draft) => { draft.openApiBinding = undefined })
+                        else if (!event.target.value) commit((draft) => {
+                          draft.openApiBinding = undefined
+                          draft.openApiAdditionalBindings = []
+                          draft.openApiAdditionalBaselines = []
+                          draft.openApiJmixLayer = undefined
+                        })
                       }}
                       disabled={Boolean(model.sourceLocator)}
                       className={fieldClass}
@@ -1675,6 +1759,193 @@ export default function IntegrationDesigner() {
                               <p className="truncate font-mono text-[8px] text-gray-600">{reference.documentSha256.slice(0, 16)}</p>
                             </div>
                           ))}
+                        </div>
+                      </details>
+                    )}
+
+                    {selectedOpenApiContract.operations.length > 1 && (
+                      <details className="min-w-0 rounded-md border border-cyan-500/15 bg-cyan-500/[0.035] p-2">
+                        <summary className="flex cursor-pointer list-none items-center gap-2 text-[9px] font-medium text-cyan-100">
+                          <Boxes size={12} className="shrink-0" />
+                          <span className="min-w-0 flex-1">
+                            Client operation set · 1 primary + {(model.openApiAdditionalBindings ?? []).length} additional
+                          </span>
+                          <span className="text-[8px] text-gray-500">Shared models · one client</span>
+                        </summary>
+                        <div className="mt-2 max-h-64 min-w-0 space-y-1.5 overflow-y-auto pr-1" role="group" aria-label="Additional OpenAPI operations">
+                          {selectedOpenApiContract.operations
+                            .filter((operation) => operation.key !== selectedOpenApiOperation.key)
+                            .map((operation) => {
+                              const selectedBinding = (model.openApiAdditionalBindings ?? []).find((binding) => (
+                                sameOpenApiOperation(operation, binding)
+                              ))
+                              const selected = Boolean(selectedBinding)
+                              const selectionLimitReached = (model.openApiAdditionalBindings ?? []).length >= 63
+                              const selectedResponse = operation.responses.find((response) => (
+                                response.status === selectedBinding?.responseStatus
+                              ))
+                              return (
+                                <div
+                                  key={operation.key}
+                                  className="min-w-0 rounded border border-surface-border bg-surface/50 px-2 py-2"
+                                >
+                                  <div className="flex min-w-0 items-start gap-2">
+                                    <input
+                                      type="checkbox"
+                                      className="mt-0.5 shrink-0"
+                                      checked={selected}
+                                      disabled={
+                                        Boolean(model.sourceLocator) ||
+                                        !operation.supported ||
+                                        !operation.defaultBinding ||
+                                        (!selected && selectionLimitReached)
+                                      }
+                                      aria-label={`Include ${operation.method} ${operation.path}`}
+                                      onChange={(event) => commit((draft) => {
+                                        const existing = draft.openApiAdditionalBindings ?? []
+                                        if (event.target.checked && operation.defaultBinding) {
+                                          draft.openApiAdditionalBindings = [
+                                            ...existing.filter((binding) => !sameOpenApiOperation(operation, binding)),
+                                            { ...operation.defaultBinding },
+                                          ].sort((left, right) => (
+                                            `${left.path}\u0000${left.method}\u0000${left.operationId ?? ''}`
+                                              .localeCompare(`${right.path}\u0000${right.method}\u0000${right.operationId ?? ''}`)
+                                          ))
+                                        } else {
+                                          draft.openApiAdditionalBindings = existing.filter((binding) => (
+                                            !sameOpenApiOperation(operation, binding)
+                                          ))
+                                        }
+                                        draft.openApiAdditionalBaselines = []
+                                        draft.openApiJmixLayer = undefined
+                                      })}
+                                    />
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block truncate text-[9px] text-gray-200">
+                                        {operation.method} {operation.path} · {operation.operationId ?? operation.javaMethodName}
+                                      </span>
+                                      <span className="block truncate text-[8px] text-gray-500">
+                                        {operation.supported ? (operation.summary || 'No operation summary') : (operation.issues[0] ?? 'Unsupported')}
+                                      </span>
+                                    </span>
+                                    {selectedBinding && (
+                                      <button
+                                        type="button"
+                                        className="btn-ghost min-h-7 shrink-0 px-2 text-[8px]"
+                                        disabled={Boolean(model.sourceLocator)}
+                                        onClick={() => commit((draft) => {
+                                          const previousPrimary = draft.openApiBinding
+                                          if (!previousPrimary) return
+                                          draft.openApiBinding = { ...selectedBinding }
+                                          draft.openApiAdditionalBindings = [
+                                            previousPrimary,
+                                            ...draft.openApiAdditionalBindings.filter((binding) => (
+                                              !sameOpenApiBinding(binding, selectedBinding)
+                                            )),
+                                          ].sort((left, right) => (
+                                            `${left.path}\u0000${left.method}\u0000${left.operationId ?? ''}`
+                                              .localeCompare(`${right.path}\u0000${right.method}\u0000${right.operationId ?? ''}`)
+                                          ))
+                                          draft.httpMethod = selectedBinding.method
+                                          if (selectedBinding.requestMediaType) draft.contentType = selectedBinding.requestMediaType
+                                          draft.openApiBaseline = undefined
+                                          draft.openApiAdditionalBaselines = []
+                                          draft.openApiJmixLayer = undefined
+                                        })}
+                                      >
+                                        Make primary
+                                      </button>
+                                    )}
+                                  </div>
+                                  {selectedBinding && (
+                                    <div className="mt-2 grid min-w-0 gap-2 border-t border-surface-border/70 pt-2 sm:grid-cols-3">
+                                      <label className="min-w-0">
+                                        <span className="block text-[8px] text-gray-500">Request</span>
+                                        <select
+                                          aria-label={`Request representation for ${operation.method} ${operation.path}`}
+                                          className="mt-1 min-h-8 w-full min-w-0 rounded border border-surface-border bg-surface px-2 text-[8px] text-gray-200"
+                                          value={selectedBinding.requestMediaType ?? ''}
+                                          disabled={Boolean(model.sourceLocator)}
+                                          onChange={(event) => commit((draft) => {
+                                            const binding = draft.openApiAdditionalBindings.find((candidate) => (
+                                              sameOpenApiOperation(operation, candidate)
+                                            ))
+                                            if (binding) binding.requestMediaType = event.target.value || undefined
+                                            draft.openApiAdditionalBaselines = []
+                                            draft.openApiJmixLayer = undefined
+                                          })}
+                                        >
+                                          <option value="">No request body</option>
+                                          {operation.requestRepresentations.filter((representation) => representation.supported).map((representation) => (
+                                            <option key={representation.mediaType} value={representation.mediaType}>{representation.mediaType}</option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                      <label className="min-w-0">
+                                        <span className="block text-[8px] text-gray-500">Response status</span>
+                                        <select
+                                          aria-label={`Response status for ${operation.method} ${operation.path}`}
+                                          className="mt-1 min-h-8 w-full min-w-0 rounded border border-surface-border bg-surface px-2 text-[8px] text-gray-200"
+                                          value={selectedBinding.responseStatus ?? ''}
+                                          disabled={Boolean(model.sourceLocator)}
+                                          onChange={(event) => commit((draft) => {
+                                            const binding = draft.openApiAdditionalBindings.find((candidate) => (
+                                              sameOpenApiOperation(operation, candidate)
+                                            ))
+                                            if (!binding) return
+                                            const response = operation.responses.find((candidate) => candidate.status === event.target.value)
+                                            if (
+                                              !response ||
+                                              !/^2(?:\d\d|XX)$/i.test(response.status) ||
+                                              (response.hasBody && !response.representations.some((representation) => representation.supported))
+                                            ) return
+                                            binding.responseStatus = event.target.value || undefined
+                                            binding.responseMediaType = response?.representations.find((representation) => representation.supported)?.mediaType
+                                            draft.openApiAdditionalBaselines = []
+                                            draft.openApiJmixLayer = undefined
+                                          })}
+                                        >
+                                          {operation.responses.map((response) => (
+                                            <option
+                                              key={response.status}
+                                              value={response.status}
+                                              disabled={
+                                                !/^2(?:\d\d|XX)$/i.test(response.status) ||
+                                                (response.hasBody && !response.representations.some((representation) => representation.supported))
+                                              }
+                                            >
+                                              {response.status}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                      <label className="min-w-0">
+                                        <span className="block text-[8px] text-gray-500">Response media</span>
+                                        <select
+                                          aria-label={`Response representation for ${operation.method} ${operation.path}`}
+                                          className="mt-1 min-h-8 w-full min-w-0 rounded border border-surface-border bg-surface px-2 text-[8px] text-gray-200"
+                                          value={selectedBinding.responseMediaType ?? ''}
+                                          disabled={Boolean(model.sourceLocator)}
+                                          onChange={(event) => commit((draft) => {
+                                            const binding = draft.openApiAdditionalBindings.find((candidate) => (
+                                              sameOpenApiOperation(operation, candidate)
+                                            ))
+                                            if (binding) binding.responseMediaType = event.target.value || undefined
+                                            draft.openApiAdditionalBaselines = []
+                                            draft.openApiJmixLayer = undefined
+                                          })}
+                                        >
+                                          <option value="">No response body</option>
+                                          {selectedResponse?.representations.filter((representation) => representation.supported).map((representation) => (
+                                            <option key={representation.mediaType} value={representation.mediaType}>{representation.mediaType}</option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
                         </div>
                       </details>
                     )}
@@ -1845,6 +2116,9 @@ export default function IntegrationDesigner() {
                               draft,
                               selectedOpenApiOperation,
                               destination?.defaultPackage ?? draft.packageName,
+                              selectedAdditionalOpenApiOperations.filter(
+                                (operation): operation is OpenApiOperationSnapshot => Boolean(operation),
+                              ),
                             )
                           })}
                         >
@@ -1920,7 +2194,7 @@ export default function IntegrationDesigner() {
 
                         <div className="space-y-2">
                           {model.openApiJmixLayer.mappings.map((mapping, mappingIndex) => {
-                            const schema = (selectedOpenApiOperation.schemas ?? []).find((candidate) => candidate.id === mapping.schemaId)
+                            const schema = selectedOpenApiSchemas.find((candidate) => candidate.id === mapping.schemaId)
                             if (!schema) return null
                             const existingEntity = workspace.entities.find((entity) => (
                               entity.artifactId === mapping.existingEntity?.artifactId &&
@@ -2099,7 +2373,7 @@ export default function IntegrationDesigner() {
                                           candidate.schemaProperty === property.javaName
                                         ))
                                         const propertyMapping = propertyIndex >= 0 ? mapping.properties[propertyIndex] : undefined
-                                        const propertySchema = (selectedOpenApiOperation.schemas ?? []).find((candidate) => (
+                                        const propertySchema = selectedOpenApiSchemas.find((candidate) => (
                                           candidate.id === property.schemaId
                                         ))
                                         const targetAttribute = existingAttributes.find((attribute) => (

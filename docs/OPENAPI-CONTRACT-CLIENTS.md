@@ -3,9 +3,11 @@
 ## Scope
 
 The Integration Designer can bind an HTTP-based connector to an OpenAPI 3.0 or
-3.1 operation stored in the IntelliJ project. The backend, not the browser,
-owns contract parsing, schema normalization, operation resolution, security
-evaluation and generated Java types.
+3.1 operation set stored in the IntelliJ project. One client may contain a
+primary operation and up to 63 additional operations from the same exact
+contract bundle revision. The backend, not the browser, owns contract parsing,
+shared-schema normalization, operation resolution, security evaluation and
+generated Java types.
 
 A contract may be a single document or a controlled bundle of project-owned
 JSON/YAML documents. Relative Reference Objects are resolved from the referring
@@ -30,7 +32,9 @@ Authoritative public references:
 
 1. Open the Integration Designer in IntelliJ.
 2. Select an indexed project contract or use **Choose project file…**.
-3. Select an operation and supported request/success-response representations.
+3. Select a primary operation, add the other client operations and choose the
+   supported request/success-response representation independently for each.
+   Any selected operation can be promoted to primary without losing the others.
 4. Review typed path, query, header and cookie parameters.
 5. Configure an authentication alternative that satisfies the exact OpenAPI
    security requirement, including required OAuth scopes and mutual TLS.
@@ -52,8 +56,9 @@ When a provider changes the selected contract, the existing connector is shown
 as **Contract update · review required**, not as a generic manual-source
 conflict. The designer then:
 
-1. proves every generated source against the persisted old operation;
-2. matches the operation by exact `operationId`, then exact method/path only
+1. proves every generated source against the persisted old operation set and
+   its single canonical shared-schema registry;
+2. matches every operation by exact `operationId`, then exact method/path only
    when that fallback is unique;
 3. presents separate wire and generated-source compatibility ratings;
 4. lists operation, parameter, request, response, validation, enum and security
@@ -96,6 +101,11 @@ in Kotlin.
 - Every binding records the root project-relative path and SHA-256, the sorted
   path/SHA-256 identity of every referenced document, specification version,
   method, path, operation ID and selected representations.
+- Every operation in a client must resolve from the same exact bundle identity.
+  Duplicate operations, diverging schema registries and more than 64 operations
+  fail closed. The persisted primary baseline owns the canonical registry;
+  additional baselines are compact operation-only records reconstructed against
+  that registry by the backend.
 - Preview/apply reopen and re-bundle every file and reject stale root or
   referenced-document digests, missing or ambiguous operations and changed
   representations.
@@ -104,9 +114,12 @@ in Kotlin.
   persisted solely as bounded comparison evidence (512 KiB maximum), is
   coordinate-checked against the exact binding, and is overwritten by current
   backend resolution before generation.
-- Semantic evolution distinguishes HTTP/wire compatibility from generated Java
-  and Jmix source compatibility. Optional parameter addition, for example, can
-  be wire-compatible while still breaking existing Java callers.
+- Semantic evolution is calculated for the entire aligned operation set and
+  distinguishes HTTP/wire compatibility from generated Java and Jmix source
+  compatibility. A change to one additional operation therefore cannot bypass
+  review merely because the primary operation is unchanged. Optional parameter
+  addition, for example, can be wire-compatible while still breaking existing
+  Java callers.
 - The analyzer covers operation identity, representations, typed parameters,
   recursive request/response graphs, schema/type identity, nullability,
   required/read-only/write-only properties, enum direction, security AND/OR
@@ -175,6 +188,9 @@ The adapter uses Spring `RestClient` with:
 - immutable defensive copies for collections, maps and binary values;
 - operation-specific nested records and enums with exact `@JsonProperty`
   names;
+- one method per selected operation, with operation-specific parameters,
+  payload and return type while every method shares the client's canonical
+  nested model registry;
 - the connector platform's timeout, retry, circuit-breaker, bulkhead,
   rate-limit, idempotency, OAuth2, mTLS and observability policies.
 
@@ -243,18 +259,23 @@ create/change/review/approve/regenerate/reopen lifecycle. Remap tests prove
 exact ranking, conservative rejection without evidence, renamed schema and
 property candidates, retained DTO identity, generated mapper expressions and
 the complete create/rename/remap/approve/preview lifecycle.
+Multi-operation tests additionally prove deterministic operation ordering,
+shared-model reuse, operation-specific Java signatures, compact baseline
+persistence, reopen fidelity, stale additional-operation rejection and a
+single bundle-wide semantic report, remap review, native approval and atomic
+regeneration lifecycle when only a non-primary operation changes.
 
-The clean `phase1Check` release gate on 2026-07-31 passed 418 regression tests
+The clean `phase1Check` release gate on 2026-07-31 passed 421 regression tests
 and 3 host smoke tests on each IntelliJ lane. Plugin Verifier reported both
 artifacts compatible:
 
 | IntelliJ host | Packaged ZIP SHA-256 |
 | --- | --- |
-| IU-253.28294.334 | `509f04ab8e857d1d7bc13c5c2fc90f3a4daa722f0b7b6ce791fc17477d670cdb` |
-| IU-262.8665.258 | `0789fcaf41330b1590c3286610069e6a3381f694ebb8d5fc5b5681c0c31e594f` |
+| IU-253.28294.334 | `5c82d1031f9043044bbc0b35e44ffc38f1a22d29ca7f4b8e4c56837deb3b52ee` |
+| IU-262.8665.258 | `ffe4eb3634acb262688d0d6a534a77e6d05a55cd628aac9e3e00593b0810a0f2` |
 
 Both ZIPs contain the same verified web input digest:
-`92c11ac2b7b791edbb6e3ee361a50d97df9d656fe65a327c0b69614588c21429`.
+`5d7e1ad4de8d50ba76c3f49bdbd433681f91ea027efb023ebdf2cf8f9eb0a9b0`.
 
 Responsive browser evidence on 2026-07-31 measured the real Integration
 Designer and the semantic-evolution workflow:
@@ -288,13 +309,19 @@ pixels. It exposed the referenced project-relative file and revision, remained
 inside the main editor region at every width, and produced no global overflow,
 clipped visible controls, warnings or errors.
 
+The shared operation-set journey selected a second operation, verified that an
+unsupported non-2xx response cannot become a generated return contract, changed
+its request/status/media representation and promoted it to primary while
+retaining the former primary as an additional operation. At 1280, 720 and 360
+pixels the per-operation controls remained inside the viewport with no global
+overflow or clipped interactive element; the browser console remained clean.
+
 ## Deliberate remaining boundary
 
 This milestone does not yet claim complete Jmix Studio OpenAPI parity. The
 active remaining layers are:
 
 - Kotlin DTO/mapper/service generation for Kotlin-owned target source sets;
-- cross-operation shared models;
 - provider/consumer contract suites and saved runtime scenarios;
 - installed-IDE accessibility, memory/leak and large-contract performance
   certification.

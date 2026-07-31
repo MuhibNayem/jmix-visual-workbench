@@ -2057,6 +2057,7 @@ export interface OpenApiEvolutionReport {
 
 export interface IntegrationOpenApiEvolutionReview {
   candidateBinding: IntegrationOpenApiBinding
+  candidateAdditionalBindings: IntegrationOpenApiBinding[]
   report: OpenApiEvolutionReport
   candidateTitle: string
   candidateApiVersion?: string
@@ -2383,8 +2384,10 @@ export interface IntegrationConnectorModel {
   enabled: boolean
   catalogBinding?: IntegrationConnectorCatalogBinding
   openApiBinding?: IntegrationOpenApiBinding
+  openApiAdditionalBindings: IntegrationOpenApiBinding[]
   openApiJmixLayer?: IntegrationOpenApiJmixLayerModel
   openApiBaseline?: IntegrationOpenApiOperationModel
+  openApiAdditionalBaselines: IntegrationOpenApiOperationModel[]
   openApiEvolutionCapability?: string
   sourceLocator?: GraphSourceLocator
 }

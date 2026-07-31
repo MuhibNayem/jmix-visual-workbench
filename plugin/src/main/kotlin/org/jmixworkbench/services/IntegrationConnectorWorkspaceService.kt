@@ -260,22 +260,24 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             "The existing connector is not contract-owned."
         }
         val normalized = normalizeBackendContracts(model, destination, selectedStore, schema)
-        require(owned.model.openApiBinding != normalized.openApiBinding) {
-            "The candidate binding is identical to the connector's existing contract."
+        require(
+            owned.model.openApiBinding != normalized.openApiBinding ||
+                owned.model.openApiAdditionalBindings != normalized.openApiAdditionalBindings
+        ) {
+            "The candidate operation set is identical to the connector's existing contract."
         }
-        val baseline = requireNotNull(owned.model.openApiBaseline) {
-            "This connector predates semantic OpenAPI baselines and requires a manual reviewed migration."
-        }
+        val baselines = semanticOpenApiBaselines(owned.model)
         val operation = requireNotNull(normalized.resolvedOpenApiOperation) {
             "The candidate OpenAPI operation was not resolved by the backend."
         }
+        val operations = listOf(operation) + normalized.resolvedOpenApiAdditionalOperations
         val validation = IntegrationConnectorGenerator.validate(normalized, destination.capabilities)
         require(validation.valid) {
             validation.diagnostics.joinToString(" ") { it.message }
         }
         val layer = generateOpenApiJmixLayer(normalized, destination, schema)
         require(layer.issues.isEmpty()) { layer.issues.joinToString(" ") }
-        val report = OpenApiContractEvolutionAnalyzer.compare(baseline, operation)
+        val report = OpenApiContractEvolutionAnalyzer.compareAll(baselines, operations)
         val mappingDecisions = normalized.openApiJmixLayer?.mappings.orEmpty()
             .sortedBy(IntegrationOpenApiJmixTypeMapping::schemaId)
             .map { mapping ->
@@ -307,7 +309,11 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             normalized = normalized,
             review = IntegrationOpenApiEvolutionApprovalReview(
                 sourcePath = owned.javaPath,
-                operation = operation.operationId ?: "${operation.method} ${operation.path}",
+                operation = if (operations.size == 1) {
+                    operation.operationId ?: "${operation.method} ${operation.path}"
+                } else {
+                    "${operations.size}-operation client (${operation.operationId ?: "${operation.method} ${operation.path}"} primary)"
+                },
                 baselineSha256 = report.baselineSha256,
                 candidateSha256 = report.candidateSha256,
                 report = report,
@@ -570,7 +576,10 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     owned.javaPath,
                 )
             }
-            if (owned.model.openApiBinding != stored.openApiBinding) {
+            if (
+                owned.model.openApiBinding != stored.openApiBinding ||
+                owned.model.openApiAdditionalBindings != stored.openApiAdditionalBindings
+            ) {
                 val previousBinding = owned.model.openApiBinding
                 val candidateOperation = stored.resolvedOpenApiOperation
                 if (previousBinding != null && candidateOperation == null) {
@@ -581,13 +590,23 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     )
                 }
                 if (previousBinding != null && candidateOperation != null) {
-                    val baseline = owned.model.openApiBaseline
-                        ?: return rejected(
+                    val baselines = runCatching { semanticOpenApiBaselines(owned.model) }
+                        .getOrElse {
+                            return rejected(
                             "JVW-INTEGRATION-OPENAPI-BASELINE-MISSING",
-                            "This connector predates semantic OpenAPI baselines. Rebind it through a reviewed migration before regeneration.",
+                                "This connector predates aligned semantic OpenAPI baselines. Rebind it through a reviewed migration before regeneration.",
+                                owned.javaPath,
+                            )
+                        }
+                    val candidateOperations = listOf(candidateOperation) + stored.resolvedOpenApiAdditionalOperations
+                    if (baselines.size != candidateOperations.size) {
+                        return rejected(
+                            "JVW-INTEGRATION-OPENAPI-OPERATION-SET-CHANGE-UNSAFE",
+                            "OpenAPI evolution must preserve the reviewed operation set. Add or remove operations only after rebinding the current contract explicitly.",
                             owned.javaPath,
                         )
-                    val report = OpenApiContractEvolutionAnalyzer.compare(baseline, candidateOperation)
+                    }
+                    val report = OpenApiContractEvolutionAnalyzer.compareAll(baselines, candidateOperations)
                     OpenApiEvolutionApprovalService.getInstance(project).validate(
                         previous = owned.model,
                         candidate = stored,
@@ -1055,20 +1074,21 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                     supplementalOwned
                 val evolution = if (owned && exactResolution.isFailure && model.openApiBinding != null) {
                     runCatching {
-                        val baseline = requireNotNull(model.openApiBaseline) {
-                            "This connector predates semantic OpenAPI baselines."
-                        }
+                        val baselines = semanticOpenApiBaselines(model)
+                        val previousBindings = listOf(requireNotNull(model.openApiBinding)) +
+                            model.openApiAdditionalBindings
                         val current = OpenApiContractService.getInstance(project)
-                            .resolveCurrent(model.openApiBinding)
+                            .resolveCurrentAll(previousBindings)
                         IntegrationOpenApiEvolutionReview(
-                            candidateBinding = bindingFor(current.operation),
-                            report = OpenApiContractEvolutionAnalyzer.compare(baseline, current.operation),
+                            candidateBinding = bindingFor(current.operations.first()),
+                            candidateAdditionalBindings = current.operations.drop(1).map(::bindingFor),
+                            report = OpenApiContractEvolutionAnalyzer.compareAll(baselines, current.operations),
                             candidateTitle = current.contract.title,
                             candidateApiVersion = current.contract.apiVersion,
-                            mappingIssues = openApiEvolutionMappingIssues(model, current.operation),
+                            mappingIssues = openApiEvolutionMappingIssues(model, current.operations),
                             remapPlans = OpenApiJmixEvolutionRemapPlanner.plan(
-                                baseline = baseline,
-                                candidate = current.operation,
+                                baseline = baselines.first(),
+                                candidates = current.operations,
                                 layer = model.openApiJmixLayer,
                             ),
                         )
@@ -1199,40 +1219,85 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
 
     private fun resolveOpenApiContract(model: IntegrationConnectorModel): IntegrationConnectorModel {
         val binding = model.openApiBinding
-            ?: return model.copy(openApiBaseline = null, resolvedOpenApiOperation = null)
-        val operation = OpenApiContractService.getInstance(project).resolve(binding).operation
-        require(gson.toJson(operation).toByteArray(Charsets.UTF_8).size <= MAX_OPENAPI_BASELINE_BYTES) {
-            "The normalized OpenAPI operation exceeds the ${MAX_OPENAPI_BASELINE_BYTES / 1024} KiB source-marker safety limit."
+            ?: run {
+                require(model.openApiAdditionalBindings.isEmpty()) {
+                    "Additional OpenAPI operations require a primary operation binding."
+                }
+                return model.copy(
+                    openApiBaseline = null,
+                    openApiAdditionalBaselines = emptyList(),
+                    resolvedOpenApiOperation = null,
+                    resolvedOpenApiAdditionalOperations = emptyList(),
+                )
+            }
+        val bindings = listOf(binding) + model.openApiAdditionalBindings
+        val operations = OpenApiContractService.getInstance(project).resolveAll(bindings).operations
+        val operation = operations.first()
+        val additional = operations.drop(1)
+        // Every resolved operation intentionally sees the same canonical schema
+        // registry. Persist it once on the primary baseline instead of repeating
+        // a potentially large graph for every selected operation.
+        val persistedAdditional = additional.map { it.copy(schemas = emptyList()) }
+        val encodedBytes = gson.toJson(listOf(operation) + persistedAdditional)
+            .toByteArray(Charsets.UTF_8).size
+        require(encodedBytes <= MAX_OPENAPI_BUNDLE_BASELINE_BYTES) {
+            "The normalized OpenAPI operation bundle exceeds the ${MAX_OPENAPI_BUNDLE_BASELINE_BYTES / 1024} KiB source-marker safety limit."
         }
         return applyOpenApiOperation(model, operation).copy(
             openApiBaseline = operation,
+            openApiAdditionalBaselines = persistedAdditional,
+            resolvedOpenApiAdditionalOperations = additional,
         )
     }
 
     private fun resolvePersistedOpenApiBaseline(model: IntegrationConnectorModel): IntegrationConnectorModel {
         val binding = model.openApiBinding
-            ?: return model.copy(openApiBaseline = null, resolvedOpenApiOperation = null)
+            ?: run {
+                require(model.openApiAdditionalBindings.isEmpty() && model.openApiAdditionalBaselines.isEmpty()) {
+                    "Additional OpenAPI baselines require a primary operation binding."
+                }
+                return model.copy(
+                    openApiBaseline = null,
+                    resolvedOpenApiOperation = null,
+                    resolvedOpenApiAdditionalOperations = emptyList(),
+                )
+            }
         val operation = requireNotNull(model.openApiBaseline) {
             "The connector has no backend-issued OpenAPI semantic baseline."
         }
-        require(gson.toJson(operation).toByteArray(Charsets.UTF_8).size <= MAX_OPENAPI_BASELINE_BYTES) {
-            "The persisted OpenAPI baseline exceeds the ${MAX_OPENAPI_BASELINE_BYTES / 1024} KiB safety limit."
+        require(model.openApiAdditionalBindings.size == model.openApiAdditionalBaselines.size) {
+            "Additional OpenAPI bindings and semantic baselines are not aligned."
         }
-        require(
-            operation.contractPath == binding.relativePath &&
-                operation.contractSha256 == binding.documentSha256 &&
-                operation.referencedDocuments == binding.referencedDocuments &&
-                operation.specificationVersion == binding.specificationVersion &&
-                operation.operationId == binding.operationId &&
-                operation.method == binding.method &&
-                operation.path == binding.path &&
-                operation.requestMediaType == binding.requestMediaType &&
-                operation.responseStatus == binding.responseStatus &&
-                operation.responseMediaType == binding.responseMediaType
-        ) {
-            "The persisted OpenAPI baseline does not match its exact source binding."
+        val persistedOperations = listOf(operation) + model.openApiAdditionalBaselines
+        require(gson.toJson(persistedOperations).toByteArray(Charsets.UTF_8).size <= MAX_OPENAPI_BUNDLE_BASELINE_BYTES) {
+            "The persisted OpenAPI operation bundle exceeds the ${MAX_OPENAPI_BUNDLE_BASELINE_BYTES / 1024} KiB safety limit."
         }
-        return applyOpenApiOperation(model, operation)
+        val additionalOperations = model.openApiAdditionalBaselines.map { baseline ->
+            require(baseline.schemas.isEmpty() || baseline.schemas == operation.schemas) {
+                "An additional OpenAPI baseline contains a conflicting shared schema registry."
+            }
+            baseline.copy(schemas = operation.schemas)
+        }
+        val operations = listOf(operation) + additionalOperations
+        (listOf(binding) + model.openApiAdditionalBindings).zip(operations).forEach { (selected, baseline) ->
+            require(
+                baseline.contractPath == selected.relativePath &&
+                    baseline.contractSha256 == selected.documentSha256 &&
+                    baseline.referencedDocuments == selected.referencedDocuments &&
+                    baseline.specificationVersion == selected.specificationVersion &&
+                    baseline.operationId == selected.operationId &&
+                    baseline.method == selected.method &&
+                    baseline.path == selected.path &&
+                    baseline.requestMediaType == selected.requestMediaType &&
+                    baseline.responseStatus == selected.responseStatus &&
+                    baseline.responseMediaType == selected.responseMediaType
+            ) {
+                "A persisted OpenAPI baseline does not match its exact source binding."
+            }
+        }
+        return applyOpenApiOperation(model, operation).copy(
+            resolvedOpenApiAdditionalOperations = additionalOperations,
+        )
     }
 
     private fun applyOpenApiOperation(
@@ -1267,17 +1332,40 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         responseMediaType = operation.responseMediaType,
     )
 
+    private fun semanticOpenApiBaselines(
+        model: IntegrationConnectorModel,
+    ): List<org.jmixworkbench.model.IntegrationOpenApiOperationModel> {
+        val primary = requireNotNull(model.openApiBaseline) {
+            "This connector predates semantic OpenAPI baselines."
+        }
+        require(model.openApiAdditionalBindings.size == model.openApiAdditionalBaselines.size) {
+            "Additional OpenAPI bindings and semantic baselines are not aligned."
+        }
+        return listOf(primary) + model.openApiAdditionalBaselines.map { baseline ->
+            require(baseline.schemas.isEmpty() || baseline.schemas == primary.schemas) {
+                "An additional OpenAPI baseline contains a conflicting shared schema registry."
+            }
+            baseline.copy(schemas = primary.schemas)
+        }
+    }
+
     private fun openApiEvolutionMappingIssues(
         model: IntegrationConnectorModel,
-        candidate: org.jmixworkbench.model.IntegrationOpenApiOperationModel,
+        candidates: List<org.jmixworkbench.model.IntegrationOpenApiOperationModel>,
     ): List<String> {
         val layer = model.openApiJmixLayer?.takeIf { it.enabled } ?: return emptyList()
         val baseline = model.openApiBaseline ?: return listOf(
             "The existing Jmix mapping has no semantic baseline and cannot be remapped automatically.",
         )
+        require(candidates.isNotEmpty()) { "At least one candidate OpenAPI operation is required." }
+        require(candidates.all { it.schemas == candidates.first().schemas }) {
+            "Every candidate operation must use the same canonical shared schema registry."
+        }
         val oldSchemas = baseline.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
-        val newSchemas = candidate.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
-        val reachable = reachableOpenApiSchemas(candidate).filterTo(linkedSetOf()) {
+        val newSchemas = candidates.first().schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        val reachable = candidates.flatMapTo(linkedSetOf()) { candidate ->
+            reachableOpenApiSchemas(candidate)
+        }.filterTo(linkedSetOf()) {
             newSchemas[it]?.kind == IntegrationOpenApiSchemaKind.OBJECT
         }
         val mappings = layer.mappings.associateBy(IntegrationOpenApiJmixTypeMapping::schemaId)
@@ -1312,8 +1400,11 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val operation = requireNotNull(model.resolvedOpenApiOperation) {
             "A Jmix entity mapping layer requires a backend-resolved OpenAPI operation."
         }
+        val operations = listOf(operation) + model.resolvedOpenApiAdditionalOperations
         val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
-        val reachableObjects = reachableOpenApiSchemas(operation)
+        val reachableObjects = operations.flatMapTo(linkedSetOf()) { selected ->
+            reachableOpenApiSchemas(selected)
+        }
             .mapNotNull(schemas::get)
             .filter { it.kind == IntegrationOpenApiSchemaKind.OBJECT }
         require(reachableObjects.isNotEmpty()) {
@@ -1330,11 +1421,13 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 else -> null
             }
         }
-        require(operation.requestSchemaId == null || rootEntitySchemaId(operation.requestSchemaId) != null) {
-            "The OpenAPI request body must be an object or an array of objects to expose a Jmix-facing service."
-        }
-        require(operation.responseSchemaId == null || rootEntitySchemaId(operation.responseSchemaId) != null) {
-            "The OpenAPI response body must be an object or an array of objects to expose a Jmix-facing service."
+        operations.forEach { selected ->
+            require(selected.requestSchemaId == null || rootEntitySchemaId(selected.requestSchemaId) != null) {
+                "Every OpenAPI request body must be an object or an array of objects to expose a Jmix-facing service."
+            }
+            require(selected.responseSchemaId == null || rootEntitySchemaId(selected.responseSchemaId) != null) {
+                "Every OpenAPI response body must be an object or an array of objects to expose a Jmix-facing service."
+            }
         }
 
         val supplied = layer.mappings.associateBy(IntegrationOpenApiJmixTypeMapping::schemaId)
@@ -1352,7 +1445,9 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             while (!usedClassNames.add(candidate)) candidate = "${base}${suffix++}"
             return candidate
         }
-        val responseRoot = rootEntitySchemaId(operation.responseSchemaId)
+        val responseRoots = operations.mapNotNull { selected ->
+            rootEntitySchemaId(selected.responseSchemaId)
+        }.toSet()
         val normalizedMappings = reachableObjects.map { schemaModel ->
             val current = supplied[schemaModel.id]
             if (current?.targetKind == IntegrationOpenApiJmixTargetKind.EXISTING_ENTITY) {
@@ -1376,7 +1471,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                         it.javaName in setOf("id", "uuid", "code", "externalId") &&
                             it.javaName in targetProperties
                     }?.javaName
-                require(schemaModel.id != responseRoot || naturalId != null) {
+                require(schemaModel.id !in responseRoots || naturalId != null) {
                     "Response DTO '${schemaModel.javaName}' needs a stable identifier property (id, uuid, code, externalId, or an explicit selection)."
                 }
                 val instanceName = current?.instanceNameProperty?.takeIf { it in targetProperties }
@@ -1691,6 +1786,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             OpenApiJmixLayerGenerator.Input(
                 connector = model,
                 operation = operation,
+                operations = listOf(operation) + model.resolvedOpenApiAdditionalOperations,
                 layer = layer,
                 entityNamePrefix = entityNamePrefix,
                 existingTargets = existingTargets,
@@ -1870,23 +1966,50 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 baseline.add("referencedDocuments", com.google.gson.JsonArray())
             }
         }
-        root.getAsJsonObject("openApiBaseline")?.getAsJsonArray("schemas")?.forEach { schemaElement ->
-            val schema = schemaElement.asJsonObject
-            val defaults = gson.toJsonTree(
-                org.jmixworkbench.model.IntegrationOpenApiValidationModel(),
-            ).asJsonObject
-            if (!schema.has("validation")) {
-                schema.add("validation", defaults)
-            } else {
-                val validation = schema.getAsJsonObject("validation")
-                defaults.entrySet().forEach { (name, value) ->
-                    if (!validation.has(name)) validation.add(name, value)
+        if (!root.has("openApiAdditionalBindings")) {
+            root.add("openApiAdditionalBindings", com.google.gson.JsonArray())
+        }
+        if (!root.has("openApiAdditionalBaselines")) {
+            root.add("openApiAdditionalBaselines", com.google.gson.JsonArray())
+        }
+        if (!root.has("resolvedOpenApiAdditionalOperations")) {
+            root.add("resolvedOpenApiAdditionalOperations", com.google.gson.JsonArray())
+        }
+        root.getAsJsonArray("openApiAdditionalBindings").forEach { bindingElement ->
+            val binding = bindingElement.asJsonObject
+            if (!binding.has("referencedDocuments")) {
+                binding.add("referencedDocuments", com.google.gson.JsonArray())
+            }
+        }
+        val baselines = buildList {
+            root.getAsJsonObject("openApiBaseline")?.let(::add)
+            root.getAsJsonArray("openApiAdditionalBaselines").forEach { add(it.asJsonObject) }
+        }
+        baselines.forEach { baseline ->
+            if (!baseline.has("referencedDocuments")) {
+                baseline.add("referencedDocuments", com.google.gson.JsonArray())
+            }
+            baseline.getAsJsonArray("schemas")?.forEach { schemaElement ->
+                val schema = schemaElement.asJsonObject
+                val defaults = gson.toJsonTree(
+                    org.jmixworkbench.model.IntegrationOpenApiValidationModel(),
+                ).asJsonObject
+                if (!schema.has("validation")) {
+                    schema.add("validation", defaults)
+                } else {
+                    val validation = schema.getAsJsonObject("validation")
+                    defaults.entrySet().forEach { (name, value) ->
+                        if (!validation.has(name)) validation.add(name, value)
+                    }
                 }
             }
         }
         val decoded = gson.fromJson(root, IntegrationConnectorModel::class.java)
         require(decoded.resolvedOpenApiOperation == null) {
             "Transient OpenAPI resolution must not be persisted."
+        }
+        require(decoded.resolvedOpenApiAdditionalOperations.isEmpty()) {
+            "Transient additional OpenAPI resolutions must not be persisted."
         }
         require(decoded.openApiEvolutionCapability == null) {
             "OpenAPI evolution capabilities must not be persisted."
@@ -1896,24 +2019,42 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         }
         val binding = decoded.openApiBinding
         val baseline = decoded.openApiBaseline
-        require(binding != null || baseline == null) {
-            "An OpenAPI baseline cannot exist without an exact contract binding."
+        require((binding == null) == (baseline == null)) {
+            "A primary OpenAPI binding and its semantic baseline must either both exist or both be absent."
         }
-        if (binding != null && baseline != null) {
-            require(gson.toJson(baseline).toByteArray(Charsets.UTF_8).size <= MAX_OPENAPI_BASELINE_BYTES)
+        require(decoded.openApiAdditionalBindings.size == decoded.openApiAdditionalBaselines.size) {
+            "Additional OpenAPI bindings and baselines are not aligned."
+        }
+        require(binding != null || (
+            decoded.openApiAdditionalBindings.isEmpty() && decoded.openApiAdditionalBaselines.isEmpty()
+        )) {
+            "Additional OpenAPI operations require a primary binding and semantic baseline."
+        }
+        val storedBindings = listOfNotNull(binding) + decoded.openApiAdditionalBindings
+        val storedBaselines = listOfNotNull(baseline) + decoded.openApiAdditionalBaselines
+        require(storedBindings.size == storedBaselines.size) {
+            "Persisted OpenAPI bindings and semantic baselines are not aligned."
+        }
+        require(gson.toJson(storedBaselines).toByteArray(Charsets.UTF_8).size <= MAX_OPENAPI_BUNDLE_BASELINE_BYTES)
+        decoded.openApiAdditionalBaselines.forEach { additionalBaseline ->
+            require(additionalBaseline.schemas.isEmpty() || additionalBaseline.schemas == baseline?.schemas) {
+                "An additional OpenAPI baseline contains a conflicting shared schema registry."
+            }
+        }
+        storedBindings.zip(storedBaselines).forEach { (selected, stored) ->
             require(
-                baseline.contractPath == binding.relativePath &&
-                    baseline.contractSha256 == binding.documentSha256 &&
-                    baseline.referencedDocuments == binding.referencedDocuments &&
-                    baseline.specificationVersion == binding.specificationVersion &&
-                    baseline.operationId == binding.operationId &&
-                    baseline.method == binding.method &&
-                    baseline.path == binding.path &&
-                    baseline.requestMediaType == binding.requestMediaType &&
-                    baseline.responseStatus == binding.responseStatus &&
-                    baseline.responseMediaType == binding.responseMediaType
+                stored.contractPath == selected.relativePath &&
+                    stored.contractSha256 == selected.documentSha256 &&
+                    stored.referencedDocuments == selected.referencedDocuments &&
+                    stored.specificationVersion == selected.specificationVersion &&
+                    stored.operationId == selected.operationId &&
+                    stored.method == selected.method &&
+                    stored.path == selected.path &&
+                    stored.requestMediaType == selected.requestMediaType &&
+                    stored.responseStatus == selected.responseStatus &&
+                    stored.responseMediaType == selected.responseMediaType
             ) {
-                "The persisted OpenAPI baseline does not match its binding."
+                "A persisted OpenAPI baseline does not match its binding."
             }
         }
         decoded.copy(sourceLocator = null)
@@ -1941,6 +2082,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         private const val MAX_CONNECTOR_FILES = 50_000
         private const val MAX_CONNECTOR_BYTES = 8L * 1024 * 1024
         private const val MAX_OPENAPI_BASELINE_BYTES = 512 * 1024
+        private const val MAX_OPENAPI_BUNDLE_BASELINE_BYTES = 2 * 1024 * 1024
         private const val MAX_OPENAPI_EVOLUTION_MAPPING_ISSUES = 256
         private const val MAX_OPENAPI_APPROVAL_MAPPINGS = 12
         private const val MAX_OPENAPI_APPROVAL_PROPERTIES = 8
@@ -2036,6 +2178,7 @@ data class IntegrationConnectorDocumentSnapshot(
 
 data class IntegrationOpenApiEvolutionReview(
     val candidateBinding: org.jmixworkbench.model.IntegrationOpenApiBinding,
+    val candidateAdditionalBindings: List<org.jmixworkbench.model.IntegrationOpenApiBinding> = emptyList(),
     val report: OpenApiEvolutionReport,
     val candidateTitle: String,
     val candidateApiVersion: String?,

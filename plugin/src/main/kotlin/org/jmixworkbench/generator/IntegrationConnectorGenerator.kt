@@ -12,6 +12,7 @@ import org.jmixworkbench.model.IntegrationDiagnosticSeverity
 import org.jmixworkbench.model.IntegrationHttpMethod
 import org.jmixworkbench.model.IntegrationJsonApi
 import org.jmixworkbench.model.IntegrationObservabilityApi
+import org.jmixworkbench.model.IntegrationOpenApiBinding
 import org.jmixworkbench.model.IntegrationOpenApiOperationModel
 import org.jmixworkbench.model.IntegrationOpenApiParameterLocation
 import org.jmixworkbench.model.IntegrationOpenApiParameterModel
@@ -43,6 +44,7 @@ import java.util.Base64
  */
 object IntegrationConnectorGenerator {
     private const val MARKER_PREFIX = "// JVW-INTEGRATION-MODEL: "
+    private const val MAX_OPENAPI_CLIENT_OPERATIONS = 64
     private val gson = Gson()
 
     fun markerPrefix(): String = MARKER_PREFIX
@@ -416,10 +418,14 @@ object IntegrationConnectorGenerator {
         val binding = model.openApiBinding
         val operation = model.resolvedOpenApiOperation
         if (binding == null) {
-            if (operation != null) {
+            if (
+                operation != null ||
+                model.openApiAdditionalBindings.isNotEmpty() ||
+                model.resolvedOpenApiAdditionalOperations.isNotEmpty()
+            ) {
                 error(
                     "INTEGRATION_OPENAPI_UNBOUND_OPERATION",
-                    "A backend-resolved OpenAPI operation cannot exist without immutable contract coordinates.",
+                    "Backend-resolved OpenAPI operations cannot exist without immutable primary contract coordinates.",
                 )
             }
             return
@@ -554,6 +560,120 @@ object IntegrationConnectorGenerator {
                 "INTEGRATION_OPENAPI_OPERATION_DEPRECATED",
                 "The selected OpenAPI operation is deprecated; contract evolution should migrate callers.",
             )
+        }
+        validateAdditionalOpenApiOperations(model, binding, operation, error, warning)
+    }
+
+    private fun validateAdditionalOpenApiOperations(
+        model: IntegrationConnectorModel,
+        primaryBinding: IntegrationOpenApiBinding,
+        primaryOperation: IntegrationOpenApiOperationModel,
+        error: (String, String) -> Unit,
+        warning: (String, String) -> Unit,
+    ) {
+        val bindings = model.openApiAdditionalBindings
+        val operations = model.resolvedOpenApiAdditionalOperations
+        if (bindings.size != operations.size) {
+            error(
+                "INTEGRATION_OPENAPI_ADDITIONAL_RESOLUTION_MISMATCH",
+                "Every additional OpenAPI binding requires one aligned backend resolution.",
+            )
+            return
+        }
+        if (bindings.size > MAX_OPENAPI_CLIENT_OPERATIONS - 1) {
+            error(
+                "INTEGRATION_OPENAPI_OPERATION_LIMIT",
+                "An OpenAPI client can contain at most $MAX_OPENAPI_CLIENT_OPERATIONS operations.",
+            )
+            return
+        }
+        val allOperations = listOf(primaryOperation) + operations
+        val duplicateMethods = allOperations.groupingBy(IntegrationOpenApiOperationModel::javaMethodName)
+            .eachCount().filterValues { it > 1 }.keys
+        if (duplicateMethods.isNotEmpty()) {
+            error(
+                "INTEGRATION_OPENAPI_METHOD_COLLISION",
+                "Selected operations collapse to duplicate Java methods: ${duplicateMethods.sorted().joinToString()}.",
+            )
+        }
+        bindings.zip(operations).forEach { (binding, operation) ->
+            if (
+                binding.relativePath != primaryBinding.relativePath ||
+                binding.documentSha256 != primaryBinding.documentSha256 ||
+                binding.referencedDocuments != primaryBinding.referencedDocuments ||
+                binding.specificationVersion != primaryBinding.specificationVersion
+            ) {
+                error(
+                    "INTEGRATION_OPENAPI_BUNDLE_MISMATCH",
+                    "Every selected operation must belong to the same exact OpenAPI contract bundle revision.",
+                )
+            }
+            if (
+                operation.contractPath != binding.relativePath ||
+                operation.contractSha256 != binding.documentSha256 ||
+                operation.referencedDocuments != binding.referencedDocuments ||
+                operation.specificationVersion != binding.specificationVersion ||
+                operation.operationId != binding.operationId ||
+                operation.method != binding.method ||
+                operation.path != binding.path ||
+                operation.requestMediaType != binding.requestMediaType ||
+                operation.responseStatus != binding.responseStatus ||
+                operation.responseMediaType != binding.responseMediaType
+            ) {
+                error(
+                    "INTEGRATION_OPENAPI_ADDITIONAL_BINDING_MISMATCH",
+                    "An additional backend-resolved operation does not match its exact binding.",
+                )
+            }
+            if (operation.schemas != primaryOperation.schemas) {
+                error(
+                    "INTEGRATION_OPENAPI_SHARED_SCHEMA_MISMATCH",
+                    "All selected operations must use one backend-issued canonical shared schema registry.",
+                )
+            }
+            if (operation.requestSchemaId != null && operation.method == IntegrationHttpMethod.GET) {
+                error(
+                    "INTEGRATION_OPENAPI_GET_BODY_UNSUPPORTED",
+                    "A GET request body has ambiguous intermediary behavior and requires an explicit custom adapter.",
+                )
+            }
+            runCatching {
+                operation.requestSchemaId?.let { openApiLocalType(operation, it, model.className) }
+                operation.responseSchemaId?.let { openApiLocalType(operation, it, model.className) }
+                operation.parameters.forEach { parameter ->
+                    openApiLocalType(operation, parameter.schemaId, model.className)
+                }
+            }.onFailure { failure ->
+                error(
+                    "INTEGRATION_OPENAPI_SCHEMA_RECURSION_UNSUPPORTED",
+                    failure.message ?: "An additional OpenAPI schema cannot be represented safely.",
+                )
+            }
+            if (
+                operation.securityRequirements.isNotEmpty() &&
+                operation.securityRequirements.none { requirement -> securityRequirementSatisfied(model, requirement) }
+            ) {
+                error(
+                    "INTEGRATION_OPENAPI_SECURITY_UNSATISFIED",
+                    "Authentication does not satisfy operation '${operation.operationId ?: operation.javaMethodName}'.",
+                )
+            }
+            val parameterNames = operation.parameters.map(IntegrationOpenApiParameterModel::javaName)
+            if (
+                model.reliability.idempotency.enabled &&
+                model.reliability.idempotency.keyParameterName in parameterNames
+            ) {
+                error(
+                    "INTEGRATION_OPENAPI_IDEMPOTENCY_PARAMETER_COLLISION",
+                    "The idempotency parameter collides with operation '${operation.operationId ?: operation.javaMethodName}'.",
+                )
+            }
+            if (operation.deprecated) {
+                warning(
+                    "INTEGRATION_OPENAPI_OPERATION_DEPRECATED",
+                    "OpenAPI operation '${operation.operationId ?: operation.javaMethodName}' is deprecated.",
+                )
+            }
         }
     }
 
@@ -757,17 +877,22 @@ object IntegrationConnectorGenerator {
         )
     }
 
-    fun encode(model: IntegrationConnectorModel): String =
-        Base64.getUrlEncoder().withoutPadding().encodeToString(
-            gson.toJson(
-                model.copy(
-                    sourceLocator = null,
-                    catalogBinding = model.catalogBinding?.copy(approvalCapability = null),
-                    openApiEvolutionCapability = null,
-                    resolvedOpenApiOperation = null,
-                ),
-            ).toByteArray(Charsets.UTF_8),
+    fun encode(model: IntegrationConnectorModel): String {
+        val persisted = gson.toJsonTree(
+            model.copy(
+                sourceLocator = null,
+                catalogBinding = model.catalogBinding?.copy(approvalCapability = null),
+                openApiEvolutionCapability = null,
+                resolvedOpenApiOperation = null,
+                resolvedOpenApiAdditionalOperations = emptyList(),
+            ),
+        ).asJsonObject.apply {
+            remove("resolvedOpenApiAdditionalOperations")
+        }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+            gson.toJson(persisted).toByteArray(Charsets.UTF_8),
         )
+    }
 
     private fun renderJava(model: IntegrationConnectorModel, encodedModel: String): String {
         val imports = imports(model)
@@ -953,8 +1078,14 @@ object IntegrationConnectorGenerator {
     }
 
     private fun renderHttpOperation(model: IntegrationConnectorModel): String =
-        model.resolvedOpenApiOperation?.let { renderOpenApiHttpOperation(model, it) }
-            ?: renderGenericHttpOperation(model)
+        model.resolvedOpenApiOperation?.let { primary ->
+            buildString {
+                (listOf(primary) + model.resolvedOpenApiAdditionalOperations).forEachIndexed { index, operation ->
+                    if (index > 0) append('\n')
+                    append(renderOpenApiHttpOperation(model, operation))
+                }
+            }
+        } ?: renderGenericHttpOperation(model)
 
     private fun renderGenericHttpOperation(model: IntegrationConnectorModel): String = buildString {
         appendResilienceAnnotations(model)
@@ -1020,15 +1151,17 @@ object IntegrationConnectorGenerator {
         operation: IntegrationOpenApiOperationModel,
     ): String = buildString {
         val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        val operationPayloadType = openApiPayloadJavaType(operation, model.className)
+        val operationResponseType = openApiResponseJavaType(operation, model.className)
         appendResilienceAnnotations(model)
-        append("    public ").append(model.responseJavaType).append(' ')
+        append("    public ").append(operationResponseType).append(' ')
             .append(operation.javaMethodName).append('(')
         val declarations = mutableListOf<String>()
         operation.parameters.forEach { parameter ->
             declarations += "${openApiLocalType(operation, parameter.schemaId, model.className)} ${parameter.javaName}"
         }
         if (operation.requestSchemaId != null) {
-            declarations += "${model.payloadJavaType} payload"
+            declarations += "$operationPayloadType payload"
         }
         if (model.reliability.idempotency.enabled) {
             declarations += "String ${model.reliability.idempotency.keyParameterName}"

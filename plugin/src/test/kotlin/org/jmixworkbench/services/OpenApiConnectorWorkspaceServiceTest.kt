@@ -30,6 +30,106 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
+    fun testSharedMultiOperationClientPreviewsAppliesAndReopens() {
+        val root = prepareProject(
+            """
+            openapi: 3.1.1
+            info: { title: HR Provider, version: "1" }
+            paths:
+              /employees:
+                post:
+                  operationId: createEmployee
+                  requestBody:
+                    required: true
+                    content:
+                      application/json:
+                        schema: { ${'$'}ref: '#/components/schemas/EmployeeDraft' }
+                  responses:
+                    "201":
+                      description: employee
+                      content:
+                        application/json:
+                          schema: { ${'$'}ref: '#/components/schemas/Employee' }
+              /employees/{employeeId}:
+                get:
+                  operationId: findEmployee
+                  parameters:
+                    - name: employeeId
+                      in: path
+                      required: true
+                      schema: { type: string }
+                  responses:
+                    "200":
+                      description: employee
+                      content:
+                        application/json:
+                          schema: { ${'$'}ref: '#/components/schemas/Employee' }
+            components:
+              schemas:
+                EmployeeDraft:
+                  type: object
+                  required: [name]
+                  properties:
+                    name: { type: string }
+                Employee:
+                  type: object
+                  required: [id, name]
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+            """.trimIndent(),
+        )
+        val contractFile = requireNotNull(
+            root.findFileByRelativePath("src/main/resources/openapi/hr-provider.yaml"),
+        )
+        val contract = OpenApiContractService.getInstance(project).inspectProjectFile(contractFile)
+        val operations = contract.operations.associateBy { it.operationId }
+        val create = requireNotNull(operations["createEmployee"]?.defaultBinding)
+        val find = requireNotNull(operations["findEmployee"]?.defaultBinding)
+        val service = IntegrationConnectorWorkspaceService.getInstance(project)
+        val destination = requireNotNull(service.load(forceRefresh = true).destinations.firstOrNull())
+        val model = connector(destination.id, create).copy(
+            openApiAdditionalBindings = listOf(find),
+            openApiJmixLayer = IntegrationOpenApiJmixLayerModel(
+                enabled = true,
+                dtoPackage = "com.acme.payroll.entity.integration.hr",
+                mapperPackage = "com.acme.payroll.integration.mapper",
+                servicePackage = "com.acme.payroll.service.integration",
+                serviceClassName = "HrProviderService",
+                serviceBeanName = "hrProviderService",
+            ),
+        )
+
+        val preview = service.preview(model)
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        val java = preview.files.single { it.relativePath.endsWith("HrProviderConnector.java") }.resultContent
+        assertContains(java, "createEmployee(")
+        assertContains(java, "findEmployee(")
+        assertEquals(1, Regex("public record Employee\\(").findAll(java).count())
+        val applicationService = preview.files.single {
+            it.relativePath.endsWith("HrProviderService.java")
+        }.resultContent
+        assertContains(applicationService, "createEmployee(")
+        assertContains(applicationService, "findEmployee(")
+        apply(service, model, preview)
+
+        val reopened = service.load(forceRefresh = true).existingDocuments.single().model
+        assertEquals(1, reopened.openApiAdditionalBindings.size)
+        assertEquals("findEmployee", reopened.openApiAdditionalBindings.single().operationId)
+        assertEquals(1, reopened.openApiAdditionalBaselines.size)
+        assertEquals("findEmployee", reopened.openApiAdditionalBaselines.single().operationId)
+        assertTrue(
+            reopened.openApiAdditionalBaselines.single().schemas.isEmpty(),
+            "The shared schema registry must be persisted once on the primary baseline.",
+        )
+        assertTrue(requireNotNull(reopened.openApiBaseline).schemas.isNotEmpty())
+        assertEquals(
+            setOf("component:Employee", "component:EmployeeDraft"),
+            requireNotNull(reopened.openApiJmixLayer).mappings.mapTo(linkedSetOf()) { it.schemaId },
+        )
+        assertTrue(service.load(forceRefresh = true).existingDocuments.single().editable)
+    }
+
     fun testMultiFileBindingInvalidatesWhenTransitiveSchemaChanges() {
         val root = prepareProject(
             """
@@ -708,6 +808,68 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertEquals(evolution.candidateBinding.documentSha256, reopened.model.openApiBaseline?.contractSha256)
     }
 
+    fun testChangedMultiOperationContractEvolvesAndApprovesAsOneBundle() {
+        val root = prepareProject(multiOperationContract("1"))
+        val service = IntegrationConnectorWorkspaceService.getInstance(project)
+        val initialWorkspace = service.load(forceRefresh = true)
+        val destination = requireNotNull(initialWorkspace.destinations.firstOrNull())
+        val operations = initialWorkspace.openApiContracts.single().operations.associateBy { it.operationId }
+        val create = requireNotNull(operations["createEmployee"]?.defaultBinding)
+        val find = requireNotNull(operations["findEmployee"]?.defaultBinding)
+        val initial = connector(destination.id, create).copy(openApiAdditionalBindings = listOf(find))
+        val createPreview = service.preview(initial)
+        assertTrue(createPreview.accepted, createPreview.issues.joinToString { it.message })
+        apply(service, initial, createPreview)
+
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/resources/openapi/hr-provider.yaml",
+                multiOperationContract("2", changeFindOperation = true),
+            )
+        }
+        ApplicationGraphService.getInstance(project).invalidate()
+        val changed = service.load(forceRefresh = true).existingDocuments.single()
+        val evolution = requireNotNull(changed.openApiEvolution)
+        assertEquals(1, evolution.candidateAdditionalBindings.size)
+        assertEquals("findEmployee", evolution.candidateAdditionalBindings.single().operationId)
+        assertEquals(evolution.candidateBinding.documentSha256, evolution.candidateAdditionalBindings.single().documentSha256)
+        assertTrue(evolution.report.changes.any {
+            it.code == "OPENAPI_PARAMETER_ADDED" && "findEmployee" in it.path
+        })
+
+        val staleAdditional = changed.model.copy(openApiBinding = evolution.candidateBinding)
+        val stalePreview = service.preview(staleAdditional)
+        assertFalse(stalePreview.accepted)
+
+        val candidate = changed.model.copy(
+            openApiBinding = evolution.candidateBinding,
+            openApiAdditionalBindings = evolution.candidateAdditionalBindings,
+        )
+        val unapproved = service.preview(candidate)
+        assertFalse(unapproved.accepted)
+        assertTrue(unapproved.issues.any {
+            it.code == "JVW-INTEGRATION-OPENAPI-EVOLUTION-APPROVAL-REQUIRED"
+        })
+        val approval = service.issueOpenApiEvolutionApproval(candidate)
+        assertEquals(evolution.report.reportDigest, approval.reportDigest)
+        val approved = candidate.copy(openApiEvolutionCapability = approval.capability)
+        val updatePreview = service.preview(approved)
+        assertTrue(updatePreview.accepted, updatePreview.issues.joinToString { it.message })
+        apply(service, approved, updatePreview)
+
+        ApplicationGraphService.getInstance(project).invalidate()
+        val reopened = service.load(forceRefresh = true).existingDocuments.single()
+        assertTrue(reopened.editable, reopened.issue)
+        assertNull(reopened.openApiEvolution)
+        assertEquals(evolution.candidateBinding.documentSha256, reopened.model.openApiBaseline?.contractSha256)
+        assertEquals(
+            evolution.candidateAdditionalBindings.single().documentSha256,
+            reopened.model.openApiAdditionalBaselines.single().contractSha256,
+        )
+        assertTrue(reopened.model.openApiAdditionalBaselines.single().schemas.isEmpty())
+    }
+
     fun testRenamedSchemaCanBeExplicitlyRemappedAndApprovedEndToEnd() {
         val root = prepareProject(contract("1"))
         val service = IntegrationConnectorWorkspaceService.getInstance(project)
@@ -893,6 +1055,68 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
             ""
         }
         return source.replace("        # OPTIONAL_PARAMETER", parameter)
+    }
+
+    private fun multiOperationContract(version: String, changeFindOperation: Boolean = false): String {
+        val optionalParameter = if (changeFindOperation) {
+            listOf(
+                "        - name: locale",
+                "          in: query",
+                "          required: false",
+                "          schema: { type: string }",
+            ).joinToString("\n")
+        } else {
+            ""
+        }
+        return """
+        openapi: 3.1.1
+        info:
+          title: HR Provider
+          version: "$version"
+        paths:
+          /employees:
+            post:
+              operationId: createEmployee
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema: { ${'$'}ref: '#/components/schemas/EmployeeDraft' }
+              responses:
+                "201":
+                  description: employee
+                  content:
+                    application/json:
+                      schema: { ${'$'}ref: '#/components/schemas/Employee' }
+          /employees/{employeeId}:
+            get:
+              operationId: findEmployee
+              parameters:
+                - name: employeeId
+                  in: path
+                  required: true
+                  schema: { type: string }
+                # OPTIONAL_PARAMETER
+              responses:
+                "200":
+                  description: employee
+                  content:
+                    application/json:
+                      schema: { ${'$'}ref: '#/components/schemas/Employee' }
+        components:
+          schemas:
+            EmployeeDraft:
+              type: object
+              required: [displayName]
+              properties:
+                displayName: { type: string }
+            Employee:
+              type: object
+              required: [id, displayName]
+              properties:
+                id: { type: string }
+                displayName: { type: string }
+        """.trimIndent().replace("        # OPTIONAL_PARAMETER", optionalParameter)
     }
 
     private fun renamedContract(version: String): String = """

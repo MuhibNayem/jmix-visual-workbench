@@ -44,6 +44,7 @@ object OpenApiJmixLayerGenerator {
     data class Input(
         val connector: IntegrationConnectorModel,
         val operation: IntegrationOpenApiOperationModel,
+        val operations: List<IntegrationOpenApiOperationModel> = listOf(operation),
         val layer: IntegrationOpenApiJmixLayerModel,
         val entityNamePrefix: String,
         val existingTargets: Map<String, ResolvedEntityTarget>,
@@ -127,6 +128,7 @@ object OpenApiJmixLayerGenerator {
     fun validate(input: Input): List<String> {
         val layer = input.layer
         val operation = input.operation
+        val operations = input.operations
         val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
         val issues = mutableListOf<String>()
 
@@ -143,8 +145,14 @@ object OpenApiJmixLayerGenerator {
         if (!isJavaIdentifier(input.entityNamePrefix.replace("-", "_"))) {
             issues += "The backend-derived Jmix entity-name prefix is invalid."
         }
-        if (operation.requestSchemaId == null && operation.responseSchemaId == null) {
-            issues += "The selected OpenAPI operation has no request or response model to expose as Jmix entities."
+        if (operations.isEmpty() || operation !in operations) {
+            issues += "The primary OpenAPI operation must be present in the selected operation set."
+        }
+        if (operations.any { it.schemas != operation.schemas }) {
+            issues += "Every selected operation must use the same canonical shared schema registry."
+        }
+        if (operations.all { it.requestSchemaId == null && it.responseSchemaId == null }) {
+            issues += "The selected OpenAPI operations have no request or response models to expose as Jmix entities."
         }
         val duplicateSchemas = layer.mappings.groupingBy(IntegrationOpenApiJmixTypeMapping::schemaId)
             .eachCount().filterValues { it > 1 }.keys
@@ -152,18 +160,20 @@ object OpenApiJmixLayerGenerator {
             issues += "Each OpenAPI schema can have only one Jmix target: ${duplicateSchemas.sorted().joinToString()}."
         }
 
-        val reachable = reachableEntitySchemaIds(operation)
+        val reachable = reachableEntitySchemaIds(operations)
         val mappings = layer.mappings.associateBy(IntegrationOpenApiJmixTypeMapping::schemaId)
-        val responseRootObject = operation.responseSchemaId?.let { responseId ->
-            val response = schemas[responseId]
-            when (response?.kind) {
-                IntegrationOpenApiSchemaKind.OBJECT -> response.id
-                IntegrationOpenApiSchemaKind.ARRAY -> response.itemSchemaId?.takeIf {
-                    schemas[it]?.kind == IntegrationOpenApiSchemaKind.OBJECT
+        val responseRootObjects = operations.mapNotNull { selected ->
+            selected.responseSchemaId?.let { responseId ->
+                val response = schemas[responseId]
+                when (response?.kind) {
+                    IntegrationOpenApiSchemaKind.OBJECT -> response.id
+                    IntegrationOpenApiSchemaKind.ARRAY -> response.itemSchemaId?.takeIf {
+                        schemas[it]?.kind == IntegrationOpenApiSchemaKind.OBJECT
+                    }
+                    else -> null
                 }
-                else -> null
             }
-        }
+        }.toSet()
         val missing = reachable - mappings.keys
         if (missing.isNotEmpty()) {
             issues += "Every reachable object schema needs a mapping: ${missing.sorted().joinToString()}."
@@ -318,7 +328,7 @@ object OpenApiJmixLayerGenerator {
                 if (it !in targetProperties) issues += "Identifier property '$it' is absent from '${schema.javaName}' target."
             }
             if (
-                mapping.schemaId == responseRootObject &&
+                mapping.schemaId in responseRootObjects &&
                 mapping.targetKind == IntegrationOpenApiJmixTargetKind.GENERATED_DTO &&
                 mapping.idProperty == null
             ) {
@@ -328,7 +338,7 @@ object OpenApiJmixLayerGenerator {
                 if (it !in targetProperties) issues += "Instance-name property '$it' is absent from '${schema.javaName}' target."
             }
         }
-        val enumNames = reachableSchemaIds(operation)
+        val enumNames = reachableSchemaIds(operations)
             .mapNotNull(schemas::get)
             .filter { it.kind == IntegrationOpenApiSchemaKind.STRING && it.enumValues.isNotEmpty() }
             .groupBy { safeTypeName(it.javaName) }
@@ -339,9 +349,11 @@ object OpenApiJmixLayerGenerator {
             issues += "Generated DTO and Jmix enum would both use class '$name'. Rename the DTO mapping."
         }
 
-        val outbound = operation.requestSchemaId
-            ?.let { reachableEntitySchemaIds(operation, it) }
-            .orEmpty()
+        val outbound = operations.flatMapTo(linkedSetOf()) { selected ->
+            selected.requestSchemaId
+                ?.let { reachableEntitySchemaIds(operation, it) }
+                .orEmpty()
+        }
         outbound.forEach { schemaId ->
             val schema = schemas[schemaId] ?: return@forEach
             val mapping = mappings[schemaId] ?: return@forEach
@@ -359,6 +371,7 @@ object OpenApiJmixLayerGenerator {
 
     private class Context(val input: Input) {
         val operation = input.operation
+        val operations = input.operations
         val layer = input.layer
         val schemas = operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
         val mappings = layer.mappings.associateBy(IntegrationOpenApiJmixTypeMapping::schemaId)
@@ -367,7 +380,7 @@ object OpenApiJmixLayerGenerator {
             .filter { it.targetKind == IntegrationOpenApiJmixTargetKind.GENERATED_DTO }
             .map { ResolvedMapping(it, requireNotNull(schemas[it.schemaId]), requireNotNull(it.generatedClassName)) }
             .sortedBy(ResolvedMapping::className)
-        val generatedEnums = reachableSchemaIds(operation)
+        val generatedEnums = reachableSchemaIds(operations)
             .mapNotNull(schemas::get)
             .filter { it.kind == IntegrationOpenApiSchemaKind.STRING && it.enumValues.isNotEmpty() }
             .distinctBy(IntegrationOpenApiSchemaModel::id)
@@ -515,7 +528,7 @@ object OpenApiJmixLayerGenerator {
     }
 
     private fun renderMapper(context: Context): String = buildString {
-        val objectSchemas = reachableEntitySchemaIds(context.operation)
+        val objectSchemas = reachableEntitySchemaIds(context.operations)
             .mapNotNull(context.schemas::get)
             .sortedBy(IntegrationOpenApiSchemaModel::javaName)
         append("package ").append(context.layer.mapperPackage).append(";\n\n")
@@ -609,11 +622,8 @@ object OpenApiJmixLayerGenerator {
     }
 
     private fun renderService(context: Context): String = buildString {
-        val operation = context.operation
         val connectorType = "${context.input.connector.packageName}.${context.input.connector.className}"
         val mapperType = "${context.layer.mapperPackage}.${context.mapperClassName}"
-        val responseType = serviceEntityType(context, operation.responseSchemaId)
-        val requestType = serviceEntityType(context, operation.requestSchemaId)
         append("package ").append(context.layer.servicePackage).append(";\n\n")
         append("import org.springframework.stereotype.Service;\n\n")
         append("@Service(\"").append(escapeJava(context.layer.serviceBeanName)).append("\")\n")
@@ -624,36 +634,40 @@ object OpenApiJmixLayerGenerator {
             .append(connectorType).append(" connector, ").append(mapperType).append(" mapper) {\n")
         append("        this.connector = connector;\n")
         append("        this.mapper = mapper;\n")
-        append("    }\n\n")
-        append("    public ").append(responseType ?: "void").append(' ')
-            .append(operation.javaMethodName).append('(')
-        val params = mutableListOf<String>()
-        operation.parameters.forEach { parameter ->
-            params += "${transportJavaType(operation, parameter.schemaId, context.input.connector.packageName, context.input.connector.className)} ${parameter.javaName}"
-        }
-        if (requestType != null) params += "$requestType requestEntity"
-        if (context.input.connector.reliability.idempotency.enabled) {
-            params += "String ${context.input.connector.reliability.idempotency.keyParameterName}"
-        }
-        append(params.joinToString()).append(") {\n")
-        val callArgs = mutableListOf<String>()
-        operation.parameters.forEach { callArgs += it.javaName }
-        operation.requestSchemaId?.let { schemaId ->
-            callArgs += serviceOutboundExpression(context, schemaId, "requestEntity")
-        }
-        if (context.input.connector.reliability.idempotency.enabled) {
-            callArgs += context.input.connector.reliability.idempotency.keyParameterName
-        }
-        if (operation.responseSchemaId == null) {
-            append("        connector.").append(operation.javaMethodName).append('(')
-                .append(callArgs.joinToString()).append(");\n")
-        } else {
-            append("        var response = connector.").append(operation.javaMethodName).append('(')
-                .append(callArgs.joinToString()).append(");\n")
-            append("        return ").append(serviceInboundExpression(context, operation.responseSchemaId, "response"))
-                .append(";\n")
-        }
         append("    }\n")
+        context.operations.forEach { operation ->
+            val responseType = serviceEntityType(context, operation.responseSchemaId)
+            val requestType = serviceEntityType(context, operation.requestSchemaId)
+            append("\n    public ").append(responseType ?: "void").append(' ')
+                .append(operation.javaMethodName).append('(')
+            val params = mutableListOf<String>()
+            operation.parameters.forEach { parameter ->
+                params += "${transportJavaType(operation, parameter.schemaId, context.input.connector.packageName, context.input.connector.className)} ${parameter.javaName}"
+            }
+            if (requestType != null) params += "$requestType requestEntity"
+            if (context.input.connector.reliability.idempotency.enabled) {
+                params += "String ${context.input.connector.reliability.idempotency.keyParameterName}"
+            }
+            append(params.joinToString()).append(") {\n")
+            val callArgs = mutableListOf<String>()
+            operation.parameters.forEach { callArgs += it.javaName }
+            operation.requestSchemaId?.let { schemaId ->
+                callArgs += serviceOutboundExpression(context, schemaId, "requestEntity")
+            }
+            if (context.input.connector.reliability.idempotency.enabled) {
+                callArgs += context.input.connector.reliability.idempotency.keyParameterName
+            }
+            if (operation.responseSchemaId == null) {
+                append("        connector.").append(operation.javaMethodName).append('(')
+                    .append(callArgs.joinToString()).append(");\n")
+            } else {
+                append("        var response = connector.").append(operation.javaMethodName).append('(')
+                    .append(callArgs.joinToString()).append(");\n")
+                append("        return ").append(serviceInboundExpression(context, operation.responseSchemaId, "response"))
+                    .append(";\n")
+            }
+            append("    }\n")
+        }
         append("}\n")
     }
 
@@ -894,6 +908,16 @@ object OpenApiJmixLayerGenerator {
         .filter { it.kind == IntegrationOpenApiSchemaKind.OBJECT }
         .mapTo(linkedSetOf(), IntegrationOpenApiSchemaModel::id)
 
+    private fun reachableEntitySchemaIds(
+        operations: List<IntegrationOpenApiOperationModel>,
+    ): Set<String> {
+        val operation = operations.firstOrNull() ?: return emptySet()
+        return reachableSchemaIds(operations)
+            .mapNotNull(operation.schemas.associateBy(IntegrationOpenApiSchemaModel::id)::get)
+            .filter { it.kind == IntegrationOpenApiSchemaKind.OBJECT }
+            .mapTo(linkedSetOf(), IntegrationOpenApiSchemaModel::id)
+    }
+
     private fun reachableSchemaIds(
         operation: IntegrationOpenApiOperationModel,
         root: String? = null,
@@ -912,6 +936,26 @@ object OpenApiJmixLayerGenerator {
             schema.additionalPropertiesSchemaId?.let(::visit)
         }
         roots.forEach(::visit)
+        return visited
+    }
+
+    private fun reachableSchemaIds(
+        operations: List<IntegrationOpenApiOperationModel>,
+    ): Set<String> {
+        val primary = operations.firstOrNull() ?: return emptySet()
+        val schemas = primary.schemas.associateBy(IntegrationOpenApiSchemaModel::id)
+        val visited = linkedSetOf<String>()
+        fun visit(schemaId: String) {
+            if (!visited.add(schemaId)) return
+            val schema = schemas[schemaId] ?: return
+            schema.properties.forEach { visit(it.schemaId) }
+            schema.itemSchemaId?.let(::visit)
+            schema.additionalPropertiesSchemaId?.let(::visit)
+        }
+        operations.forEach { operation ->
+            operation.requestSchemaId?.let(::visit)
+            operation.responseSchemaId?.let(::visit)
+        }
         return visited
     }
 

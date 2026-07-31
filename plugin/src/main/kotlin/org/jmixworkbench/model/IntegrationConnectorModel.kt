@@ -547,6 +547,12 @@ data class IntegrationConnectorModel(
     val enabled: Boolean = true,
     val catalogBinding: IntegrationConnectorCatalogBinding? = null,
     val openApiBinding: IntegrationOpenApiBinding? = null,
+    /**
+     * Additional operations generated into the same client. The primary
+     * [openApiBinding] remains the compatibility anchor and UI default; every
+     * additional binding must belong to the exact same contract bundle.
+     */
+    val openApiAdditionalBindings: List<IntegrationOpenApiBinding> = emptyList(),
     val openApiJmixLayer: IntegrationOpenApiJmixLayerModel? = null,
     /**
      * Backend-derived semantic baseline of the selected operation. Unlike
@@ -555,9 +561,13 @@ data class IntegrationConnectorModel(
      * contract that generated the owned connector.
      */
     val openApiBaseline: IntegrationOpenApiOperationModel? = null,
+    /** Backend-issued semantic baselines aligned with [openApiAdditionalBindings]. */
+    val openApiAdditionalBaselines: List<IntegrationOpenApiOperationModel> = emptyList(),
     /** Short-lived backend capability; never persisted in generated source. */
     val openApiEvolutionCapability: String? = null,
     val resolvedOpenApiOperation: IntegrationOpenApiOperationModel? = null,
+    /** Transient backend resolutions aligned with [openApiAdditionalBindings]. */
+    val resolvedOpenApiAdditionalOperations: List<IntegrationOpenApiOperationModel> = emptyList(),
     val sourceLocator: SourceLocator? = null,
 )
 

@@ -56,6 +56,66 @@ data class OpenApiEvolutionReport(
  * but regenerating a Java method with one more argument still breaks callers.
  */
 object OpenApiContractEvolutionAnalyzer {
+    fun compareAll(
+        baselines: List<IntegrationOpenApiOperationModel>,
+        candidates: List<IntegrationOpenApiOperationModel>,
+    ): OpenApiEvolutionReport {
+        require(baselines.isNotEmpty()) { "At least one OpenAPI baseline is required." }
+        require(baselines.size == candidates.size) {
+            "OpenAPI baseline and candidate operation sets are not aligned."
+        }
+        require(baselines.map(IntegrationOpenApiOperationModel::contractSha256).distinct().size == 1) {
+            "Every baseline operation must belong to one exact contract revision."
+        }
+        require(candidates.map(IntegrationOpenApiOperationModel::contractSha256).distinct().size == 1) {
+            "Every candidate operation must belong to one exact contract revision."
+        }
+        val reports = baselines.zip(candidates).map { (baseline, candidate) ->
+            candidate to compare(baseline, candidate)
+        }
+        val changes = reports.flatMap { (candidate, report) ->
+            val operation = candidate.operationId ?: "${candidate.method.name} ${candidate.path}"
+            report.changes.map { change ->
+                change.copy(path = "$operation · ${change.path}")
+            }
+        }.distinct().sortedWith(
+            compareByDescending<OpenApiEvolutionChange> { impactRank(maxImpact(it.wireImpact, it.sourceImpact)) }
+                .thenBy { it.scope.name }
+                .thenBy(OpenApiEvolutionChange::path)
+                .thenBy(OpenApiEvolutionChange::code),
+        )
+        val wire = reports.fold(OpenApiEvolutionImpact.NONE) { current, (_, report) ->
+            maxImpact(current, report.wireImpact)
+        }
+        val source = reports.fold(OpenApiEvolutionImpact.NONE) { current, (_, report) ->
+            maxImpact(current, report.sourceImpact)
+        }
+        val digest = CanonicalDiscoveryJson.sha256(
+            buildString {
+                baselines.zip(candidates).zip(reports).forEach { (pair, candidateReport) ->
+                    val (baseline, candidate) = pair
+                    val report = candidateReport.second
+                    append(baseline.operationId ?: "${baseline.method.name} ${baseline.path}")
+                        .append('\u0000')
+                        .append(candidate.operationId ?: "${candidate.method.name} ${candidate.path}")
+                        .append('\u0000')
+                        .append(report.reportDigest)
+                        .append('\u0001')
+                }
+            },
+        )
+        return OpenApiEvolutionReport(
+            baselineSha256 = baselines.first().contractSha256,
+            candidateSha256 = candidates.first().contractSha256,
+            baselineApiVersion = baselines.first().apiVersion,
+            candidateApiVersion = candidates.first().apiVersion,
+            wireImpact = wire,
+            sourceImpact = source,
+            changes = changes,
+            reportDigest = digest,
+        )
+    }
+
     fun compare(
         baseline: IntegrationOpenApiOperationModel,
         candidate: IntegrationOpenApiOperationModel,
