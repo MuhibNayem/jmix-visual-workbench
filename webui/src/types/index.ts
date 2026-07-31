@@ -1938,6 +1938,7 @@ export interface IntegrationOpenApiJmixLayerModel {
 export interface IntegrationOpenApiBinding {
   relativePath: string
   documentSha256: string
+  referencedDocuments: IntegrationOpenApiReferencedDocument[]
   specificationVersion: string
   operationId?: string
   method: IntegrationHttpMethod
@@ -1945,6 +1946,11 @@ export interface IntegrationOpenApiBinding {
   requestMediaType?: string
   responseStatus?: string
   responseMediaType?: string
+}
+
+export interface IntegrationOpenApiReferencedDocument {
+  relativePath: string
+  documentSha256: string
 }
 
 export interface IntegrationOpenApiPropertyModel {
@@ -2001,6 +2007,7 @@ export interface IntegrationOpenApiParameterModel {
 export interface IntegrationOpenApiOperationModel {
   contractPath: string
   contractSha256: string
+  referencedDocuments: IntegrationOpenApiReferencedDocument[]
   specificationVersion: string
   title: string
   apiVersion?: string
@@ -2176,6 +2183,7 @@ export interface OpenApiSchemaPropertySnapshot {
 export interface OpenApiContractSnapshot {
   relativePath: string
   documentSha256: string
+  referencedDocuments: IntegrationOpenApiReferencedDocument[]
   specificationVersion: string
   title: string
   apiVersion?: string

@@ -1221,6 +1221,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         require(
             operation.contractPath == binding.relativePath &&
                 operation.contractSha256 == binding.documentSha256 &&
+                operation.referencedDocuments == binding.referencedDocuments &&
                 operation.specificationVersion == binding.specificationVersion &&
                 operation.operationId == binding.operationId &&
                 operation.method == binding.method &&
@@ -1256,6 +1257,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
     ) = org.jmixworkbench.model.IntegrationOpenApiBinding(
         relativePath = operation.contractPath,
         documentSha256 = operation.contractSha256,
+        referencedDocuments = operation.referencedDocuments,
         specificationVersion = operation.specificationVersion,
         operationId = operation.operationId,
         method = operation.method,
@@ -1858,6 +1860,16 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 authentication.addProperty("evictInvalidAuthorizedClient", true)
             }
         }
+        root.getAsJsonObject("openApiBinding")?.let { binding ->
+            if (!binding.has("referencedDocuments")) {
+                binding.add("referencedDocuments", com.google.gson.JsonArray())
+            }
+        }
+        root.getAsJsonObject("openApiBaseline")?.let { baseline ->
+            if (!baseline.has("referencedDocuments")) {
+                baseline.add("referencedDocuments", com.google.gson.JsonArray())
+            }
+        }
         root.getAsJsonObject("openApiBaseline")?.getAsJsonArray("schemas")?.forEach { schemaElement ->
             val schema = schemaElement.asJsonObject
             val defaults = gson.toJsonTree(
@@ -1892,6 +1904,7 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
             require(
                 baseline.contractPath == binding.relativePath &&
                     baseline.contractSha256 == binding.documentSha256 &&
+                    baseline.referencedDocuments == binding.referencedDocuments &&
                     baseline.specificationVersion == binding.specificationVersion &&
                     baseline.operationId == binding.operationId &&
                     baseline.method == binding.method &&

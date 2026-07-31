@@ -440,6 +440,7 @@ object IntegrationConnectorGenerator {
         if (
             operation.contractPath != binding.relativePath ||
             operation.contractSha256 != binding.documentSha256 ||
+            operation.referencedDocuments != binding.referencedDocuments ||
             operation.specificationVersion != binding.specificationVersion ||
             operation.operationId != binding.operationId ||
             operation.method != binding.method ||

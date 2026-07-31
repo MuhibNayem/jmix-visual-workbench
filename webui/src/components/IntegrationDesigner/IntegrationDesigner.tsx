@@ -20,6 +20,7 @@ import type {
   IntegrationOrganizationConnectorTemplateSnapshot,
   IntegrationOpenApiJmixLayerModel,
   IntegrationOpenApiJmixTypeMapping,
+  IntegrationOpenApiReferencedDocument,
   IntegrationOpenApiSecurityRequirement,
   IntegrationOpenApiSecurityScheme,
   IntegrationRetryMode,
@@ -88,6 +89,33 @@ function classNameFor(kind: IntegrationConnectorKind) {
 
 function beanNameFor(className: string) {
   return className ? className.charAt(0).toLowerCase() + className.slice(1) : ''
+}
+
+function openApiBundleKey(
+  relativePath: string,
+  documentSha256: string,
+  referencedDocuments: IntegrationOpenApiReferencedDocument[] = [],
+) {
+  const references = [...referencedDocuments]
+    .sort((left, right) => left.relativePath.localeCompare(right.relativePath))
+    .map((reference) => `${reference.relativePath}:${reference.documentSha256}`)
+    .join('|')
+  return `${relativePath}\u0000${documentSha256}\u0000${references}`
+}
+
+function sameOpenApiBundle(
+  left: { relativePath: string, documentSha256: string, referencedDocuments?: IntegrationOpenApiReferencedDocument[] },
+  right?: { relativePath: string, documentSha256: string, referencedDocuments?: IntegrationOpenApiReferencedDocument[] },
+) {
+  return Boolean(right) && openApiBundleKey(
+    left.relativePath,
+    left.documentSha256,
+    left.referencedDocuments,
+  ) === openApiBundleKey(
+    right!.relativePath,
+    right!.documentSha256,
+    right!.referencedDocuments,
+  )
 }
 
 function safeJavaTypeName(value: string, fallback: string) {
@@ -731,11 +759,14 @@ export default function IntegrationDesigner() {
   }, [
     selectedDocument?.locator.relativePath,
     selectedDocument?.locator.revisionFingerprint,
-    openApiEvolution?.candidateBinding.documentSha256,
+    openApiEvolution ? openApiBundleKey(
+      openApiEvolution.candidateBinding.relativePath,
+      openApiEvolution.candidateBinding.documentSha256,
+      openApiEvolution.candidateBinding.referencedDocuments,
+    ) : '',
   ])
   const selectedOpenApiContract = workspace?.openApiContracts.find((candidate) => (
-    candidate.relativePath === model?.openApiBinding?.relativePath &&
-    candidate.documentSha256 === model?.openApiBinding?.documentSha256
+    sameOpenApiBundle(candidate, model?.openApiBinding)
   ))
   const selectedOpenApiOperation = selectedOpenApiContract?.operations.find((candidate) => (
     candidate.method === model?.openApiBinding?.method &&
@@ -767,7 +798,8 @@ export default function IntegrationDesigner() {
   }
   const evolutionPrepared = Boolean(
     openApiEvolution &&
-    model?.openApiBinding?.documentSha256 === openApiEvolution.candidateBinding.documentSha256 &&
+    model?.openApiBinding &&
+    sameOpenApiBundle(openApiEvolution.candidateBinding, model.openApiBinding) &&
     model.openApiBinding.operationId === openApiEvolution.candidateBinding.operationId &&
     model.openApiBinding.method === openApiEvolution.candidateBinding.method &&
     model.openApiBinding.path === openApiEvolution.candidateBinding.path,
@@ -976,8 +1008,7 @@ export default function IntegrationDesigner() {
         ...current,
         openApiContracts: [
           ...current.openApiContracts.filter((candidate) => (
-            candidate.relativePath !== contract.relativePath ||
-            candidate.documentSha256 !== contract.documentSha256
+            candidate.relativePath !== contract.relativePath
           )),
           contract,
         ].sort((left, right) => left.title.localeCompare(right.title)),
@@ -1028,8 +1059,7 @@ export default function IntegrationDesigner() {
   const prepareOpenApiEvolution = () => {
     if (!model || !openApiEvolution || !workspace || !destination) return
     const contract = workspace.openApiContracts.find((candidate) => (
-      candidate.relativePath === openApiEvolution.candidateBinding.relativePath &&
-      candidate.documentSha256 === openApiEvolution.candidateBinding.documentSha256
+      sameOpenApiBundle(candidate, openApiEvolution.candidateBinding)
     ))
     const operation = contract?.operations.find((candidate) => (
       candidate.method === openApiEvolution.candidateBinding.method &&
@@ -1550,10 +1580,18 @@ export default function IntegrationDesigner() {
                   <label>
                     <span className={labelClass}>API contract</span>
                     <select
-                      value={selectedOpenApiContract ? `${selectedOpenApiContract.relativePath}\u0000${selectedOpenApiContract.documentSha256}` : ''}
+                      value={selectedOpenApiContract ? openApiBundleKey(
+                        selectedOpenApiContract.relativePath,
+                        selectedOpenApiContract.documentSha256,
+                        selectedOpenApiContract.referencedDocuments,
+                      ) : ''}
                       onChange={(event) => {
                         const contract = workspace.openApiContracts.find((candidate) => (
-                          `${candidate.relativePath}\u0000${candidate.documentSha256}` === event.target.value
+                          openApiBundleKey(
+                            candidate.relativePath,
+                            candidate.documentSha256,
+                            candidate.referencedDocuments,
+                          ) === event.target.value
                         ))
                         const operation = contract?.operations.find((candidate) => candidate.supported && candidate.defaultBinding)
                         if (contract && operation) bindOpenApiOperation(contract, operation)
@@ -1565,8 +1603,16 @@ export default function IntegrationDesigner() {
                       <option value="">Manual HTTP contract</option>
                       {workspace.openApiContracts.map((contract) => (
                         <option
-                          key={`${contract.relativePath}:${contract.documentSha256}`}
-                          value={`${contract.relativePath}\u0000${contract.documentSha256}`}
+                          key={openApiBundleKey(
+                            contract.relativePath,
+                            contract.documentSha256,
+                            contract.referencedDocuments,
+                          )}
+                          value={openApiBundleKey(
+                            contract.relativePath,
+                            contract.documentSha256,
+                            contract.referencedDocuments,
+                          )}
                           disabled={!contract.valid}
                         >
                           {contract.title} · {contract.specificationVersion} · {contract.moduleId ?? 'shared'}
@@ -1608,6 +1654,30 @@ export default function IntegrationDesigner() {
                         {selectedOpenApiContract.documentSha256.slice(0, 12)}
                       </span>
                     </div>
+
+                    {selectedOpenApiContract.referencedDocuments.length > 0 && (
+                      <details className="min-w-0 rounded-md border border-cyan-500/15 bg-cyan-500/[0.035] p-2">
+                        <summary className="flex cursor-pointer list-none items-center gap-2 text-[9px] font-medium text-cyan-100">
+                          <FileJson2 size={12} className="shrink-0" />
+                          <span className="min-w-0 flex-1">
+                            Contract bundle · {selectedOpenApiContract.referencedDocuments.length} referenced file{selectedOpenApiContract.referencedDocuments.length === 1 ? '' : 's'}
+                          </span>
+                          <span className="text-[8px] text-gray-500">Every revision is protected</span>
+                        </summary>
+                        <div className="mt-2 grid min-w-0 gap-1.5 sm:grid-cols-2">
+                          {selectedOpenApiContract.referencedDocuments.map((reference) => (
+                            <div
+                              key={`${reference.relativePath}:${reference.documentSha256}`}
+                              className="min-w-0 rounded border border-surface-border bg-surface/50 px-2 py-1.5"
+                              title={`${reference.relativePath}\n${reference.documentSha256}`}
+                            >
+                              <p className="truncate text-[9px] text-gray-300">{reference.relativePath}</p>
+                              <p className="truncate font-mono text-[8px] text-gray-600">{reference.documentSha256.slice(0, 16)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
 
                     <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                       <label>

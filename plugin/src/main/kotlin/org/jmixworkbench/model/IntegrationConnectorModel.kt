@@ -234,6 +234,17 @@ data class IntegrationOpenApiSecurityRequirementModel(
 )
 
 /**
+ * Immutable revision of one project-owned document reached from an OpenAPI
+ * reference. Referenced documents are sorted by [relativePath] and become part
+ * of the operation binding, so editing any transitive contract file invalidates
+ * preview/apply just like editing the root document.
+ */
+data class IntegrationOpenApiReferencedDocument(
+    val relativePath: String,
+    val documentSha256: String,
+)
+
+/**
  * Immutable coordinates of a project-owned OpenAPI operation.
  *
  * The browser selects these coordinates, but never supplies the effective
@@ -244,6 +255,7 @@ data class IntegrationOpenApiSecurityRequirementModel(
 data class IntegrationOpenApiBinding(
     val relativePath: String,
     val documentSha256: String,
+    val referencedDocuments: List<IntegrationOpenApiReferencedDocument> = emptyList(),
     val specificationVersion: String,
     val operationId: String?,
     val method: IntegrationHttpMethod,
@@ -312,6 +324,7 @@ data class IntegrationOpenApiParameterModel(
 data class IntegrationOpenApiOperationModel(
     val contractPath: String,
     val contractSha256: String,
+    val referencedDocuments: List<IntegrationOpenApiReferencedDocument> = emptyList(),
     val specificationVersion: String,
     val title: String,
     val apiVersion: String?,

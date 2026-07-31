@@ -23,12 +23,114 @@ import java.io.IOException
 import java.util.Base64
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
+    fun testMultiFileBindingInvalidatesWhenTransitiveSchemaChanges() {
+        val root = prepareProject(
+            """
+            openapi: 3.1.1
+            info: { title: HR Provider, version: "1" }
+            paths:
+              /employees/{employeeId}:
+                get:
+                  operationId: findEmployee
+                  parameters:
+                    - name: employeeId
+                      in: path
+                      required: true
+                      schema: { type: string }
+                  responses:
+                    "200":
+                      description: employee
+                      content:
+                        application/json:
+                          schema:
+                            ${'$'}ref: schemas/employee.yaml#/Employee
+            """.trimIndent(),
+        )
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/resources/openapi/schemas/employee.yaml",
+                externalEmployeeSchema(includeDepartment = false),
+            )
+        }
+        val contractFile = requireNotNull(
+            root.findFileByRelativePath("src/main/resources/openapi/hr-provider.yaml"),
+        )
+        val contractService = OpenApiContractService.getInstance(project)
+        val initialSnapshot = contractService.inspectProjectFile(contractFile)
+        val binding = requireNotNull(initialSnapshot.operations.single().defaultBinding)
+        assertEquals(1, binding.referencedDocuments.size)
+        assertTrue(binding.referencedDocuments.single().relativePath.endsWith("/schemas/employee.yaml"))
+
+        val workspaceService = IntegrationConnectorWorkspaceService.getInstance(project)
+        val destination = requireNotNull(workspaceService.load(forceRefresh = true).destinations.firstOrNull())
+        val model = connector(destination.id, binding)
+        val preview = workspaceService.preview(model)
+        assertTrue(preview.accepted, preview.issues.joinToString { it.message })
+        assertTrue(preview.files.any { "public record" in it.resultContent })
+
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/resources/openapi/schemas/employee.yaml",
+                externalEmployeeSchema(includeDepartment = true),
+            )
+        }
+        val currentSnapshot = contractService.inspectProjectFile(contractFile)
+        assertEquals(initialSnapshot.documentSha256, currentSnapshot.documentSha256)
+        assertTrue(initialSnapshot.referencedDocuments != currentSnapshot.referencedDocuments)
+
+        val stale = workspaceService.preview(model)
+        assertFalse(stale.accepted)
+        assertTrue(stale.issues.any { "referenced OpenAPI document changed" in it.message })
+
+        val current = contractService.resolveCurrent(binding)
+        assertEquals(binding.documentSha256, current.operation.contractSha256)
+        assertTrue(current.operation.referencedDocuments != binding.referencedDocuments)
+        val response = requireNotNull(current.operation.responseSchemaId)
+        assertTrue(
+            current.operation.schemas.single { it.id == response }
+                .properties.any { it.javaName == "department" },
+        )
+    }
+
+    fun testMultiFileReferenceCannotEscapeRegisteredProjectRoots() {
+        val root = prepareProject(
+            """
+            openapi: 3.1.1
+            info: { title: Escaping Contract, version: "1" }
+            paths:
+              /employees:
+                get:
+                  operationId: employees
+                  responses:
+                    "200":
+                      description: employees
+                      content:
+                        application/json:
+                          schema:
+                            ${'$'}ref: ../../../../../outside-contract.yaml#/Employee
+            """.trimIndent(),
+        )
+        val failure = assertFailsWith<IllegalArgumentException> {
+            OpenApiContractService.getInstance(project).inspectProjectFile(
+                requireNotNull(root.findFileByRelativePath("src/main/resources/openapi/hr-provider.yaml")),
+            )
+        }
+        assertContains(requireNotNull(failure.message), "escapes the registered IntelliJ project roots")
+        assertFalse(
+            requireNotNull(failure.message).contains(root.path),
+            "Diagnostics must not expose an absolute host path",
+        )
+    }
+
     fun testDiscoversBindsGeneratesAndRejectsStaleOpenApiContract() {
         val root = getOrCreateProjectBaseDir()
         WriteAction.run<RuntimeException> {
@@ -857,6 +959,16 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
                 id: { type: string }
                 displayName: { type: string }
                 status: { ${'$'}ref: '#/components/schemas/EmploymentStatus' }
+        """.trimIndent()
+
+    private fun externalEmployeeSchema(includeDepartment: Boolean): String = """
+        Employee:
+          type: object
+          required: [id, displayName]
+          properties:
+            id: { type: string }
+            displayName: { type: string }
+            ${if (includeDepartment) "department: { type: string }" else ""}
         """.trimIndent()
 
     private fun write(root: VirtualFile, path: String, content: String) {

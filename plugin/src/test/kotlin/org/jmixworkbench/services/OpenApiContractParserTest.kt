@@ -17,8 +17,207 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import java.nio.file.Path
 
 class OpenApiContractParserTest {
+    @Test
+    fun `bundles transitive project documents with stable shared schema identity`() {
+        val rootPath = "contracts/openapi.yaml"
+        val root = """
+            openapi: 3.1.1
+            info: { title: Bundled Payments, version: "1" }
+            security:
+              - oauth: [payments.write]
+            paths:
+              /health:
+                ${'$'}ref: components/paths.yaml#/HealthPath
+              /payments:
+                post:
+                  operationId: submitPayment
+                  parameters:
+                    - ${'$'}ref: components/parameters.yaml#/components/parameters/RequestId
+                  requestBody:
+                    ${'$'}ref: components/request-bodies.yaml#/SubmitPayment
+                  responses:
+                    "201":
+                      ${'$'}ref: components/responses.yaml#/components/responses/Created
+            components:
+              securitySchemes:
+                oauth:
+                  ${'$'}ref: components/security.yaml#/oauth
+        """.trimIndent().toByteArray()
+        val documents = mapOf(
+            "contracts/components/parameters.yaml" to """
+                components:
+                  parameters:
+                    RequestId:
+                      name: X-Request-Id
+                      in: header
+                      required: true
+                      schema: { type: string, format: uuid }
+            """.trimIndent().toByteArray(),
+            "contracts/components/request-bodies.yaml" to """
+                SubmitPayment:
+                  required: true
+                  content:
+                    application/json:
+                      schema:
+                        ${'$'}ref: ../models/payment.yaml#/PaymentRequest
+            """.trimIndent().toByteArray(),
+            "contracts/components/responses.yaml" to """
+                components:
+                  responses:
+                    Created:
+                      description: created
+                      content:
+                        application/json:
+                          schema:
+                            ${'$'}ref: ../models/payment.yaml#/PaymentReceipt
+            """.trimIndent().toByteArray(),
+            "contracts/components/security.yaml" to """
+                oauth:
+                  type: oauth2
+                  flows:
+                    clientCredentials:
+                      tokenUrl: https://identity.example/token
+                      scopes:
+                        payments.write: write payments
+            """.trimIndent().toByteArray(),
+            "contracts/components/paths.yaml" to """
+                HealthPath:
+                  get:
+                    operationId: health
+                    responses:
+                      "204": { description: healthy }
+            """.trimIndent().toByteArray(),
+            "contracts/models/payment.yaml" to """
+                PaymentRequest:
+                  type: object
+                  required: [account, lines]
+                  properties:
+                    account:
+                      ${'$'}ref: common.yaml#/Account
+                    lines:
+                      type: array
+                      items:
+                        ${'$'}ref: '#/PaymentLine'
+                PaymentLine:
+                  type: object
+                  required: [description]
+                  properties:
+                    description: { type: string }
+                    parent:
+                      ${'$'}ref: '#/PaymentRequest'
+                PaymentReceipt:
+                  type: object
+                  required: [account, status]
+                  properties:
+                    account:
+                      ${'$'}ref: common.yaml#/Account
+                    status: { type: string }
+            """.trimIndent().toByteArray(),
+            "contracts/models/common.yaml" to """
+                Account:
+                  type: object
+                  required: [id]
+                  properties:
+                    id: { type: string, format: uuid }
+            """.trimIndent().toByteArray(),
+        )
+        val bundled = OpenApiDocumentBundler.bundle(rootPath, root) { referrer, reference ->
+            val resolved = Path.of(referrer).parent.resolve(reference).normalize().toString()
+            OpenApiSourceDocument(resolved, requireNotNull(documents[resolved]))
+        }
+        val parsed = OpenApiContractParser.parse(
+            relativePath = rootPath,
+            bytes = bundled.bytes,
+            sourceSha256 = bundled.rootSha256,
+            referencedDocuments = bundled.referencedDocuments,
+        )
+        val snapshot = parsed.snapshot("payments")
+        val binding = assertNotNull(
+            snapshot.operations.single { it.operationId == "submitPayment" }.defaultBinding,
+        )
+        val operation = parsed.resolve(binding)
+
+        assertTrue(snapshot.valid, snapshot.operations.flatMap { it.issues }.joinToString())
+        assertEquals(7, snapshot.referencedDocuments.size)
+        assertTrue(snapshot.operations.any { it.operationId == "health" && it.supported })
+        assertEquals(snapshot.referencedDocuments, binding.referencedDocuments)
+        assertEquals(snapshot.referencedDocuments, operation.referencedDocuments)
+        assertEquals("submitPayment", operation.javaMethodName)
+        assertEquals("X-Request-Id", operation.parameters.single().wireName)
+        assertEquals(listOf("oauth"), operation.securitySchemes)
+        assertEquals("payments.write", operation.securityRequirements.single().schemes.single().requiredScopes.single())
+        val accountSchemaIds = operation.schemas.flatMap { schema ->
+            schema.properties.filter { it.javaName == "account" }.map { it.schemaId }
+        }.distinct()
+        assertEquals(1, accountSchemaIds.size, "The shared external Account schema must keep one canonical identity")
+        assertTrue(operation.schemas.any { schema ->
+            schema.properties.any { it.javaName == "parent" }
+        })
+
+        val changedDocuments = documents + (
+            "contracts/models/common.yaml" to documents.getValue("contracts/models/common.yaml") + "\n# changed".toByteArray()
+        )
+        val changed = OpenApiDocumentBundler.bundle(rootPath, root) { referrer, reference ->
+            val resolved = Path.of(referrer).parent.resolve(reference).normalize().toString()
+            OpenApiSourceDocument(resolved, requireNotNull(changedDocuments[resolved]))
+        }
+        assertEquals(bundled.rootSha256, changed.rootSha256)
+        assertTrue(changed.referencedDocuments != bundled.referencedDocuments)
+    }
+
+    @Test
+    fun `blocks remote references unsupported anchors and cyclic reference objects`() {
+        val remoteRoot = """
+            openapi: 3.1.1
+            info: { title: Remote, version: "1" }
+            paths:
+              /items:
+                get:
+                  responses:
+                    "200":
+                      description: ok
+                      content:
+                        application/json:
+                          schema:
+                            ${'$'}ref: https://attacker.invalid/schema.yaml#/Item
+        """.trimIndent().toByteArray()
+        assertFailsWith<IllegalArgumentException> {
+            OpenApiDocumentBundler.bundle("contracts/openapi.yaml", remoteRoot) { _, _ ->
+                error("Remote references must not invoke the project loader")
+            }
+        }
+
+        val anchorRoot = remoteRoot.toString(Charsets.UTF_8)
+            .replace("https://attacker.invalid/schema.yaml#/Item", "models.yaml#Payment")
+            .toByteArray()
+        assertFailsWith<IllegalArgumentException> {
+            OpenApiDocumentBundler.bundle("contracts/openapi.yaml", anchorRoot) { _, _ ->
+                OpenApiSourceDocument("contracts/models.yaml", "Payment: { type: string }".toByteArray())
+            }
+        }
+
+        val pathRoot = """
+            openapi: 3.1.1
+            info: { title: Paths, version: "1" }
+            paths:
+              /items:
+                ${'$'}ref: paths-a.yaml#/ItemPath
+        """.trimIndent().toByteArray()
+        val cyclic = mapOf(
+            "contracts/paths-a.yaml" to "ItemPath: { ${'$'}ref: paths-b.yaml#/ItemPath }".toByteArray(),
+            "contracts/paths-b.yaml" to "ItemPath: { ${'$'}ref: paths-a.yaml#/ItemPath }".toByteArray(),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            OpenApiDocumentBundler.bundle("contracts/openapi.yaml", pathRoot) { referrer, reference ->
+                val resolved = Path.of(referrer).parent.resolve(reference).normalize().toString()
+                OpenApiSourceDocument(resolved, requireNotNull(cyclic[resolved]))
+            }
+        }
+    }
+
     @Test
     fun `parses OpenAPI 3 yaml and generates an exact typed operation`() {
         val parsed = OpenApiContractParser.parse("payments/src/main/resources/openapi/payment.yaml", CONTRACT)

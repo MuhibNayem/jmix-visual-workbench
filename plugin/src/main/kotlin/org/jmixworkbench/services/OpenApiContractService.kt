@@ -3,6 +3,7 @@ package org.jmixworkbench.services
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
 import io.swagger.v3.oas.models.Components
@@ -23,6 +24,7 @@ import org.jmixworkbench.model.IntegrationOpenApiOperationModel
 import org.jmixworkbench.model.IntegrationOpenApiParameterLocation
 import org.jmixworkbench.model.IntegrationOpenApiParameterModel
 import org.jmixworkbench.model.IntegrationOpenApiPropertyModel
+import org.jmixworkbench.model.IntegrationOpenApiReferencedDocument
 import org.jmixworkbench.model.IntegrationOpenApiSchemaKind
 import org.jmixworkbench.model.IntegrationOpenApiSchemaModel
 import org.jmixworkbench.model.IntegrationOpenApiSecurityRequirementModel
@@ -34,15 +36,17 @@ import java.security.MessageDigest
 import java.util.HexFormat
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.io.path.isRegularFile
 
 /**
  * Project-owned, network-isolated OpenAPI discovery and operation resolution.
  *
- * Contract files are parsed only from IntelliJ content roots. Parser reference
- * resolution and external-reference validation are disabled, and this service
- * resolves only same-document `#/components/...` references itself. Every
- * selected operation is bound to the exact document SHA-256 and is reconstructed
- * by the backend before preview/apply.
+ * Contract files are parsed only from registered IntelliJ content roots. The
+ * third-party parser never resolves references or performs network access.
+ * A bounded backend bundler resolves supported relative references itself,
+ * keeps shared/cyclic schema identity, and binds every transitive project file
+ * to its exact SHA-256. Every selected operation is reconstructed and the full
+ * bundle revision is verified again before preview/apply.
  */
 @Service(Service.Level.PROJECT)
 class OpenApiContractService(private val project: Project) {
@@ -119,6 +123,9 @@ class OpenApiContractService(private val project: Project) {
         require(contract.documentSha256 == binding.documentSha256) {
             "OpenAPI contract '${binding.relativePath}' changed. Refresh and review the new contract before generation."
         }
+        require(contract.referencedDocuments == binding.referencedDocuments) {
+            "A referenced OpenAPI document changed. Refresh and review the complete contract bundle before generation."
+        }
         require(contract.specificationVersion == binding.specificationVersion) {
             "OpenAPI specification version changed. Refresh and review the contract."
         }
@@ -191,25 +198,105 @@ class OpenApiContractService(private val project: Project) {
         if (
             cached != null &&
             cached.modificationStamp == file.modificationStamp &&
-            cached.length == file.length
+            cached.length == file.length &&
+            cached.dependencies.all(::dependencyUnchanged)
         ) {
             return cached.snapshot.copy(moduleId = moduleId ?: cached.snapshot.moduleId)
         }
-        val parsed = parseFile(path, file)
-        val snapshot = parsed.snapshot(moduleId)
+        val parsed = parseProjectFile(path, file)
+        val snapshot = parsed.contract.snapshot(moduleId)
         if (cache.size >= MAX_CACHED_CONTRACTS) {
             cache.keys.sorted().firstOrNull()?.let(cache::remove)
         }
-        cache[key] = CachedContract(file.modificationStamp, file.length, snapshot)
+        cache[key] = CachedContract(
+            modificationStamp = file.modificationStamp,
+            length = file.length,
+            snapshot = snapshot,
+            dependencies = parsed.dependencies,
+        )
         return snapshot
     }
 
     private fun parseFile(path: String, file: VirtualFile): ParsedOpenApiContract {
+        return parseProjectFile(path, file).contract
+    }
+
+    private fun parseProjectFile(path: String, file: VirtualFile): ParsedProjectOpenApiContract {
         require(file.length in 1..MAX_DOCUMENT_BYTES) {
             "OpenAPI contract must be between 1 byte and ${MAX_DOCUMENT_BYTES / (1024 * 1024)} MiB."
         }
         val bytes = file.contentsToByteArray(false)
-        return OpenApiContractParser.parse(path, bytes)
+        val dependencies = linkedMapOf<String, CachedContractDependency>()
+        val resolver = ProjectFileResolver.getInstance(project)
+        val bundled = OpenApiDocumentBundler.bundle(path, bytes) { referrerPath, referencePath ->
+            val referrer = resolver.resolveFile(referrerPath)?.file
+                ?: throw IllegalArgumentException(
+                    "OpenAPI reference base '$referrerPath' is no longer available in the project.",
+                )
+            val referenceUri = runCatching { java.net.URI(referencePath) }.getOrElse {
+                throw IllegalArgumentException("OpenAPI reference path '$referencePath' is not a valid URI path.")
+            }
+            require(
+                referenceUri.scheme == null &&
+                    referenceUri.rawAuthority == null &&
+                    referenceUri.rawQuery == null &&
+                    !referenceUri.path.orEmpty().startsWith('/'),
+            ) { "Remote or absolute OpenAPI reference '$referencePath' is blocked." }
+            val referrerPathOnDisk = referrer.toNioPath()
+            val targetPath = requireNotNull(referrerPathOnDisk.parent) {
+                "OpenAPI reference base '$referrerPath' has no parent directory."
+            }.resolve(referenceUri.path).normalize()
+            require(
+                resolver.registeredRoots().any { registered ->
+                    targetPath.startsWith(registered.root.toNioPath().normalize())
+                },
+            ) {
+                "Referenced OpenAPI document '$referencePath' escapes the registered IntelliJ project roots."
+            }
+            require(targetPath.isRegularFile()) {
+                "Referenced OpenAPI document '$referencePath' does not exist or is not a regular file."
+            }
+            val unresolved = LocalFileSystem.getInstance().findFileByNioFile(targetPath)
+                ?: throw IllegalArgumentException(
+                    "Referenced OpenAPI document '$referencePath' is not available through IntelliJ VFS.",
+                )
+            val target = unresolved.canonicalFile ?: unresolved
+            require(resolver.contains(target)) {
+                "Referenced OpenAPI document '$referencePath' escapes the registered IntelliJ project roots."
+            }
+            require(isSupportedFile(target)) {
+                "Referenced OpenAPI document '${target.name}' must use .json, .yaml, or .yml."
+            }
+            val locator = requireNotNull(resolver.locatorPath(target)) {
+                "Referenced OpenAPI document '$referencePath' has no safe project-relative locator."
+            }
+            require(target.length in 1..MAX_DOCUMENT_BYTES) {
+                "Referenced OpenAPI document '$locator' must be between 1 byte and " +
+                    "${MAX_DOCUMENT_BYTES / (1024 * 1024)} MiB."
+            }
+            val targetBytes = target.contentsToByteArray(false)
+            dependencies[locator] = CachedContractDependency(
+                relativePath = locator,
+                modificationStamp = target.modificationStamp,
+                length = target.length,
+            )
+            OpenApiSourceDocument(locator, targetBytes)
+        }
+        return ParsedProjectOpenApiContract(
+            contract = OpenApiContractParser.parse(
+                relativePath = path,
+                bytes = bundled.bytes,
+                sourceSha256 = bundled.rootSha256,
+                referencedDocuments = bundled.referencedDocuments,
+            ),
+            dependencies = dependencies.values.sortedBy(CachedContractDependency::relativePath),
+        )
+    }
+
+    private fun dependencyUnchanged(dependency: CachedContractDependency): Boolean {
+        val file = ProjectFileResolver.getInstance(project).resolveFile(dependency.relativePath)?.file
+            ?: return false
+        return file.modificationStamp == dependency.modificationStamp && file.length == dependency.length
     }
 
     companion object {
@@ -250,6 +337,7 @@ class OpenApiContractService(private val project: Project) {
 data class OpenApiContractSnapshot(
     val relativePath: String,
     val documentSha256: String,
+    val referencedDocuments: List<IntegrationOpenApiReferencedDocument> = emptyList(),
     val specificationVersion: String,
     val title: String,
     val apiVersion: String?,
@@ -347,6 +435,18 @@ private data class CachedContract(
     val modificationStamp: Long,
     val length: Long,
     val snapshot: OpenApiContractSnapshot,
+    val dependencies: List<CachedContractDependency> = emptyList(),
+)
+
+private data class CachedContractDependency(
+    val relativePath: String,
+    val modificationStamp: Long,
+    val length: Long,
+)
+
+private data class ParsedProjectOpenApiContract(
+    val contract: ParsedOpenApiContract,
+    val dependencies: List<CachedContractDependency>,
 )
 
 internal object OpenApiContractParser {
@@ -357,9 +457,17 @@ internal object OpenApiContractParser {
     private const val MAX_PARSER_MESSAGES = 100
     private const val MAX_MESSAGE_LENGTH = 1_000
 
-    fun parse(relativePath: String, bytes: ByteArray): ParsedOpenApiContract {
+    fun parse(
+        relativePath: String,
+        bytes: ByteArray,
+        sourceSha256: String? = null,
+        referencedDocuments: List<IntegrationOpenApiReferencedDocument> = emptyList(),
+    ): ParsedOpenApiContract {
         require(bytes.isNotEmpty()) { "OpenAPI contract is empty." }
-        require(bytes.size <= 5 * 1024 * 1024) { "OpenAPI contract exceeds the 5 MiB safety limit." }
+        val maximumBytes = if (sourceSha256 == null) 5 * 1024 * 1024 else 20 * 1024 * 1024
+        require(bytes.size <= maximumBytes) {
+            "OpenAPI parser input exceeds the ${maximumBytes / (1024 * 1024)} MiB safety limit."
+        }
         val text = bytes.toString(Charsets.UTF_8)
         require('\u0000' !in text) { "OpenAPI contract contains binary NUL characters." }
         val options = ParseOptions().apply {
@@ -393,7 +501,9 @@ internal object OpenApiContractParser {
             .map { it.take(MAX_MESSAGE_LENGTH) }
         return ParsedOpenApiContract(
             relativePath = relativePath,
-            sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
+            sha256 = sourceSha256
+                ?: HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),
+            referencedDocuments = referencedDocuments,
             openApi = openApi,
             parserMessages = parserMessages,
             limits = ParserLimits(MAX_OPERATIONS, MAX_SCHEMAS, MAX_PROPERTIES, MAX_DEPTH),
@@ -404,6 +514,7 @@ internal object OpenApiContractParser {
 internal class ParsedOpenApiContract(
     private val relativePath: String,
     private val sha256: String,
+    private val referencedDocuments: List<IntegrationOpenApiReferencedDocument>,
     private val openApi: OpenAPI,
     private val parserMessages: List<String>,
     private val limits: ParserLimits,
@@ -464,6 +575,7 @@ internal class ParsedOpenApiContract(
         return OpenApiContractSnapshot(
             relativePath = relativePath,
             documentSha256 = sha256,
+            referencedDocuments = referencedDocuments,
             specificationVersion = openApi.openapi,
             title = openApi.info?.title?.trim()?.takeIf(String::isNotBlank) ?: relativePath.substringAfterLast('/'),
             apiVersion = openApi.info?.version?.trim()?.takeIf(String::isNotBlank),
@@ -482,6 +594,9 @@ internal class ParsedOpenApiContract(
     fun resolve(binding: IntegrationOpenApiBinding): IntegrationOpenApiOperationModel {
         require(binding.relativePath == relativePath) { "OpenAPI contract path does not match the selected document." }
         require(binding.documentSha256 == sha256) { "OpenAPI contract digest is stale." }
+        require(binding.referencedDocuments == referencedDocuments) {
+            "One or more referenced OpenAPI documents changed or are missing from the binding."
+        }
         require(binding.specificationVersion == openApi.openapi) { "OpenAPI specification version is stale." }
         val candidates = operationEntries.filter { it.method == binding.method && it.path == binding.path }
         val entry = candidates.singleOrNull {
@@ -526,6 +641,7 @@ internal class ParsedOpenApiContract(
         val binding = IntegrationOpenApiBinding(
             relativePath = relativePath,
             documentSha256 = sha256,
+            referencedDocuments = referencedDocuments,
             specificationVersion = openApi.openapi,
             operationId = entry.operation.operationId?.trim()?.takeIf(String::isNotBlank),
             method = entry.method,
@@ -786,6 +902,7 @@ internal class ParsedOpenApiContract(
         return IntegrationOpenApiOperationModel(
             contractPath = relativePath,
             contractSha256 = sha256,
+            referencedDocuments = referencedDocuments,
             specificationVersion = openApi.openapi,
             title = openApi.info?.title?.trim()?.takeIf(String::isNotBlank)
                 ?: relativePath.substringAfterLast('/'),

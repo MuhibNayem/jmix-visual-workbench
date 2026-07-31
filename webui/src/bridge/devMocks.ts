@@ -544,6 +544,10 @@ const developmentOpenApiEvolutionDocument: IntegrationConnectorDocumentSnapshot 
       openApiBinding: {
         relativePath: 'loan/src/main/resources/openapi/payment-provider.yaml',
         documentSha256: 'a'.repeat(64),
+        referencedDocuments: [{
+          relativePath: 'loan/src/main/resources/openapi/models/payment-types.yaml',
+          documentSha256: 'c'.repeat(64),
+        }],
         specificationVersion: '3.1.1',
         operationId: 'submitPayment',
         method: 'POST',
@@ -582,6 +586,10 @@ const developmentOpenApiEvolutionDocument: IntegrationConnectorDocumentSnapshot 
       candidateBinding: {
         relativePath: 'loan/src/main/resources/openapi/payment-provider.yaml',
         documentSha256: 'b'.repeat(64),
+        referencedDocuments: [{
+          relativePath: 'loan/src/main/resources/openapi/models/payment-types.yaml',
+          documentSha256: 'd'.repeat(64),
+        }],
         specificationVersion: '3.1.1',
         operationId: 'submitPayment',
         method: 'POST',
@@ -795,6 +803,10 @@ export const developmentIntegrationConnectorWorkspace: IntegrationConnectorWorks
   openApiContracts: [{
     relativePath: 'loan/src/main/resources/openapi/payment-provider.yaml',
     documentSha256: 'b'.repeat(64),
+    referencedDocuments: [{
+      relativePath: 'loan/src/main/resources/openapi/models/payment-types.yaml',
+      documentSha256: 'd'.repeat(64),
+    }],
     specificationVersion: '3.1.1',
     title: 'Payment Provider API',
     apiVersion: '2026-07',
@@ -965,6 +977,10 @@ export const developmentIntegrationConnectorWorkspace: IntegrationConnectorWorks
       defaultBinding: {
         relativePath: 'loan/src/main/resources/openapi/payment-provider.yaml',
         documentSha256: 'b'.repeat(64),
+        referencedDocuments: [{
+          relativePath: 'loan/src/main/resources/openapi/models/payment-types.yaml',
+          documentSha256: 'd'.repeat(64),
+        }],
         specificationVersion: '3.1.1',
         operationId: 'submitPayment',
         method: 'POST',

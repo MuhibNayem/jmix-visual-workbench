@@ -7,6 +7,12 @@ The Integration Designer can bind an HTTP-based connector to an OpenAPI 3.0 or
 owns contract parsing, schema normalization, operation resolution, security
 evaluation and generated Java types.
 
+A contract may be a single document or a controlled bundle of project-owned
+JSON/YAML documents. Relative Reference Objects are resolved from the referring
+document, every participating document is revision-bound independently, and
+the browser receives only the normalized operation plus credential-free bundle
+identity.
+
 The generated transport client can now be wrapped by a Jmix-facing layer in the
 same visual workflow. That layer consists of Jmix DTO entities and enums,
 explicit transport/entity mappers, and an application service that keeps
@@ -72,16 +78,27 @@ in Kotlin.
 
 - Contracts must be project-owned `.json`, `.yaml` or `.yml` files under an
   IntelliJ content root.
-- Documents are limited to 5 MiB. Discovery, operations, schemas, properties,
-  nesting, representations and cache entries have explicit bounds.
+- Individual documents are limited to 5 MiB; a bundle is limited to 128
+  documents, 20 MiB total, 4,096 references and 64 reference levels.
+  Discovery, operations, schemas, properties, nesting, representations and
+  cache entries have additional explicit bounds.
 - Parsing runs away from the IntelliJ event-dispatch thread.
-- Parser reference resolution, external validation and network access are
-  disabled. Only same-document `#/components/...` references are resolved by
-  the workbench.
-- Every binding records the project-relative path, SHA-256, specification
-  version, method, path, operation ID and selected representations.
-- Preview/apply reopen the file and reject stale digests, missing or ambiguous
-  operations and changed representations.
+- Parser network resolution and external validation are disabled. The
+  workbench resolves only relative project-local JSON Pointer references under
+  registered IntelliJ content roots. URL, absolute, query-bearing,
+  non-JSON-Pointer and content-root-escaping references fail closed before any
+  out-of-project filesystem probe.
+- External schemas are normalized to deterministic synthetic root components,
+  retaining shared identity and schema cycles. External Path Items,
+  parameters, request bodies, responses and security schemes are expanded in
+  place. Unsupported semantic `$ref` siblings and cyclic non-schema Reference
+  Objects fail closed.
+- Every binding records the root project-relative path and SHA-256, the sorted
+  path/SHA-256 identity of every referenced document, specification version,
+  method, path, operation ID and selected representations.
+- Preview/apply reopen and re-bundle every file and reject stale root or
+  referenced-document digests, missing or ambiguous operations and changed
+  representations.
 - The transient normalized operation/schema graph is backend-derived and never
   trusted from the browser. A separate backend-issued semantic baseline is
   persisted solely as bounded comparison evidence (512 KiB maximum), is
@@ -105,10 +122,10 @@ in Kotlin.
   shape evidence are ranked, bounded and disclosed, but non-identity evidence
   is never silently accepted. The final normalized mapping is independently
   type-checked and included in the native approval digest.
-- Unsupported polymorphism, external references, arbitrary object parameters,
-  media-type parameters, unsupported serialization styles, reserved
-  characters, unsafe headers, form/multipart bodies and unproven message
-  converters fail closed.
+- Unsupported polymorphism, remote or unsafe references, arbitrary object
+  parameters, media-type parameters, unsupported serialization styles,
+  reserved characters, unsafe headers, form/multipart bodies and unproven
+  message converters fail closed.
 - OpenAPI security requirement objects preserve their AND semantics; separate
   objects preserve OR semantics. API-key location/name, HTTP auth kind, OAuth2
   flow/scopes, OpenID/bearer and mutual TLS are evaluated against the exact
@@ -202,13 +219,17 @@ Production OpenAPI-generated source is part of
 | 3.0.0 | 21 | Spring Boot 4 / Jackson 3 |
 | 3.0.0 | 25 | Spring Boot 4 / Jackson 3 |
 
-Focused parser/generator/workspace tests cover YAML and JSON, local references,
-`allOf`, typed records/enums, exact status handling, stale documents, duplicate
-operation IDs, external references, polymorphism, form serializers, unsupported
-parameter/media serialization, security mismatch, Java name collisions,
-generated and existing Jmix targets, read-only attributes, inbound/outbound
-direction, source revision, complete create/reopen/update/remove round trips,
-manual supplemental-source protection and injected partial-write rollback.
+Focused parser/generator/workspace tests cover YAML and JSON, same-document and
+transitive multi-document references, shared schema identity, cross-document
+schema cycles, external Path Items/parameters/request bodies/responses/security
+schemes, `allOf`, typed records/enums, exact status handling, stale root and
+referenced documents, duplicate operation IDs, blocked remote references,
+unsupported anchors and cyclic non-schema references, polymorphism, form
+serializers, unsupported parameter/media serialization, security mismatch,
+Java name collisions, generated and existing Jmix targets, read-only
+attributes, inbound/outbound direction, source revision, complete
+create/reopen/update/remove round trips, manual supplemental-source protection
+and injected partial-write rollback.
 The mapping-extension lifecycle additionally discovers Java and Kotlin-light
 `EnumClass` and Spring component symbols from indexes, rejects stale revisions
 and forged identities, verifies exact directional method signatures, and
@@ -223,17 +244,17 @@ exact ranking, conservative rejection without evidence, renamed schema and
 property candidates, retained DTO identity, generated mapper expressions and
 the complete create/rename/remap/approve/preview lifecycle.
 
-The clean `phase1Check` release gate on 2026-07-31 passed 414 regression tests
+The clean `phase1Check` release gate on 2026-07-31 passed 418 regression tests
 and 3 host smoke tests on each IntelliJ lane. Plugin Verifier reported both
 artifacts compatible:
 
 | IntelliJ host | Packaged ZIP SHA-256 |
 | --- | --- |
-| IU-253.28294.334 | `9639501f157235d6b13b5f8f489cfdc9e3158d90efc46f9cf8a49eef5ee16578` |
-| IU-262.8665.258 | `20e91a58621a504ed0a6c2d0a23da73ae837ebc158ea9b290eda33b973c87506` |
+| IU-253.28294.334 | `509f04ab8e857d1d7bc13c5c2fc90f3a4daa722f0b7b6ce791fc17477d670cdb` |
+| IU-262.8665.258 | `0789fcaf41330b1590c3286610069e6a3381f694ebb8d5fc5b5681c0c31e594f` |
 
 Both ZIPs contain the same verified web input digest:
-`9370432aa88612b607241f5816cf772d75c46bf82b00f69d6f62bab9514d372b`.
+`92c11ac2b7b791edbb6e3ee361a50d97df9d656fe65a327c0b69614588c21429`.
 
 Responsive browser evidence on 2026-07-31 measured the real Integration
 Designer and the semantic-evolution workflow:
@@ -262,13 +283,18 @@ region. The browser journey selected a renamed schema, carried `receiptId` and
 instance-name metadata, reached revision-bound approval and enabled preview.
 The console contained no warnings or errors.
 
+The multi-file contract-bundle panel was also exercised at 1280, 720 and 360
+pixels. It exposed the referenced project-relative file and revision, remained
+inside the main editor region at every width, and produced no global overflow,
+clipped visible controls, warnings or errors.
+
 ## Deliberate remaining boundary
 
 This milestone does not yet claim complete Jmix Studio OpenAPI parity. The
 active remaining layers are:
 
 - Kotlin DTO/mapper/service generation for Kotlin-owned target source sets;
-- controlled multi-file contract bundles and cross-operation shared models;
+- cross-operation shared models;
 - provider/consumer contract suites and saved runtime scenarios;
 - installed-IDE accessibility, memory/leak and large-contract performance
   certification.
