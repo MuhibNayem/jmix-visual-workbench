@@ -614,6 +614,7 @@ export default function IntegrationDesigner() {
   const [approvingCatalog, setApprovingCatalog] = useState(false)
   const [approvingEvolution, setApprovingEvolution] = useState(false)
   const [choosingOpenApi, setChoosingOpenApi] = useState(false)
+  const [evolutionRemapSelections, setEvolutionRemapSelections] = useState<Record<string, string>>({})
   const [activePreviewFile, setActivePreviewFile] = useState(0)
   const historyRef = useRef<IntegrationConnectorModel[]>([])
   const futureRef = useRef<IntegrationConnectorModel[]>([])
@@ -702,6 +703,24 @@ export default function IntegrationDesigner() {
     document.locator.relativePath === model?.sourceLocator?.relativePath
   ))
   const openApiEvolution = selectedDocument?.openApiEvolution
+  useEffect(() => {
+    if (!openApiEvolution) {
+      setEvolutionRemapSelections({})
+      return
+    }
+    setEvolutionRemapSelections(Object.fromEntries(
+      openApiEvolution.remapPlans.map((plan) => {
+        const exact = plan.options.find((option) => (
+          option.confidence === 'EXACT' && option.candidateSchemaId === plan.previousSchemaId
+        ))
+        return [plan.previousSchemaId, exact?.candidateSchemaId ?? '']
+      }),
+    ))
+  }, [
+    selectedDocument?.locator.relativePath,
+    selectedDocument?.locator.revisionFingerprint,
+    openApiEvolution?.candidateBinding.documentSha256,
+  ])
   const selectedOpenApiContract = workspace?.openApiContracts.find((candidate) => (
     candidate.relativePath === model?.openApiBinding?.relativePath &&
     candidate.documentSha256 === model?.openApiBinding?.documentSha256
@@ -741,6 +760,16 @@ export default function IntegrationDesigner() {
     model.openApiBinding.method === openApiEvolution.candidateBinding.method &&
     model.openApiBinding.path === openApiEvolution.candidateBinding.path,
   )
+  const unresolvedEvolutionRemaps = openApiEvolution?.remapPlans.filter((plan) => (
+    !evolutionRemapSelections[plan.previousSchemaId]
+  )) ?? []
+  const conflictingEvolutionRemapTargets = Object.entries(evolutionRemapSelections)
+    .filter(([, target]) => target && target !== '__NEW_TARGET__')
+    .reduce<Record<string, number>>((counts, [, target]) => {
+      counts[target] = (counts[target] ?? 0) + 1
+      return counts
+    }, {})
+  const hasEvolutionRemapConflict = Object.values(conflictingEvolutionRemapTargets).some((count) => count > 1)
   if (evolutionPrepared && !model?.openApiEvolutionCapability) {
     blockers.push('Approve the reviewed OpenAPI contract evolution in native IntelliJ UI before previewing regeneration.')
   }
@@ -988,14 +1017,45 @@ export default function IntegrationDesigner() {
       const defaults = defaultOpenApiJmixLayer(next, operation, destination.defaultPackage)
       const previousMappings = new Map(previousLayer.mappings.map((mapping) => [mapping.schemaId, mapping]))
       defaults.mappings = defaults.mappings.map((fresh) => {
-        const previous = previousMappings.get(fresh.schemaId)
+        const selectedPlan = openApiEvolution.remapPlans.find((plan) => (
+          evolutionRemapSelections[plan.previousSchemaId] === fresh.schemaId
+        ))
+        const previous = selectedPlan
+          ? previousMappings.get(selectedPlan.previousSchemaId)
+          : undefined
         if (!previous) return fresh
+        const option = selectedPlan?.options.find((candidate) => candidate.candidateSchemaId === fresh.schemaId)
+        const exactSuggestions = new Map(
+          option?.propertyCandidates
+            .filter((candidate) => candidate.confidence === 'EXACT')
+            .map((candidate) => [candidate.candidateSchemaProperty, candidate]) ?? [],
+        )
         const previousProperties = new Map(previous.properties.map((property) => [property.schemaProperty, property]))
+        const carriedProperties = fresh.properties.flatMap((property) => {
+          const suggestion = exactSuggestions.get(property.schemaProperty)
+          if (suggestion) {
+            return [{
+              schemaProperty: property.schemaProperty,
+              entityProperty: suggestion.previousEntityProperty,
+              direction: suggestion.direction,
+            }]
+          }
+          const exact = previousProperties.get(property.schemaProperty)
+          if (exact) return [exact]
+          return previous.targetKind === 'GENERATED_DTO' ? [property] : []
+        })
+        const carriedTargets = new Set(carriedProperties.map((property) => property.entityProperty))
         return {
           ...fresh,
           ...previous,
           schemaId: fresh.schemaId,
-          properties: fresh.properties.map((property) => previousProperties.get(property.schemaProperty) ?? property),
+          idProperty: previous.idProperty && carriedTargets.has(previous.idProperty)
+            ? previous.idProperty
+            : undefined,
+          instanceNameProperty: previous.instanceNameProperty && carriedTargets.has(previous.instanceNameProperty)
+            ? previous.instanceNameProperty
+            : undefined,
+          properties: carriedProperties,
         }
       })
       next.openApiJmixLayer = {
@@ -1008,7 +1068,7 @@ export default function IntegrationDesigner() {
       }
     }
     replaceModel(next)
-    addToast('Prepared the current contract and preserved only exact, unambiguous Jmix mappings.', 'success')
+    addToast('Prepared the current contract with the explicitly selected schema remaps and exact property identities.', 'success')
   }
 
   const approveOpenApiEvolution = async () => {
@@ -1143,9 +1203,57 @@ export default function IntegrationDesigner() {
                   {openApiEvolution.mappingIssues.length > 3 && ` +${openApiEvolution.mappingIssues.length - 3} more`}
                 </div>
               )}
+              {!evolutionPrepared && openApiEvolution.remapPlans.length > 0 && (
+                <div className="mt-2 max-h-40 space-y-1.5 overflow-y-auto rounded border border-amber-400/20 bg-black/10 p-2" role="group" aria-label="Jmix schema remapping decisions">
+                  <div className="flex flex-wrap items-center justify-between gap-1">
+                    <span className="text-[9px] font-semibold text-amber-100">Carry previous Jmix targets forward</span>
+                    <span className="text-[8px] text-amber-100/60">Non-identity mappings require an explicit choice</span>
+                  </div>
+                  {openApiEvolution.remapPlans.map((plan) => (
+                    <label key={plan.previousSchemaId} className="grid min-w-0 gap-1 rounded border border-amber-400/10 bg-surface/35 p-1.5 sm:grid-cols-[minmax(9rem,0.8fr)_minmax(12rem,1.2fr)] sm:items-center">
+                      <span className="min-w-0 text-[9px] text-gray-300">
+                        <code className="text-amber-100">{plan.previousJavaName}</code>
+                        <span className="block truncate text-[8px] text-gray-500">{plan.targetKind === 'EXISTING_ENTITY' ? 'Existing entity' : 'Generated DTO'} · {plan.targetLabel}</span>
+                      </span>
+                      <select
+                        aria-label={`Replacement schema for ${plan.previousJavaName}`}
+                        value={evolutionRemapSelections[plan.previousSchemaId] ?? ''}
+                        onChange={(event) => setEvolutionRemapSelections((current) => ({
+                          ...current,
+                          [plan.previousSchemaId]: event.target.value,
+                        }))}
+                        className="min-h-8 min-w-0 rounded border border-amber-400/20 bg-surface px-2 text-[9px] text-gray-200"
+                      >
+                        <option value="">Choose a reviewed replacement…</option>
+                        <option value="__NEW_TARGET__">Do not carry this target; generate a new DTO</option>
+                        {plan.options.map((option) => (
+                          <option
+                            key={option.candidateSchemaId}
+                            value={option.candidateSchemaId}
+                            disabled={Object.entries(evolutionRemapSelections).some(([previousId, selected]) => (
+                              previousId !== plan.previousSchemaId && selected === option.candidateSchemaId
+                            ))}
+                          >
+                            {option.candidateJavaName} · {option.confidence.toLowerCase()} · {option.structuralScore}% · {option.compatiblePropertyMatches} compatible fields
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
             {!evolutionPrepared ? (
-              <button className="btn-secondary shrink-0" onClick={prepareOpenApiEvolution}>
+              <button
+                className="btn-secondary shrink-0"
+                disabled={unresolvedEvolutionRemaps.length > 0 || hasEvolutionRemapConflict}
+                title={unresolvedEvolutionRemaps.length > 0
+                  ? 'Choose how every compatible previous Jmix target should be handled.'
+                  : hasEvolutionRemapConflict
+                    ? 'A current schema can inherit only one previous Jmix target.'
+                    : undefined}
+                onClick={prepareOpenApiEvolution}
+              >
                 Prepare guided update
               </button>
             ) : !model.openApiEvolutionCapability ? (
@@ -1719,6 +1827,17 @@ export default function IntegrationDesigner() {
                             const targetProperties = mapping.targetKind === 'GENERATED_DTO'
                               ? mapping.properties.map((property) => property.entityProperty)
                               : existingAttributes.map((attribute) => attribute.name)
+                            const remapPlan = evolutionPrepared
+                              ? openApiEvolution?.remapPlans.find((plan) => (
+                                evolutionRemapSelections[plan.previousSchemaId] === mapping.schemaId
+                              ))
+                              : undefined
+                            const remapOption = remapPlan?.options.find((option) => (
+                              option.candidateSchemaId === mapping.schemaId
+                            ))
+                            const previousMapping = selectedDocument?.model.openApiJmixLayer?.mappings.find((candidate) => (
+                              candidate.schemaId === remapPlan?.previousSchemaId
+                            ))
                             return (
                               <article
                                 key={mapping.schemaId}
@@ -1873,6 +1992,10 @@ export default function IntegrationDesigner() {
                                           candidate.schemaProperty === property.javaName
                                         ))
                                         const propertyMapping = propertyIndex >= 0 ? mapping.properties[propertyIndex] : undefined
+                                        const remapCandidates = remapOption?.propertyCandidates.filter((candidate) => (
+                                          candidate.candidateSchemaProperty === property.javaName &&
+                                          candidate.confidence !== 'EXACT'
+                                        )) ?? []
                                         return (
                                           <tr key={property.javaName} className="border-t border-surface-border/70">
                                             <td className="px-2 py-1.5">
@@ -1880,6 +2003,43 @@ export default function IntegrationDesigner() {
                                               <span className="ml-1 text-gray-600">({property.wireName})</span>
                                             </td>
                                             <td className="px-2 py-1.5">
+                                              {remapCandidates.length > 0 && (
+                                                <select
+                                                  aria-label={`${schema.javaName}.${property.javaName} previous mapping suggestion`}
+                                                  value=""
+                                                  onChange={(event) => {
+                                                    if (event.target.value === '') return
+                                                    const suggestion = remapCandidates[Number(event.target.value)]
+                                                    if (!suggestion) return
+                                                    commit((draft) => {
+                                                      const current = draft.openApiJmixLayer?.mappings[mappingIndex]
+                                                      if (!current) return
+                                                      current.properties = current.properties.filter((candidate) => (
+                                                        candidate.schemaProperty !== property.javaName
+                                                      ))
+                                                      current.properties.push({
+                                                        schemaProperty: property.javaName,
+                                                        entityProperty: suggestion.previousEntityProperty,
+                                                        direction: suggestion.direction,
+                                                      })
+                                                      if (previousMapping?.idProperty === suggestion.previousEntityProperty) {
+                                                        current.idProperty = suggestion.previousEntityProperty
+                                                      }
+                                                      if (previousMapping?.instanceNameProperty === suggestion.previousEntityProperty) {
+                                                        current.instanceNameProperty = suggestion.previousEntityProperty
+                                                      }
+                                                    })
+                                                  }}
+                                                  className="mb-1 min-h-7 w-full min-w-32 rounded border border-amber-400/25 bg-amber-500/[0.06] px-1.5 text-[9px] text-amber-100"
+                                                >
+                                                  <option value="">Reuse reviewed previous field…</option>
+                                                  {remapCandidates.map((candidate, index) => (
+                                                    <option key={`${candidate.previousSchemaProperty}:${candidate.previousEntityProperty}`} value={index}>
+                                                      {candidate.previousEntityProperty} ← {candidate.previousSchemaProperty} · {candidate.confidence.toLowerCase()} · {candidate.reason}
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                              )}
                                               {mapping.targetKind === 'EXISTING_ENTITY' ? (
                                                 <select
                                                   value={propertyMapping?.entityProperty ?? ''}
@@ -1910,8 +2070,17 @@ export default function IntegrationDesigner() {
                                                   value={propertyMapping?.entityProperty ?? ''}
                                                   onChange={(event) => commit((draft) => {
                                                     const current = draft.openApiJmixLayer?.mappings[mappingIndex]
-                                                    const target = current?.properties.find((candidate) => candidate.schemaProperty === property.javaName)
-                                                    if (target) target.entityProperty = event.target.value
+                                                    if (!current) return
+                                                    const target = current.properties.find((candidate) => candidate.schemaProperty === property.javaName)
+                                                    if (target) {
+                                                      target.entityProperty = event.target.value
+                                                    } else if (event.target.value) {
+                                                      current.properties.push({
+                                                        schemaProperty: property.javaName,
+                                                        entityProperty: event.target.value,
+                                                        direction: 'BIDIRECTIONAL',
+                                                      })
+                                                    }
                                                   })}
                                                   className="min-h-7 w-full min-w-32 rounded border border-surface-border bg-surface px-1.5 text-[9px]"
                                                 />

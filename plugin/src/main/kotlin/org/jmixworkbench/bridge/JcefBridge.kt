@@ -1546,8 +1546,20 @@ class JcefBridge(
                         "Generated-source impact: ${review.report.sourceImpact}\n" +
                         "Semantic changes: ${review.report.changes.size}\n" +
                         "Owned files affected: ${review.generatedFileCount}\n" +
+                        "Jmix type mappings: ${review.mappingDecisionCount}\n" +
                         "Old contract: ${review.baselineSha256.take(12)}\n" +
-                        "New contract: ${review.candidateSha256.take(12)}\n\n" +
+                        "New contract: ${review.candidateSha256.take(12)}\n" +
+                        if (review.mappingDecisionSummaries.isNotEmpty()) {
+                            "\nMapping decisions:\n" + review.mappingDecisionSummaries.joinToString("\n") { " • $it" } +
+                                if (review.mappingDecisionCount > review.mappingDecisionSummaries.size) {
+                                    "\n • +${review.mappingDecisionCount - review.mappingDecisionSummaries.size} more mappings"
+                                } else {
+                                    ""
+                                }
+                        } else {
+                            ""
+                        } +
+                        "\n\n" +
                         "The five-minute approval is bound to this source revision, exact contracts, " +
                         "semantic report, and all mapping decisions.",
                     "Approve OpenAPI Contract Evolution",

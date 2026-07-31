@@ -49,9 +49,17 @@ conflict. The designer then:
 3. presents separate wire and generated-source compatibility ratings;
 4. lists operation, parameter, request, response, validation, enum and security
    changes, plus Jmix mappings that no longer have an exact identity;
-5. carries forward only exact unambiguous mapping decisions;
-6. requires native IntelliJ approval before preview/apply; and
-7. invalidates that approval immediately after any model or mapping edit.
+5. presents bounded backend-ranked replacement schemas and property candidates;
+6. requires an explicit carry-forward or new-target decision for every
+   compatible previous Jmix target, prevents two targets from claiming the
+   same current schema, and carries only exact property identities without a
+   separate field decision;
+7. exposes non-identity property candidates in the mapping table, where the
+   developer chooses the retained Jmix property and direction;
+8. shows the resulting schema, target and property decisions again in the
+   native IntelliJ confirmation;
+9. requires native IntelliJ approval before preview/apply; and
+10. invalidates that approval immediately after any model or mapping edit.
 
 The visual UI suggests contract-required authentication, but this is only a
 convenience. Preview and apply always reconstruct and validate the requirement
@@ -89,6 +97,11 @@ in Kotlin.
   and the complete proposed mapping model. The capability is never persisted;
   edits, stale source, a new contract revision or changed mapping decisions
   fail closed.
+- Remap candidates are calculated by the backend from the persisted baseline,
+  current backend-resolved graph and previous Jmix mappings. Name and recursive
+  shape evidence are ranked, bounded and disclosed, but non-identity evidence
+  is never silently accepted. The final normalized mapping is independently
+  type-checked and included in the native approval digest.
 - Unsupported polymorphism, external references, arbitrary object parameters,
   media-type parameters, unsupported serialization styles, reserved
   characters, unsafe headers, form/multipart bodies and unproven message
@@ -179,28 +192,31 @@ Evolution tests additionally cover distinct wire/source impact, validation
 tightening, deterministic reports, exact current-operation recovery, forged
 baseline replacement, stale generated ownership, native-capability scope and
 expiry, post-approval tamper rejection, capability non-persistence and the full
-create/change/review/approve/regenerate/reopen lifecycle.
+create/change/review/approve/regenerate/reopen lifecycle. Remap tests prove
+exact ranking, conservative rejection without evidence, renamed schema and
+property candidates, retained DTO identity, generated mapper expressions and
+the complete create/rename/remap/approve/preview lifecycle.
 
-The clean `phase1Check` release gate on 2026-07-31 passed 407 regression tests
+The clean `phase1Check` release gate on 2026-07-31 passed 412 regression tests
 and 3 host smoke tests on each IntelliJ lane. Plugin Verifier reported both
 artifacts compatible:
 
 | IntelliJ host | Packaged ZIP SHA-256 |
 | --- | --- |
-| IU-253.28294.334 | `7fea5f026b2ecf9d35b88bcc8d44722dd499a8a170d7642af200866ee90c275e` |
-| IU-262.8665.258 | `3cbf057f365712bd691cbf6bba23edb1f6d188b71116fb99c113ef6bfd1f6549` |
+| IU-253.28294.334 | `3412d280b5f377ff0c1b48563a5d1f8f1104cbf618172a34ddb08e5e8489480a` |
+| IU-262.8665.258 | `bb1297b7eb53bd124136e9740053d37adee85c1d3ec8ee0db8d310b629b671bd` |
 
 Both ZIPs contain the same verified web input digest:
-`9abfdd262bd461d3b0a64594d8c92160621129a972c659ce11b478fb67b5cd8e`.
+`c785db7909168ea36794f07055601c4dc2a23f47524f6f6fda7bbc5f9f9fa4c0`.
 
 Responsive browser evidence on 2026-07-31 measured the real Integration
 Designer and the semantic-evolution workflow:
 
 | Embedded viewport | Layout | Document/client width | Region right edge |
 | --- | --- | --- | --- |
-| 1200 px | Three columns | 1200 / 1200 | 1200 |
-| 720 px | Continuous stack | 720 / 720 | 712 |
-| 360 px | Continuous stack | 360 / 360 | 352 |
+| 1280 px | Three columns | 1280 / 1280 | 1280 |
+| 720 px | Continuous stack | 720 / 720 | 720 |
+| 360 px | Continuous stack | 360 / 360 | 360 |
 
 At 360 pixels, selecting the Payment Provider contract and generating its Jmix
 layer rendered both object mappings, package/service controls and all property
@@ -209,10 +225,14 @@ inside a 196-pixel keyboard-focusable local scroll region. Mapping targets and
 directions have schema-qualified accessible names. Generate, undo and redo were
 executed successfully at that width.
 
-The changed-contract banner also has zero global overflow at 1280, 720 and 360
-pixels. At 360 pixels the review chips and approval controls wrap without being
-cut off. Prepare, approve, approval-ready and edit-invalidated states were
-executed in the browser, and the console contained no warnings or errors.
+The changed-contract and explicit-remapping workflow also has zero global
+overflow at 1280, 720 and 360 pixels. At 360 pixels the review chips, schema
+decision, property suggestions and approval controls remain reachable without
+being cut off; the 590-pixel mapping table stays inside a 196-pixel local scroll
+region. The browser journey selected a renamed schema, carried `receiptId` and
+`state` through two explicit property decisions, restored stable identifier and
+instance-name metadata, reached revision-bound approval and enabled preview.
+The console contained no warnings or errors.
 
 ## Deliberate remaining boundary
 
@@ -223,9 +243,6 @@ active remaining layers are:
 - Kotlin DTO/mapper/service generation for Kotlin-owned target source sets;
 - controlled multi-file contract bundles and cross-operation shared models;
 - provider/consumer contract suites and saved runtime scenarios;
-- explicit visual mapping of renamed/structurally changed schemas when exact
-  identity cannot be proven (the current workflow discloses and defaults these
-  mappings, then binds the developer's reviewed decisions to approval);
 - installed-IDE accessibility, memory/leak and large-contract performance
   certification.
 

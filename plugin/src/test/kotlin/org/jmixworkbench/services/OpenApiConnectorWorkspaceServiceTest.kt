@@ -435,6 +435,86 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         assertEquals(evolution.candidateBinding.documentSha256, reopened.model.openApiBaseline?.contractSha256)
     }
 
+    fun testRenamedSchemaCanBeExplicitlyRemappedAndApprovedEndToEnd() {
+        val root = prepareProject(contract("1"))
+        val service = IntegrationConnectorWorkspaceService.getInstance(project)
+        val initialWorkspace = service.load(forceRefresh = true)
+        val destination = requireNotNull(initialWorkspace.destinations.firstOrNull())
+        val operation = initialWorkspace.openApiContracts.single().operations.single()
+        val responseSchema = requireNotNull(operation.responseSchemaId)
+        val initial = connector(destination.id, requireNotNull(operation.defaultBinding)).copy(
+            openApiJmixLayer = IntegrationOpenApiJmixLayerModel(
+                enabled = true,
+                dtoPackage = "com.acme.payroll.entity.integration",
+                mapperPackage = "com.acme.payroll.integration.mapper",
+                servicePackage = "com.acme.payroll.service.integration",
+                serviceClassName = "EmployeeDirectoryService",
+                serviceBeanName = "employeeDirectoryService",
+                mappings = listOf(
+                    IntegrationOpenApiJmixTypeMapping(
+                        schemaId = responseSchema,
+                        generatedClassName = "ExternalEmployee",
+                        idProperty = "externalId",
+                        instanceNameProperty = "name",
+                        properties = listOf(
+                            IntegrationOpenApiPropertyMapping("id", "externalId"),
+                            IntegrationOpenApiPropertyMapping("displayName", "name"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val createPreview = service.preview(initial)
+        assertTrue(createPreview.accepted, createPreview.issues.joinToString { it.message })
+        apply(service, initial, createPreview)
+
+        WriteAction.run<RuntimeException> {
+            write(root, "src/main/resources/openapi/hr-provider.yaml", renamedContract("2"))
+        }
+        ApplicationGraphService.getInstance(project).invalidate()
+        val changed = service.load(forceRefresh = true).existingDocuments.single()
+        val evolution = requireNotNull(changed.openApiEvolution)
+        val plan = evolution.remapPlans.single()
+        assertEquals("Employee", plan.previousJavaName)
+        assertEquals("ExternalEmployee", plan.targetLabel)
+        val option = plan.options.single { it.candidateJavaName == "WorkerProfile" }
+        assertEquals(OpenApiRemapConfidence.REVIEW, option.confidence)
+        assertTrue(option.propertyCandidates.any {
+            it.candidateSchemaProperty == "workerId" && it.previousEntityProperty == "externalId"
+        })
+        assertTrue(option.propertyCandidates.any {
+            it.candidateSchemaProperty == "displayLabel" && it.previousEntityProperty == "name"
+        })
+
+        val previousLayer = requireNotNull(changed.model.openApiJmixLayer)
+        val explicitlyRemapped = changed.model.copy(
+            openApiBinding = evolution.candidateBinding,
+            openApiJmixLayer = previousLayer.copy(
+                mappings = listOf(
+                    requireNotNull(previousLayer.mappings.singleOrNull()).copy(
+                        schemaId = option.candidateSchemaId,
+                        idProperty = "externalId",
+                        instanceNameProperty = "name",
+                        properties = listOf(
+                            IntegrationOpenApiPropertyMapping("workerId", "externalId"),
+                            IntegrationOpenApiPropertyMapping("displayLabel", "name"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val approval = service.issueOpenApiEvolutionApproval(explicitlyRemapped)
+        val nativeReview = service.openApiEvolutionReview(explicitlyRemapped)
+        assertEquals(1, nativeReview.mappingDecisionCount)
+        assertTrue(nativeReview.mappingDecisionSummaries.single().contains("workerId→externalId"))
+        val approved = explicitlyRemapped.copy(openApiEvolutionCapability = approval.capability)
+        val updatePreview = service.preview(approved)
+        assertTrue(updatePreview.accepted, updatePreview.issues.joinToString { it.message })
+        assertTrue(updatePreview.files.any { "class ExternalEmployee" in it.resultContent })
+        assertTrue(updatePreview.files.any { "setExternalId(source.workerId())" in it.resultContent })
+        assertTrue(updatePreview.files.any { "setName(source.displayLabel())" in it.resultContent })
+    }
+
     private fun prepareProject(openApiContract: String): VirtualFile {
         val root = getOrCreateProjectBaseDir()
         WriteAction.run<RuntimeException> {
@@ -541,6 +621,37 @@ class OpenApiConnectorWorkspaceServiceTest : HeavyPlatformTestCase() {
         }
         return source.replace("        # OPTIONAL_PARAMETER", parameter)
     }
+
+    private fun renamedContract(version: String): String = """
+        openapi: 3.0.3
+        info:
+          title: HR Provider
+          version: "$version"
+        paths:
+          /employees/{employeeId}:
+            get:
+              operationId: findEmployee
+              parameters:
+                - name: employeeId
+                  in: path
+                  required: true
+                  schema: { type: string }
+              responses:
+                "200":
+                  description: employee
+                  content:
+                    application/json:
+                      schema:
+                        ${'$'}ref: '#/components/schemas/WorkerProfile'
+        components:
+          schemas:
+            WorkerProfile:
+              type: object
+              required: [workerId, displayLabel]
+              properties:
+                workerId: { type: string }
+                displayLabel: { type: string }
+        """.trimIndent()
 
     private fun write(root: VirtualFile, path: String, content: String) {
         val parentPath = path.substringBeforeLast('/', "")

@@ -2025,6 +2025,37 @@ export interface IntegrationOpenApiEvolutionReview {
   candidateTitle: string
   candidateApiVersion?: string
   mappingIssues: string[]
+  remapPlans: OpenApiSchemaRemapPlan[]
+}
+
+export type OpenApiRemapConfidence = 'EXACT' | 'HIGH' | 'REVIEW'
+
+export interface OpenApiPropertyRemapCandidate {
+  candidateSchemaProperty: string
+  previousSchemaProperty: string
+  previousEntityProperty: string
+  direction: IntegrationOpenApiMappingDirection
+  confidence: OpenApiRemapConfidence
+  reason: string
+}
+
+export interface OpenApiSchemaRemapOption {
+  candidateSchemaId: string
+  candidateJavaName: string
+  confidence: OpenApiRemapConfidence
+  structuralScore: number
+  exactPropertyMatches: number
+  compatiblePropertyMatches: number
+  requiredOutboundUnmapped: string[]
+  propertyCandidates: OpenApiPropertyRemapCandidate[]
+}
+
+export interface OpenApiSchemaRemapPlan {
+  previousSchemaId: string
+  previousJavaName: string
+  targetKind: IntegrationOpenApiJmixTargetKind
+  targetLabel: string
+  options: OpenApiSchemaRemapOption[]
 }
 
 export interface OpenApiEvolutionApproval {

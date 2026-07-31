@@ -40,6 +40,7 @@ import org.jmixworkbench.model.IntegrationTransportSecurityModel
 import org.jmixworkbench.project.JmixOrganizationConnectorTemplate
 import org.jmixworkbench.project.JmixTemplateCatalogManager
 import java.util.Base64
+import java.util.Locale
 
 /**
  * Source-safe integration-adapter lifecycle.
@@ -259,6 +260,25 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         val layer = generateOpenApiJmixLayer(normalized, destination, schema)
         require(layer.issues.isEmpty()) { layer.issues.joinToString(" ") }
         val report = OpenApiContractEvolutionAnalyzer.compare(baseline, operation)
+        val mappingDecisions = normalized.openApiJmixLayer?.mappings.orEmpty()
+            .sortedBy(IntegrationOpenApiJmixTypeMapping::schemaId)
+            .map { mapping ->
+                val target = mapping.existingEntity?.qualifiedName
+                    ?: mapping.generatedClassName
+                    ?: "generated DTO"
+                val properties = mapping.properties.sortedWith(
+                    compareBy(IntegrationOpenApiPropertyMapping::schemaProperty, IntegrationOpenApiPropertyMapping::entityProperty),
+                )
+                val visibleProperties = properties.take(MAX_OPENAPI_APPROVAL_PROPERTIES).joinToString { property ->
+                    "${property.schemaProperty}→${property.entityProperty} (${property.direction.name.lowercase(Locale.ROOT)})"
+                }
+                val suffix = if (properties.size > MAX_OPENAPI_APPROVAL_PROPERTIES) {
+                    ", +${properties.size - MAX_OPENAPI_APPROVAL_PROPERTIES} more"
+                } else {
+                    ""
+                }
+                "${mapping.schemaId} → $target · $visibleProperties$suffix"
+            }
         return OpenApiEvolutionContext(
             owned = owned,
             normalized = normalized,
@@ -269,6 +289,8 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                 candidateSha256 = report.candidateSha256,
                 report = report,
                 generatedFileCount = 2 + layer.sources.size,
+                mappingDecisionCount = mappingDecisions.size,
+                mappingDecisionSummaries = mappingDecisions.take(MAX_OPENAPI_APPROVAL_MAPPINGS),
             ),
         )
     }
@@ -868,6 +890,11 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
                             candidateTitle = current.contract.title,
                             candidateApiVersion = current.contract.apiVersion,
                             mappingIssues = openApiEvolutionMappingIssues(model, current.operation),
+                            remapPlans = OpenApiJmixEvolutionRemapPlanner.plan(
+                                baseline = baseline,
+                                candidate = current.operation,
+                                layer = model.openApiJmixLayer,
+                            ),
                         )
                     }.getOrNull()
                 } else null
@@ -1510,6 +1537,8 @@ class IntegrationConnectorWorkspaceService(private val project: Project) {
         private const val MAX_CONNECTOR_BYTES = 8L * 1024 * 1024
         private const val MAX_OPENAPI_BASELINE_BYTES = 512 * 1024
         private const val MAX_OPENAPI_EVOLUTION_MAPPING_ISSUES = 256
+        private const val MAX_OPENAPI_APPROVAL_MAPPINGS = 12
+        private const val MAX_OPENAPI_APPROVAL_PROPERTIES = 8
         private const val MAX_MARKER_LENGTH = 4_000_000
         private val CONSUMER_KINDS = setOf(
             IntegrationConnectorKind.KAFKA_CONSUMER,
@@ -1581,6 +1610,7 @@ data class IntegrationOpenApiEvolutionReview(
     val candidateTitle: String,
     val candidateApiVersion: String?,
     val mappingIssues: List<String> = emptyList(),
+    val remapPlans: List<OpenApiSchemaRemapPlan> = emptyList(),
 )
 
 data class IntegrationOpenApiEvolutionApprovalReview(
@@ -1590,6 +1620,8 @@ data class IntegrationOpenApiEvolutionApprovalReview(
     val candidateSha256: String,
     val report: OpenApiEvolutionReport,
     val generatedFileCount: Int,
+    val mappingDecisionCount: Int = 0,
+    val mappingDecisionSummaries: List<String> = emptyList(),
 )
 
 private data class OpenApiEvolutionContext(
