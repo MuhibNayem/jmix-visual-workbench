@@ -1,0 +1,3463 @@
+import type {
+  ApplicationGraphResponse,
+  DmnDecisionModel,
+  DmnDecisionWorkspaceResponse,
+  DmnSimulationResult,
+  FlowUiPropertyChangeRequest,
+  FlowUiStructureChangeRequest,
+  FlowUiDirectTextChangeRequest,
+  FlowUiControllerInjectionRequest,
+  FlowUiControllerHandlerRequest,
+  AggregateUpdateServiceRequest,
+  FlowUiWorkspaceResponse,
+  ExistingEntityAttributeAdditionRequest,
+  DatabaseEntityTableInspectionRequest,
+  DatabaseEntityTableInspectionResponse,
+  DatabaseEntityTableBrowseRequest,
+  DatabaseEntityTableBrowseResponse,
+  DatabaseTableReference,
+  DatabaseEntityImportRequest,
+  DatabaseEntityImportPlanResponse,
+  DatabaseEntityImportProfileWorkspaceResponse,
+  DatabaseColumnSnapshot,
+  EntityAttributePropagationChangeRequest,
+  EntityAttributePropagationInspectionRequest,
+  EntityAttributePropagationInspectionResponse,
+  EntityAttributeRenameRequest,
+  EntityAttributeRenameLaunchResponse,
+  EntityAttributeSafeDeleteRequest,
+  EntityAttributeSafeDeleteLaunchResponse,
+  EntityEventListenerRequest,
+  DataRepositoryChangeRequest,
+  RepositoryMethodRefactorLaunchResponse,
+  RepositoryMethodRefactorRequest,
+  RepositorySemanticValidationResponse,
+  EntityAttributeTypeMigrationRequest,
+  EntityAttributeTypeMigrationLaunchResponse,
+  EntityAttributeTypeExpansionPreviewResponse,
+  EntityAttributeTypeExpansionVerificationResponse,
+  EntityAttributeTypeMappingCutoverRequest,
+  GenerationResult,
+  GraphSourceLocator,
+  IntegrationConnectorCatalogApprovalResponse,
+  IntegrationOpenApiEvolutionApprovalResponse,
+  IntegrationConnectorModel,
+  IntegrationConnectorWorkspaceResponse,
+  OpenApiContractSelectionResponse,
+  EnvironmentChangeRequest,
+  EnvironmentConnectionRequest,
+  EnvironmentSecretChangeRequest,
+  EnvironmentSecretPreviewResponse,
+  JmixEnvironmentWorkspace,
+  ProjectApplicationPropertiesChangeRequest,
+  ProjectApplicationProfileLifecycleRequest,
+  JmixProjectPropertiesWorkspace,
+  JmixFlowUiHotDeployRequest,
+  JmixRuntimeActionResponse,
+  JmixRuntimeInspectionResponse,
+  JmixRuntimeViewport,
+  ProjectConfig,
+  RuntimeSecurityEvidenceImportRequest,
+  RuntimeSecurityEvidenceImportResponse,
+  RuntimeSecurityEvidenceSnapshot,
+  RestApiInvocationRequest,
+  RestApiInvocationResponse,
+  RestApiContractAdditionRequest,
+  RestApiContractMutationRequest,
+  RestApiWorkspaceResponse,
+  ScenarioTestModel,
+  ScenarioWorkspaceResponse,
+  SchemaMigrationChangeRequest,
+  SchemaWorkspaceResponse,
+  SecurityWorkspaceSnapshot,
+  SecurityRoleCreateRequest,
+  SecurityRoleDestinationsResponse,
+  SecurityRolePolicyChangeRequest,
+  SecurityRolePolicyInspectionRequest,
+  SecurityRolePolicyInspectionResponse,
+  SecurityRolePolicyReplacementRequest,
+  SecurityRolePolicyRemovalRequest,
+  SourceNavigationResponse,
+  WorkspaceChangeApplyResponse,
+  WorkspaceHistoryMutationResponse,
+  WorkspaceHistorySnapshot,
+  WorkspaceChangePreviewResponse,
+  WorkspaceChangeSet,
+  WorkflowLoadResponse,
+  WorkflowModel,
+  VisualLogicClassModel,
+  VisualLogicWorkspaceResponse,
+  VisualRuleModel,
+  VisualRuleWorkspaceResponse,
+  WorkbenchLaunchContext,
+  WorkbenchSurfaceOpenResponse,
+} from '../types'
+import {
+  developmentApplicationGraph,
+  developmentDmnDecisionWorkspace,
+  developmentFlowUiWorkspace,
+  developmentIntegrationConnectorWorkspace,
+  developmentEnvironmentWorkspace,
+  developmentProjectPropertiesWorkspace,
+  developmentProjectConfig,
+  developmentRestApiWorkspace,
+  developmentScenarioWorkspace,
+  developmentSchemaWorkspace,
+  developmentSecurityWorkspace,
+  developmentVisualLogicWorkspace,
+  developmentVisualRuleWorkspace,
+} from './devMocks'
+
+type BridgeCallback = (action: string, requestId: string | null, result: any) => void
+
+let developmentRuntimeSecurity: RuntimeSecurityEvidenceSnapshot = developmentSecurityWorkspace.runtime
+let developmentHistory: WorkspaceHistorySnapshot = {
+  canUndo: false,
+  undoDepth: 0,
+  canRedo: false,
+  redoDepth: 0,
+}
+
+function developmentDatabaseColumn(
+  name: string,
+  typeName: string,
+  attributeType: DatabaseColumnSnapshot['suggestion']['attributeType'],
+  primaryKey: boolean,
+  alreadyMapped: boolean,
+  size?: number,
+  suggestionOverrides: Partial<DatabaseColumnSnapshot['suggestion']> = {},
+): DatabaseColumnSnapshot {
+  return {
+    name,
+    jdbcType: 0,
+    typeName,
+    size,
+    nullable: !primaryKey,
+    autoIncrement: false,
+    generated: false,
+    ordinal: 1,
+    primaryKey,
+    alreadyMapped,
+    suggestion: {
+      attributeName: name.toLowerCase().replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()),
+      attributeType,
+      javaType: suggestionOverrides.javaType ?? 'java.lang.String',
+      primaryKey,
+      mandatory: primaryKey,
+      length: size,
+      ...suggestionOverrides,
+    },
+  }
+}
+
+declare global {
+  interface Window {
+    javaBridge?: {
+      send: (action: string, payload: any, requestId: string) => void
+    }
+    onBridgeResponse?: (action: string, requestId: string | null, result: any) => void
+    onBridgeReady?: () => void
+    jmixWorkbenchLaunchContext?: WorkbenchLaunchContext | null
+    onWorkbenchLaunchContext?: (context: WorkbenchLaunchContext | null) => void
+  }
+}
+
+class Bridge {
+  private listeners: BridgeCallback[] = []
+  private launchContextListeners: ((context: WorkbenchLaunchContext | null) => void)[] = []
+  private launchContext: WorkbenchLaunchContext | null =
+    window.jmixWorkbenchLaunchContext ?? this.developmentLaunchContext()
+  private ready = false
+  private requestSequence = 0
+  private pendingQueue: { action: string; payload: any; requestId: string }[] = []
+
+  constructor() {
+    window.onBridgeResponse = (action: string, requestId: string | null, result: any) => {
+      this.listeners.forEach(cb => cb(action, requestId, result))
+    }
+
+    window.onBridgeReady = () => {
+      this.ready = true
+      this.pendingQueue.forEach(({ action, payload, requestId }) => this.send(action, payload, requestId))
+      this.pendingQueue = []
+    }
+
+    window.onWorkbenchLaunchContext = (context) => {
+      this.launchContext = context
+      this.launchContextListeners.forEach((listener) => listener(context))
+    }
+
+    // If bridge is already available (e.g., dev mode without JCEF)
+    if (window.javaBridge) {
+      this.ready = true
+    }
+  }
+
+  private developmentLaunchContext(): WorkbenchLaunchContext | null {
+    if (!import.meta.env.DEV) return null
+    if (window.location.pathname === '/flowui-editor.html') {
+      const document = developmentFlowUiWorkspace.document
+      return document
+        ? {
+            surface: 'FLOW_UI_EDITOR',
+            sourceLocator: {
+              relativePath: document.relativePath,
+              revisionFingerprint: document.revisionFingerprint,
+            },
+          }
+        : null
+    }
+    if (window.location.pathname === '/entity-editor.html') {
+      const requestedSource = new URLSearchParams(window.location.search).get('source')
+      const entity = developmentSchemaWorkspace.entities.find(candidate =>
+        candidate.sourceLocator.relativePath === requestedSource,
+      ) ?? developmentSchemaWorkspace.entities[0]
+      return entity
+        ? {
+            surface: 'ENTITY_EDITOR',
+            sourceLocator: entity.sourceLocator,
+          }
+        : null
+    }
+    return null
+  }
+
+  send(action: string, payload: any = {}, requestId: string = this.nextRequestId()) {
+    if (!this.ready || !window.javaBridge) {
+      // In dev mode, simulate response
+      if (import.meta.env.DEV) {
+        console.log(`[Bridge] ${action}`, payload)
+        setTimeout(() => {
+          const result = (() => {
+            switch (action) {
+              case 'getApplicationGraph':
+                return developmentApplicationGraph
+              case 'getProjectPropertiesWorkspace':
+                return developmentProjectPropertiesWorkspace
+              case 'previewProjectProfileChange': {
+                const change = payload as ProjectApplicationPropertiesChangeRequest
+                const profile = developmentProjectPropertiesWorkspace.profiles.find(
+                  candidate => candidate.locator.relativePath === change.profileLocator.relativePath,
+                )
+                if (!profile || change.updates.length === 0) {
+                  return {
+                    accepted: false,
+                    changeSetId: 'project-profile:development-rejected',
+                    label: 'Project profile change rejected',
+                    planDigest: null,
+                    files: [],
+                    issues: [{
+                      code: 'JVW-PROJECT-PROPERTIES-DEVELOPMENT-REQUEST-INVALID',
+                      message: 'Select at least one profile value to change.',
+                    }],
+                  }
+                }
+                const current = new Map(profile.properties.map(property => [
+                  property.key,
+                  property.displayValue,
+                ]))
+                if (profile.serverPort !== undefined) current.set('server.port', profile.serverPort)
+                if (profile.contextPath !== undefined) {
+                  current.set('server.servlet.context-path', profile.contextPath)
+                }
+                const keys = [...change.updates].sort((left, right) => left.key.localeCompare(right.key))
+                const render = (after: boolean) => [
+                  '# Credential-safe focused preview; unrelated properties are intentionally omitted.',
+                  ...keys.map(update => {
+                    const value = after ? update.value : current.get(update.key)
+                    return value === undefined
+                      ? `# ${update.key} is not configured`
+                      : `${update.key}=${value}`
+                  }),
+                  '',
+                ].join('\n')
+                return {
+                  accepted: true,
+                  changeSetId: 'project-profile:development',
+                  label: `Update ${profile.profile} project configuration`,
+                  planDigest: 'development-project-profile-digest',
+                  files: [{
+                    relativePath: profile.locator.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: profile.locator.revisionFingerprint,
+                    afterFingerprint: 'development-project-profile-after',
+                    originalContent: render(false),
+                    resultContent: render(true),
+                    appliedEditCount: change.updates.length,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applyProjectProfileChange': {
+                const change = payload.change as ProjectApplicationPropertiesChangeRequest
+                const profile = developmentProjectPropertiesWorkspace.profiles.find(
+                  candidate => candidate.locator.relativePath === change.profileLocator.relativePath,
+                )
+                if (!profile || payload.expectedPlanDigest !== 'development-project-profile-digest') {
+                  return {
+                    success: false,
+                    changeSetId: 'project-profile:development-rejected',
+                    planDigest: null,
+                    filesChanged: [],
+                    issues: [{
+                      code: 'JVW-CHANGE-PREVIEW-STALE',
+                      message: 'The approved development preview is stale.',
+                    }],
+                  }
+                }
+                change.updates.forEach(update => {
+                  const existing = profile.properties.find(property => property.key === update.key)
+                  if (existing) {
+                    existing.displayValue = update.value
+                  } else {
+                    profile.properties.push({
+                      key: update.key,
+                      displayValue: update.value,
+                      secret: update.key.toLowerCase().includes('password'),
+                    })
+                  }
+                  if (update.key === 'server.port') profile.serverPort = update.value
+                  if (update.key === 'server.servlet.context-path') profile.contextPath = update.value
+                  if (update.key === 'spring.profiles.active') {
+                    profile.activeProfiles = update.value
+                      .split(',')
+                      .map(value => value.trim())
+                      .filter(Boolean)
+                  }
+                  if (update.key === 'jmix.core.available-locales') {
+                    profile.availableLocales = update.value
+                      .split(',')
+                      .map(value => value.split('|')[0].trim())
+                      .filter(Boolean)
+                  }
+                })
+                profile.locator.revisionFingerprint = `development-profile-${Date.now()}`
+                developmentProjectPropertiesWorkspace.snapshotDigest = profile.locator.revisionFingerprint
+                return {
+                  success: true,
+                  changeSetId: 'project-profile:development',
+                  planDigest: 'development-project-profile-digest',
+                  filesChanged: [profile.locator.relativePath],
+                  issues: [],
+                }
+              }
+              case 'previewProjectProfileLifecycle': {
+                const change = payload as ProjectApplicationProfileLifecycleRequest
+                const profile = developmentProjectPropertiesWorkspace.profiles.find(
+                  candidate => candidate.locator.relativePath === change.profileLocator.relativePath,
+                )
+                if (!profile) {
+                  return {
+                    accepted: false,
+                    changeSetId: 'project-profile-lifecycle:development-rejected',
+                    label: 'Project profile lifecycle change rejected',
+                    planDigest: null,
+                    files: [],
+                    issues: [{
+                      code: 'JVW-PROJECT-PROFILE-LIFECYCLE-UNINDEXED',
+                      message: 'The selected development profile is unavailable.',
+                    }],
+                  }
+                }
+                const parent = profile.locator.relativePath.includes('/')
+                  ? profile.locator.relativePath.slice(0, profile.locator.relativePath.lastIndexOf('/') + 1)
+                  : ''
+                const targetPath = change.mode === 'CREATE'
+                  ? `${parent}application-${change.profileName}.properties`
+                  : profile.locator.relativePath
+                return {
+                  accepted: true,
+                  changeSetId: `project-profile-lifecycle:development-${change.mode.toLowerCase()}`,
+                  label: change.mode === 'CREATE'
+                    ? `Create application-${change.profileName}.properties`
+                    : `Remove ${targetPath.split('/').pop()}`,
+                  planDigest: 'development-project-profile-lifecycle-digest',
+                  files: [{
+                    relativePath: targetPath,
+                    mode: change.mode === 'CREATE' ? 'CREATE' : 'DELETE',
+                    beforeFingerprint: change.mode === 'CREATE' ? null : profile.locator.revisionFingerprint,
+                    afterFingerprint: 'development-project-profile-lifecycle-after',
+                    originalContent: change.mode === 'CREATE'
+                      ? null
+                      : [
+                        '# Credential-safe deletion preview; property values are intentionally omitted.',
+                        `# Properties: ${profile.properties.length}`,
+                        `# Secret-bearing properties: ${profile.properties.filter(property => property.secret).length}`,
+                        '',
+                      ].join('\n'),
+                    resultContent: change.mode === 'CREATE'
+                      ? `# Profile-specific Jmix configuration for ${change.profileName}.\n`
+                      : '# The profile file will be removed after approval.\n',
+                    appliedEditCount: 0,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applyProjectProfileLifecycle': {
+                const change = payload.change as ProjectApplicationProfileLifecycleRequest
+                const profileIndex = developmentProjectPropertiesWorkspace.profiles.findIndex(
+                  candidate => candidate.locator.relativePath === change.profileLocator.relativePath,
+                )
+                if (
+                  profileIndex < 0 ||
+                  payload.expectedPlanDigest !== 'development-project-profile-lifecycle-digest'
+                ) {
+                  return {
+                    success: false,
+                    changeSetId: 'project-profile-lifecycle:development-rejected',
+                    planDigest: null,
+                    filesChanged: [],
+                    issues: [{
+                      code: 'JVW-CHANGE-PREVIEW-STALE',
+                      message: 'The approved development lifecycle preview is stale.',
+                    }],
+                  }
+                }
+                const selected = developmentProjectPropertiesWorkspace.profiles[profileIndex]
+                let changedPath = selected.locator.relativePath
+                if (change.mode === 'CREATE') {
+                  const separator = selected.locator.relativePath.lastIndexOf('/')
+                  const parent = separator >= 0
+                    ? selected.locator.relativePath.slice(0, separator + 1)
+                    : ''
+                  changedPath = `${parent}application-${change.profileName}.properties`
+                  developmentProjectPropertiesWorkspace.profiles.push({
+                    modulePath: selected.modulePath,
+                    profile: change.profileName ?? 'profile',
+                    locator: {
+                      relativePath: changedPath,
+                      revisionFingerprint: `development-profile-${Date.now()}`,
+                    },
+                    activeProfiles: [],
+                    availableLocales: [],
+                    stores: [],
+                    properties: [],
+                  })
+                } else {
+                  developmentProjectPropertiesWorkspace.profiles.splice(profileIndex, 1)
+                }
+                developmentProjectPropertiesWorkspace.snapshotDigest =
+                  `development-project-properties-${Date.now()}`
+                return {
+                  success: true,
+                  changeSetId: `project-profile-lifecycle:development-${change.mode.toLowerCase()}`,
+                  planDigest: 'development-project-profile-lifecycle-digest',
+                  filesChanged: [changedPath],
+                  issues: [],
+                }
+              }
+              case 'getEnvironmentWorkspace':
+                return developmentEnvironmentWorkspace
+              case 'navigateEnvironmentSource':
+                return {
+                  success: true,
+                  errorCode: null,
+                  message: 'Environment source token verified.',
+                }
+              case 'previewEnvironmentChange': {
+                const change = payload as EnvironmentChangeRequest
+                const file = developmentEnvironmentWorkspace.files.find(
+                  candidate => candidate.relativePath === change.relativePath,
+                )
+                if (!file || change.workspaceDigest !== developmentEnvironmentWorkspace.snapshotDigest) {
+                  return {
+                    accepted: false,
+                    changeSetId: 'environment:development-rejected',
+                    label: 'Environment change rejected',
+                    planDigest: null,
+                    files: [],
+                    issues: [{
+                      code: 'JVW-ENV-WORKSPACE-STALE',
+                      message: 'The development environment workspace is stale.',
+                    }],
+                  }
+                }
+                return {
+                  accepted: true,
+                  changeSetId: `environment:${change.mode.toLowerCase()}:development`,
+                  label: `${change.mode === 'SET' ? 'Update' : 'Remove'} ${change.variableName}`,
+                  planDigest: 'development-environment-change-digest',
+                  files: [{
+                    relativePath: file.relativePath,
+                    mode: file.existing ? 'MODIFY' : 'CREATE',
+                    beforeFingerprint: file.locator?.revisionFingerprint,
+                    afterFingerprint: 'development-environment-after',
+                    originalContent: null,
+                    resultContent: `${change.variableName}=value selected in editor`,
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'prepareSecretEnvironmentChange': {
+                const change = payload as EnvironmentSecretChangeRequest
+                return {
+                  accepted: true,
+                  capability: 'development-secret-capability',
+                  preview: {
+                    accepted: true,
+                    changeSetId: 'environment:set:development-secret',
+                    label: `Securely update ${change.variableName}`,
+                    planDigest: 'development-secret-environment-digest',
+                    files: [{
+                      relativePath: change.relativePath,
+                      mode: 'MODIFY',
+                      beforeFingerprint: change.locator?.revisionFingerprint,
+                      afterFingerprint: 'development-environment-secret-after',
+                      originalContent: null,
+                      resultContent: `${change.variableName}=••••••••`,
+                      appliedEditCount: 1,
+                    }],
+                    issues: [],
+                  },
+                }
+              }
+              case 'previewEnvironmentConnection': {
+                const change = payload as EnvironmentConnectionRequest
+                return {
+                  accepted: true,
+                  changeSetId: 'environment-connect:development',
+                  label: `Connect ${change.environmentFile}`,
+                  planDigest: 'development-environment-connection-digest',
+                  files: [{
+                    relativePath: change.profileLocator.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: change.profileLocator.revisionFingerprint,
+                    afterFingerprint: 'development-environment-connection-after',
+                    originalContent: null,
+                    resultContent:
+                      `spring.config.import += optional:file:${change.environmentFile}[.properties]`,
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applyEnvironmentConnection':
+                return {
+                  success:
+                    payload.expectedPlanDigest === 'development-environment-connection-digest',
+                  changeSetId: 'environment-connect:development',
+                  planDigest: 'development-environment-connection-digest',
+                  filesChanged: [payload.change.profileLocator.relativePath],
+                  issues: [],
+                }
+              case 'applyEnvironmentChange':
+              case 'applySecretEnvironmentChange': {
+                const secret = action === 'applySecretEnvironmentChange'
+                const change = secret ? undefined : payload.change as EnvironmentChangeRequest
+                const expected = secret
+                  ? 'development-secret-environment-digest'
+                  : 'development-environment-change-digest'
+                if (payload.expectedPlanDigest !== expected) {
+                  return {
+                    success: false,
+                    changeSetId: 'environment:development-rejected',
+                    planDigest: null,
+                    filesChanged: [],
+                    issues: [{
+                      code: 'JVW-CHANGE-PREVIEW-STALE',
+                      message: 'The approved development environment preview is stale.',
+                    }],
+                  }
+                }
+                if (change) {
+                  const file = developmentEnvironmentWorkspace.files.find(
+                    candidate => candidate.relativePath === change.relativePath,
+                  )
+                  if (file) {
+                    const index = file.variables.findIndex(variable =>
+                      variable.name === change.variableName,
+                    )
+                    if (change.mode === 'REMOVE') {
+                      if (index >= 0) file.variables.splice(index, 1)
+                    } else if (index >= 0) {
+                      file.variables[index].displayValue = change.value ?? ''
+                    } else {
+                      file.variables.push({
+                        name: change.variableName,
+                        displayValue: change.value ?? '',
+                        secret: false,
+                        mutable: true,
+                        references: [],
+                      })
+                    }
+                  }
+                }
+                developmentEnvironmentWorkspace.snapshotDigest =
+                  `development-environment-${Date.now()}`
+                return {
+                  success: true,
+                  changeSetId: secret
+                    ? 'environment:set:development-secret'
+                    : `environment:${change?.mode.toLowerCase()}:development`,
+                  planDigest: expected,
+                  filesChanged: [
+                    change?.relativePath ?? developmentEnvironmentWorkspace.files[0].relativePath,
+                  ],
+                  issues: [],
+                }
+              }
+              case 'getScenarioWorkspace':
+                return developmentScenarioWorkspace
+              case 'getVisualLogicWorkspace':
+                return developmentVisualLogicWorkspace
+              case 'getIntegrationConnectorWorkspace':
+                return developmentIntegrationConnectorWorkspace
+              case 'chooseOpenApiContract':
+                return {
+                  selected: true,
+                  contract: developmentIntegrationConnectorWorkspace.openApiContracts[0],
+                } satisfies OpenApiContractSelectionResponse
+              case 'getVisualRuleWorkspace':
+                return developmentVisualRuleWorkspace
+              case 'getDmnDecisionWorkspace':
+                return developmentDmnDecisionWorkspace
+              case 'previewVisualLogic': {
+                const model = payload as VisualLogicClassModel
+                const destination = developmentVisualLogicWorkspace.destinations.find(
+                  (candidate) => candidate.id === model.destinationId,
+                ) ?? developmentVisualLogicWorkspace.destinations[0]
+                const relativePath = `${destination.sourceRoot}/${model.packageName.replace(/\./g, '/')}/${model.className}.java`
+                return {
+                  accepted: true,
+                  changeSetId: 'visual-logic:development',
+                  label: `${model.sourceLocator ? 'Update' : 'Create'} visual service ${model.name}`,
+                  planDigest: 'development-visual-logic',
+                  files: [{
+                    relativePath,
+                    mode: model.sourceLocator ? 'MODIFY' : 'CREATE',
+                    beforeFingerprint: model.sourceLocator?.revisionFingerprint,
+                    afterFingerprint: 'development-visual-logic-after',
+                    resultContent: `package ${model.packageName};
+
+import org.springframework.stereotype.Service;
+
+@Service("${model.beanName}")
+public class ${model.className} {
+    // ${model.methods.length} typed visual method(s)
+}
+`,
+                    appliedEditCount: model.sourceLocator ? 1 : 0,
+                  }],
+                  issues: [],
+                } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'applyVisualLogic':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Generate ${payload.model?.name ?? 'visual service'}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'visual-logic:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [`${payload.model?.className ?? 'VisualService'}.java`],
+                  issues: [],
+                } satisfies WorkspaceChangeApplyResponse
+              case 'previewIntegrationConnector': {
+                const model = payload as IntegrationConnectorModel
+                const destination = developmentIntegrationConnectorWorkspace.destinations.find(
+                  (candidate) => candidate.id === model.destinationId,
+                ) ?? developmentIntegrationConnectorWorkspace.destinations[0]
+                const javaPath = `${destination.sourceRoot}/${model.packageName.replace(/\./g, '/')}/${model.className}.java`
+                const policyPath = `${destination.resourceRoot}/META-INF/jvw/integration/${model.beanName}.properties`
+                const outboxStore = developmentIntegrationConnectorWorkspace.dataStores.find(
+                  (candidate) => candidate.id === model.reliability.outbox?.storeId,
+                )
+                const outboxFiles = model.reliability.outboxEnabled && model.reliability.outbox && !model.sourceLocator && outboxStore?.generatedDirectory
+                  ? [{
+                    relativePath: `${outboxStore.generatedDirectory}/jvw-${model.beanName}-outbox.xml`,
+                    mode: 'CREATE' as const,
+                    afterFingerprint: 'development-integration-outbox-migration',
+                    resultContent: `<databaseChangeLog>
+  <changeSet id="jvw-outbox-${model.beanName}-1" author="jmix-visual-workbench">
+    <createTable tableName="${model.reliability.outbox.tableName}"/>
+    <rollback><dropTable tableName="${model.reliability.outbox.tableName}"/></rollback>
+  </changeSet>
+</databaseChangeLog>
+`,
+                    appliedEditCount: 0,
+                  }]
+                  : []
+                return {
+                  accepted: true,
+                  changeSetId: 'integration-connector:development',
+                  label: `${model.sourceLocator ? 'Update' : 'Create'} integration connector ${model.name}`,
+                  planDigest: 'development-integration-connector',
+                  files: [
+                    ...outboxFiles,
+                    {
+                      relativePath: javaPath,
+                      mode: model.sourceLocator ? 'MODIFY' : 'CREATE',
+                      beforeFingerprint: model.sourceLocator?.revisionFingerprint,
+                      afterFingerprint: 'development-integration-java',
+                      resultContent: `package ${model.packageName};
+
+// JVW-INTEGRATION-MODEL: development
+public final class ${model.className} {
+    // ${model.kind} adapter with externalized configuration and reliability policies
+    ${model.reliability.outboxEnabled ? '// Transactional enqueue + leased at-least-once dispatcher + replay/reconciliation' : ''}
+}
+`,
+                      appliedEditCount: model.sourceLocator ? 1 : 0,
+                    },
+                    {
+                      relativePath: policyPath,
+                      mode: model.sourceLocator ? 'MODIFY' : 'CREATE',
+                      afterFingerprint: 'development-integration-policy',
+                      resultContent: `# Owned reliability policy for ${model.beanName}
+# endpoint/topic/queue and secrets remain externalized
+${model.reliability.outboxEnabled ? '# durable at-least-once outbox; deduplicate jvw-outbox-id downstream' : ''}
+`,
+                      appliedEditCount: model.sourceLocator ? 1 : 0,
+                    },
+                  ],
+                  issues: [],
+                } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'applyIntegrationConnector':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Generate ${payload.model?.name ?? 'integration connector'}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'integration-connector:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    `${payload.model?.className ?? 'IntegrationConnector'}.java`,
+                    `${payload.model?.beanName ?? 'integrationConnector'}.properties`,
+                  ],
+                  issues: [],
+                } satisfies WorkspaceChangeApplyResponse
+              case 'approveIntegrationConnectorCatalogTemplate':
+                return {
+                  approved: true,
+                  approval: {
+                    capability: 'development-native-catalog-approval',
+                    expiresAt: new Date(Date.now() + 300_000).toISOString(),
+                    approvalPolicyId: 'brac.integration.sensitive',
+                  },
+                } satisfies IntegrationConnectorCatalogApprovalResponse
+              case 'approveOpenApiContractEvolution':
+                return {
+                  approved: true,
+                  approval: {
+                    capability: 'development-native-openapi-evolution-approval',
+                    expiresAt: new Date(Date.now() + 300_000).toISOString(),
+                    reportDigest: 'development-openapi-report',
+                    wireImpact: 'REVIEW',
+                    sourceImpact: 'BREAKING',
+                  },
+                } satisfies IntegrationOpenApiEvolutionApprovalResponse
+              case 'previewVisualRule': {
+                const model = payload as VisualRuleModel
+                const destination = developmentVisualRuleWorkspace.destinations.find(
+                  (candidate) => candidate.id === model.destinationId,
+                ) ?? developmentVisualRuleWorkspace.destinations[0]
+                const relativePath = `${destination.sourceRoot}/${model.packageName.replace(/\./g, '/')}/${model.className}.java`
+                return {
+                  accepted: true,
+                  changeSetId: 'visual-rule:development',
+                  label: `${model.sourceLocator ? 'Update' : 'Create'} visual rule ${model.name}`,
+                  planDigest: 'development-visual-rule',
+                  files: [{
+                    relativePath,
+                    mode: model.sourceLocator ? 'MODIFY' : 'CREATE',
+                    beforeFingerprint: model.sourceLocator?.revisionFingerprint,
+                    afterFingerprint: 'development-visual-rule-after',
+                    resultContent: `package ${model.packageName};
+
+import org.springframework.stereotype.Component;
+
+@Component("${model.beanName}")
+public class ${model.className} {
+    // Pure typed ${model.kind.toLowerCase()} compiled from ${model.expression.kind}
+}
+`,
+                    appliedEditCount: model.sourceLocator ? 1 : 0,
+                  }],
+                  issues: [],
+                } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'applyVisualRule':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Generate ${payload.model?.name ?? 'visual rule'}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'visual-rule:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [`${payload.model?.className ?? 'VisualRule'}.java`],
+                  issues: [],
+                } satisfies WorkspaceChangeApplyResponse
+              case 'previewDmnDecision': {
+                const model = payload as DmnDecisionModel
+                const destination = developmentDmnDecisionWorkspace.destinations.find(
+                  (candidate) => candidate.id === model.destinationId,
+                ) ?? developmentDmnDecisionWorkspace.destinations[0]
+                const relativePath = `${destination.dmnDirectory}/${model.fileName}`
+                return {
+                  accepted: true,
+                  changeSetId: 'dmn-decision:development',
+                  label: `${model.sourceLocator ? 'Update' : 'Create'} DMN decision ${model.name}`,
+                  planDigest: 'development-dmn-decision',
+                  files: [{
+                    relativePath,
+                    mode: model.sourceLocator ? 'MODIFY' : 'CREATE',
+                    beforeFingerprint: model.sourceLocator?.revisionFingerprint,
+                    afterFingerprint: 'development-dmn-after',
+                    resultContent: `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/DMN/20151101">
+  <decision id="${model.key}" name="${model.name}">
+    <decisionTable hitPolicy="${model.hitPolicy}">
+      <!-- ${model.inputs.length} inputs, ${model.outputs.length} outputs, ${model.rules.length} rules -->
+    </decisionTable>
+  </decision>
+</definitions>
+`,
+                    appliedEditCount: model.sourceLocator ? 1 : 0,
+                  }],
+                  issues: [],
+                } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'applyDmnDecision':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Generate ${payload.model?.name ?? 'DMN decision'}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'dmn-decision:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [`${payload.model?.fileName ?? 'decision.dmn'}`],
+                  issues: [],
+                } satisfies WorkspaceChangeApplyResponse
+              case 'simulateDmnDecision': {
+                const model = payload.model as DmnDecisionModel
+                const enabledRule = model.rules.find((rule) => rule.enabled)
+                return {
+                  accepted: Boolean(enabledRule),
+                  matchedRuleIds: enabledRule ? [enabledRule.id] : [],
+                  results: enabledRule ? [enabledRule.outputEntries] : [],
+                  diagnostics: [],
+                } satisfies DmnSimulationResult
+              }
+              case 'previewScenarioTest': {
+                const scenario = payload as ScenarioTestModel
+                const destination = developmentScenarioWorkspace.destinations.find(
+                  (candidate) => candidate.id === scenario.destinationId,
+                ) ?? developmentScenarioWorkspace.destinations[0]
+                const relativePath = `${destination.testSourceRoot}/${scenario.packageName.replace(/\./g, '/')}/${scenario.className}.java`
+                return {
+                  accepted: true,
+                  changeSetId: 'scenario-test:development',
+                  label: `Create integration scenario ${scenario.name}`,
+                  planDigest: 'development-scenario-test',
+                  files: [{
+                    relativePath,
+                    mode: scenario.sourceLocator ? 'MODIFY' : 'CREATE',
+                    beforeFingerprint: scenario.sourceLocator?.revisionFingerprint,
+                    afterFingerprint: 'development-scenario-after',
+                    resultContent: `package ${scenario.packageName};
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+class ${scenario.className} {
+    @Test
+    void ${scenario.name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'executes_scenario'}() {
+        // ${scenario.steps.length} visual steps generated with DataManager and security context
+    }
+}
+`,
+                    appliedEditCount: scenario.sourceLocator ? 1 : 0,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applyScenarioTest':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Generate scenario ${payload.scenario?.name ?? 'test'}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'scenario-test:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [`${payload.scenario?.className ?? 'ScenarioTest'}.java`],
+                  issues: [],
+                }
+              case 'getMenuWorkspace':
+                return {
+                  sources: [],
+                  warnings: [],
+                  springBeans: [
+                    {
+                      name: 'PayrollMenu',
+                      declarationName: 'PayrollMenu',
+                      sourcePath: 'src/main/java/com/company/payroll/menu/PayrollMenu.java',
+                      language: 'JAVA',
+                      ambiguous: false,
+                      methods: [
+                        {
+                          name: 'closePeriod',
+                          signature: 'closePeriod()',
+                          callable: true,
+                        },
+                        {
+                          name: 'openReport',
+                          signature: 'openReport(Map<String, Object>)',
+                          callable: true,
+                        },
+                      ],
+                    },
+                  ],
+                }
+              case 'getSchemaWorkspace':
+                return developmentSchemaWorkspace
+              case 'getDatabaseEntityImportProfiles':
+                return {
+                  profiles: [{
+                    profile: {
+                      schemaVersion: 1,
+                      id: 'loan-accounts',
+                      label: 'Loan accounts database model',
+                      request: {
+                        storeId: 'loan:main',
+                        moduleId: 'loan',
+                        packageName: 'com.company.loan.entity',
+                        sourceLanguage: 'java',
+                        selectedTables: [{
+                          catalog: 'payroll',
+                          schema: 'public',
+                          name: 'LOAN_ACCT',
+                          type: 'TABLE',
+                          remarks: 'Loan accounts',
+                        }],
+                        includeDependencies: true,
+                        identifierOverrides: {},
+                        classNameOverrides: {},
+                        profileId: 'loan-accounts',
+                        profileLabel: 'Loan accounts database model',
+                      },
+                      baselineSnapshotDigest: 'development-database-entity-graph',
+                      database: {
+                        name: 'PostgreSQL',
+                        version: '17',
+                        driverName: 'PostgreSQL JDBC Driver',
+                        driverVersion: '42.7',
+                        urlFingerprint: 'development-db',
+                      },
+                      tables: [],
+                    },
+                    sourceLocator: {
+                      relativePath: '.jmix-workbench/database-imports/loan-accounts.json',
+                      revisionFingerprint: 'development-profile-revision',
+                    },
+                  }],
+                  issues: [],
+                } satisfies DatabaseEntityImportProfileWorkspaceResponse
+              case 'getRestApiWorkspace':
+                return developmentRestApiWorkspace
+              case 'invokeRestApi':
+                return {
+                  accepted: false,
+                  durationMillis: 3,
+                  headers: {},
+                  body: '',
+                  truncated: false,
+                  errorCode: 'JVW-REST-INVOKE-DEVELOPMENT-PREVIEW',
+                  message: 'Start the Jmix application and use the packaged plugin to execute loopback API requests.',
+                } satisfies RestApiInvocationResponse
+              case 'previewRestApiContractAddition':
+                return {
+                  accepted: true,
+                  changeSetId: 'rest-contract-add:development',
+                  label: 'Expose Jmix REST contract',
+                  planDigest: 'development-rest-contract',
+                  files: [{
+                    relativePath: payload.configLocator?.relativePath ?? 'src/main/resources/rest-services.xml',
+                    mode: 'MODIFY',
+                    beforeFingerprint: payload.configLocator?.revisionFingerprint,
+                    afterFingerprint: 'development-rest-contract-after',
+                    originalContent: '<services xmlns="http://jmix.io/schema/rest/services">\n</services>\n',
+                    resultContent: '<services xmlns="http://jmix.io/schema/rest/services">\n    <!-- reviewed visual contract -->\n</services>\n',
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              case 'applyRestApiContractAddition':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: 'Expose Jmix REST contract',
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'rest-contract-add:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [payload.change?.configLocator?.relativePath ?? 'src/main/resources/rest-services.xml'],
+                  issues: [],
+                }
+              case 'previewRestApiContractMutation':
+                return {
+                  accepted: true,
+                  changeSetId: 'rest-contract-change:development',
+                  label: `${payload.mode === 'REMOVE' ? 'Remove' : 'Update'} Jmix REST contract`,
+                  planDigest: 'development-rest-contract-change',
+                  files: [{
+                    relativePath: payload.configLocator?.relativePath ?? 'src/main/resources/rest-services.xml',
+                    mode: 'MODIFY',
+                    beforeFingerprint: payload.configLocator?.revisionFingerprint,
+                    afterFingerprint: 'development-rest-contract-change-after',
+                    originalContent: '<services xmlns="http://jmix.io/schema/rest/services">\n    <service name="existing"/>\n</services>\n',
+                    resultContent: payload.mode === 'REMOVE'
+                      ? '<services xmlns="http://jmix.io/schema/rest/services">\n</services>\n'
+                      : '<services xmlns="http://jmix.io/schema/rest/services">\n    <!-- surgically updated contract -->\n</services>\n',
+                    appliedEditCount: 2,
+                  }],
+                  issues: [],
+                }
+              case 'applyRestApiContractMutation':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `${payload.change?.mode === 'REMOVE' ? 'Remove' : 'Update'} Jmix REST contract`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'rest-contract-change:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [payload.change?.configLocator?.relativePath ?? 'src/main/resources/rest-services.xml'],
+                  issues: [],
+                }
+              case 'previewSchemaMigration': {
+                const change = payload as SchemaMigrationChangeRequest
+                const store = developmentSchemaWorkspace.stores.find((candidate) => candidate.id === change.storeId)
+                const relativePath = `${store?.generatedDirectory ?? 'src/main/resources/db/changelog'}/2026/07/${change.fileName ?? change.migration.changelogId}.xml`
+                return {
+                  accepted: true,
+                  changeSetId: 'schema-migration:development',
+                  label: `Create ${store?.name ?? 'main'} Liquibase migration ${change.migration.changelogId}`,
+                  planDigest: 'development-schema-migration',
+                  files: [{
+                    relativePath,
+                    mode: 'CREATE',
+                    afterFingerprint: 'development-schema-after',
+                    resultContent: '<databaseChangeLog><!-- source-safe migration preview --></databaseChangeLog>',
+                    appliedEditCount: 0,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applySchemaMigration':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: 'Create Liquibase migration',
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'schema-migration:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: ['loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/development.xml'],
+                  issues: [],
+                }
+              case 'previewEntityGeneration': {
+                const entity = payload as any
+                const store = developmentSchemaWorkspace.stores.find(
+                  (candidate) => candidate.id === entity.generationTarget?.storeId,
+                ) ?? developmentSchemaWorkspace.stores[0]
+                const packagePath = String(entity.packageName ?? 'com.example.app.entity').replace(/\./g, '/')
+                const modulePrefix = store?.moduleId ? `${store.moduleId}/` : ''
+                const tableStem = String(entity.tableName || entity.className)
+                  .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+                  .toLowerCase()
+                const files = [
+                  `${modulePrefix}src/main/java/${packagePath}/${entity.className || 'NewEntity'}.java`,
+                  `${modulePrefix}src/main/resources/${packagePath}/messages.properties`,
+                ]
+                if (
+                  entity.databaseView !== true &&
+                  entity.ddlGeneration?.enabled !== false &&
+                  entity.ddlGeneration?.mode !== 'disabled' &&
+                  store?.generatedDirectory
+                ) {
+                  files.push(
+                    `${store.generatedDirectory}/2026/07/29-create-${tableStem}.xml`,
+                  )
+                }
+                return {
+                  accepted: true,
+                  changeSetId: 'generation:development-entity',
+                  label: `Create Jmix entity ${entity.className || 'NewEntity'}`,
+                  planDigest: 'development-entity-generation',
+                  files: files.map((relativePath) => ({
+                    relativePath,
+                    mode: relativePath.endsWith('messages.properties') ? 'MODIFY' : 'CREATE',
+                    afterFingerprint: `development-${relativePath}`,
+                    resultContent: relativePath.endsWith('.java')
+                      ? `package ${entity.packageName};\n\npublic class ${entity.className} {}\n`
+                      : '# source-safe generated preview\n',
+                    appliedEditCount: relativePath.endsWith('messages.properties') ? 1 : 0,
+                  })),
+                  issues: [],
+                }
+              }
+              case 'applyEntityGeneration':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Create Jmix entity ${payload.entity?.className ?? ''}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'generation:development-entity',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    `loan/src/main/java/${String(payload.entity?.packageName ?? '').replace(/\./g, '/')}/${payload.entity?.className}.java`,
+                  ],
+                  issues: [],
+                }
+              case 'previewEntityEventListener': {
+                const listener = payload as EntityEventListenerRequest
+                const entity = developmentSchemaWorkspace.entities.find(
+                  candidate =>
+                    candidate.sourceLocator.relativePath === listener.entitySource.relativePath,
+                ) ?? developmentSchemaWorkspace.entities[0]
+                const modulePrefix = entity?.moduleId ? `${entity.moduleId}/` : ''
+                const root = listener.sourceLanguage === 'kotlin'
+                  ? 'src/main/kotlin'
+                  : 'src/main/java'
+                const extension = listener.sourceLanguage === 'kotlin' ? 'kt' : 'java'
+                const relativePath =
+                  `${modulePrefix}${root}/${listener.packageName.replace(/\./g, '/')}/${listener.className}.${extension}`
+                const entityClass = entity?.className ?? 'Entity'
+                const javaMethods = listener.events.map(event => {
+                  switch (event) {
+                    case 'ENTITY_SAVING':
+                      return `    @org.springframework.context.event.EventListener
+    public void on${entityClass}Saving(io.jmix.core.event.EntitySavingEvent<${entityClass}> event) {
+    }`
+                    case 'ENTITY_LOADING':
+                      return `    @org.springframework.context.event.EventListener
+    public void on${entityClass}Loading(io.jmix.core.event.EntityLoadingEvent<${entityClass}> event) {
+    }`
+                    case 'ENTITY_CHANGED_BEFORE_COMMIT':
+                      return `    @org.springframework.context.event.EventListener
+    public void on${entityClass}ChangedBeforeCommit(EntityChangedEvent<${entityClass}> event) {
+    }`
+                    case 'ENTITY_CHANGED_AFTER_COMMIT':
+                      return `    @TransactionalEventListener(phase = org.springframework.transaction.event.TransactionPhase.AFTER_COMMIT)
+${listener.afterCommitRequiresNewTransaction
+    ? '    @org.springframework.transaction.annotation.Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)\n'
+    : ''}    public void on${entityClass}ChangedAfterCommit(EntityChangedEvent<${entityClass}> event) {
+    }`
+                  }
+                }).join('\n\n')
+                const kotlinMethods = listener.events.map(event => {
+                  switch (event) {
+                    case 'ENTITY_SAVING':
+                      return `    @org.springframework.context.event.EventListener
+    fun on${entityClass}Saving(event: io.jmix.core.event.EntitySavingEvent<${entityClass}>) {
+    }`
+                    case 'ENTITY_LOADING':
+                      return `    @org.springframework.context.event.EventListener
+    fun on${entityClass}Loading(event: io.jmix.core.event.EntityLoadingEvent<${entityClass}>) {
+    }`
+                    case 'ENTITY_CHANGED_BEFORE_COMMIT':
+                      return `    @org.springframework.context.event.EventListener
+    fun on${entityClass}ChangedBeforeCommit(event: EntityChangedEvent<${entityClass}>) {
+    }`
+                    case 'ENTITY_CHANGED_AFTER_COMMIT':
+                      return `    @TransactionalEventListener(phase = org.springframework.transaction.event.TransactionPhase.AFTER_COMMIT)
+${listener.afterCommitRequiresNewTransaction
+    ? '    @org.springframework.transaction.annotation.Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)\n'
+    : ''}    fun on${entityClass}ChangedAfterCommit(event: EntityChangedEvent<${entityClass}>) {
+    }`
+                  }
+                }).join('\n\n')
+                const source = listener.sourceLanguage === 'kotlin'
+                  ? `package ${listener.packageName}
+
+import io.jmix.core.event.EntityChangedEvent
+import org.springframework.transaction.event.TransactionalEventListener
+
+class ${listener.className} {
+${kotlinMethods}
+}
+`
+                  : `package ${listener.packageName};
+
+import io.jmix.core.event.EntityChangedEvent;
+import org.springframework.transaction.event.TransactionalEventListener;
+
+public class ${listener.className} {
+${javaMethods}
+}
+`
+                return {
+                  accepted: true,
+                  changeSetId: 'entity-listener:development',
+                  label: `Create ${listener.className} for ${entity?.className ?? 'entity'}`,
+                  planDigest: 'development-entity-listener',
+                  files: [{
+                    relativePath,
+                    mode: 'CREATE',
+                    afterFingerprint: 'development-entity-listener-after',
+                    resultContent: source,
+                    appliedEditCount: 0,
+                  }],
+                  issues: [],
+                } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'applyEntityEventListener':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Create ${payload.listener?.className ?? 'entity listener'}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'entity-listener:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [`${payload.listener?.className ?? 'EntityEventListener'}.java`],
+                  issues: [],
+                } satisfies WorkspaceChangeApplyResponse
+              case 'previewDataRepositoryChange': {
+                const change = payload as DataRepositoryChangeRequest
+                const repositoryName = change.config.interfaceName || 'EntityRepository'
+                const extension = change.entitySource.relativePath.endsWith('.kt') ? 'kt' : 'java'
+                const relativePath = change.repositorySource?.relativePath ??
+                  `${change.entitySource.relativePath.substring(0, change.entitySource.relativePath.lastIndexOf('/') + 1)}${repositoryName}.${extension}`
+                return {
+                  accepted: true,
+                  changeSetId: 'data-repository:development',
+                  label: `${change.repositorySource ? 'Update' : 'Create'} ${repositoryName}`,
+                  planDigest: 'development-data-repository',
+                  files: [{
+                    relativePath,
+                    mode: change.repositorySource ? 'MODIFY' : 'CREATE',
+                    afterFingerprint: 'development-data-repository-after',
+                    resultContent: `// Source-safe ${repositoryName} preview\n`,
+                    appliedEditCount: change.repositorySource ? 1 : 0,
+                  }],
+                  issues: [],
+                } satisfies WorkspaceChangePreviewResponse
+              }
+              case 'validateDataRepositorySemantics': {
+                const change = payload as DataRepositoryChangeRequest
+                const propertyPaths = [
+                  { path: 'id', javaType: 'UUID', nullable: false, association: false, collection: false, derivedToken: 'Id' },
+                  { path: 'employeeNumber', javaType: 'String', nullable: false, association: false, collection: false, derivedToken: 'EmployeeNumber' },
+                  { path: 'department', javaType: 'Department', nullable: true, association: true, collection: false, derivedToken: 'Department' },
+                  { path: 'department.code', javaType: 'String', nullable: false, association: false, collection: false, derivedToken: 'DepartmentCode' },
+                  { path: 'active', javaType: 'Boolean', nullable: false, association: false, collection: false, derivedToken: 'Active' },
+                ]
+                const diagnostics: RepositorySemanticValidationResponse['diagnostics'] = []
+                change.config.methods.forEach((method, methodIndex) => {
+                  if (method.queryType === 'derived' &&
+                    method.name.includes('DoesNotExist')) {
+                    diagnostics.push({
+                      severity: 'error',
+                      code: 'JVW-REPOSITORY-DERIVED-PROPERTY',
+                      message: "Cannot resolve derived property 'doesNotExist' against the entity model.",
+                      methodIndex,
+                      field: 'name',
+                      suggestions: ['department.code', 'employeeNumber'],
+                      blocking: true,
+                      sourceOwned: false,
+                    })
+                    return
+                  }
+                  if (method.applyConstraints === false) {
+                    diagnostics.push({
+                      severity: 'warning',
+                      code: 'JVW-REPOSITORY-METHOD-SECURITY-BYPASS',
+                      message: `Method '${method.name}' explicitly bypasses Jmix data constraints.`,
+                      methodIndex,
+                      field: 'applyConstraints',
+                      suggestions: [],
+                      blocking: false,
+                      sourceOwned: false,
+                    })
+                  }
+                })
+                if (!change.config.applyConstraints) {
+                  diagnostics.push({
+                    severity: 'warning',
+                    code: 'JVW-REPOSITORY-SECURITY-BYPASS',
+                    message: 'Repository-wide security constraints are disabled.',
+                    field: 'applyConstraints',
+                    suggestions: [],
+                    blocking: false,
+                    sourceOwned: false,
+                  })
+                }
+                return {
+                  accepted: diagnostics.every(diagnostic => diagnostic.severity !== 'error'),
+                  diagnostics,
+                  propertyPaths,
+                  methods: change.config.methods.map((method, methodIndex) => ({
+                    methodIndex,
+                    propertyPaths: propertyPaths
+                      .filter(path => method.name.includes(path.derivedToken) || method.query?.includes(`.${path.path}`))
+                      .map(path => path.path),
+                    expectedValueParameters: method.parameters.filter(parameter => parameter.role === 'value').length,
+                    resultKind: method.queryType === 'jpql' ? 'entity' : 'entity',
+                  })),
+                } satisfies RepositorySemanticValidationResponse
+              }
+              case 'applyDataRepositoryChange':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: 'Update data repository',
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'data-repository:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    payload.change?.repositorySource?.relativePath ??
+                      `${payload.change?.config?.interfaceName ?? 'EntityRepository'}.java`,
+                  ],
+                  issues: [],
+                } satisfies WorkspaceChangeApplyResponse
+              case 'previewExistingEntityAttributeAdditions': {
+                const change = payload as any
+                const entity = change.entity ?? {}
+                const sourcePath = change.sourceLocator?.relativePath ??
+                  'loan/src/main/java/com/company/loan/entity/LoanApp.java'
+                const currentEntity = developmentSchemaWorkspace.entities
+                  .find(candidate => candidate.qualifiedName === `${entity.packageName}.${entity.className}`)
+                const additions = (entity.attributes ?? []).filter((attribute: any) =>
+                  !currentEntity?.attributes.some(existing => existing.name === attribute.name),
+                )
+                const mappingChanges = (entity.attributes ?? []).filter((attribute: any) => {
+                  const current = currentEntity?.attributes.find(existing => existing.name === attribute.name)
+                  if (!current || current.association || !current.persistent) return false
+                  return attribute.mandatory !== !current.nullable ||
+                    attribute.unique !== current.unique ||
+                    (attribute.columnName ?? current.columnName) !== current.columnName ||
+                    (attribute.length ?? 255) !== (current.length ?? 255) ||
+                    attribute.precision !== current.precision ||
+                    attribute.scale !== current.scale
+                })
+                const relationshipMappingChanges = (entity.attributes ?? []).filter((attribute: any) => {
+                  const current = currentEntity?.attributes.find(existing => existing.name === attribute.name)
+                  if (!current?.association || !attribute.association) return false
+                  return attribute.mandatory !== !current.nullable ||
+                    attribute.unique !== current.unique ||
+                    attribute.association.associationType !== current.associationDetails?.associationType ||
+                    attribute.association.joinColumnName !== current.associationDetails?.joinColumnName
+                })
+                const coordinatedInverseEntities = relationshipMappingChanges.flatMap((
+                  attribute: any,
+                ): SchemaWorkspaceResponse['entities'] => {
+                  const current = currentEntity?.attributes.find(existing => existing.name === attribute.name)
+                  if (
+                    !current?.associationDetails ||
+                    !attribute.association ||
+                    current.associationDetails.associationType === attribute.association.associationType
+                  ) {
+                    return []
+                  }
+                  const target = developmentSchemaWorkspace.entities.find(candidate =>
+                    candidate.qualifiedName === current.associationDetails?.relatedEntity,
+                  )
+                  const inverseMatches = target?.attributes.filter(candidate =>
+                    candidate.associationDetails?.relatedEntity === currentEntity?.qualifiedName &&
+                    candidate.associationDetails?.mappedBy === current.name,
+                  ) ?? []
+                  return inverseMatches.length === 1 && target ? [target] : []
+                }).filter((
+                  candidate: SchemaWorkspaceResponse['entities'][number],
+                  index: number,
+                  candidates: SchemaWorkspaceResponse['entities'],
+                ) =>
+                  candidate.sourceLocator.relativePath !== sourcePath &&
+                  candidates.findIndex((
+                    other: SchemaWorkspaceResponse['entities'][number],
+                  ) => other.artifactId === candidate.artifactId) === index,
+                )
+                if (
+                  additions.length === 0 &&
+                  mappingChanges.length === 0 &&
+                  relationshipMappingChanges.length === 0
+                ) {
+                  return {
+                    accepted: false,
+                    changeSetId: 'existing-entity-update:rejected',
+                    label: 'Existing entity update rejected',
+                    files: [],
+                    issues: [{
+                      code: 'JVW-ENTITY-UPDATE-NOOP',
+                      message: 'Change a safe mapping or add an attribute before previewing the update.',
+                    }],
+                  }
+                }
+                const migrationPath =
+                  `loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/29-update-${String(entity.tableName ?? entity.className).toLowerCase()}.xml`
+                return {
+                  accepted: true,
+                  changeSetId: 'existing-entity-update:development',
+                  label: `Update ${entity.className}: ${[
+                    additions.length
+                      ? `add ${additions.length} attribute${additions.length === 1 ? '' : 's'}`
+                      : '',
+                    mappingChanges.length
+                      ? `change ${mappingChanges.length} scalar mapping${mappingChanges.length === 1 ? '' : 's'}`
+                      : '',
+                    relationshipMappingChanges.length
+                      ? `change ${relationshipMappingChanges.length} relationship mapping${relationshipMappingChanges.length === 1 ? '' : 's'}`
+                      : '',
+                  ].filter(Boolean).join(', ')}`,
+                  planDigest: 'development-existing-entity-update',
+                  files: [
+                    {
+                      relativePath: sourcePath,
+                      mode: 'MODIFY',
+                      beforeFingerprint: change.sourceLocator?.revisionFingerprint,
+                      afterFingerprint: 'development-existing-entity-after',
+                      resultContent: [
+                        '// Existing source preserved',
+                        additions.length
+                          ? `// Added: ${additions.map((attribute: any) => attribute.name).join(', ')}`
+                          : '',
+                        mappingChanges.length
+                          ? `// Mapping updates: ${mappingChanges.map((attribute: any) => attribute.name).join(', ')}`
+                          : '',
+                        relationshipMappingChanges.length
+                          ? `// Relationship mapping updates: ${relationshipMappingChanges.map((attribute: any) => attribute.name).join(', ')}`
+                          : '',
+                      ].filter(Boolean).join('\n'),
+                      appliedEditCount: 2,
+                    },
+                    ...coordinatedInverseEntities.map((
+                      target: SchemaWorkspaceResponse['entities'][number],
+                    ) => ({
+                      relativePath: target.sourceLocator.relativePath,
+                      mode: 'MODIFY' as const,
+                      beforeFingerprint: target.sourceLocator.revisionFingerprint,
+                      afterFingerprint: 'development-existing-inverse-after',
+                      resultContent: '// Exact inverse collection/scalar declaration updated atomically',
+                      appliedEditCount: 2,
+                    })),
+                    {
+                      relativePath: migrationPath,
+                      mode: 'CREATE',
+                      afterFingerprint: 'development-existing-entity-migration',
+                      resultContent: '<databaseChangeLog><!-- safe entity migration with rollback --></databaseChangeLog>',
+                      appliedEditCount: 0,
+                    },
+                  ],
+                  issues: [],
+                }
+              }
+              case 'applyExistingEntityAttributeAdditions': {
+                const changedEntity = payload.change?.entity as any
+                const currentEntity = developmentSchemaWorkspace.entities.find(
+                  candidate => candidate.qualifiedName ===
+                    `${changedEntity?.packageName}.${changedEntity?.className}`,
+                )
+                const physicalStore = developmentSchemaWorkspace.physicalSchemas.find(
+                  candidate => candidate.storeId === changedEntity?.generationTarget?.storeId,
+                )
+                const physicalTable = physicalStore?.tables.find(
+                  candidate => candidate.name.toLowerCase() ===
+                    String(currentEntity?.tableName ?? '').split('.').pop()?.toLowerCase(),
+                )
+                ;(changedEntity?.attributes ?? []).forEach((desired: any) => {
+                  const current = currentEntity?.attributes.find(candidate => candidate.name === desired.name)
+                  if (!current) return
+                  const formerAssociationType = current.associationDetails?.associationType
+                  const oldColumn = current.columnName
+                  const nextColumn =
+                    desired.association?.joinColumnName ||
+                    desired.columnName ||
+                    oldColumn
+                  const physicalColumn = physicalTable?.columns.find(
+                    candidate => candidate.name.toLowerCase() === oldColumn.toLowerCase(),
+                  )
+                  if (nextColumn !== oldColumn) {
+                    current.columnName = nextColumn
+                    if (current.associationDetails) {
+                      current.associationDetails.joinColumnName = nextColumn
+                    }
+                    if (physicalColumn) physicalColumn.name = nextColumn
+                    physicalTable?.foreignKeys.forEach(foreignKey => {
+                      if (foreignKey.baseColumnNames.toLowerCase() === oldColumn.toLowerCase()) {
+                        foreignKey.baseColumnNames = nextColumn
+                      }
+                    })
+                  }
+                  current.nullable = !desired.mandatory
+                  current.unique = Boolean(desired.unique)
+                  if (current.associationDetails && desired.association) {
+                    current.associationDetails.associationType = desired.association.associationType
+                    if (formerAssociationType !== desired.association.associationType) {
+                      const target = developmentSchemaWorkspace.entities.find(candidate =>
+                        candidate.qualifiedName === current.associationDetails?.relatedEntity,
+                      )
+                      const inverseMatches = target?.attributes.filter(candidate =>
+                        candidate.associationDetails?.relatedEntity === currentEntity?.qualifiedName &&
+                        candidate.associationDetails?.mappedBy === current.name,
+                      ) ?? []
+                      if (inverseMatches.length === 1) {
+                        const inverse = inverseMatches[0]
+                        const inverseType = desired.association.associationType === 'oneToOne'
+                          ? 'oneToOne'
+                          : 'oneToMany'
+                        if (inverse.associationDetails) {
+                          inverse.associationDetails.associationType = inverseType
+                        }
+                        inverse.javaType = inverseType === 'oneToOne'
+                          ? currentEntity?.qualifiedName ?? inverse.javaType
+                          : `java.util.List<${currentEntity?.qualifiedName ?? 'java.lang.Object'}>`
+                        if (target) {
+                          target.sourceLocator.revisionFingerprint =
+                            `development-existing-inverse-${Date.now()}`
+                        }
+                      }
+                    }
+                  }
+                  if (physicalColumn && physicalTable) {
+                    physicalColumn.nullable = !desired.mandatory
+                    physicalColumn.unique = Boolean(desired.unique)
+                    const uniqueConstraints =
+                      physicalTable.uniqueConstraints ?? (physicalTable.uniqueConstraints = [])
+                    const matchingUnique = uniqueConstraints.findIndex(constraint =>
+                      constraint.columns.length === 1 &&
+                      constraint.columns[0].toLowerCase() === physicalColumn.name.toLowerCase(),
+                    )
+                    if (desired.unique && matchingUnique < 0) {
+                      uniqueConstraints.push({
+                        name: `UQ_${physicalTable.name}_${physicalColumn.name}`,
+                        columns: [physicalColumn.name],
+                      })
+                    } else if (!desired.unique && matchingUnique >= 0) {
+                      uniqueConstraints.splice(matchingUnique, 1)
+                    }
+                  }
+                })
+                if (currentEntity) {
+                  currentEntity.sourceLocator.revisionFingerprint =
+                    `development-existing-entity-${Date.now()}`
+                }
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Update ${payload.change?.entity?.className ?? 'entity'}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'existing-entity-update:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    payload.change?.sourceLocator?.relativePath ??
+                      'loan/src/main/java/com/company/loan/entity/LoanApp.java',
+                    'loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/29-update-loan_app.xml',
+                  ],
+                  issues: [],
+                }
+              }
+              case 'inspectEntityAttributeRename':
+                return {
+                  success: true,
+                  message: `Native usage rename is ready for ${payload.attributeName} → ${payload.newName}; no files were changed.`,
+                }
+              case 'launchEntityAttributeRename':
+                return {
+                  success: true,
+                  message: `IntelliJ usage preview opened for ${payload.attributeName} → ${payload.newName}.`,
+                }
+              case 'launchEntityAttributeSafeDelete':
+                return {
+                  success: true,
+                  message: `IntelliJ Safe Delete usage preview opened for ${payload.attributeName}. Database mapping is retained for separate migration review.`,
+                  retainedColumnName: payload.attributeName
+                    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+                    .toUpperCase(),
+                }
+              case 'launchRepositoryMethodRefactor':
+                return {
+                  success: true,
+                  message: payload.operation === 'OPEN_SOURCE'
+                    ? `Opened ${payload.repositoryQualifiedName}.${payload.sourceSignature} in source.`
+                    : `IntelliJ ${String(payload.operation)
+                      .toLowerCase()
+                      .replace(/_/g, ' ')} opened for ${payload.sourceSignature}. ` +
+                      `No source changes until you confirm IntelliJ's preview.`,
+                } satisfies RepositoryMethodRefactorLaunchResponse
+              case 'launchEntityAttributeTypeMigration':
+                return {
+                  success: payload.targetType === 'uri' || Boolean(payload.verificationToken),
+                  code: payload.targetType === 'uri' || payload.verificationToken
+                    ? undefined
+                    : 'JVW-ENTITY-TYPE-MIGRATION-SCHEMA-STAGE-REQUIRED',
+                  message: payload.targetType === 'uri' || payload.verificationToken
+                    ? `IntelliJ project-wide Type Migration preview opened for ${payload.attributeName} → ${payload.targetType}.`
+                    : `Schema expansion is required before ${payload.attributeName} can migrate to ${payload.targetType}.`,
+                  sourceLanguage: 'java',
+                  schemaImpact: {
+                    strategy: payload.targetType === 'uri'
+                      ? 'SOURCE_ONLY'
+                      : 'EXPAND_CONTRACT_REQUIRED',
+                    storeId: 'loan:main',
+                    tableName: 'LOAN_APP',
+                    columnName: payload.attributeName
+                      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+                      .toUpperCase(),
+                    currentSqlType: 'INT',
+                    targetSqlType: payload.targetType === 'long'
+                      ? 'BIGINT'
+                      : payload.targetType === 'uri' ? 'INT' : 'DOUBLE',
+                    dependencies: ['index IDX_LOAN_APP_STATUS'],
+                    summary: payload.targetType === 'uri'
+                      ? 'No physical type rewrite is required.'
+                      : 'The mapped column requires a reviewed data conversion. This is not automatically reversible.',
+                  },
+                }
+              case 'previewEntityAttributeTypeExpansion':
+                return {
+                  accepted: true,
+                  message: `Expansion preview is ready for ${payload.attributeName}.`,
+                  shadowColumnName: 'JVE_91A8B2C_LOAN_AMOUNT',
+                  targetSqlType: payload.targetType === 'long' ? 'BIGINT' : 'DOUBLE',
+                  preview: {
+                    accepted: true,
+                    changeSetId: 'entity-type-expansion:development',
+                    label: `Expand ${payload.attributeName} safely`,
+                    planDigest: 'development-entity-type-expansion',
+                    files: [{
+                      relativePath: 'loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/30-entity-type-expand.xml',
+                      mode: 'CREATE',
+                      afterFingerprint: 'development-expansion-after',
+                      resultContent: '<databaseChangeLog><!-- shadow column + backfill + rollback --></databaseChangeLog>',
+                      appliedEditCount: 0,
+                    }],
+                    issues: [],
+                  },
+                }
+              case 'applyEntityAttributeTypeExpansion':
+                return {
+                  success: true,
+                  changeSetId: 'entity-type-expansion:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    'loan/src/main/resources/com/company/loan/liquibase/changelog/2026/07/30-entity-type-expand.xml',
+                  ],
+                  issues: [],
+                }
+              case 'verifyEntityAttributeTypeExpansion':
+                return {
+                  accepted: true,
+                  message: 'Live database verified: the shadow type and every deployed backfill row are complete.',
+                  verificationToken: 'development-expansion-verification',
+                  expiresAtEpochMillis: Date.now() + 20 * 60 * 1000,
+                  evidenceDigest: 'development-live-expansion-evidence',
+                  shadowColumnName: 'JVE_91A8B2C_LOAN_AMOUNT',
+                  targetSqlType: payload.targetType === 'long' ? 'BIGINT' : 'DOUBLE',
+                  inconsistentBackfillRows: 0,
+                  database: {
+                    name: 'PostgreSQL',
+                    version: '17',
+                    driverName: 'PostgreSQL JDBC Driver',
+                    driverVersion: '42.7',
+                    urlFingerprint: 'development-db',
+                  },
+                }
+              case 'previewEntityAttributeTypeMappingCutover':
+                return {
+                  accepted: true,
+                  changeSetId: 'entity-type-mapping-cutover:development',
+                  label: `Switch ${payload.entityClassName}.${payload.attributeName} to verified shadow`,
+                  planDigest: 'development-mapping-cutover',
+                  files: [{
+                    relativePath: payload.sourceLocator?.relativePath ??
+                      'loan/src/main/java/com/company/loan/entity/LoanApp.java',
+                    mode: 'MODIFY',
+                    beforeFingerprint: payload.sourceLocator?.revisionFingerprint,
+                    afterFingerprint: 'development-mapping-cutover-after',
+                    originalContent: '@Column(name = "LOAN_AMOUNT")',
+                    resultContent: '@Column(name = "JVE_91A8B2C_LOAN_AMOUNT")',
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              case 'applyEntityAttributeTypeMappingCutover':
+                return {
+                  success: true,
+                  changeSetId: 'entity-type-mapping-cutover:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [payload.change?.sourceLocator?.relativePath],
+                  issues: [],
+                }
+              case 'inspectDatabaseEntityTable':
+                return {
+                  accepted: true,
+                  snapshotDigest: 'development-loan-app-database-snapshot',
+                  storeId: payload.storeId,
+                  existingEntityQualifiedName:
+                    payload.expectedEntityQualifiedName === 'com.company.loan.entity.LoanApp' &&
+                    (payload.tableName || '').toUpperCase() === 'LOAN_LOAN_APP' &&
+                    (payload.schemaName || 'public').toLowerCase() === 'public'
+                      ? 'com.company.loan.entity.LoanApp'
+                      : undefined,
+                  database: {
+                    name: 'PostgreSQL',
+                    version: '17.2',
+                    driverName: 'PostgreSQL JDBC Driver',
+                    driverVersion: '42.7.5',
+                    urlFingerprint: '0a17f0a17f0a17f0',
+                  },
+                  table: {
+                    catalog: payload.catalogName || 'payroll',
+                    schema: payload.schemaName || 'public',
+                    name: payload.tableName || 'LOAN_LOAN_APP',
+                    type: 'TABLE',
+                    primaryKeyColumns: ['ID'],
+                    dependencyTables: ['EMPLOYEE', 'LOAN_CATEGORY'],
+                    foreignKeys: [
+                      {
+                        name: 'FK_LOAN_APP_EMPLOYEE',
+                        columnName: 'EMPLOYEE_ID',
+                        referencedTableName: 'EMPLOYEE',
+                        referencedColumnName: 'ID',
+                        updateRule: 3,
+                        deleteRule: 3,
+                        sequence: 1,
+                      },
+                    ],
+                    indexes: [
+                      { name: 'IDX_LOAN_APP_EMPLOYEE', unique: false, columns: ['EMPLOYEE_ID'] },
+                      { name: 'UQ_LOAN_APP_NUMBER', unique: true, columns: ['APPLICATION_NO'] },
+                    ],
+                    columns: [
+                      developmentDatabaseColumn('ID', 'UUID', 'uuid', true, true),
+                      developmentDatabaseColumn('APPLICATION_NO', 'VARCHAR', 'string', false, true, 40),
+                      developmentDatabaseColumn('EMPLOYEE_ID', 'UUID', 'association', false, false, undefined, {
+                        attributeName: 'employee',
+                        javaType: 'com.company.hr.entity.Employee',
+                        relatedEntity: 'com.company.hr.entity.Employee',
+                        joinColumnName: 'EMPLOYEE_ID',
+                        referencedColumnName: 'ID',
+                      }),
+                      developmentDatabaseColumn('APPROVED_AMOUNT', 'NUMERIC', 'bigDecimal', false, false, 19, {
+                        precision: 19,
+                        scale: 2,
+                      }),
+                      developmentDatabaseColumn('LEGACY_RISK_SCORE', 'INTEGER', 'integer', false, false),
+                    ],
+                  },
+                  issues: [],
+                } satisfies DatabaseEntityTableInspectionResponse
+              case 'inspectEntityAttributePropagation': {
+                const attributeNames = payload.attributeNames ?? []
+                return {
+                  accepted: true,
+                  entityQualifiedName: payload.entityQualifiedName,
+                  attributes: attributeNames,
+                  targets: [
+                    {
+                      id: 'development-detail-form',
+                      kind: 'VIEW_FORM',
+                      label: 'Form loanAppForm',
+                      relativePath: 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-detail-view.xml',
+                      detail: `Add ${attributeNames.length} bound fields for loanAppDc.`,
+                      missingAttributes: attributeNames,
+                      recommended: true,
+                      supported: true,
+                      securityExpanding: false,
+                    },
+                    {
+                      id: 'development-list-grid',
+                      kind: 'VIEW_GRID',
+                      label: 'Grid loanAppsDataGrid',
+                      relativePath: 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-list-view.xml',
+                      detail: `Add ${attributeNames.length} bound columns for loanAppsDc.`,
+                      missingAttributes: attributeNames,
+                      recommended: true,
+                      supported: true,
+                      securityExpanding: false,
+                    },
+                    {
+                      id: 'development-message-bundle',
+                      kind: 'MESSAGE_BUNDLE',
+                      label: 'Entity message bundle',
+                      relativePath: 'loan/src/main/resources/com/company/loan/entity/messages.properties',
+                      detail: `Add ${attributeNames.length} default-locale caption keys.`,
+                      missingAttributes: attributeNames,
+                      recommended: true,
+                      supported: true,
+                      securityExpanding: false,
+                    },
+                    {
+                      id: 'development-security-impact',
+                      kind: 'RESOURCE_ROLE',
+                      label: 'Security role PayrollUserRole',
+                      relativePath: 'loan/src/main/java/com/company/loan/security/PayrollUserRole.java',
+                      detail: 'Explicitly extend the existing VIEW attribute policy. This expands privileges.',
+                      missingAttributes: attributeNames,
+                      recommended: false,
+                      supported: true,
+                      securityExpanding: true,
+                    },
+                  ],
+                  issues: [],
+                } satisfies EntityAttributePropagationInspectionResponse
+              }
+              case 'previewEntityAttributePropagation': {
+                const selected = new Set<string>(payload.targetIds ?? [])
+                const paths = [
+                  payload.inspection?.entityChange?.sourceLocator?.relativePath ?? null,
+                  selected.has('development-detail-form')
+                    ? 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-detail-view.xml'
+                    : null,
+                  selected.has('development-list-grid')
+                    ? 'loan/src/main/resources/com/company/loan/view/loanapp/loan-app-list-view.xml'
+                    : null,
+                  selected.has('development-message-bundle')
+                    ? 'loan/src/main/resources/com/company/loan/entity/messages.properties'
+                    : null,
+                ].filter((path): path is string => Boolean(path))
+                return {
+                  accepted: paths.length > 0,
+                  changeSetId: 'entity-attribute-propagation:development',
+                  label: payload.inspection?.entityChange
+                    ? `Add and propagate ${payload.inspection?.attributeNames?.length ?? 0} entity attributes`
+                    : `Propagate ${payload.inspection?.attributeNames?.length ?? 0} entity attributes`,
+                  planDigest: paths.length ? 'development-entity-attribute-propagation' : undefined,
+                  files: paths.map(relativePath => ({
+                    relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: 'development-before',
+                    afterFingerprint: 'development-after',
+                    resultContent: '<!-- source-preserving propagated attributes -->',
+                    appliedEditCount: 1,
+                  })),
+                  issues: paths.length ? [] : [{
+                    code: 'JVW-PROPAGATION-TARGETS-EMPTY',
+                    message: 'Select at least one reviewed propagation target.',
+                  }],
+                }
+              }
+              case 'applyEntityAttributePropagation':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: 'Propagate entity attributes',
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'entity-attribute-propagation:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: ['loan/src/main/resources/com/company/loan/entity/messages.properties'],
+                  issues: [],
+                }
+              case 'browseDatabaseEntityTables':
+                return {
+                  accepted: true,
+                  storeId: payload.storeId,
+                  database: {
+                    name: 'PostgreSQL',
+                    version: '17',
+                    driverName: 'PostgreSQL JDBC Driver',
+                    driverVersion: '42.7',
+                    urlFingerprint: 'development-db',
+                  },
+                  activeCatalog: 'payroll',
+                  catalogs: ['payroll'],
+                  schemas: [
+                    { catalog: 'payroll', name: 'public' },
+                    { catalog: 'payroll', name: 'audit' },
+                  ],
+                  tables: [
+                    {
+                      catalog: 'payroll',
+                      schema: 'public',
+                      name: 'LOAN_LOAN_APP',
+                      type: 'TABLE',
+                      remarks: 'Loan applications',
+                    },
+                    {
+                      catalog: 'payroll',
+                      schema: 'public',
+                      name: 'LOAN_ACCT',
+                      type: 'TABLE',
+                      remarks: 'Loan accounts',
+                    },
+                    {
+                      catalog: 'payroll',
+                      schema: 'audit',
+                      name: 'V_LOAN_EXPOSURE',
+                      type: 'VIEW',
+                      remarks: 'Current loan exposure',
+                    },
+                  ].filter(table =>
+                    (!payload.schemaName || table.schema === payload.schemaName) &&
+                    (!payload.search || table.name.toLowerCase().includes(
+                      String(payload.search).toLowerCase(),
+                    )),
+                  ),
+                  truncated: false,
+                  issues: [],
+                }
+              case 'planDatabaseEntityImport': {
+                const selected = (payload.selectedTables ?? []) as DatabaseTableReference[]
+                const root = selected[0] ?? {
+                  catalog: 'payroll',
+                  schema: 'public',
+                  name: 'LOAN_ACCT',
+                  type: 'TABLE',
+                }
+                const rootTable = {
+                  ...root,
+                  remarks: root.remarks ?? 'Database-first import root',
+                  columns: [
+                    developmentDatabaseColumn('BANK_CODE', 'VARCHAR', 'string', true, false, 12),
+                    developmentDatabaseColumn('ACCOUNT_NO', 'VARCHAR', 'string', true, false, 32),
+                    developmentDatabaseColumn('EMPLOYEE_ID', 'UUID', 'association', false, false),
+                    developmentDatabaseColumn('BALANCE', 'NUMERIC', 'bigDecimal', false, false, 19, {
+                      precision: 19,
+                      scale: 2,
+                    }),
+                  ],
+                  primaryKeyColumns: ['BANK_CODE', 'ACCOUNT_NO'],
+                  foreignKeys: [{
+                    name: 'FK_LOAN_ACCT_EMPLOYEE',
+                    columnName: 'EMPLOYEE_ID',
+                    referencedCatalog: 'payroll',
+                    referencedSchema: 'public',
+                    referencedTableName: 'EMPLOYEE',
+                    referencedColumnName: 'ID',
+                    updateRule: 3,
+                    deleteRule: 3,
+                    sequence: 1,
+                  }],
+                  indexes: [],
+                  dependencyTables: ['EMPLOYEE'],
+                }
+                return {
+                  accepted: true,
+                  ready: true,
+                  snapshotDigest: 'development-database-entity-graph',
+                  storeId: payload.storeId,
+                  database: {
+                    name: 'PostgreSQL',
+                    version: '17',
+                    driverName: 'PostgreSQL JDBC Driver',
+                    driverVersion: '42.7',
+                    urlFingerprint: 'development-db',
+                  },
+                  tables: [
+                    {
+                      table: rootTable,
+                      selectedByUser: true,
+                      requiredBy: [],
+                      status: 'COMPOSITE_KEY',
+                      entityClassName: 'LoanAcct',
+                      entityQualifiedName: `${payload.packageName}.LoanAcct`,
+                      compositeIdClassName: `${payload.packageName}.LoanAcctId`,
+                      generated: true,
+                      issues: [],
+                    },
+                    {
+                      table: {
+                        catalog: 'payroll',
+                        schema: 'public',
+                        name: 'EMPLOYEE',
+                        type: 'TABLE',
+                        remarks: 'Already mapped HR entity',
+                        columns: [developmentDatabaseColumn('ID', 'UUID', 'uuid', true, true)],
+                        primaryKeyColumns: ['ID'],
+                        foreignKeys: [],
+                        indexes: [],
+                        dependencyTables: [],
+                      },
+                      selectedByUser: false,
+                      requiredBy: [[root.catalog, root.schema, root.name].filter(Boolean).join('.')],
+                      status: 'EXISTING_ENTITY',
+                      entityClassName: 'Employee',
+                      entityQualifiedName: 'com.company.hr.entity.Employee',
+                      generated: false,
+                      issues: [],
+                    },
+                  ],
+                  entities: [],
+                  issues: [],
+                  profileDrift: payload.profileId === 'loan-accounts'
+                    ? {
+                        profileId: 'loan-accounts',
+                        baselineSnapshotDigest: 'development-database-entity-graph',
+                        liveSnapshotDigest: 'development-database-entity-graph',
+                        matchesBaseline: true,
+                        requestChanged: false,
+                        addedTables: [],
+                        removedTables: [],
+                        changedTables: [],
+                      }
+                    : undefined,
+                } satisfies DatabaseEntityImportPlanResponse
+              }
+              case 'previewDatabaseEntityImport': {
+                const packagePath = String(payload.request?.packageName ?? 'com.company.loan.entity')
+                  .replace(/\./g, '/')
+                const moduleId = payload.request?.moduleId ?? 'loan'
+                const paths = [
+                  `${moduleId}/src/main/java/${packagePath}/LoanAcctId.java`,
+                  `${moduleId}/src/main/java/${packagePath}/LoanAcct.java`,
+                  `${moduleId}/src/main/resources/${packagePath}/messages.properties`,
+                ]
+                if (payload.request?.profileId) {
+                  paths.push(`.jmix-workbench/database-imports/${payload.request.profileId}.json`)
+                }
+                return {
+                  accepted: true,
+                  changeSetId: 'database-import:development',
+                  label: 'Import 1 Jmix database entity with 1 composite ID class',
+                  planDigest: 'development-database-entity-plan',
+                  files: paths.map(relativePath => ({
+                    relativePath,
+                    mode: relativePath.endsWith('.properties') ? 'MODIFY' : 'CREATE',
+                    afterFingerprint: `development-${relativePath}`,
+                    resultContent: '// database-first source preview',
+                    appliedEditCount: relativePath.endsWith('.properties') ? 1 : 0,
+                  })),
+                  issues: [],
+                }
+              }
+              case 'applyDatabaseEntityImport':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: 'Import database entity model',
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'database-import:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    'loan/src/main/java/com/company/loan/entity/LoanAcctId.java',
+                    'loan/src/main/java/com/company/loan/entity/LoanAcct.java',
+                    'loan/src/main/resources/com/company/loan/entity/messages.properties',
+                    ...(payload.request?.profileId
+                      ? [`.jmix-workbench/database-imports/${payload.request.profileId}.json`]
+                      : []),
+                  ],
+                  issues: [],
+                }
+              case 'previewCrudGeneration': {
+                const entity = payload.entity as any
+                const moduleId = entity.generationTarget?.moduleId ?? 'loan'
+                const basePackage = String(entity.packageName ?? 'com.example.app.entity').replace(/\.entity$/, '')
+                const sourcePackage = basePackage.replace(/\./g, '/')
+                const entityName = entity.className || 'NewEntity'
+                const store = developmentSchemaWorkspace.stores.find(
+                  (candidate) => candidate.id === entity.generationTarget?.storeId,
+                ) ?? developmentSchemaWorkspace.stores[0]
+                const tableStem = String(entity.tableName || entityName)
+                  .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+                  .toLowerCase()
+                const paths = [
+                  `${moduleId}/src/main/java/${sourcePackage}/view/${entityName}ListView.java`,
+                  `${moduleId}/src/main/resources/${sourcePackage}/view/${entityName}ListView.xml`,
+                  `${moduleId}/src/main/java/${sourcePackage}/view/${entityName}DetailView.java`,
+                  `${moduleId}/src/main/resources/${sourcePackage}/view/${entityName}DetailView.xml`,
+                ]
+                if (payload.options?.generateMenu !== false) {
+                  paths.push(`${moduleId}/src/main/resources/${sourcePackage}/menu.xml`)
+                }
+                if (payload.options?.generateSecurityRole !== false) {
+                  paths.push(`${moduleId}/src/main/java/${sourcePackage}/security/${entityName}Role.java`)
+                }
+                if (payload.options?.generateMessages !== false) {
+                  paths.push(`${moduleId}/src/main/resources/${sourcePackage}/messages.properties`)
+                }
+                if (payload.options?.generateEntity !== false) {
+                  paths.unshift(`${moduleId}/src/main/java/${sourcePackage}/entity/${entityName}.java`)
+                }
+                if (payload.options?.generateFetchPlan !== false) {
+                  paths.push(`${moduleId}/src/main/resources/${sourcePackage}/entity/${entityName}-fetch-plans.xml`)
+                }
+                if (
+                  payload.options?.generateEntity !== false &&
+                  payload.options?.generateMigration !== false &&
+                  store?.generatedDirectory
+                ) {
+                  paths.push(`${store.generatedDirectory}/2026/07/29-create-${tableStem}.xml`)
+                }
+                if (payload.options?.generateDataRepository) {
+                  paths.push(`${moduleId}/src/main/java/${sourcePackage}/entity/${entityName}Repository.java`)
+                }
+                return {
+                  accepted: true,
+                  changeSetId: 'generation:development-crud',
+                  label: payload.options?.generateEntity === false
+                    ? `Generate Jmix views and UI support for existing ${entityName}`
+                    : `Generate Jmix CRUD for ${entityName}`,
+                  planDigest: 'development-crud-generation',
+                  files: paths.map((relativePath) => ({
+                    relativePath,
+                    mode: relativePath.endsWith('menu.xml') || relativePath.endsWith('messages.properties')
+                      ? 'MODIFY'
+                      : 'CREATE',
+                    afterFingerprint: `development-${relativePath}`,
+                    resultContent: `<!-- source-safe CRUD preview for ${entityName} -->`,
+                    appliedEditCount:
+                      relativePath.endsWith('menu.xml') || relativePath.endsWith('messages.properties') ? 1 : 0,
+                  })),
+                  issues: [],
+                }
+              }
+              case 'applyCrudGeneration':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Generate Jmix CRUD for ${payload.entity?.className ?? ''}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'generation:development-crud',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: ['loan/src/main/java/com/company/loan/entity/LoanApp.java'],
+                  issues: [],
+                }
+              case 'openWorkbenchSurface':
+                return {
+                  success: true,
+                  message: 'Development bridge accepted the indexed workbench surface.',
+                }
+              case 'previewWorkflowGeneration': {
+                const workflow = payload as WorkflowModel
+                const modulePrefix = workflow.moduleId && workflow.moduleId !== '.'
+                  ? `${workflow.moduleId}/`
+                  : ''
+                return {
+                  accepted: true,
+                  changeSetId: 'generation:development-workflow',
+                  label: `Create Jmix workflow ${workflow.name}`,
+                  planDigest: 'development-workflow-generation',
+                  files: [{
+                    relativePath: `${modulePrefix}src/main/resources/processes/${workflow.id}.bpmn20.xml`,
+                    mode: 'CREATE',
+                    afterFingerprint: 'development-workflow-after',
+                    resultContent: `<definitions><process id="${workflow.id}" name="${workflow.name}" isExecutable="true"><!-- connected source-safe workflow preview --></process></definitions>`,
+                    appliedEditCount: 0,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'loadWorkflowModel':
+                return {
+                  editable: false,
+                  unsupportedElements: ['development source is synthetic'],
+                  warnings: ['Connect the plugin to an indexed IntelliJ project to load real BPMN source.'],
+                }
+              case 'applyWorkflowGeneration':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: `Create Jmix workflow ${payload.workflow?.name ?? ''}`,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  changeSetId: 'generation:development-workflow',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [
+                    `${payload.workflow?.moduleId ?? 'loan'}/src/main/resources/processes/${payload.workflow?.id}.bpmn20.xml`,
+                  ],
+                  issues: [],
+                }
+              case 'getFlowUiWorkspace':
+                return developmentFlowUiWorkspace
+              case 'inspectJmixRuntime':
+                return {
+                  accepted: true,
+                  viewId: developmentFlowUiWorkspace.document?.viewId,
+                  targets: [{
+                    id: 'development-runtime',
+                    moduleId: 'loan',
+                    moduleRoot: '/development/payroll-platform/loan',
+                    profile: 'development',
+                    preferred: true,
+                    baseUrl: 'http://localhost:8080',
+                    previewUrl: 'http://localhost:8080/loan-applications',
+                    routePath: 'loan-applications',
+                    routeRequiresParameters: false,
+                    reachable: false,
+                    responseTimeMillis: 1,
+                    configSources: ['application.properties'],
+                    hotDeploySupported: false,
+                    hotDeployMessage: 'Start the Jmix application to enable runtime preview.',
+                    warnings: [],
+                  }],
+                  issues: [],
+                } satisfies JmixRuntimeInspectionResponse
+              case 'getWorkspaceHistory':
+                return developmentHistory
+              case 'undoWorkspaceChange':
+                developmentHistory = {
+                  canUndo: false,
+                  undoDepth: 0,
+                  canRedo: true,
+                  redoLabel: developmentHistory.undoLabel ?? 'last visual change',
+                  redoDepth: 1,
+                }
+                return {
+                  success: true,
+                  message: 'Undid the last visual change.',
+                  changedFiles: [],
+                  revisions: {},
+                  history: developmentHistory,
+                  issues: [],
+                } satisfies WorkspaceHistoryMutationResponse
+              case 'redoWorkspaceChange':
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: developmentHistory.redoLabel ?? 'last visual change',
+                  undoDepth: 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                return {
+                  success: true,
+                  message: 'Redid the last visual change.',
+                  changedFiles: [],
+                  revisions: {},
+                  history: developmentHistory,
+                  issues: [],
+                } satisfies WorkspaceHistoryMutationResponse
+              case 'getProjectConfig':
+                return developmentProjectConfig
+              case 'getSecurityWorkspace':
+                return { ...developmentSecurityWorkspace, runtime: developmentRuntimeSecurity }
+              case 'importRuntimeSecurityEvidence': {
+                const sourceId = 'runtime-evidence:development'
+                developmentRuntimeSecurity = {
+                  sources: [{
+                    id: sourceId,
+                    fileName: payload.fileName || 'security-evidence.json',
+                    environmentLabel: payload.environmentLabel || 'Development',
+                    format: 'JMIX_MIXED_ENTITY_JSON',
+                    sha256: 'development-runtime-evidence',
+                    importedAt: new Date().toISOString(),
+                    roleCount: 2,
+                    policyCount: 3,
+                    assignmentCount: 2,
+                  }],
+                  roles: [
+                    {
+                      id: `${sourceId}:role:runtime-payroll`,
+                      name: 'Runtime payroll operator',
+                      code: 'runtime-payroll-operator',
+                      description: 'Database-backed payroll permissions.',
+                      kind: 'RESOURCE',
+                      scopes: ['UI', 'API'],
+                      policyIds: [`${sourceId}:policy:payroll-entity`, `${sourceId}:policy:payroll-view`],
+                      inheritedRoleIds: [],
+                      unresolvedChildRoleCodes: [],
+                      evidenceSourceId: sourceId,
+                    },
+                    {
+                      id: `${sourceId}:role:own-loans`,
+                      name: 'Runtime own loans',
+                      code: 'runtime-own-loans',
+                      kind: 'ROW_LEVEL',
+                      scopes: ['ALL'],
+                      policyIds: [`${sourceId}:policy:own-loans`],
+                      inheritedRoleIds: [],
+                      unresolvedChildRoleCodes: [],
+                      evidenceSourceId: sourceId,
+                    },
+                  ],
+                  policies: [
+                    {
+                      id: `${sourceId}:policy:payroll-entity`,
+                      roleId: `${sourceId}:role:runtime-payroll`,
+                      type: 'EntityPolicy',
+                      effect: 'GRANT',
+                      actions: ['READ', 'UPDATE'],
+                      resourceExpressions: ['payroll_PayrollRun'],
+                      targetArtifactIds: ['entity-payroll'],
+                      wildcard: false,
+                      evidenceSourceId: sourceId,
+                    },
+                    {
+                      id: `${sourceId}:policy:payroll-view`,
+                      roleId: `${sourceId}:role:runtime-payroll`,
+                      type: 'ViewPolicy',
+                      effect: 'GRANT',
+                      actions: ['ACCESS'],
+                      resourceExpressions: ['payroll_PayrollRun.list'],
+                      targetArtifactIds: ['view-payroll'],
+                      wildcard: false,
+                      evidenceSourceId: sourceId,
+                    },
+                    {
+                      id: `${sourceId}:policy:own-loans`,
+                      roleId: `${sourceId}:role:own-loans`,
+                      type: 'JpqlRowLevelPolicy',
+                      effect: 'RESTRICT',
+                      actions: ['READ'],
+                      resourceExpressions: ['payroll_LoanApp'],
+                      targetArtifactIds: ['entity-loan'],
+                      wildcard: false,
+                      condition: 'where: {E}.employee.user.id = :current_user_id',
+                      evidenceSourceId: sourceId,
+                    },
+                  ],
+                  assignments: [
+                    {
+                      id: `${sourceId}:assignment:alex-resource`,
+                      username: 'alex',
+                      roleCode: 'runtime-payroll-operator',
+                      roleKind: 'RESOURCE',
+                      candidateRoleIds: [`${sourceId}:role:runtime-payroll`],
+                      resolution: 'RESOLVED',
+                      evidenceSourceId: sourceId,
+                    },
+                    {
+                      id: `${sourceId}:assignment:alex-row`,
+                      username: 'alex',
+                      roleCode: 'runtime-own-loans',
+                      roleKind: 'ROW_LEVEL',
+                      candidateRoleIds: [`${sourceId}:role:own-loans`],
+                      resolution: 'RESOLVED',
+                      evidenceSourceId: sourceId,
+                    },
+                  ],
+                  principals: ['alex'],
+                  issues: [],
+                  summary: {
+                    sourceCount: 1,
+                    roleCount: 2,
+                    policyCount: 3,
+                    assignmentCount: 2,
+                    principalCount: 1,
+                    errorCount: 0,
+                    warningCount: 0,
+                  },
+                }
+                return {
+                  accepted: true,
+                  sourceId,
+                  message: `Imported runtime security evidence from ${payload.fileName || 'security-evidence.json'}.`,
+                  issues: [],
+                } satisfies RuntimeSecurityEvidenceImportResponse
+              }
+              case 'clearRuntimeSecurityEvidence':
+                developmentRuntimeSecurity = developmentSecurityWorkspace.runtime
+                return {
+                  accepted: true,
+                  message: 'Cleared runtime security evidence.',
+                  issues: [],
+                } satisfies RuntimeSecurityEvidenceImportResponse
+              case 'getSecurityRoleDestinations':
+                return {
+                  destinations: [
+                    {
+                      id: 'security-role-destination:loan',
+                      moduleId: 'loan',
+                      sourceRoot: 'loan/src/main/java',
+                      defaultPackage: 'com.company.loan.security',
+                      recommended: true,
+                    },
+                    {
+                      id: 'security-role-destination:payroll',
+                      moduleId: 'payroll',
+                      sourceRoot: 'payroll/src/main/java',
+                      defaultPackage: 'com.company.payroll.security',
+                      recommended: false,
+                    },
+                  ],
+                  defaultDestinationId: 'security-role-destination:loan',
+                  issues: [],
+                }
+              case 'previewSecurityRoleCreate': {
+                const role = payload.role
+                const selectedRoot = payload.destinationId === 'security-role-destination:payroll'
+                  ? 'payroll/src/main/java'
+                  : 'loan/src/main/java'
+                const defaultPackage = payload.destinationId === 'security-role-destination:payroll'
+                  ? 'com.company.payroll.security'
+                  : 'com.company.loan.security'
+                const packageName = role.packageName || defaultPackage
+                const relativePath = `${selectedRoot}/${packageName.replaceAll('.', '/')}/${role.className}.java`
+                const annotation = role.scope === 'resource' ? 'ResourceRole' : 'RowLevelRole'
+                const resultContent = `package ${packageName};\n\n` +
+                  `import io.jmix.security.role.annotation.${annotation};\n\n` +
+                  `@${annotation}(name = ${JSON.stringify(role.name)}, code = ${role.className}.CODE)\n` +
+                  `public interface ${role.className} {\n` +
+                  `    String CODE = ${JSON.stringify(role.code)};\n` +
+                  `}\n`
+                return {
+                  accepted: true,
+                  changeSetId: `security-role-create:development`,
+                  label: `Create Jmix role ${role.className}`,
+                  planDigest: `development-${role.className}`,
+                  files: [{
+                    relativePath,
+                    mode: 'CREATE',
+                    afterFingerprint: 'development-after',
+                    resultContent,
+                    appliedEditCount: 0,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applySecurityRoleCreate':
+                return {
+                  success: true,
+                  changeSetId: 'security-role-create:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: ['development/security-role.java'],
+                  issues: [],
+                }
+              case 'previewSecurityRolePolicyAddition': {
+                const change = payload as SecurityRolePolicyChangeRequest
+                const roleName = change.roleClassName.split('.').slice(-1)[0] || 'ExistingRole'
+                const policy = change.policy
+                const annotation = (() => {
+                  switch (policy.type) {
+                    case 'entity':
+                      return `@EntityPolicy(entityClass = ${policy.entityClass?.split('.').slice(-1)[0]}.class, actions = EntityPolicyAction.READ)`
+                    case 'entityAttribute':
+                      return `@EntityAttributePolicy(entityClass = ${policy.entityClass?.split('.').slice(-1)[0]}.class, attributes = {${policy.attributes.map((value) => JSON.stringify(value)).join(', ')}}, action = EntityAttributePolicyAction.${policy.attributeAction.toUpperCase()})`
+                    case 'menu':
+                      return `@MenuPolicy(menuIds = {${policy.resources.map((value) => JSON.stringify(value)).join(', ')}})`
+                    case 'view':
+                      return `@ViewPolicy(viewIds = {${policy.resources.map((value) => JSON.stringify(value)).join(', ')}})`
+                    case 'specific':
+                      return `@SpecificPolicy(resources = {${policy.resources.map((value) => JSON.stringify(value)).join(', ')}})`
+                    case 'jpqlRow':
+                      return `@JpqlRowLevelPolicy(entityClass = ${policy.entityClass?.split('.').slice(-1)[0]}.class, where = ${JSON.stringify(policy.whereClause || '')})`
+                    case 'predicateRow':
+                      return `@PredicateRowLevelPolicy(entityClass = ${policy.entityClass?.split('.').slice(-1)[0]}.class, actions = RowLevelPolicyAction.READ)`
+                  }
+                })()
+                const originalContent = `public interface ${roleName} {\n    String CODE = \"existing-role\";\n}\n`
+                const resultContent = `public interface ${roleName} {\n    String CODE = \"existing-role\";\n\n    ${annotation}\n    void generatedPolicy();\n}\n`
+                return {
+                  accepted: true,
+                  changeSetId: 'security-role-policy:development',
+                  label: `Add policy to ${roleName}`,
+                  planDigest: `development-policy-${roleName}`,
+                  files: [{
+                    relativePath: change.roleLocator.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: change.roleLocator.revisionFingerprint,
+                    afterFingerprint: 'development-policy-after',
+                    originalContent,
+                    resultContent,
+                    appliedEditCount: 2,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applySecurityRolePolicyAddition':
+                return {
+                  success: true,
+                  changeSetId: 'security-role-policy:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [payload.change.roleLocator.relativePath],
+                  issues: [],
+                }
+              case 'inspectSecurityRolePolicies': {
+                const request = payload as SecurityRolePolicyInspectionRequest
+                const rowRole = request.roleClassName.endsWith('OwnLoansRole')
+                const locator = {
+                  ...request.roleLocator,
+                  symbol: rowRole
+                    ? `${request.roleClassName}#JpqlRowLevelPolicy-1`
+                    : `${request.roleClassName}#EntityPolicy-1`,
+                  line: 12,
+                  column: 5,
+                }
+                return {
+                  accepted: true,
+                  policies: [{
+                    id: locator.symbol,
+                    locator,
+                    type: rowRole ? 'jpqlRow' : 'entity',
+                    methodName: rowRole ? 'loanApp' : 'payrollRun',
+                    annotationText: rowRole
+                      ? '@JpqlRowLevelPolicy(entityClass = LoanApp.class, where = "{E}.employee.user.id = :current_user_id")'
+                      : '@EntityPolicy(entityClass = PayrollRun.class, actions = EntityPolicyAction.READ)',
+                    policy: rowRole ? {
+                      type: 'jpqlRow',
+                      entityClass: 'com.company.loan.entity.LoanApp',
+                      entityActions: [],
+                      allEntityActions: false,
+                      attributes: [],
+                      attributeAction: 'view',
+                      resources: [],
+                      rowActions: [],
+                      whereClause: '{E}.employee.user.id = :current_user_id',
+                      joinClause: '',
+                      predicateExpression: '',
+                      allowWildcard: false,
+                    } : {
+                      type: 'entity',
+                      entityClass: 'com.company.payroll.entity.PayrollRun',
+                      entityActions: ['read'],
+                      allEntityActions: false,
+                      attributes: [],
+                      attributeAction: 'view',
+                      resources: [],
+                      rowActions: [],
+                      whereClause: '',
+                      joinClause: '',
+                      predicateExpression: '',
+                      allowWildcard: false,
+                    },
+                    editable: true,
+                  }],
+                  issues: [],
+                } satisfies SecurityRolePolicyInspectionResponse
+              }
+              case 'previewSecurityRolePolicyReplacement': {
+                const change = payload as SecurityRolePolicyReplacementRequest
+                const originalContent = `public interface ExistingRole {\n    ${change.policyLocator.symbol}\n}\n`
+                const resultContent = `public interface ExistingRole {\n    // exact replacement: ${change.replacement.type}\n}\n`
+                return {
+                  accepted: true,
+                  changeSetId: 'security-role-policy-replace:development',
+                  label: 'Replace existing security policy',
+                  planDigest: 'development-policy-replace',
+                  files: [{
+                    relativePath: change.roleLocator.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: change.roleLocator.revisionFingerprint,
+                    afterFingerprint: 'development-policy-replaced',
+                    originalContent,
+                    resultContent,
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applySecurityRolePolicyReplacement':
+                return {
+                  success: true,
+                  changeSetId: 'security-role-policy-replace:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [payload.change.roleLocator.relativePath],
+                  issues: [],
+                }
+              case 'previewSecurityRolePolicyRemoval': {
+                const change = payload as SecurityRolePolicyRemovalRequest
+                return {
+                  accepted: true,
+                  changeSetId: 'security-role-policy-remove:development',
+                  label: 'Remove existing security policy',
+                  planDigest: 'development-policy-remove',
+                  files: [{
+                    relativePath: change.roleLocator.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: change.roleLocator.revisionFingerprint,
+                    afterFingerprint: 'development-policy-removed',
+                    originalContent: 'public interface ExistingRole { /* policy */ }\n',
+                    resultContent: 'public interface ExistingRole { }\n',
+                    appliedEditCount: 1,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applySecurityRolePolicyRemoval':
+                return {
+                  success: true,
+                  changeSetId: 'security-role-policy-remove:development',
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [payload.change.roleLocator.relativePath],
+                  issues: [],
+                }
+              case 'previewFlowUiPropertyChange':
+              case 'previewFlowUiStructureChange':
+              case 'previewFlowUiDirectTextChange':
+              case 'previewFlowUiControllerInjection':
+              case 'previewFlowUiControllerHandler': {
+                const sourceLocator = payload.sourceLocator ?? payload.controllerLocator
+                const label = action === 'previewFlowUiStructureChange'
+                  ? `${String(payload.operation ?? 'position').replace(/_/g, ' ').toLowerCase()} ${payload.tagName ?? ''}`.trim()
+                  : action.replace(/^previewFlowUi/, '').replace(/([A-Z])/g, ' $1').trim()
+                return {
+                  accepted: true,
+                  changeSetId: `flowui-development:${action}`,
+                  label,
+                  planDigest: `development-${action}`,
+                  files: [{
+                    relativePath: sourceLocator?.relativePath ??
+                      developmentFlowUiWorkspace.document?.relativePath ??
+                      'development-view.xml',
+                    mode: 'MODIFY',
+                    beforeFingerprint: sourceLocator?.revisionFingerprint ?? 'development-preview',
+                    afterFingerprint: `development-after-${action}`,
+                    originalContent: developmentFlowUiWorkspace.document?.sourceText ?? '',
+                    resultContent: `${developmentFlowUiWorkspace.document?.sourceText ?? ''}\n<!-- ${label} -->`,
+                    appliedEditCount: action === 'previewFlowUiStructureChange' &&
+                      payload.operation === 'REPARENT' ? 2 : 1,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'previewAggregateUpdateService': {
+                const change = payload as AggregateUpdateServiceRequest
+                return {
+                  accepted: true,
+                  changeSetId: 'aggregate-update-service:development',
+                  label: 'Create and wire transactional aggregate update service',
+                  planDigest: 'development-aggregate-update-service',
+                  files: [{
+                    relativePath: 'src/main/java/com/company/app/service/LoanAppUpdateService.java',
+                    mode: 'CREATE',
+                    afterFingerprint: 'development-aggregate-service',
+                    resultContent: [
+                      '@Component',
+                      'class LoanAppUpdateService {',
+                      '  @Transactional Set<Object> saveChanges(SaveContext context) {',
+                      '    return dataManager.save(context);',
+                      '  }',
+                      '}',
+                    ].join('\n'),
+                    appliedEditCount: 1,
+                  }, {
+                    relativePath: change.controllerSource.relativePath,
+                    mode: 'MODIFY',
+                    beforeFingerprint: change.controllerSource.revisionFingerprint,
+                    afterFingerprint: 'development-aggregate-controller',
+                    originalContent: 'class LoanAppDetailView {}',
+                    resultContent: 'class LoanAppDetailView { /* transactional aggregate delegate */ }',
+                    appliedEditCount: 2,
+                  }],
+                  issues: [],
+                }
+              }
+              case 'applyFlowUiPropertyChange':
+              case 'applyFlowUiStructureChange':
+              case 'applyFlowUiDirectTextChange':
+              case 'applyFlowUiControllerInjection':
+              case 'applyFlowUiControllerHandler':
+              case 'applyAggregateUpdateService': {
+                const label = action.replace(/^applyFlowUi/, '').replace(/([A-Z])/g, ' $1').trim()
+                developmentHistory = {
+                  canUndo: true,
+                  undoLabel: label,
+                  undoDepth: developmentHistory.undoDepth + 1,
+                  canRedo: false,
+                  redoDepth: 0,
+                }
+                const sourceLocator = payload.change?.sourceLocator ?? payload.change?.controllerLocator
+                return {
+                  success: true,
+                  changeSetId: `flowui-development:${action}`,
+                  planDigest: payload.expectedPlanDigest,
+                  filesChanged: [sourceLocator?.relativePath ??
+                    developmentFlowUiWorkspace.document?.relativePath ??
+                    'development-view.xml'],
+                  issues: [],
+                }
+              }
+              default:
+                return {
+                  success: true,
+                  filesWritten: [`generated/${action}.java`],
+                  errors: [],
+                }
+            }
+          })()
+          this.listeners.forEach(cb => cb(action, requestId, result))
+        }, 300)
+        return
+      }
+      this.pendingQueue.push({ action, payload, requestId })
+      return
+    }
+    window.javaBridge.send(action, payload, requestId)
+  }
+
+  onResponse(callback: BridgeCallback) {
+    this.listeners.push(callback)
+    return () => {
+      this.listeners = this.listeners.filter(cb => cb !== callback)
+    }
+  }
+
+  getLaunchContext(): WorkbenchLaunchContext | null {
+    return this.launchContext
+  }
+
+  onLaunchContext(callback: (context: WorkbenchLaunchContext | null) => void) {
+    this.launchContextListeners.push(callback)
+    return () => {
+      this.launchContextListeners = this.launchContextListeners.filter(
+        (listener) => listener !== callback,
+      )
+    }
+  }
+
+  async request<T = any>(action: string, payload: any = {}): Promise<T> {
+    const requestId = this.nextRequestId()
+    return new Promise((resolve) => {
+      const unsub = this.onResponse((respAction, responseRequestId, result) => {
+        if (responseRequestId === requestId && respAction === action) {
+          unsub()
+          resolve(result)
+        }
+      })
+      this.send(action, payload, requestId)
+    })
+  }
+
+  private nextRequestId(): string {
+    this.requestSequence += 1
+    return `jvw-${Date.now().toString(36)}-${this.requestSequence.toString(36)}`
+  }
+
+  generateEntity(entity: any) {
+    return this.request<GenerationResult>('generateEntity', entity)
+  }
+
+  previewEntityGeneration(entity: any) {
+    return this.request<WorkspaceChangePreviewResponse>('previewEntityGeneration', entity)
+  }
+
+  applyEntityGeneration(entity: any, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyEntityGeneration', {
+      entity,
+      expectedPlanDigest,
+    })
+  }
+
+  previewEntityEventListener(listener: EntityEventListenerRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewEntityEventListener',
+      listener,
+    )
+  }
+
+  applyEntityEventListener(
+    listener: EntityEventListenerRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyEntityEventListener',
+      { listener, expectedPlanDigest },
+    )
+  }
+
+  previewDataRepositoryChange(change: DataRepositoryChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewDataRepositoryChange',
+      change,
+    )
+  }
+
+  validateDataRepositorySemantics(change: DataRepositoryChangeRequest) {
+    return this.request<RepositorySemanticValidationResponse>(
+      'validateDataRepositorySemantics',
+      change,
+    )
+  }
+
+  applyDataRepositoryChange(
+    change: DataRepositoryChangeRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyDataRepositoryChange',
+      { change, expectedPlanDigest },
+    )
+  }
+
+  previewExistingEntityAttributeAdditions(change: ExistingEntityAttributeAdditionRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewExistingEntityAttributeAdditions',
+      change,
+    )
+  }
+
+  applyExistingEntityAttributeAdditions(
+    change: ExistingEntityAttributeAdditionRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyExistingEntityAttributeAdditions',
+      { change, expectedPlanDigest },
+    )
+  }
+
+  launchEntityAttributeRename(change: EntityAttributeRenameRequest) {
+    return this.request<EntityAttributeRenameLaunchResponse>(
+      'launchEntityAttributeRename',
+      change,
+    )
+  }
+
+  inspectEntityAttributeRename(change: EntityAttributeRenameRequest) {
+    return this.request<EntityAttributeRenameLaunchResponse>(
+      'inspectEntityAttributeRename',
+      change,
+    )
+  }
+
+  launchEntityAttributeSafeDelete(change: EntityAttributeSafeDeleteRequest) {
+    return this.request<EntityAttributeSafeDeleteLaunchResponse>(
+      'launchEntityAttributeSafeDelete',
+      change,
+    )
+  }
+
+  launchRepositoryMethodRefactor(change: RepositoryMethodRefactorRequest) {
+    return this.request<RepositoryMethodRefactorLaunchResponse>(
+      'launchRepositoryMethodRefactor',
+      change,
+    )
+  }
+
+  launchEntityAttributeTypeMigration(change: EntityAttributeTypeMigrationRequest) {
+    return this.request<EntityAttributeTypeMigrationLaunchResponse>(
+      'launchEntityAttributeTypeMigration',
+      change,
+    )
+  }
+
+  previewEntityAttributeTypeExpansion(change: EntityAttributeTypeMigrationRequest) {
+    return this.request<EntityAttributeTypeExpansionPreviewResponse>(
+      'previewEntityAttributeTypeExpansion',
+      change,
+    )
+  }
+
+  applyEntityAttributeTypeExpansion(
+    change: EntityAttributeTypeMigrationRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyEntityAttributeTypeExpansion',
+      { change, expectedPlanDigest },
+    )
+  }
+
+  verifyEntityAttributeTypeExpansion(change: EntityAttributeTypeMigrationRequest) {
+    return this.request<EntityAttributeTypeExpansionVerificationResponse>(
+      'verifyEntityAttributeTypeExpansion',
+      change,
+    )
+  }
+
+  previewEntityAttributeTypeMappingCutover(change: EntityAttributeTypeMappingCutoverRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewEntityAttributeTypeMappingCutover',
+      change,
+    )
+  }
+
+  applyEntityAttributeTypeMappingCutover(
+    change: EntityAttributeTypeMappingCutoverRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyEntityAttributeTypeMappingCutover',
+      { change, expectedPlanDigest },
+    )
+  }
+
+  inspectDatabaseEntityTable(request: DatabaseEntityTableInspectionRequest) {
+    return this.request<DatabaseEntityTableInspectionResponse>(
+      'inspectDatabaseEntityTable',
+      request,
+    )
+  }
+
+  browseDatabaseEntityTables(request: DatabaseEntityTableBrowseRequest) {
+    return this.request<DatabaseEntityTableBrowseResponse>(
+      'browseDatabaseEntityTables',
+      request,
+    )
+  }
+
+  planDatabaseEntityImport(request: DatabaseEntityImportRequest) {
+    return this.request<DatabaseEntityImportPlanResponse>(
+      'planDatabaseEntityImport',
+      request,
+    )
+  }
+
+  previewDatabaseEntityImport(
+    request: DatabaseEntityImportRequest,
+    expectedSnapshotDigest: string,
+  ) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewDatabaseEntityImport',
+      { request, expectedSnapshotDigest },
+    )
+  }
+
+  applyDatabaseEntityImport(
+    request: DatabaseEntityImportRequest,
+    expectedSnapshotDigest: string,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyDatabaseEntityImport',
+      { request, expectedSnapshotDigest, expectedPlanDigest },
+    )
+  }
+
+  inspectEntityAttributePropagation(request: EntityAttributePropagationInspectionRequest) {
+    return this.request<EntityAttributePropagationInspectionResponse>(
+      'inspectEntityAttributePropagation',
+      request,
+    )
+  }
+
+  previewEntityAttributePropagation(change: EntityAttributePropagationChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>(
+      'previewEntityAttributePropagation',
+      change,
+    )
+  }
+
+  applyEntityAttributePropagation(
+    change: EntityAttributePropagationChangeRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>(
+      'applyEntityAttributePropagation',
+      { change, expectedPlanDigest },
+    )
+  }
+
+  generateCrud(entity: any, options: any) {
+    return this.request<GenerationResult>('generateCrud', { entity, options })
+  }
+
+  previewCrudGeneration(entity: any, options: any) {
+    return this.request<WorkspaceChangePreviewResponse>('previewCrudGeneration', { entity, options })
+  }
+
+  applyCrudGeneration(entity: any, options: any, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyCrudGeneration', {
+      entity,
+      options,
+      expectedPlanDigest,
+    })
+  }
+
+  generateView(view: any) {
+    return this.request<GenerationResult>('generateView', view)
+  }
+
+  generateMigration(migration: any) {
+    return this.request<GenerationResult>('generateMigration', migration)
+  }
+
+  getSchemaWorkspace(forceRefresh: boolean = false) {
+    return this.request<SchemaWorkspaceResponse>('getSchemaWorkspace', { forceRefresh })
+  }
+
+  getDatabaseEntityImportProfiles() {
+    return this.request<DatabaseEntityImportProfileWorkspaceResponse>(
+      'getDatabaseEntityImportProfiles',
+      {},
+    )
+  }
+
+  getRestApiWorkspace(forceRefresh: boolean = false) {
+    return this.request<RestApiWorkspaceResponse>('getRestApiWorkspace', { forceRefresh })
+  }
+
+  invokeRestApi(request: RestApiInvocationRequest) {
+    return this.request<RestApiInvocationResponse>('invokeRestApi', request)
+  }
+
+  previewRestApiContractAddition(change: RestApiContractAdditionRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewRestApiContractAddition', change)
+  }
+
+  applyRestApiContractAddition(change: RestApiContractAdditionRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyRestApiContractAddition', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewRestApiContractMutation(change: RestApiContractMutationRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewRestApiContractMutation', change)
+  }
+
+  applyRestApiContractMutation(change: RestApiContractMutationRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyRestApiContractMutation', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewSchemaMigration(change: SchemaMigrationChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewSchemaMigration', change)
+  }
+
+  applySchemaMigration(change: SchemaMigrationChangeRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applySchemaMigration', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  generateRole(role: any) {
+    return this.request<GenerationResult>('generateRole', role)
+  }
+
+  generateBpm(entityName: string) {
+    return this.request<GenerationResult>('generateBpm', { entityName })
+  }
+
+  previewWorkflowGeneration(workflow: WorkflowModel) {
+    return this.request<WorkspaceChangePreviewResponse>('previewWorkflowGeneration', workflow)
+  }
+
+  loadWorkflowModel(relativePath: string, processId: string, moduleId: string) {
+    return this.request<WorkflowLoadResponse>('loadWorkflowModel', {
+      relativePath,
+      processId,
+      moduleId,
+    })
+  }
+
+  applyWorkflowGeneration(workflow: WorkflowModel, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyWorkflowGeneration', {
+      workflow,
+      expectedPlanDigest,
+    })
+  }
+
+  getProjectConfig() {
+    return this.request<ProjectConfig>('getProjectConfig')
+  }
+
+  getProjectPropertiesWorkspace() {
+    return this.request<JmixProjectPropertiesWorkspace>('getProjectPropertiesWorkspace')
+  }
+
+  previewProjectProfileChange(change: ProjectApplicationPropertiesChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewProjectProfileChange', change)
+  }
+
+  applyProjectProfileChange(
+    change: ProjectApplicationPropertiesChangeRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>('applyProjectProfileChange', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewProjectProfileLifecycle(change: ProjectApplicationProfileLifecycleRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewProjectProfileLifecycle', change)
+  }
+
+  applyProjectProfileLifecycle(
+    change: ProjectApplicationProfileLifecycleRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>('applyProjectProfileLifecycle', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  getEnvironmentWorkspace() {
+    return this.request<JmixEnvironmentWorkspace>('getEnvironmentWorkspace')
+  }
+
+  previewEnvironmentChange(change: EnvironmentChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewEnvironmentChange', change)
+  }
+
+  applyEnvironmentChange(change: EnvironmentChangeRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyEnvironmentChange', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  prepareSecretEnvironmentChange(change: EnvironmentSecretChangeRequest) {
+    return this.request<EnvironmentSecretPreviewResponse>(
+      'prepareSecretEnvironmentChange',
+      change,
+    )
+  }
+
+  applySecretEnvironmentChange(capability: string, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applySecretEnvironmentChange', {
+      capability,
+      expectedPlanDigest,
+    })
+  }
+
+  previewEnvironmentConnection(change: EnvironmentConnectionRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewEnvironmentConnection', change)
+  }
+
+  applyEnvironmentConnection(
+    change: EnvironmentConnectionRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>('applyEnvironmentConnection', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  getApplicationGraph(forceRefresh: boolean = false) {
+    return this.request<ApplicationGraphResponse>('getApplicationGraph', { forceRefresh })
+  }
+
+  getScenarioWorkspace(forceRefresh: boolean = false) {
+    return this.request<ScenarioWorkspaceResponse>('getScenarioWorkspace', { forceRefresh })
+  }
+
+  getVisualLogicWorkspace(forceRefresh: boolean = false) {
+    return this.request<VisualLogicWorkspaceResponse>('getVisualLogicWorkspace', { forceRefresh })
+  }
+
+  getIntegrationConnectorWorkspace(forceRefresh: boolean = false) {
+    return this.request<IntegrationConnectorWorkspaceResponse>(
+      'getIntegrationConnectorWorkspace',
+      { forceRefresh },
+    )
+  }
+
+  chooseOpenApiContract() {
+    return this.request<OpenApiContractSelectionResponse>('chooseOpenApiContract', {})
+  }
+
+  approveOpenApiContractEvolution(model: IntegrationConnectorModel) {
+    return this.request<IntegrationOpenApiEvolutionApprovalResponse>(
+      'approveOpenApiContractEvolution',
+      model,
+    )
+  }
+
+  previewIntegrationConnector(model: IntegrationConnectorModel) {
+    return this.request<WorkspaceChangePreviewResponse>('previewIntegrationConnector', model)
+  }
+
+  applyIntegrationConnector(model: IntegrationConnectorModel, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyIntegrationConnector', {
+      model,
+      expectedPlanDigest,
+    })
+  }
+
+  approveIntegrationConnectorCatalogTemplate(
+    binding: NonNullable<IntegrationConnectorModel['catalogBinding']>,
+    destinationId: string,
+  ) {
+    return this.request<IntegrationConnectorCatalogApprovalResponse>(
+      'approveIntegrationConnectorCatalogTemplate',
+      { binding, destinationId },
+    )
+  }
+
+  previewVisualLogic(model: VisualLogicClassModel) {
+    return this.request<WorkspaceChangePreviewResponse>('previewVisualLogic', model)
+  }
+
+  applyVisualLogic(model: VisualLogicClassModel, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyVisualLogic', {
+      model,
+      expectedPlanDigest,
+    })
+  }
+
+  getVisualRuleWorkspace(forceRefresh: boolean = false) {
+    return this.request<VisualRuleWorkspaceResponse>('getVisualRuleWorkspace', { forceRefresh })
+  }
+
+  previewVisualRule(model: VisualRuleModel) {
+    return this.request<WorkspaceChangePreviewResponse>('previewVisualRule', model)
+  }
+
+  applyVisualRule(model: VisualRuleModel, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyVisualRule', {
+      model,
+      expectedPlanDigest,
+    })
+  }
+
+  getDmnDecisionWorkspace(forceRefresh: boolean = false) {
+    return this.request<DmnDecisionWorkspaceResponse>('getDmnDecisionWorkspace', { forceRefresh })
+  }
+
+  previewDmnDecision(model: DmnDecisionModel) {
+    return this.request<WorkspaceChangePreviewResponse>('previewDmnDecision', model)
+  }
+
+  applyDmnDecision(model: DmnDecisionModel, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyDmnDecision', {
+      model,
+      expectedPlanDigest,
+    })
+  }
+
+  simulateDmnDecision(model: DmnDecisionModel, inputs: Record<string, string>) {
+    return this.request<DmnSimulationResult>('simulateDmnDecision', { model, inputs })
+  }
+
+  previewScenarioTest(scenario: ScenarioTestModel) {
+    return this.request<WorkspaceChangePreviewResponse>('previewScenarioTest', scenario)
+  }
+
+  applyScenarioTest(scenario: ScenarioTestModel, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyScenarioTest', {
+      scenario,
+      expectedPlanDigest,
+    })
+  }
+
+  getSecurityWorkspace(forceRefresh: boolean = false) {
+    return this.request<SecurityWorkspaceSnapshot>('getSecurityWorkspace', { forceRefresh })
+  }
+
+  importRuntimeSecurityEvidence(change: RuntimeSecurityEvidenceImportRequest) {
+    return this.request<RuntimeSecurityEvidenceImportResponse>('importRuntimeSecurityEvidence', change)
+  }
+
+  clearRuntimeSecurityEvidence(sourceId?: string) {
+    return this.request<RuntimeSecurityEvidenceImportResponse>('clearRuntimeSecurityEvidence', { sourceId })
+  }
+
+  getSecurityRoleDestinations() {
+    return this.request<SecurityRoleDestinationsResponse>('getSecurityRoleDestinations')
+  }
+
+  previewSecurityRoleCreate(change: SecurityRoleCreateRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewSecurityRoleCreate', change)
+  }
+
+  applySecurityRoleCreate(change: SecurityRoleCreateRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applySecurityRoleCreate', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewSecurityRolePolicyAddition(change: SecurityRolePolicyChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewSecurityRolePolicyAddition', change)
+  }
+
+  applySecurityRolePolicyAddition(change: SecurityRolePolicyChangeRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applySecurityRolePolicyAddition', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  inspectSecurityRolePolicies(change: SecurityRolePolicyInspectionRequest) {
+    return this.request<SecurityRolePolicyInspectionResponse>('inspectSecurityRolePolicies', change)
+  }
+
+  previewSecurityRolePolicyReplacement(change: SecurityRolePolicyReplacementRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewSecurityRolePolicyReplacement', change)
+  }
+
+  applySecurityRolePolicyReplacement(
+    change: SecurityRolePolicyReplacementRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>('applySecurityRolePolicyReplacement', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewSecurityRolePolicyRemoval(change: SecurityRolePolicyRemovalRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewSecurityRolePolicyRemoval', change)
+  }
+
+  applySecurityRolePolicyRemoval(
+    change: SecurityRolePolicyRemovalRequest,
+    expectedPlanDigest: string,
+  ) {
+    return this.request<WorkspaceChangeApplyResponse>('applySecurityRolePolicyRemoval', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  navigateToSource(locator: GraphSourceLocator) {
+    return this.request<SourceNavigationResponse>('navigateToSource', locator)
+  }
+
+  navigateEnvironmentSource(locator: GraphSourceLocator) {
+    return this.request<SourceNavigationResponse>('navigateEnvironmentSource', locator)
+  }
+
+  openWorkbenchSurface(
+    surface: 'CRUD_DESIGNER' | 'FLOW_UI_EDITOR',
+    sourceLocator: GraphSourceLocator,
+  ) {
+    return this.request<WorkbenchSurfaceOpenResponse>('openWorkbenchSurface', {
+      surface,
+      sourceLocator,
+    })
+  }
+
+  getFlowUiWorkspace(sourceLocator: GraphSourceLocator) {
+    return this.request<FlowUiWorkspaceResponse>('getFlowUiWorkspace', { sourceLocator })
+  }
+
+  getWorkspaceHistory() {
+    return this.request<WorkspaceHistorySnapshot>('getWorkspaceHistory')
+  }
+
+  undoWorkspaceChange() {
+    return this.request<WorkspaceHistoryMutationResponse>('undoWorkspaceChange')
+  }
+
+  redoWorkspaceChange() {
+    return this.request<WorkspaceHistoryMutationResponse>('redoWorkspaceChange')
+  }
+
+  previewFlowUiPropertyChange(change: FlowUiPropertyChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiPropertyChange', change)
+  }
+
+  applyFlowUiPropertyChange(change: FlowUiPropertyChangeRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiPropertyChange', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewFlowUiStructureChange(change: FlowUiStructureChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiStructureChange', change)
+  }
+
+  applyFlowUiStructureChange(change: FlowUiStructureChangeRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiStructureChange', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewFlowUiDirectTextChange(change: FlowUiDirectTextChangeRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiDirectTextChange', change)
+  }
+
+  applyFlowUiDirectTextChange(change: FlowUiDirectTextChangeRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiDirectTextChange', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewFlowUiControllerInjection(change: FlowUiControllerInjectionRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiControllerInjection', change)
+  }
+
+  applyFlowUiControllerInjection(change: FlowUiControllerInjectionRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiControllerInjection', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewFlowUiControllerHandler(change: FlowUiControllerHandlerRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiControllerHandler', change)
+  }
+
+  applyFlowUiControllerHandler(change: FlowUiControllerHandlerRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiControllerHandler', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewAggregateUpdateService(change: AggregateUpdateServiceRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewAggregateUpdateService', change)
+  }
+
+  applyAggregateUpdateService(change: AggregateUpdateServiceRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyAggregateUpdateService', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  inspectJmixRuntime(descriptorLocator: GraphSourceLocator) {
+    return this.request<JmixRuntimeInspectionResponse>('inspectJmixRuntime', { descriptorLocator })
+  }
+
+  openJmixRuntimePreview(url: string, title: string, viewport: JmixRuntimeViewport = 'DESKTOP') {
+    return this.request<JmixRuntimeActionResponse>('openJmixRuntimePreview', { url, title, viewport })
+  }
+
+  previewFlowUiHotDeploy(change: JmixFlowUiHotDeployRequest) {
+    return this.request<WorkspaceChangePreviewResponse>('previewFlowUiHotDeploy', change)
+  }
+
+  applyFlowUiHotDeploy(change: JmixFlowUiHotDeployRequest, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyFlowUiHotDeploy', {
+      change,
+      expectedPlanDigest,
+    })
+  }
+
+  previewWorkspaceChange(changeSet: WorkspaceChangeSet) {
+    return this.request<WorkspaceChangePreviewResponse>('previewWorkspaceChange', changeSet)
+  }
+
+  applyWorkspaceChange(changeSet: WorkspaceChangeSet, expectedPlanDigest: string) {
+    return this.request<WorkspaceChangeApplyResponse>('applyWorkspaceChange', {
+      changeSet,
+      expectedPlanDigest,
+    })
+  }
+}
+
+export const bridge = new Bridge()

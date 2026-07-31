@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.20.xsd">
+
+    <changeSet id="jvw-runtime-roundtrip" author="jmix-workbench">
+        <createTable tableName="JVW_LOAN_DOCUMENT">
+            <column name="ID" type="BIGINT">
+                <constraints nullable="false" primaryKey="true" primaryKeyName="PK_JVW_LOAN_DOC"/>
+            </column>
+            <column name="LOAN_ID" type="BIGINT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="DOCUMENT_KEY" type="VARCHAR(128)">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addUniqueConstraint
+                tableName="JVW_LOAN_DOCUMENT"
+                columnNames="LOAN_ID,DOCUMENT_KEY"
+                constraintName="UK_JVW_LOAN_DOC_KEY"/>
+        <createIndex tableName="JVW_LOAN_DOCUMENT" indexName="IDX_JVW_LOAN_DOC_LOAN">
+            <column name="LOAN_ID"/>
+        </createIndex>
+        <addForeignKeyConstraint
+                baseTableName="JVW_LOAN_DOCUMENT"
+                baseColumnNames="LOAN_ID"
+                referencedTableName="JVW_LOAN_APPLICATION"
+                referencedColumnNames="ID"
+                constraintName="FK_JVW_LOAN_DOC_LOAN"/>
+        <rollback>
+            <dropTable tableName="JVW_LOAN_DOCUMENT"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

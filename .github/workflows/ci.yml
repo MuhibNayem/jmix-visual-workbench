@@ -1,0 +1,66 @@
+name: Phase 1 CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase1-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  phase1:
+    name: Wrapper-only dual-lane gate
+    # Linux x64 artifacts are checksum-reviewed in verification-metadata.xml.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate checked-in wrapper
+        shell: bash
+        run: |
+          echo "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7  plugin/gradle/wrapper/gradle-wrapper.jar" | sha256sum --check --strict
+          grep -qx 'distributionSha256Sum=bafc141b619ad6350fd975fc903156dd5c151998cc8b058e8c1044ab5f7b031f' plugin/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Install Java 21 bootstrap JDK
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "21"
+          check-latest: false
+
+      - name: Run strict Phase 1 gate
+        shell: bash
+        run: cd plugin && ./gradlew clean phase1Check --dependency-verification=strict --no-daemon --no-configuration-cache --stacktrace
+
+      - name: Upload lane plugin ZIPs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: jmix-visual-workbench-plugin-zips
+          path: |
+            plugin/hosts/idea253/build/distributions/jmix-visual-workbench-1.0.0-idea253.zip
+            plugin/hosts/idea262/build/distributions/jmix-visual-workbench-1.0.0-idea262.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload test and verification reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phase1-verification-reports
+          path: |
+            plugin/build/reports/
+            plugin/hosts/idea253/build/reports/tests/
+            plugin/hosts/idea253/build/reports/pluginVerifier/
+            plugin/hosts/idea262/build/reports/tests/
+            plugin/hosts/idea262/build/reports/pluginVerifier/
+          if-no-files-found: warn
+          retention-days: 7

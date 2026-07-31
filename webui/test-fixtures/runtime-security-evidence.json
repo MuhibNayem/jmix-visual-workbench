@@ -1,0 +1,28 @@
+[
+  {
+    "_entityName": "sec_ResourceRoleEntity",
+    "id": "7a25218c-b99c-4f31-9d58-6d468292dd4b",
+    "name": "Runtime payroll operator",
+    "code": "runtime-payroll-operator",
+    "description": "Database-backed payroll permissions",
+    "scopes": ["UI", "API"],
+    "childRoles": [],
+    "resourcePolicies": [
+      {
+        "_entityName": "sec_ResourcePolicyEntity",
+        "id": "08e27279-adc5-4fbe-aecd-864331c26620",
+        "type": "entity",
+        "resource": "payroll_PayrollRun",
+        "action": "read",
+        "effect": "allow"
+      }
+    ]
+  },
+  {
+    "_entityName": "sec_RoleAssignmentEntity",
+    "id": "1be578aa-7089-4d87-af63-cb183e53e20e",
+    "username": "alex",
+    "roleCode": "runtime-payroll-operator",
+    "roleType": "resource"
+  }
+]
