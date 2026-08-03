@@ -1,0 +1,231 @@
+<idea-plugin>
+    <id>org.jmixworkbench</id>
+    <name>Jmix Visual Workbench</name>
+    <version>1.0.0</version>
+    <vendor>Jmix Visual Workbench contributors</vendor>
+
+    <description><![CDATA[
+    Compatible with Jmix. This independent project is not affiliated with or endorsed by Haulmont.
+    Early, non-certified clean-room visual workbench prototype for IntelliJ IDEA.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+    <depends>com.intellij.modules.xml</depends>
+    <depends>com.intellij.properties</depends>
+    <depends>com.intellij.gradle</depends>
+    <depends optional="true" config-file="jmix-kotlin.xml">org.jetbrains.kotlin</depends>
+
+    <extensionPoints>
+        <extensionPoint name="templateCatalogSigningProvider"
+                        interface="org.jmixworkbench.project.JmixTemplateCatalogSigningProvider"
+                        dynamic="true"/>
+    </extensionPoints>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <newProjectWizard.generator implementation="org.jmixworkbench.project.JmixNewProjectWizard"/>
+        <applicationConfigurable parentId="tools"
+                                 id="org.jmixworkbench.organizationTemplates"
+                                 displayName="Jmix Organization Templates"
+                                 instance="org.jmixworkbench.project.JmixTemplateCatalogConfigurable"/>
+        <fileEditorProvider implementation="org.jmixworkbench.editor.JmixFlowUiFileEditorProvider"/>
+        <fileEditorProvider implementation="org.jmixworkbench.editor.JmixEntityFileEditorProvider"/>
+        <toolWindow id="Jmix Visual Workbench"
+                    anchor="right"
+                    factoryClass="org.jmixworkbench.toolwindow.JmixWorkbenchToolWindowFactory"
+                    icon="/icons/workbench.svg"/>
+        <toolWindow id="Jmix Runtime Preview"
+                    anchor="bottom"
+                    canCloseContents="true"
+                    factoryClass="org.jmixworkbench.toolwindow.JmixRuntimePreviewToolWindowFactory"
+                    icon="/icons/workbench.svg"/>
+
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixProjectPropertiesService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixEnvironmentConfigurationService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.ApplicationGraphService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.WorkspaceChangeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.FlowUiWorkspaceService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.FlowUiControllerChangeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.AggregateUpdateServiceChangeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.JmixRuntimeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.toolwindow.WorkbenchNavigationService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.CodeGenerationService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.EntityEventListenerService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.DataRepositoryChangeService"/>
+        <projectService serviceImplementation="org.jmixworkbench.services.RepositoryMethodRefactorService"/>
+        <projectService serviceImplementation="org.jmixworkbench.ide.JmixDomainSymbolService"/>
+        <projectService serviceImplementation="org.jmixworkbench.ide.JmixUiSecuritySymbolService"/>
+        <projectService serviceImplementation="org.jmixworkbench.ide.JmixSpringBeanSymbolService"/>
+        <projectService serviceImplementation="org.jmixworkbench.ide.JmixRestConfigurationSymbolService"/>
+
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixEntityCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixViewControllerCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpecificPolicyCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpringBeanCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixSpringStereotypeUsageFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMenuCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFetchPlanCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixFlowUiDescriptorCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixRestDescriptorCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixMessageBundleCandidateFileIndex"/>
+        <fileBasedIndex implementation="org.jmixworkbench.ide.JmixStudioMetadataCandidateFileIndex"/>
+
+        <psi.referenceContributor language="XML"
+                                  implementation="org.jmixworkbench.ide.JmixFlowUiReferenceContributor"/>
+        <psi.referenceContributor language="XML"
+                                  implementation="org.jmixworkbench.ide.JmixDomainXmlReferenceContributor"/>
+        <psi.referenceContributor language="XML"
+                                  implementation="org.jmixworkbench.ide.JmixUiXmlReferenceContributor"/>
+        <psi.referenceContributor language="XML"
+                                  implementation="org.jmixworkbench.ide.JmixRestXmlReferenceContributor"/>
+        <psi.referenceContributor language="JAVA"
+                                  implementation="org.jmixworkbench.ide.JmixJavaReferenceContributor"/>
+        <psi.referenceContributor language="kotlin"
+                                  implementation="org.jmixworkbench.ide.JmixKotlinReferenceContributor"/>
+        <psi.referenceContributor language="Properties"
+                                  implementation="org.jmixworkbench.ide.JmixConfigurationReferenceContributor"/>
+        <useScopeEnlarger implementation="org.jmixworkbench.ide.JmixEntityUseScopeEnlarger"/>
+        <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixSpringBeanRenameProcessor"/>
+        <renamePsiElementProcessor implementation="org.jmixworkbench.ide.JmixMessageBundleRenameProcessor"
+                                   order="last"/>
+        <codeInsight.lineMarkerProvider language="JAVA"
+                                        implementationClass="org.jmixworkbench.ide.JmixViewDescriptorLineMarkerProvider"/>
+        <codeInsight.lineMarkerProvider language="XML"
+                                        implementationClass="org.jmixworkbench.ide.JmixViewDescriptorLineMarkerProvider"/>
+        <localInspection language="XML"
+                         shortName="JmixFlowUiReference"
+                         displayName="Unresolved Jmix FlowUI reference"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixFlowUiReferenceInspection"/>
+        <localInspection language="XML"
+                         shortName="JmixDomainXmlReference"
+                         displayName="Unresolved Jmix entity, property, or fetch plan"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixDomainXmlReferenceInspection"/>
+        <localInspection language="XML"
+                         shortName="JmixUiXmlReference"
+                         displayName="Unresolved Jmix menu, view, or message reference"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixUiXmlReferenceInspection"/>
+        <localInspection language="XML"
+                         shortName="JmixRestXmlReference"
+                         displayName="Invalid Jmix REST service mapping"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixRestXmlReferenceInspection"/>
+        <localInspection language="JAVA"
+                         shortName="JmixUiComponentPolicy"
+                         displayName="Invalid Jmix UI component policy"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixJavaUiComponentPolicyInspection"/>
+        <localInspection language="kotlin"
+                         shortName="JmixKotlinUiComponentPolicy"
+                         displayName="Invalid Jmix Kotlin UI component policy"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixKotlinUiComponentPolicyInspection"/>
+        <localInspection language="JAVA"
+                         shortName="JmixJavaReference"
+                         displayName="Unresolved Jmix Java reference"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixJavaReferenceInspection"/>
+        <localInspection language="kotlin"
+                         shortName="JmixKotlinReference"
+                         displayName="Unresolved Jmix Kotlin reference"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixKotlinReferenceInspection"/>
+        <localInspection language="Properties"
+                         shortName="JmixConfigurationReference"
+                         displayName="Invalid Jmix configuration resource"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixConfigurationReferenceInspection"/>
+        <localInspection language="JAVA"
+                         shortName="JmixFlowUiController"
+                         displayName="Invalid Jmix FlowUI controller contract"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixJavaFlowUiControllerInspection"/>
+        <localInspection language="kotlin"
+                         shortName="JmixKotlinFlowUiController"
+                         displayName="Invalid Jmix Kotlin FlowUI controller contract"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="ERROR"
+                         implementationClass="org.jmixworkbench.ide.JmixKotlinFlowUiControllerInspection"/>
+        <localInspection language="JAVA"
+                         shortName="JmixEventListener"
+                         displayName="Invalid Jmix event listener contract"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="WARNING"
+                         implementationClass="org.jmixworkbench.ide.JmixJavaEventListenerInspection"/>
+        <localInspection language="kotlin"
+                         shortName="JmixKotlinEventListener"
+                         displayName="Invalid Jmix Kotlin event listener contract"
+                         groupName="Jmix"
+                         enabledByDefault="true"
+                         level="WARNING"
+                         implementationClass="org.jmixworkbench.ide.JmixKotlinEventListenerInspection"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="org.jetbrains.kotlin">
+        <supportsKotlinPluginMode supportsK2="true"/>
+    </extensions>
+
+    <actions>
+        <group id="JmixWorkbench.NewMenu" text="Jmix Visual Workbench" popup="true">
+            <add-to-group group-id="NewGroup" anchor="last"/>
+            <action id="JmixWorkbench.NewEntity"
+                    class="org.jmixworkbench.actions.NewEntityAction"
+                    text="Entity"
+                    description="Create a new Jmix entity visually"/>
+            <action id="JmixWorkbench.NewView"
+                    class="org.jmixworkbench.actions.NewViewAction"
+                    text="View"
+                    description="Create a new Jmix view visually"/>
+            <action id="JmixWorkbench.NewCrud"
+                    class="org.jmixworkbench.actions.NewCrudAction"
+                    text="CRUD Screens"
+                    description="Generate full CRUD screens for an entity"/>
+        </group>
+
+        <action id="JmixWorkbench.OpenDesigner"
+                class="org.jmixworkbench.actions.OpenDesignerAction"
+                text="Open Jmix Visual Workbench"
+                description="Open the Jmix Visual Workbench">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+
+        <action id="JmixWorkbench.OpenProjectProperties"
+                class="org.jmixworkbench.actions.OpenProjectPropertiesAction"
+                text="Jmix Project Configuration"
+                description="Inspect and safely edit Jmix profiles, locales, server settings and data stores">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+
+        <action id="JmixWorkbench.InjectRepository"
+                class="org.jmixworkbench.actions.InjectJmixRepositoryAction"
+                text="Inject Jmix Data Repository..."
+                description="Inject an accessible Jmix data repository into the current Java or Kotlin class">
+            <add-to-group group-id="GenerateGroup" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

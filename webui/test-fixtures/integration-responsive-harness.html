@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Integration Designer responsive harness</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; background: #080d16; color: #d1d5db; font: 12px system-ui; }
+    #app-frame { display: block; height: 760px; border: 0; background: #111827; }
+    #metrics { margin: 0; padding: 12px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <iframe id="app-frame" title="Responsive Integration Designer"></iframe>
+  <pre id="metrics">Loading…</pre>
+  <script>
+    const requestedWidth = Math.max(320, Math.min(1600, Number(new URLSearchParams(location.search).get('width')) || 640))
+    const frame = document.getElementById('app-frame')
+    frame.style.width = `${requestedWidth}px`
+    frame.src = '/'
+    frame.addEventListener('load', () => {
+      setTimeout(() => {
+        const documentUnderTest = frame.contentDocument
+        const integrationButton = [...documentUnderTest.querySelectorAll('button')]
+          .find((button) => button.getAttribute('aria-label') === 'Integration Designer')
+        integrationButton?.click()
+        setTimeout(() => {
+          const regions = [...documentUnderTest.querySelectorAll(
+            '.integration-catalog,.integration-canvas,.integration-inspector',
+          )].map((element) => {
+            const rect = element.getBoundingClientRect()
+            return {
+              region: element.classList.contains('integration-catalog')
+                ? 'catalog'
+                : element.classList.contains('integration-canvas') ? 'canvas' : 'inspector',
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              width: Math.round(rect.width),
+              right: Math.round(rect.right),
+              display: getComputedStyle(element).display,
+            }
+          })
+          const grid = documentUnderTest.querySelector('.integration-designer-grid')
+          const result = {
+            requestedWidth,
+            clientWidth: documentUnderTest.documentElement.clientWidth,
+            scrollWidth: documentUnderTest.documentElement.scrollWidth,
+            bodyScrollWidth: documentUnderTest.body.scrollWidth,
+            gridDisplay: grid ? getComputedStyle(grid).display : null,
+            regionCount: regions.length,
+            regions,
+          }
+          document.getElementById('metrics').textContent = JSON.stringify(result, null, 2)
+          document.title = result.scrollWidth === result.clientWidth && result.regionCount === 3
+            ? `PASS ${requestedWidth}`
+            : `FAIL ${requestedWidth}`
+        }, 600)
+      }, 250)
+    })
+  </script>
+</body>
+</html>

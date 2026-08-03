@@ -1,0 +1,113 @@
+name: jmix-workbench-integration-certification
+
+services:
+  postgres:
+    image: postgres:16.9
+    environment:
+      POSTGRES_DB: jmixintcert
+      POSTGRES_USER: jmixintcert
+      POSTGRES_PASSWORD: ${CERT_POSTGRES_PASSWORD:-jmix-integration-postgres}
+    ports:
+      - "127.0.0.1:${CERT_POSTGRES_PORT:-56432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jmixintcert -d jmixintcert"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  kafka:
+    image: apache/kafka:4.0.0
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://127.0.0.1:${CERT_KAFKA_PROXY_PORT:-59092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 50
+    tmpfs:
+      - /tmp/kraft-combined-logs
+
+  rabbit:
+    image: rabbitmq:4.1.2-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: jmixintcert
+      RABBITMQ_DEFAULT_PASS: ${CERT_RABBIT_PASSWORD:-jmix-integration-rabbit}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 50
+    tmpfs:
+      - /var/lib/rabbitmq
+
+  sftp:
+    image: atmoz/sftp:alpine
+    command: ["jmixintcert:jmix-integration-sftp:1001::upload"]
+    ports:
+      - "127.0.0.1:${CERT_SFTP_PORT:-52222}:22"
+    healthcheck:
+      test: ["CMD-SHELL", "ps | grep -q '[s]shd'"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+      rabbit:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${CERT_TOXIPROXY_PORT:-58474}:8474"
+      - "127.0.0.1:${CERT_KAFKA_PROXY_PORT:-59092}:19092"
+      - "127.0.0.1:${CERT_RABBIT_PROXY_PORT:-55673}:15673"
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  wiremock:
+    image: wiremock/wiremock:3.13.2-2
+    ports:
+      - "127.0.0.1:${CERT_WIREMOCK_PORT:-58080}:8080"
+      - "127.0.0.1:${CERT_MTLS_PORT:-58443}:8443"
+    volumes:
+      - "${CERT_TLS_DIR:?CERT_TLS_DIR is required}/server.p12:/certs/server.p12:ro"
+      - "${CERT_TLS_DIR:?CERT_TLS_DIR is required}/server-trust.p12:/certs/server-trust.p12:ro"
+    command:
+      - "--global-response-templating"
+      - "--disable-gzip"
+      - "--https-port"
+      - "8443"
+      - "--https-keystore"
+      - "/certs/server.p12"
+      - "--keystore-type"
+      - "PKCS12"
+      - "--keystore-password"
+      - "${CERT_MTLS_PASSWORD:-jmix-integration-mtls}"
+      - "--key-manager-password"
+      - "${CERT_MTLS_PASSWORD:-jmix-integration-mtls}"
+      - "--https-truststore"
+      - "/certs/server-trust.p12"
+      - "--truststore-type"
+      - "PKCS12"
+      - "--truststore-password"
+      - "${CERT_MTLS_PASSWORD:-jmix-integration-mtls}"
+      - "--https-require-client-cert"

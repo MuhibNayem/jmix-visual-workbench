@@ -1,0 +1,20 @@
+[versions]
+gradle = "9.5.1"
+intellij-platform-gradle-plugin = "2.18.0"
+foojay-resolver = "1.0.0"
+node-gradle-plugin = "7.1.0"
+node-runtime = "24.18.0"
+gson = "2.11.0"
+kotlin = "2.4.0"
+idea253-kotlin-language = "2.2"
+idea253 = "2025.3"
+idea262 = "2026.2"
+
+[libraries]
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+
+[plugins]
+intellij-platform = { id = "org.jetbrains.intellij.platform", version.ref = "intellij-platform-gradle-plugin" }
+foojay-resolver = { id = "org.gradle.toolchains.foojay-resolver-convention", version.ref = "foojay-resolver" }
+node = { id = "com.github.node-gradle.node", version.ref = "node-gradle-plugin" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+    <changeSet id="jvw-cert-handler-effect-1" author="jmix-workbench">
+        <createTable tableName="jvw_cert_handler_effect">
+            <column name="payload" type="varchar(500)">
+                <constraints nullable="false" primaryKey="true"
+                             primaryKeyName="pk_jvw_cert_handler_effect"/>
+            </column>
+            <column name="handled_at" type="datetime">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+    <include file="db/changelog/jvw-loan-outbox.xml"/>
+    <include file="db/changelog/jvw-payroll-outbox.xml"/>
+    <include file="db/changelog/jvw-loan-inbox.xml"/>
+    <include file="db/changelog/jvw-payroll-inbox.xml"/>
+</databaseChangeLog>
