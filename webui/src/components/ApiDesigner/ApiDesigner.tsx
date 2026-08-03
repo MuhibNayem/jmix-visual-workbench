@@ -138,7 +138,7 @@ export default function ApiDesigner() {
 
   const selected = workspace?.operations.find((operation) => operation.artifactId === selectedId) ?? null
   const normalizedQuery = query.trim().toLowerCase()
-  const visibleOperations = useMemo(() => (
+  const matchingOperations = useMemo(() => (
     workspace?.operations.filter((operation) => (
       (kind === 'ALL' || operation.kind === kind) &&
       (!normalizedQuery || [
@@ -149,6 +149,7 @@ export default function ApiDesigner() {
       ].some((value) => value.toLowerCase().includes(normalizedQuery)))
     )) ?? []
   ), [workspace, kind, normalizedQuery])
+  const visibleOperations = useMemo(() => matchingOperations.slice(0, 300), [matchingOperations])
   const selectedFindings = workspace?.findings.filter((finding) => (
     !finding.operationId || finding.operationId === selectedId
   )) ?? []
@@ -445,7 +446,7 @@ export default function ApiDesigner() {
             onChange={setPane}
             label="API workbench panels"
             options={[
-              { id: 'operations', label: 'Operations', badge: visibleOperations.length },
+              { id: 'operations', label: 'Operations', badge: matchingOperations.length },
               { id: 'contract', label: 'Contract', badge: selectedFindings.length },
               { id: 'request', label: 'Request runner', badge: saved.length },
             ]}
@@ -476,6 +477,11 @@ export default function ApiDesigner() {
                 </div>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                {matchingOperations.length > visibleOperations.length && (
+                  <div className="mb-2 rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[9px] text-amber-200/80">
+                    Showing the first {visibleOperations.length} of {matchingOperations.length} operations. Refine the search to narrow the catalog.
+                  </div>
+                )}
                 {visibleOperations.map((operation) => (
                   <button
                     type="button"

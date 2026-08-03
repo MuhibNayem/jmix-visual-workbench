@@ -60,6 +60,7 @@ export default function App() {
       : null
   })
   const [entityDesignerKey, setEntityDesignerKey] = useState(0)
+  const [workspaceRevision, setWorkspaceRevision] = useState(0)
   const developmentEditorWidthParameter = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get('editorWidth')
     : null
@@ -80,6 +81,22 @@ export default function App() {
       }
     })
   }, [])
+
+  useEffect(() => {
+    const handleIndexUpdate = (event: Event) => {
+      const update = (event as CustomEvent<{ changedFiles?: number; incremental?: boolean }>).detail
+      setWorkspaceRevision((current) => current + 1)
+      const changedFiles = update?.changedFiles ?? 0
+      if (changedFiles > 0) {
+        addToast(
+          `Project model synchronized incrementally from ${changedFiles} changed ${changedFiles === 1 ? 'file' : 'files'}.`,
+          'info',
+        )
+      }
+    }
+    window.addEventListener('jmix-workbench-index-updated', handleIndexUpdate)
+    return () => window.removeEventListener('jmix-workbench-index-updated', handleIndexUpdate)
+  }, [addToast])
 
   useEffect(() => {
     const applyLaunchContext = (context: ReturnType<typeof bridge.getLaunchContext>) => {
@@ -238,7 +255,7 @@ export default function App() {
       </nav>
 
       {/* Main Content */}
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <main key={workspaceRevision} className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {activeTab === 'projectProperties' && <ProjectProperties />}
         {activeTab === 'projectMap' && <ProjectMap />}
         {activeTab === 'entity' && <EntityDesigner key={entityDesignerKey} />}

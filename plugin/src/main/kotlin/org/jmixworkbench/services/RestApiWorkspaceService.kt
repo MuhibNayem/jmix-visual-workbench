@@ -9,13 +9,12 @@ import org.jmixworkbench.discovery.model.DiagnosticSeverity
 import org.jmixworkbench.discovery.model.RelationshipType
 import org.jmixworkbench.discovery.model.SourceLocator
 import org.jmixworkbench.discovery.security.SecurityPolicyEffect
-import org.jmixworkbench.discovery.security.SecurityWorkspaceBuilder
-import org.jmixworkbench.discovery.security.SecurityWorkspaceInput
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.util.concurrent.atomic.AtomicReference
 import org.xml.sax.InputSource
 import java.io.StringReader
 import javax.xml.XMLConstants
@@ -23,18 +22,17 @@ import javax.xml.parsers.DocumentBuilderFactory
 
 @Service(Service.Level.PROJECT)
 class RestApiWorkspaceService(private val project: Project) {
+    private val cachedWorkspace = AtomicReference<RestApiWorkspaceResponse?>()
 
     fun load(forceRefresh: Boolean = false): RestApiWorkspaceResponse {
         val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh)
-        val security = SecurityWorkspaceBuilder.build(
-            SecurityWorkspaceInput(
-                artifacts = graph.artifacts,
-                relationships = graph.relationships,
-                diagnostics = graph.diagnostics,
-                graphDigest = graph.snapshotDigest,
-            ),
-        )
-        return enrichEditableContracts(RestApiWorkspaceBuilder.build(graph, security))
+        if (!forceRefresh) {
+            cachedWorkspace.get()
+                ?.takeIf { it.graphDigest == graph.snapshotDigest }
+                ?.let { return it }
+        }
+        val security = SecurityWorkspaceService.getInstance(project).source()
+        return enrichEditableContracts(RestApiWorkspaceBuilder.build(graph, security)).also(cachedWorkspace::set)
     }
 
     private fun enrichEditableContracts(workspace: RestApiWorkspaceResponse): RestApiWorkspaceResponse {

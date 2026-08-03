@@ -20,6 +20,48 @@ import kotlin.test.assertTrue
 
 class ApplicationGraphServiceIntegrationTest : HeavyPlatformTestCase() {
 
+    fun testExistingRootChangesUseIncrementalInventoryAndSemanticContributions() {
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/payroll/Employee.java",
+                "package com.acme.payroll; @JmixEntity public class Employee {}",
+            )
+        }
+        PsiTestUtil.addContentRoot(module, root)
+        PsiTestUtil.addSourceRoot(
+            module,
+            requireNotNull(root.findFileByRelativePath("src/main/java")),
+            JavaSourceRootType.SOURCE,
+        )
+        val service = ApplicationGraphService.getInstance(project)
+        val initial = service.graph(forceRefresh = true)
+        assertEquals(1, initial.scannedFiles)
+
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/java/com/acme/payroll/Department.java",
+                "package com.acme.payroll; @JmixEntity public class Department {}",
+            )
+        }
+        val added = service.graph()
+
+        assertFalse(added.cacheHit)
+        assertEquals(2, added.scannedFiles)
+        assertEquals(1, added.changedFiles)
+        assertEquals(1, added.reusedFiles)
+        assertTrue(added.artifacts.any {
+            it.kind == ArtifactKind.ENTITY && it.displayName == "Department"
+        })
+
+        val cached = service.graph()
+        assertTrue(cached.cacheHit)
+        assertEquals(0, cached.changedFiles)
+        assertEquals(2, cached.reusedFiles)
+    }
+
     fun testUnsavedJvmDocumentInvalidatesGraphAndBecomesIndexedRevision() {
         val root = getOrCreateProjectBaseDir()
         WriteAction.run<RuntimeException> {
@@ -185,6 +227,48 @@ class ApplicationGraphServiceIntegrationTest : HeavyPlatformTestCase() {
             it.kind == ArtifactKind.VIEW_DESCRIPTOR && it.displayName == "employee-list-view"
         })
         assertTrue(graph.indexHealth.complete)
+    }
+
+    fun testDependencyLocksAndCompiledResourceCopiesAreNotApplicationSources() {
+        val root = getOrCreateProjectBaseDir()
+        WriteAction.run<RuntimeException> {
+            write(
+                root,
+                "src/main/resources/application.yml",
+                "spring:\n  profiles:\n    active: enterprise",
+            )
+            write(
+                root,
+                "src/main/resources/pnpm-lock.yaml",
+                "lockfileVersion: 9\n'@polymer/iron-icon': 3.0.1\npackages:\n  values:\n    - one",
+            )
+            write(
+                root,
+                "build/resources/main/com/acme/menu.xml",
+                "<menu-config><menu></wrong></menu-config>",
+            )
+        }
+        PsiTestUtil.addContentRoot(module, root)
+        PsiTestUtil.addSourceRoot(
+            module,
+            requireNotNull(root.findFileByRelativePath("src/main/resources")),
+            JavaResourceRootType.RESOURCE,
+        )
+        PsiTestUtil.addSourceRoot(
+            module,
+            requireNotNull(root.findFileByRelativePath("build/resources/main")),
+            JavaResourceRootType.RESOURCE,
+        )
+
+        val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh = true)
+
+        assertEquals(1, graph.scannedFiles)
+        assertEquals(0, graph.parseErrorFiles)
+        assertTrue(graph.indexHealth.complete)
+        assertFalse(graph.artifacts.any {
+            it.sourceLocator.relativePath.endsWith("pnpm-lock.yaml") ||
+                "/build/resources/" in it.sourceLocator.relativePath
+        })
     }
 
     fun testSyntaxErrorsAreExcludedAndMakeIndexHealthPartial() {

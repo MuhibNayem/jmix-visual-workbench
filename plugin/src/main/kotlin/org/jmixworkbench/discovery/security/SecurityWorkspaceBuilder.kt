@@ -14,6 +14,7 @@ data class SecurityWorkspaceInput(
     val relationships: List<ArtifactRelationship>,
     val diagnostics: List<DiscoveryDiagnostic>,
     val graphDigest: String,
+    val checkCancelled: () -> Unit = {},
 )
 
 data class SecurityWorkspaceSnapshot(
@@ -133,20 +134,23 @@ data class SecurityWorkspaceSummary(
 
 object SecurityWorkspaceBuilder {
     fun build(input: SecurityWorkspaceInput): SecurityWorkspaceSnapshot {
+        input.checkCancelled()
         val artifactsById = input.artifacts.associateBy(ArtifactSnapshot::id)
         val policyArtifacts = input.artifacts.filter { it.kind == ArtifactKind.SECURITY_POLICY }
         val roleArtifacts = input.artifacts.filter {
             it.kind == ArtifactKind.RESOURCE_ROLE || it.kind == ArtifactKind.ROW_ROLE
         }
+        val policyArtifactIds = policyArtifacts.mapTo(linkedSetOf(), ArtifactSnapshot::id)
+        val roleArtifactIds = roleArtifacts.mapTo(linkedSetOf(), ArtifactSnapshot::id)
         val declaredPolicyIds = input.relationships
-            .filter { it.type == RelationshipType.DECLARES && it.targetArtifactId in policyArtifacts.map(ArtifactSnapshot::id) }
+            .filter { it.type == RelationshipType.DECLARES && it.targetArtifactId in policyArtifactIds }
             .groupBy(ArtifactRelationship::sourceArtifactId)
             .mapValues { (_, links) -> links.mapNotNull(ArtifactRelationship::targetArtifactId).distinct().sorted() }
         val inheritance = input.relationships
-            .filter { it.type == RelationshipType.EXTENDS && it.sourceArtifactId in roleArtifacts.map(ArtifactSnapshot::id) }
+            .filter { it.type == RelationshipType.EXTENDS && it.sourceArtifactId in roleArtifactIds }
             .groupBy(ArtifactRelationship::sourceArtifactId)
         val directPolicyTargets = input.relationships
-            .filter { it.type == RelationshipType.APPLIES_POLICY_TO && it.sourceArtifactId in policyArtifacts.map(ArtifactSnapshot::id) }
+            .filter { it.type == RelationshipType.APPLIES_POLICY_TO && it.sourceArtifactId in policyArtifactIds }
             .groupBy(ArtifactRelationship::sourceArtifactId)
             .mapValues { (_, links) -> links.mapNotNull(ArtifactRelationship::targetArtifactId).distinct().sorted() }
         val outgoingRelationships = input.relationships.groupBy(ArtifactRelationship::sourceArtifactId)
@@ -210,42 +214,58 @@ object SecurityWorkspaceBuilder {
             )
         }.sortedWith(compareBy(SecurityPolicySnapshot::roleId, SecurityPolicySnapshot::type, SecurityPolicySnapshot::id))
         val policiesById = policies.associateBy(SecurityPolicySnapshot::id)
-
         val effectivePolicyIdsByRole = roles.associate { role ->
+            input.checkCancelled()
             role.id to effectiveRoleIds(role.id, rolesById).flatMap { roleId ->
                 rolesById[roleId]?.policyIds.orEmpty()
             }.distinct()
         }
         val grantingRolesByArtifact = linkedMapOf<String, MutableSet<String>>()
         val restrictingRolesByArtifact = linkedMapOf<String, MutableSet<String>>()
+        val wildcardGrantingRolesByPolicyType = linkedMapOf<String, MutableSet<String>>()
+        val wildcardRestrictingRolesByPolicyType = linkedMapOf<String, MutableSet<String>>()
         roles.forEach { role ->
+            input.checkCancelled()
             effectivePolicyIdsByRole[role.id].orEmpty().mapNotNull(policiesById::get).forEach { policy ->
-                val targetIds = if (policy.wildcard) {
-                    input.artifacts.filter { wildcardAppliesTo(policy.type, it.kind) }.map(ArtifactSnapshot::id)
+                val granting = policy.effect == SecurityPolicyEffect.GRANT
+                if (policy.wildcard) {
+                    val destination = if (granting) {
+                        wildcardGrantingRolesByPolicyType
+                    } else {
+                        wildcardRestrictingRolesByPolicyType
+                    }
+                    destination.getOrPut(policy.type) { linkedSetOf() } += role.id
                 } else {
-                    policy.targetArtifactIds
-                }
-                val destination = if (policy.effect == SecurityPolicyEffect.GRANT) {
-                    grantingRolesByArtifact
-                } else {
-                    restrictingRolesByArtifact
-                }
-                targetIds.forEach { artifactId ->
-                    destination.getOrPut(artifactId) { linkedSetOf() } += role.id
+                    val destination = if (granting) grantingRolesByArtifact else restrictingRolesByArtifact
+                    policy.targetArtifactIds.forEachIndexed { targetIndex, artifactId ->
+                        if (targetIndex % 256 == 0) input.checkCancelled()
+                        destination.getOrPut(artifactId) { linkedSetOf() } += role.id
+                    }
                 }
             }
         }
 
-        val surfaces = input.artifacts.mapNotNull { artifact ->
-            val surfaceKind = surfaceKind(artifact.kind) ?: return@mapNotNull null
+        val surfaces = input.artifacts.mapIndexedNotNull { artifactIndex, artifact ->
+            if (artifactIndex % 256 == 0) input.checkCancelled()
+            val surfaceKind = surfaceKind(artifact.kind) ?: return@mapIndexedNotNull null
+            val wildcardGrants = wildcardGrantingRolesByPolicyType
+                .asSequence()
+                .filter { (policyType) -> wildcardAppliesTo(policyType, artifact.kind) }
+                .flatMap { it.value.asSequence() }
+            val wildcardRestrictions = wildcardRestrictingRolesByPolicyType
+                .asSequence()
+                .filter { (policyType) -> wildcardAppliesTo(policyType, artifact.kind) }
+                .flatMap { it.value.asSequence() }
             SecuritySurfaceSnapshot(
                 artifactId = artifact.id,
                 kind = surfaceKind,
                 displayName = artifact.displayName,
                 semanticKey = artifact.semanticKey,
                 moduleId = artifact.owner.moduleId,
-                grantingRoleIds = grantingRolesByArtifact[artifact.id].orEmpty().sorted(),
-                restrictingRoleIds = restrictingRolesByArtifact[artifact.id].orEmpty().sorted(),
+                grantingRoleIds = (grantingRolesByArtifact[artifact.id].orEmpty().asSequence() + wildcardGrants)
+                    .distinct().sorted().toList(),
+                restrictingRoleIds = (restrictingRolesByArtifact[artifact.id].orEmpty().asSequence() + wildcardRestrictions)
+                    .distinct().sorted().toList(),
                 sourceLocator = artifact.sourceLocator,
             )
         }.sortedWith(compareBy(SecuritySurfaceSnapshot::kind, SecuritySurfaceSnapshot::displayName))
@@ -284,7 +304,10 @@ object SecurityWorkspaceBuilder {
         val outgoingBySource = input.relationships
             .filter { it.type in traversableJourneyLinks }
             .groupBy(ArtifactRelationship::sourceArtifactId)
-        val journeys = menuRoutes.map { route ->
+        val reachableByView = mutableMapOf<String, Set<String>>()
+        val unresolvedByView = mutableMapOf<String, Int>()
+        val journeys = menuRoutes.mapIndexed { routeIndex, route ->
+            if (routeIndex % 64 == 0) input.checkCancelled()
             val menuPath = buildList {
                 val seen = mutableSetOf<String>()
                 var current: String? = route.menuArtifactId
@@ -294,7 +317,9 @@ object SecurityWorkspaceBuilder {
                 }
             }.reversed()
             val reachable = route.viewArtifactId?.let { viewId ->
-                reachableArtifacts(viewId, outgoingBySource, maxDepth = 6)
+                reachableByView.getOrPut(viewId) {
+                    reachableArtifacts(viewId, outgoingBySource, maxDepth = 6, input.checkCancelled)
+                }
             }.orEmpty()
             SecurityJourneySnapshot(
                 menuArtifactId = route.menuArtifactId,
@@ -309,7 +334,9 @@ object SecurityWorkspaceBuilder {
                     artifactsById[it]?.kind in setOf(ArtifactKind.UI_COMPONENT, ArtifactKind.UI_ACTION)
                 }.sorted(),
                 unresolvedDependencyCount = route.viewArtifactId?.let { viewId ->
-                    reachableUnresolvedCount(viewId, outgoingBySource, maxDepth = 6)
+                    unresolvedByView.getOrPut(viewId) {
+                        reachableUnresolvedCount(viewId, outgoingBySource, maxDepth = 6, input.checkCancelled)
+                    }
                 } ?: 1,
                 sourceLocator = route.sourceLocator,
             )
@@ -559,11 +586,14 @@ object SecurityWorkspaceBuilder {
         startId: String,
         outgoingBySource: Map<String, List<ArtifactRelationship>>,
         maxDepth: Int,
+        checkCancelled: () -> Unit,
     ): Set<String> {
         val result = linkedSetOf<String>()
         val queue = ArrayDeque<Pair<String, Int>>()
         queue.add(startId to 0)
+        var visitedCount = 0
         while (queue.isNotEmpty()) {
+            if (visitedCount++ % 256 == 0) checkCancelled()
             val (current, depth) = queue.removeFirst()
             if (depth >= maxDepth) continue
             outgoingBySource[current].orEmpty().forEach { relationship ->
@@ -579,12 +609,15 @@ object SecurityWorkspaceBuilder {
         startId: String,
         outgoingBySource: Map<String, List<ArtifactRelationship>>,
         maxDepth: Int,
+        checkCancelled: () -> Unit,
     ): Int {
         val visited = mutableSetOf(startId)
         val queue = ArrayDeque<Pair<String, Int>>()
         queue.add(startId to 0)
         var unresolved = 0
+        var visitedCount = 0
         while (queue.isNotEmpty()) {
+            if (visitedCount++ % 256 == 0) checkCancelled()
             val (current, depth) = queue.removeFirst()
             if (depth >= maxDepth) continue
             outgoingBySource[current].orEmpty().forEach { relationship ->

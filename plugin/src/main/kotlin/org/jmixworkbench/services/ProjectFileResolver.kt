@@ -1,14 +1,18 @@
 package org.jmixworkbench.services
 
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.ModuleRootEvent
+import com.intellij.openapi.roots.ModuleRootListener
 import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
 import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Resolves safe source-locator paths across every IntelliJ content root.
@@ -24,7 +28,19 @@ import org.jmixworkbench.discovery.model.CanonicalDiscoveryJson
  * project model. No absolute path is exposed to the web UI or accepted from it.
  */
 @Service(Service.Level.PROJECT)
-class ProjectFileResolver(private val project: Project) {
+class ProjectFileResolver(private val project: Project) : Disposable {
+    private val rootCache = AtomicReference<List<RegisteredRoot>?>(null)
+
+    init {
+        project.messageBus.connect(this).subscribe(
+            ModuleRootListener.TOPIC,
+            object : ModuleRootListener {
+                override fun rootsChanged(event: ModuleRootEvent) {
+                    rootCache.set(null)
+                }
+            },
+        )
+    }
 
     fun locatorPath(file: VirtualFile, module: Module? = null): String? {
         val baseRoot = baseRoot()
@@ -88,6 +104,13 @@ class ProjectFileResolver(private val project: Project) {
         registeredRoots().any { VfsUtilCore.isAncestor(it.root, file, false) }
 
     fun registeredRoots(): List<RegisteredRoot> {
+        rootCache.get()?.let { return it }
+        val computed = computeRegisteredRoots()
+        rootCache.compareAndSet(null, computed)
+        return rootCache.get() ?: computed
+    }
+
+    private fun computeRegisteredRoots(): List<RegisteredRoot> {
         val baseRoot = baseRoot()
         val roots = mutableListOf<RegisteredRoot>()
         if (baseRoot != null) {
@@ -116,6 +139,10 @@ class ProjectFileResolver(private val project: Project) {
                     }
             }
         return roots.distinctBy { "${it.prefix}\u0000${it.root.path}" }
+    }
+
+    override fun dispose() {
+        rootCache.set(null)
     }
 
     private fun baseRoot(): VirtualFile? =

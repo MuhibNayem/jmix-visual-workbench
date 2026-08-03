@@ -758,9 +758,16 @@ export default function IntegrationDesigner() {
   const destination = workspace?.destinations.find((candidate) => candidate.id === model?.destinationId)
     ?? workspace?.destinations[0]
   const definition = definitions.find((candidate) => candidate.kind === model?.kind)
-  const handlers = workspace?.contextArtifacts.filter((artifact) => (
+  const handlers = useMemo(() => workspace?.contextArtifacts.filter((artifact) => (
     ['SERVICE', 'BUSINESS_RULE', 'REPOSITORY', 'VALIDATOR', 'SOURCE_TYPE'].includes(artifact.kind)
-  )) ?? []
+  )) ?? [], [workspace])
+  const visibleHandlers = useMemo(() => {
+    const bounded = handlers.slice(0, 500)
+    const selected = handlers.find((handler) => handler.semanticKey === model?.handlerBeanClass)
+    return selected && !bounded.some((handler) => handler.id === selected.id)
+      ? [selected, ...bounded]
+      : bounded
+  }, [handlers, model?.handlerBeanClass])
   const selectedCatalogTemplate = workspace?.organizationConnectorTemplates.find((candidate) => (
     candidate.catalogId === model?.catalogBinding?.catalogId &&
     candidate.catalogVersion === model?.catalogBinding?.catalogVersion &&
@@ -2785,8 +2792,13 @@ export default function IntegrationDesigner() {
                       className={fieldClass}
                     >
                       <option value="">Select an indexed service or rule…</option>
-                      {handlers.map((handler) => <option key={handler.id} value={handler.semanticKey}>{handler.displayName} · {handler.owner.moduleId}</option>)}
+                      {visibleHandlers.map((handler) => <option key={handler.id} value={handler.semanticKey}>{handler.displayName} · {handler.owner.moduleId}</option>)}
                     </select>
+                    {handlers.length > visibleHandlers.length && (
+                      <span className="mt-1 block text-[9px] text-amber-300/70">
+                        Showing {visibleHandlers.length} of {handlers.length} indexed handler types to keep this editor responsive.
+                      </span>
+                    )}
                   </label>
                   <label>
                     <span className={labelClass}>Injected field</span>

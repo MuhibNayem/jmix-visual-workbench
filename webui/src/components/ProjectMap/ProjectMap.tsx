@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { bridge } from '../../bridge'
 import { useStore } from '../../store'
 import ResponsivePaneSwitcher from '../shared/ResponsivePaneSwitcher'
 import type {
+  ApplicationGraphProgressResponse,
   ApplicationGraphResponse,
   GraphArtifact,
   GraphDiagnostic,
@@ -99,31 +100,78 @@ interface TransitiveImpact {
   route: ImpactHop[]
 }
 
+interface GraphLookup {
+  artifactsById: Map<string, GraphArtifact>
+  outgoingByArtifactId: Map<string, GraphRelationship[]>
+  incomingByArtifactId: Map<string, GraphRelationship[]>
+  diagnosticsByPath: Map<string, GraphDiagnostic[]>
+}
+
+const EMPTY_GRAPH_LOOKUP: GraphLookup = {
+  artifactsById: new Map(),
+  outgoingByArtifactId: new Map(),
+  incomingByArtifactId: new Map(),
+  diagnosticsByPath: new Map(),
+}
+
+function appendLookupValue<K, V>(lookup: Map<K, V[]>, key: K, value: V) {
+  const values = lookup.get(key)
+  if (values) values.push(value)
+  else lookup.set(key, [value])
+}
+
+function buildGraphLookup(graph: ApplicationGraphResponse): GraphLookup {
+  const artifactsById = new Map(graph.artifacts.map((artifact) => [artifact.id, artifact]))
+  const outgoingByArtifactId = new Map<string, GraphRelationship[]>()
+  const incomingByArtifactId = new Map<string, GraphRelationship[]>()
+  const diagnosticsByPath = new Map<string, GraphDiagnostic[]>()
+
+  graph.relationships.forEach((relationship) => {
+    appendLookupValue(outgoingByArtifactId, relationship.sourceArtifactId, relationship)
+    if (relationship.targetArtifactId) {
+      appendLookupValue(incomingByArtifactId, relationship.targetArtifactId, relationship)
+    }
+
+  })
+  graph.diagnostics.forEach((diagnostic) => {
+    const path = diagnostic.sourceLocator?.relativePath
+    if (path) appendLookupValue(diagnosticsByPath, path, diagnostic)
+  })
+  return {
+    artifactsById,
+    outgoingByArtifactId,
+    incomingByArtifactId,
+    diagnosticsByPath,
+  }
+}
+
 function connectedImpact(
-  graph: ApplicationGraphResponse,
+  lookup: GraphLookup,
   startId: string,
   artifactsById: Map<string, GraphArtifact>,
 ): TransitiveImpact[] {
-  const adjacency = new Map<string, Array<{ nextId: string; hop: ImpactHop }>>()
-  const connect = (from: string, nextId: string, hop: ImpactHop) => {
-    const links = adjacency.get(from) ?? []
-    links.push({ nextId, hop })
-    adjacency.set(from, links)
-  }
-  graph.relationships.forEach((relationship) => {
-    const targetId = relationship.targetArtifactId
-    if (!targetId || !artifactsById.has(targetId) || !artifactsById.has(relationship.sourceArtifactId)) return
-    connect(relationship.sourceArtifactId, targetId, { relationship, direction: 'outgoing' })
-    connect(targetId, relationship.sourceArtifactId, { relationship, direction: 'incoming' })
-  })
-
   const visited = new Set([startId])
   const queue: Array<{ artifactId: string; route: ImpactHop[] }> = [{ artifactId: startId, route: [] }]
   const results: TransitiveImpact[] = []
   while (queue.length && results.length < MAX_TRANSITIVE_IMPACT) {
     const current = queue.shift()!
     if (current.route.length >= MAX_TRANSITIVE_DEPTH) continue
-    const nextLinks = (adjacency.get(current.artifactId) ?? []).sort((left, right) => (
+    const nextLinks: Array<{ nextId: string; hop: ImpactHop }> = []
+    ;(lookup.outgoingByArtifactId.get(current.artifactId) ?? []).forEach((relationship) => {
+      if (relationship.targetArtifactId) {
+        nextLinks.push({
+          nextId: relationship.targetArtifactId,
+          hop: { relationship, direction: 'outgoing' },
+        })
+      }
+    })
+    ;(lookup.incomingByArtifactId.get(current.artifactId) ?? []).forEach((relationship) => {
+      nextLinks.push({
+        nextId: relationship.sourceArtifactId,
+        hop: { relationship, direction: 'incoming' },
+      })
+    })
+    nextLinks.sort((left, right) => (
       left.hop.relationship.type.localeCompare(right.hop.relationship.type) ||
       left.nextId.localeCompare(right.nextId)
     ))
@@ -163,12 +211,15 @@ function severityClass(severity: GraphDiagnostic['severity']): string {
 export default function ProjectMap() {
   const openFlowUiDesigner = useStore((state) => state.openFlowUiDesigner)
   const [graph, setGraph] = useState<ApplicationGraphResponse | null>(null)
+  const [progress, setProgress] = useState<ApplicationGraphProgressResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [group, setGroup] = useState<Group>('ALL')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [activePane, setActivePane] = useState<'artifacts' | 'impact'>('artifacts')
+  const [showAllModules, setShowAllModules] = useState(false)
+  const [showIndexDetails, setShowIndexDetails] = useState(false)
 
   const load = async (forceRefresh: boolean = false) => {
     setLoading(true)
@@ -188,6 +239,11 @@ export default function ProjectMap() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Application graph request failed.')
     } finally {
+      try {
+        setProgress(await bridge.getApplicationGraphProgress())
+      } catch {
+        // Preserve the graph result even if the final status read is unavailable.
+      }
       setLoading(false)
     }
   }
@@ -195,14 +251,35 @@ export default function ProjectMap() {
   useEffect(() => {
     void load()
   }, [])
+  useEffect(() => {
+    if (!loading) return
 
-  const artifactsById = useMemo(
-    () => new Map(graph?.artifacts.map((artifact) => [artifact.id, artifact]) ?? []),
-    [graph],
-  )
+    let cancelled = false
+    let timer: number | undefined
+    const pollProgress = async () => {
+      try {
+        const next = await bridge.getApplicationGraphProgress()
+        if (!cancelled) setProgress(next)
+      } catch {
+        // The graph request remains authoritative; a transient status poll may be retried.
+      }
+      if (!cancelled) timer = window.setTimeout(() => void pollProgress(), 400)
+    }
+    void pollProgress()
+
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [loading])
+
+
+  const graphLookup = useMemo(() => graph ? buildGraphLookup(graph) : EMPTY_GRAPH_LOOKUP, [graph])
+  const artifactsById = graphLookup.artifactsById
   const selected = selectedId ? artifactsById.get(selectedId) ?? null : null
   const selectedGroup = GROUPS.find((candidate) => candidate.id === group)
-  const normalizedQuery = query.trim().toLowerCase()
+  const deferredQuery = useDeferredValue(query)
+  const normalizedQuery = deferredQuery.trim().toLowerCase()
   const filtered = useMemo(() => {
     if (!graph) return []
     return graph.artifacts.filter((artifact) => {
@@ -217,15 +294,31 @@ export default function ProjectMap() {
       return groupMatches && queryMatches
     })
   }, [graph, normalizedQuery, selectedGroup])
-  const outgoing = graph?.relationships.filter((relationship) => relationship.sourceArtifactId === selectedId) ?? []
-  const incoming = graph?.relationships.filter((relationship) => relationship.targetArtifactId === selectedId) ?? []
-  const selectedDiagnostics = graph?.diagnostics.filter((diagnostic) => (
-    diagnostic.sourceLocator?.relativePath === selected?.sourceLocator.relativePath
-  )) ?? []
+  const outgoing = selectedId ? graphLookup.outgoingByArtifactId.get(selectedId) ?? [] : []
+  const incoming = selectedId ? graphLookup.incomingByArtifactId.get(selectedId) ?? [] : []
+  const selectedDiagnostics = selected
+    ? graphLookup.diagnosticsByPath.get(selected.sourceLocator.relativePath) ?? []
+    : []
   const transitiveImpact = useMemo(
-    () => graph && selectedId ? connectedImpact(graph, selectedId, artifactsById) : [],
-    [graph, selectedId, artifactsById],
+    () => selectedId ? connectedImpact(graphLookup, selectedId, artifactsById) : [],
+    [selectedId, artifactsById, graphLookup],
   )
+  const indexDiagnostics = useMemo(() => graph?.diagnostics.filter((diagnostic) => (
+    diagnostic.reasonCode.startsWith('JVW-INDEX-') ||
+    diagnostic.reasonCode === 'P2_XML_MALFORMED' ||
+    diagnostic.reasonCode === 'P2_YAML_PARTIAL' ||
+    diagnostic.reasonCode === 'P2_LIQUIBASE_SQL_MALFORMED'
+  )) ?? [], [graph])
+  const unsafeCoverage = Boolean(graph && (
+    graph.indexHealth.limitReached ||
+    graph.unreadableFiles > 0 ||
+    graph.parserUnavailableFiles > 0 ||
+    graph.indexHealth.ambiguousOwnershipFileCount > 0 ||
+    graph.indexHealth.unresolvedModuleDependencyCount > 0 ||
+    graph.indexHealth.recoveredModuleCount > 0 ||
+    graph.indexHealth.moduleCount === 0
+  ))
+  const boundedPartial = Boolean(graph && !graph.indexHealth.complete && !unsafeCoverage && graph.parseErrorFiles > 0)
 
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Connected application map">
@@ -247,6 +340,9 @@ export default function ProjectMap() {
             {loading ? 'Indexing…' : 'Refresh graph'}
           </button>
         </div>
+        {loading && (
+          <IndexingProgress progress={progress} />
+        )}
 
         {graph && (
           <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
@@ -263,13 +359,19 @@ export default function ProjectMap() {
           <div className={`mt-3 rounded-lg border px-3 py-2.5 ${
             graph.indexHealth.complete
               ? 'border-emerald-500/25 bg-emerald-500/5'
-              : 'border-red-500/35 bg-red-500/10'
+              : boundedPartial
+                ? 'border-amber-500/35 bg-amber-500/10'
+                : 'border-red-500/35 bg-red-500/10'
           }`}>
             <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
               <span className={`text-[10px] font-semibold uppercase tracking-wider ${
-                graph.indexHealth.complete ? 'text-emerald-300' : 'text-red-200'
+                graph.indexHealth.complete ? 'text-emerald-300' : boundedPartial ? 'text-amber-200' : 'text-red-200'
               }`}>
-                {graph.indexHealth.complete ? 'Complete inventory and parser coverage' : 'Partial index — do not trust impact analysis yet'}
+                {graph.indexHealth.complete
+                  ? 'Complete inventory and parser coverage'
+                  : boundedPartial
+                    ? `Bounded partial index — ${graph.parseErrorFiles} source file${graph.parseErrorFiles === 1 ? '' : 's'} need attention`
+                    : 'Unsafe partial index — resolve coverage gaps before impact analysis'}
               </span>
               <span className="text-[10px] text-gray-500">
                 {graph.indexHealth.moduleCount} modules · {graph.indexHealth.contentRootCount} content roots ·{' '}
@@ -301,7 +403,7 @@ export default function ProjectMap() {
                 )}
             </div>
             <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
-              {graph.modules.slice(0, 16).map((module) => (
+              {graph.modules.slice(0, showAllModules ? graph.modules.length : 16).map((module) => (
                 <span
                   key={module.moduleId}
                   className="max-w-full rounded border border-surface-border bg-surface/70 px-2 py-1 font-mono text-[9px] text-gray-400"
@@ -316,11 +418,51 @@ export default function ProjectMap() {
                 </span>
               ))}
               {graph.modules.length > 16 && (
-                <span className="rounded border border-surface-border px-2 py-1 text-[9px] text-gray-500">
-                  +{graph.modules.length - 16} more modules
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowAllModules((current) => !current)}
+                  className="rounded border border-surface-border px-2 py-1 text-[9px] text-gray-500 hover:text-gray-300"
+                >
+                  {showAllModules ? 'Collapse module coverage' : `+${graph.modules.length - 16} more modules`}
+                </button>
               )}
             </div>
+            {indexDiagnostics.length > 0 && (
+              <div className="mt-2 border-t border-surface-border/70 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowIndexDetails((current) => !current)}
+                  className="text-[10px] font-medium text-jmix-300 hover:text-jmix-200"
+                >
+                  {showIndexDetails ? 'Hide index diagnostics' : `Review ${indexDiagnostics.length.toLocaleString()} index diagnostic${indexDiagnostics.length === 1 ? '' : 's'}`}
+                </button>
+                {showIndexDetails && (
+                  <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                    {indexDiagnostics.slice(0, 24).map((diagnostic) => (
+                      <div key={diagnostic.id} className={`rounded border p-2 text-[10px] ${severityClass(diagnostic.severity)}`}>
+                        <div className="font-semibold">{diagnostic.reasonCode}</div>
+                        <div className="mt-1">{diagnostic.message}</div>
+                        {diagnostic.sourceLocator && (
+                          <button
+                            type="button"
+                            onClick={() => void bridge.navigateToSource(diagnostic.sourceLocator!)}
+                            className="mt-1.5 underline decoration-dotted underline-offset-2"
+                          >
+                            Open {diagnostic.sourceLocator.relativePath}
+                            {diagnostic.sourceLocator.line ? `:${diagnostic.sourceLocator.line}` : ''}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    {indexDiagnostics.length > 24 && (
+                      <div className="text-[10px] text-gray-500">
+                        Showing the first 24 index diagnostics. Filter artifacts by source path to inspect the remaining file-linked issues.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </header>
@@ -332,8 +474,8 @@ export default function ProjectMap() {
       )}
 
       {!error && loading && !graph && (
-        <div className="flex flex-1 items-center justify-center text-sm text-gray-400">
-          Building the module-aware application graph…
+        <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-gray-400">
+          {progress?.message ?? 'Building the module-aware application graph…'}
         </div>
       )}
 
@@ -433,6 +575,43 @@ export default function ProjectMap() {
     </section>
   )
 }
+function IndexingProgress({ progress }: { progress: ApplicationGraphProgressResponse | null }) {
+  const percent = progress?.percent ?? 0
+  const stage = progress?.stage
+    ? progress.stage.toLowerCase().replace(/_/g, ' ')
+    : 'waiting for index worker'
+  const hasCount = Boolean(progress && progress.total > 0)
+  const elapsed = progress ? (progress.elapsedMillis / 1000).toFixed(1) : '0.0'
+
+  return (
+    <div className="mt-3 rounded-lg border border-jmix-500/30 bg-jmix-500/5 px-3 py-3" role="status" aria-live="polite">
+      <div className="flex items-center justify-between gap-3 text-[11px]">
+        <span className="font-medium capitalize text-jmix-200">{stage}</span>
+        <span className="font-mono font-semibold text-jmix-300">{percent}%</span>
+      </div>
+      <div
+        className="mt-2 h-2 overflow-hidden rounded-full bg-surface"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+      >
+        <div
+          className="h-full rounded-full bg-jmix-500 transition-[width] duration-300"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      <div className="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[10px] text-gray-400">
+        <span className="min-w-0 truncate">{progress?.message ?? 'Waiting for the application graph worker…'}</span>
+        <span className="shrink-0 font-mono text-gray-500">
+          {hasCount && `${progress!.completed.toLocaleString()} / ${progress!.total.toLocaleString()} · `}
+          {elapsed}s elapsed
+        </span>
+      </div>
+    </div>
+  )
+}
+
 
 function Metric({ label, value, warning = false }: { label: string; value: string | number; warning?: boolean }) {
   return (

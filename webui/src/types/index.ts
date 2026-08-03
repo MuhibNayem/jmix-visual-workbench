@@ -1472,6 +1472,29 @@ export interface GraphRelationship {
   diagnostic?: GraphDiagnostic
 }
 
+export type ApplicationGraphProgressStage =
+  | 'IDLE'
+  | 'DISCOVERING'
+  | 'READING_SOURCES'
+  | 'INDEXING_ARTIFACTS'
+  | 'LINKING_RELATIONSHIPS'
+  | 'RESOLVING_RELATIONSHIPS'
+  | 'FINALIZING'
+  | 'TRANSFERRING'
+  | 'COMPLETE'
+  | 'FAILED'
+
+export interface ApplicationGraphProgressResponse {
+  runId: number
+  running: boolean
+  stage: ApplicationGraphProgressStage
+  completed: number
+  total: number
+  percent: number
+  message: string
+  elapsedMillis: number
+}
+
 export interface ApplicationGraphResponse {
   artifacts: GraphArtifact[]
   relationships: GraphRelationship[]

@@ -1150,6 +1150,106 @@ class ApplicationGraphIndexerTest {
         })
     }
 
+    @Test
+    fun `valid yaml quoted keys and nested sequences remain fully indexed`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                files = listOf(
+                    source(
+                        "loan/src/main/resources/application.yml",
+                        SourceLanguage.YAML,
+                        """
+                        spring:
+                          profiles:
+                            group:
+                              enterprise:
+                                - payroll
+                                - audit
+                        tenants:
+                          - id: main
+                            modules:
+                              - loans
+                              - hr
+                        '@polymer/iron-icon': 3.0.1
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        assertFalse(result.diagnostics.any { it.reasonCode == "P2_YAML_PARTIAL" })
+        val keys = result.artifacts
+            .filter { it.kind == ArtifactKind.CONFIGURATION_PROPERTY }
+            .map { it.displayName }
+            .toSet()
+        assertTrue("spring.profiles.group.enterprise[0]" in keys)
+        assertTrue("spring.profiles.group.enterprise[1]" in keys)
+        assertTrue("tenants[0].id" in keys)
+        assertTrue("tenants[0].modules[0]" in keys)
+        assertTrue("@polymer/iron-icon" in keys)
+    }
+
+    @Test
+    fun `malformed xml diagnostic points to the exact parser location`() {
+        val result = ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                files = listOf(
+                    source(
+                        "loan/src/main/resources/com/acme/menu.xml",
+                        SourceLanguage.XML,
+                        """
+                        <menu-config>
+                          <menu id="root">
+                            <item id="loans"/>
+                          </wrong>
+                        </menu-config>
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+
+        val diagnostic = result.diagnostics.single { it.reasonCode == "P2_XML_MALFORMED" }
+        assertEquals(4, diagnostic.sourceLocator?.line)
+        assertTrue(diagnostic.sourceLocator?.column != null)
+        assertTrue("menu" in diagnostic.message.lowercase())
+    }
+
+    @Test
+    fun `reports bounded progress and checks cancellation across every index phase`() {
+        val updates = mutableListOf<Pair<ApplicationGraphIndexProgressStage, Pair<Int, Int>>>()
+        var cancellationChecks = 0
+
+        ApplicationGraphIndexer().index(
+            ApplicationGraphIndexInput(
+                files = listOf(
+                    source(
+                        "loan/src/main/java/com/acme/loan/Loan.java",
+                        SourceLanguage.JAVA,
+                        "package com.acme.loan; @JmixEntity public class Loan {}",
+                    ),
+                    source(
+                        "loan/src/main/java/com/acme/loan/LoanService.java",
+                        SourceLanguage.JAVA,
+                        "package com.acme.loan; @Service public class LoanService { Loan load() { return null; } }",
+                    ),
+                ),
+                progress = { stage, completed, total, _ ->
+                    updates += stage to (completed to total)
+                },
+                checkCancelled = { cancellationChecks += 1 },
+            ),
+        )
+
+        assertTrue(cancellationChecks >= 2)
+        ApplicationGraphIndexProgressStage.entries.forEach { stage ->
+            val stageUpdates = updates.filter { it.first == stage }.map { it.second }
+            assertTrue(stageUpdates.isNotEmpty(), "Expected progress for $stage")
+            assertTrue(stageUpdates.all { (completed, total) -> completed in 0..total })
+            assertEquals(stageUpdates.last().second, stageUpdates.last().first)
+        }
+    }
+
     private fun source(
         path: String,
         language: SourceLanguage,

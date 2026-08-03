@@ -37,13 +37,21 @@ import org.jmixworkbench.model.ValidationModel
 import org.jmixworkbench.model.ValidationType
 import java.time.LocalDate
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
 
 @Service(Service.Level.PROJECT)
 class SchemaWorkspaceService(
     private val project: Project,
 ) {
+    private val cachedWorkspace = AtomicReference<SchemaWorkspaceResponse?>()
+
     fun load(forceRefresh: Boolean = false): SchemaWorkspaceResponse {
         val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh)
+        if (!forceRefresh) {
+            cachedWorkspace.get()
+                ?.takeIf { it.snapshotDigest == graph.snapshotDigest }
+                ?.let { return it }
+        }
         val fileCache = linkedMapOf<String, String?>()
         fun content(path: String): String? = fileCache.getOrPut(path) { read(path) }
 
@@ -470,7 +478,7 @@ class SchemaWorkspaceService(
             drifts = drifts,
             findings = findings,
             issues = emptyList(),
-        )
+        ).also(cachedWorkspace::set)
     }
 
     fun previewMigration(request: SchemaMigrationChangeRequest): WorkspaceChangePreviewResponse {

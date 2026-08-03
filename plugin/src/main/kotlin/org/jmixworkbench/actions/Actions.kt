@@ -2,6 +2,7 @@ package org.jmixworkbench.actions
 
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.wm.ToolWindowManager
 import org.jmixworkbench.services.JmixProjectService
 import org.jmixworkbench.toolwindow.WorkbenchLaunchContext
@@ -13,11 +14,15 @@ private fun openWorkbench(e: AnActionEvent, surface: WorkbenchSurface) {
     WorkbenchNavigationService.getInstance(project).request(WorkbenchLaunchContext(surface))
     ToolWindowManager.getInstance(project).getToolWindow("Jmix Visual Workbench")?.show()
 }
+abstract class JmixProjectAction : AnAction() {
+    final override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
+}
+
 
 /**
  * Opens the Jmix Visual Workbench Designer tool window.
  */
-class OpenDesignerAction : AnAction() {
+class OpenDesignerAction : JmixProjectAction() {
     override fun actionPerformed(e: AnActionEvent) {
         openWorkbench(e, WorkbenchSurface.TOOL_WINDOW)
     }
@@ -32,7 +37,7 @@ class OpenDesignerAction : AnAction() {
 /**
  * Opens the revision-bound project configuration workspace.
  */
-class OpenProjectPropertiesAction : AnAction() {
+class OpenProjectPropertiesAction : JmixProjectAction() {
     override fun actionPerformed(e: AnActionEvent) {
         openWorkbench(e, WorkbenchSurface.PROJECT_PROPERTIES)
     }
@@ -47,7 +52,7 @@ class OpenProjectPropertiesAction : AnAction() {
 /**
  * Opens the Entity Designer tab in the tool window.
  */
-class NewEntityAction : AnAction() {
+class NewEntityAction : JmixProjectAction() {
     override fun actionPerformed(e: AnActionEvent) {
         openWorkbench(e, WorkbenchSurface.ENTITY_DESIGNER)
     }
@@ -62,7 +67,7 @@ class NewEntityAction : AnAction() {
 /**
  * Opens the View Designer tab in the tool window.
  */
-class NewViewAction : AnAction() {
+class NewViewAction : JmixProjectAction() {
     override fun actionPerformed(e: AnActionEvent) {
         openWorkbench(e, WorkbenchSurface.VIEW_DESIGNER)
     }
@@ -77,7 +82,7 @@ class NewViewAction : AnAction() {
 /**
  * Opens the CRUD Scaffolding wizard in the tool window.
  */
-class NewCrudAction : AnAction() {
+class NewCrudAction : JmixProjectAction() {
     override fun actionPerformed(e: AnActionEvent) {
         openWorkbench(e, WorkbenchSurface.CRUD_DESIGNER)
     }

@@ -213,10 +213,10 @@ export default function ProjectProperties() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
-  const load = (preferredProfilePath?: string) => {
+  const load = (preferredProfilePath?: string, forceRefresh: boolean = false) => {
     setLoading(true)
     setError(null)
-    return bridge.getProjectPropertiesWorkspace()
+    return bridge.getProjectPropertiesWorkspace(forceRefresh)
       .then((next) => {
         setWorkspace(next)
         setSelectedProfilePath((current) => {
@@ -523,7 +523,7 @@ export default function ProjectProperties() {
         </div>
         <button
           type="button"
-          onClick={() => void load(selectedProfilePath)}
+          onClick={() => void load(selectedProfilePath, true)}
           disabled={loading || applying || reviewing}
           className="min-h-10 rounded border border-surface-border bg-surface-light px-3 py-2 text-xs text-gray-200 hover:border-jmix-500 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-jmix-400 disabled:opacity-50"
         >

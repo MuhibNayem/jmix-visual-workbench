@@ -1,5 +1,6 @@
 import type {
   ApplicationGraphResponse,
+  ApplicationGraphProgressResponse,
   DmnDecisionModel,
   DmnDecisionWorkspaceResponse,
   DmnSimulationResult,
@@ -52,6 +53,7 @@ import type {
   ProjectApplicationPropertiesChangeRequest,
   ProjectApplicationProfileLifecycleRequest,
   JmixProjectPropertiesWorkspace,
+  MenuWorkspaceResponse,
   JmixFlowUiHotDeployRequest,
   JmixRuntimeActionResponse,
   JmixRuntimeInspectionResponse,
@@ -170,9 +172,19 @@ class Bridge {
   private ready = false
   private requestSequence = 0
   private pendingQueue: { action: string; payload: any; requestId: string }[] = []
+  private applicationGraphCache: ApplicationGraphResponse | null = null
+  private applicationGraphRequest: Promise<ApplicationGraphResponse> | null = null
+  private workspaceCache = new Map<string, unknown>()
+  private workspaceRequests = new Map<string, Promise<unknown>>()
+  private workspaceEpoch = 0
 
   constructor() {
     window.onBridgeResponse = (action: string, requestId: string | null, result: any) => {
+      if (action === 'applicationGraphUpdated') {
+        this.invalidateWorkspaceCaches()
+        window.dispatchEvent(new CustomEvent('jmix-workbench-index-updated', { detail: result }))
+        return
+      }
       this.listeners.forEach(cb => cb(action, requestId, result))
     }
 
@@ -232,6 +244,17 @@ class Bridge {
             switch (action) {
               case 'getApplicationGraph':
                 return developmentApplicationGraph
+              case 'getApplicationGraphProgress':
+                return {
+                  runId: 1,
+                  running: false,
+                  stage: 'COMPLETE',
+                  completed: developmentApplicationGraph.scannedFiles,
+                  total: developmentApplicationGraph.candidateFiles,
+                  percent: 100,
+                  message: 'Application graph ready',
+                  elapsedMillis: developmentApplicationGraph.durationMillis,
+                }
               case 'getProjectPropertiesWorkspace':
                 return developmentProjectPropertiesWorkspace
               case 'previewProjectProfileChange': {
@@ -2739,15 +2762,68 @@ ${javaMethods}
 
   async request<T = any>(action: string, payload: any = {}): Promise<T> {
     const requestId = this.nextRequestId()
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        unsub()
+        reject(new Error(`${action} did not respond within 120 seconds.`))
+      }, 120_000)
       const unsub = this.onResponse((respAction, responseRequestId, result) => {
         if (responseRequestId === requestId && respAction === action) {
+          window.clearTimeout(timeout)
           unsub()
+          if (this.isWorkspaceMutation(action, result)) this.invalidateWorkspaceCaches()
           resolve(result)
         }
       })
-      this.send(action, payload, requestId)
+      try {
+        this.send(action, payload, requestId)
+      } catch (cause) {
+        window.clearTimeout(timeout)
+        unsub()
+        reject(cause)
+      }
     })
+  }
+
+  private cachedWorkspace<T>(
+    action: string,
+    payload: Record<string, unknown> = {},
+    forceRefresh: boolean = false,
+  ): Promise<T> {
+    if (!forceRefresh && this.workspaceCache.has(action)) {
+      return Promise.resolve(this.workspaceCache.get(action) as T)
+    }
+    const active = this.workspaceRequests.get(action)
+    if (active) return active as Promise<T>
+
+    const requestEpoch = this.workspaceEpoch
+    const request = this.request<T | { error: string }>(action, payload)
+      .then((result) => {
+        if (result && typeof result === 'object' && 'error' in result) {
+          throw new Error(String(result.error))
+        }
+        if (requestEpoch === this.workspaceEpoch) this.workspaceCache.set(action, result)
+        return result as T
+      })
+    this.workspaceRequests.set(action, request)
+    const clear = () => {
+      if (this.workspaceRequests.get(action) === request) this.workspaceRequests.delete(action)
+    }
+    void request.then(clear, clear)
+    return request
+  }
+
+  private isWorkspaceMutation(action: string, result: unknown): boolean {
+    if (!/^(apply|generate|undoWorkspace|redoWorkspace|importRuntimeSecurityEvidence|clearRuntimeSecurityEvidence)/.test(action)) {
+      return false
+    }
+    return !(result && typeof result === 'object' && 'success' in result && result.success === false)
+  }
+
+  private invalidateWorkspaceCaches() {
+    this.workspaceEpoch += 1
+    this.workspaceCache.clear()
+    this.applicationGraphCache = null
   }
 
   private nextRequestId(): string {
@@ -2995,18 +3071,26 @@ ${javaMethods}
   }
 
   getSchemaWorkspace(forceRefresh: boolean = false) {
-    return this.request<SchemaWorkspaceResponse>('getSchemaWorkspace', { forceRefresh })
+    return this.cachedWorkspace<SchemaWorkspaceResponse>(
+      'getSchemaWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   getDatabaseEntityImportProfiles() {
-    return this.request<DatabaseEntityImportProfileWorkspaceResponse>(
+    return this.cachedWorkspace<DatabaseEntityImportProfileWorkspaceResponse>(
       'getDatabaseEntityImportProfiles',
       {},
     )
   }
 
   getRestApiWorkspace(forceRefresh: boolean = false) {
-    return this.request<RestApiWorkspaceResponse>('getRestApiWorkspace', { forceRefresh })
+    return this.cachedWorkspace<RestApiWorkspaceResponse>(
+      'getRestApiWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   invokeRestApi(request: RestApiInvocationRequest) {
@@ -3077,8 +3161,12 @@ ${javaMethods}
     return this.request<ProjectConfig>('getProjectConfig')
   }
 
-  getProjectPropertiesWorkspace() {
-    return this.request<JmixProjectPropertiesWorkspace>('getProjectPropertiesWorkspace')
+  getProjectPropertiesWorkspace(forceRefresh: boolean = false) {
+    return this.cachedWorkspace<JmixProjectPropertiesWorkspace>(
+      'getProjectPropertiesWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   previewProjectProfileChange(change: ProjectApplicationPropertiesChangeRequest) {
@@ -3109,8 +3197,12 @@ ${javaMethods}
     })
   }
 
-  getEnvironmentWorkspace() {
-    return this.request<JmixEnvironmentWorkspace>('getEnvironmentWorkspace')
+  getEnvironmentWorkspace(forceRefresh: boolean = false) {
+    return this.cachedWorkspace<JmixEnvironmentWorkspace>(
+      'getEnvironmentWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   previewEnvironmentChange(change: EnvironmentChangeRequest) {
@@ -3153,21 +3245,57 @@ ${javaMethods}
   }
 
   getApplicationGraph(forceRefresh: boolean = false) {
-    return this.request<ApplicationGraphResponse>('getApplicationGraph', { forceRefresh })
+    if (!forceRefresh && this.applicationGraphCache) {
+      return Promise.resolve(this.applicationGraphCache)
+    }
+    if (this.applicationGraphRequest) {
+      return this.applicationGraphRequest
+    }
+
+    const requestEpoch = this.workspaceEpoch
+    const request = this.request<ApplicationGraphResponse | { error: string }>(
+      'getApplicationGraph',
+      { forceRefresh },
+    ).then((result) => {
+      if ('error' in result) throw new Error(result.error)
+      if (requestEpoch === this.workspaceEpoch) this.applicationGraphCache = result
+      return result
+    })
+    this.applicationGraphRequest = request
+    const clearRequest = () => {
+      if (this.applicationGraphRequest === request) {
+        this.applicationGraphRequest = null
+      }
+    }
+    void request.then(clearRequest, clearRequest)
+    return request
+  }
+  getApplicationGraphProgress() {
+    return this.request<ApplicationGraphProgressResponse>('getApplicationGraphProgress')
   }
 
+
   getScenarioWorkspace(forceRefresh: boolean = false) {
-    return this.request<ScenarioWorkspaceResponse>('getScenarioWorkspace', { forceRefresh })
+    return this.cachedWorkspace<ScenarioWorkspaceResponse>(
+      'getScenarioWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   getVisualLogicWorkspace(forceRefresh: boolean = false) {
-    return this.request<VisualLogicWorkspaceResponse>('getVisualLogicWorkspace', { forceRefresh })
+    return this.cachedWorkspace<VisualLogicWorkspaceResponse>(
+      'getVisualLogicWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   getIntegrationConnectorWorkspace(forceRefresh: boolean = false) {
-    return this.request<IntegrationConnectorWorkspaceResponse>(
+    return this.cachedWorkspace<IntegrationConnectorWorkspaceResponse>(
       'getIntegrationConnectorWorkspace',
       { forceRefresh },
+      forceRefresh,
     )
   }
 
@@ -3215,7 +3343,11 @@ ${javaMethods}
   }
 
   getVisualRuleWorkspace(forceRefresh: boolean = false) {
-    return this.request<VisualRuleWorkspaceResponse>('getVisualRuleWorkspace', { forceRefresh })
+    return this.cachedWorkspace<VisualRuleWorkspaceResponse>(
+      'getVisualRuleWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   previewVisualRule(model: VisualRuleModel) {
@@ -3230,7 +3362,11 @@ ${javaMethods}
   }
 
   getDmnDecisionWorkspace(forceRefresh: boolean = false) {
-    return this.request<DmnDecisionWorkspaceResponse>('getDmnDecisionWorkspace', { forceRefresh })
+    return this.cachedWorkspace<DmnDecisionWorkspaceResponse>(
+      'getDmnDecisionWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   previewDmnDecision(model: DmnDecisionModel) {
@@ -3260,7 +3396,11 @@ ${javaMethods}
   }
 
   getSecurityWorkspace(forceRefresh: boolean = false) {
-    return this.request<SecurityWorkspaceSnapshot>('getSecurityWorkspace', { forceRefresh })
+    return this.cachedWorkspace<SecurityWorkspaceSnapshot>(
+      'getSecurityWorkspace',
+      { forceRefresh },
+      forceRefresh,
+    )
   }
 
   importRuntimeSecurityEvidence(change: RuntimeSecurityEvidenceImportRequest) {
@@ -3272,7 +3412,11 @@ ${javaMethods}
   }
 
   getSecurityRoleDestinations() {
-    return this.request<SecurityRoleDestinationsResponse>('getSecurityRoleDestinations')
+    return this.cachedWorkspace<SecurityRoleDestinationsResponse>('getSecurityRoleDestinations')
+  }
+
+  getMenuWorkspace() {
+    return this.cachedWorkspace<MenuWorkspaceResponse>('getMenuWorkspace')
   }
 
   previewSecurityRoleCreate(change: SecurityRoleCreateRequest) {

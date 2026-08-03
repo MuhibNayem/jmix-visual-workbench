@@ -1,8 +1,13 @@
 package org.jmixworkbench.services
 
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.event.DocumentEvent
+import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.progress.ProgressManager
@@ -15,11 +20,13 @@ import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.psi.PsiErrorElement
 import com.intellij.psi.PsiManager
 import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.util.concurrency.AppExecutorUtil
 import org.jmixworkbench.discovery.model.ArtifactKind
 import org.jmixworkbench.discovery.model.ArtifactOrigin
 import org.jmixworkbench.discovery.model.ArtifactOwner
@@ -36,25 +43,55 @@ import org.jmixworkbench.discovery.navigation.SourceNavigationPolicy
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexInput
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexResult
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexer
+import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexProgressStage
 import org.jmixworkbench.discovery.semantic.GraphSourceFile
 import org.jetbrains.jps.model.java.JavaResourceRootType
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.atomic.AtomicReference
 
 @Service(Service.Level.PROJECT)
 class ApplicationGraphService(
     private val project: Project,
 ) : Disposable {
+    private val log = Logger.getInstance(ApplicationGraphService::class.java)
     private val cached = AtomicReference<CachedGraph?>()
     private val cachedSources = AtomicReference<Map<String, CachedSource>>(emptyMap())
+    private val cachedContributions = AtomicReference<Map<String, ApplicationGraphIndexer.FileContribution>>(emptyMap())
+    private val cachedInventory = AtomicReference<CandidateInventory?>()
+    private val dirtyFileVersions = ConcurrentHashMap<String, Long>()
+    private val changeSequence = AtomicLong()
+    private val fullRescanRequired = AtomicBoolean(false)
+    private val fullRescanSequence = AtomicLong()
+    private val refreshScheduled = AtomicBoolean(false)
+    private val lastChangeNanos = AtomicLong()
+    private val updateListeners = CopyOnWriteArrayList<(ApplicationGraphUpdate) -> Unit>()
 
+    private val buildLock = ReentrantLock()
+    private val completedBuildSequence = AtomicLong()
+    private val runSequence = AtomicLong()
+    private val graphProgress = AtomicReference(GraphProgressSnapshot.idle())
     init {
         val connection = project.messageBus.connect(this)
         connection.subscribe(
             VirtualFileManager.VFS_CHANGES,
             object : BulkFileListener {
                 override fun after(events: List<VFileEvent>) {
-                    if (events.any(::affectsApplicationGraph)) {
-                        cached.set(null)
+                    val relevant = events.filter(::affectsApplicationGraph)
+                    relevant.forEach { event ->
+                        dirtyFileVersions[event.path.replace('\\', '/')] = changeSequence.incrementAndGet()
+                        if (event.path.substringAfterLast('/') in GRADLE_CONFIGURATION_FILE_NAMES) {
+                            fullRescanRequired.set(true)
+                            fullRescanSequence.incrementAndGet()
+                        }
+                    }
+                    if (relevant.isNotEmpty()) {
+                        lastChangeNanos.set(System.nanoTime())
+                        scheduleIncrementalRefresh()
                     }
                 }
             },
@@ -63,15 +100,242 @@ class ApplicationGraphService(
             ModuleRootListener.TOPIC,
             object : ModuleRootListener {
                 override fun rootsChanged(event: ModuleRootEvent) {
-                    cached.set(null)
+                    fullRescanRequired.set(true)
+                    fullRescanSequence.incrementAndGet()
+                    lastChangeNanos.set(System.nanoTime())
+                    scheduleIncrementalRefresh()
                 }
             },
+        )
+        EditorFactory.getInstance().eventMulticaster.addDocumentListener(
+            object : DocumentListener {
+                override fun documentChanged(event: DocumentEvent) {
+                    val file = FileDocumentManager.getInstance().getFile(event.document) ?: return
+                    if (!isEligibleIncrementalFile(file)) return
+                    dirtyFileVersions[file.path.replace('\\', '/')] = changeSequence.incrementAndGet()
+                    lastChangeNanos.set(System.nanoTime())
+                    scheduleIncrementalRefresh()
+                }
+            },
+            this,
         )
     }
 
     fun graph(forceRefresh: Boolean = false): ApplicationGraphResponse {
+        val requestStartedAt = System.nanoTime()
+        if (!forceRefresh && !fullRescanRequired.get() && dirtyFileVersions.isEmpty()) {
+            cached.get()?.let { previous ->
+                return previous.response.copy(
+                    cacheHit = true,
+                    reusedFiles = previous.response.scannedFiles,
+                    changedFiles = 0,
+                    durationMillis = elapsedMillis(requestStartedAt),
+                )
+            }
+        }
+        val observedCompletion = completedBuildSequence.get()
+        while (!buildLock.tryLock(100, TimeUnit.MILLISECONDS)) {
+            ProgressManager.checkCanceled()
+        }
+
+        val runId = runSequence.incrementAndGet()
         val startedAt = System.nanoTime()
-        val inventory = collectCandidates()
+        try {
+            val joinedExistingBuild = completedBuildSequence.get() != observedCompletion
+            if ((!forceRefresh || joinedExistingBuild) &&
+                !fullRescanRequired.get() && dirtyFileVersions.isEmpty()
+            ) {
+                cached.get()?.let { previous ->
+                    return previous.response.copy(
+                        cacheHit = true,
+                        reusedFiles = previous.response.scannedFiles,
+                        changedFiles = 0,
+                        durationMillis = elapsedMillis(startedAt),
+                    )
+                }
+            }
+            publishProgress(
+                runId = runId,
+                startedAt = startedAt,
+                running = true,
+                stage = ApplicationGraphProgressStage.DISCOVERING,
+                completed = 0,
+                total = 0,
+                percent = 1,
+                message = if (joinedExistingBuild) {
+                    "Reusing the graph build already requested by another workbench view"
+                } else {
+                    "Discovering imported modules and source roots"
+                },
+            )
+            val response = buildGraph(forceRefresh && !joinedExistingBuild)
+            publishProgress(
+                runId = runId,
+                startedAt = startedAt,
+                running = false,
+                stage = ApplicationGraphProgressStage.COMPLETE,
+                completed = response.scannedFiles,
+                total = response.scannedFiles,
+                percent = 100,
+                message = if (response.cacheHit) "Application graph loaded from cache" else "Application graph ready",
+            )
+            return response
+        } catch (cause: Throwable) {
+            publishProgress(
+                runId = runId,
+                startedAt = startedAt,
+                running = false,
+                stage = ApplicationGraphProgressStage.FAILED,
+                completed = 0,
+                total = 0,
+                percent = graphProgress.get().percent,
+                message = cause.message?.take(240) ?: "Application graph indexing failed",
+            )
+            throw cause
+        } finally {
+            completedBuildSequence.incrementAndGet()
+            buildLock.unlock()
+        }
+    }
+
+    fun progress(): ApplicationGraphProgressResponse {
+        val snapshot = graphProgress.get()
+        return ApplicationGraphProgressResponse(
+            runId = snapshot.runId,
+            running = snapshot.running,
+            stage = snapshot.stage,
+            completed = snapshot.completed,
+            total = snapshot.total,
+            percent = snapshot.percent,
+            message = snapshot.message,
+            elapsedMillis = if (snapshot.running) elapsedMillis(snapshot.startedAt) else snapshot.elapsedMillis,
+        )
+    }
+
+    fun addUpdateListener(listener: (ApplicationGraphUpdate) -> Unit): AutoCloseable {
+        updateListeners += listener
+        return AutoCloseable { updateListeners -= listener }
+    }
+
+    fun beginTransfer(message: String = "Serializing the application graph for the workbench") {
+        val snapshot = graphProgress.get()
+        publishProgress(
+            runId = snapshot.runId,
+            startedAt = snapshot.startedAt,
+            running = true,
+            stage = ApplicationGraphProgressStage.TRANSFERRING,
+            completed = snapshot.completed,
+            total = snapshot.total,
+            percent = 99,
+            message = message,
+        )
+    }
+
+    fun completeTransfer() {
+        val snapshot = graphProgress.get()
+        publishProgress(
+            runId = snapshot.runId,
+            startedAt = snapshot.startedAt,
+            running = false,
+            stage = ApplicationGraphProgressStage.COMPLETE,
+            completed = snapshot.completed,
+            total = snapshot.total,
+            percent = 100,
+            message = "Application graph delivered to the workbench",
+        )
+    }
+
+    fun failTransfer(message: String) {
+        val snapshot = graphProgress.get()
+        publishProgress(
+            runId = snapshot.runId,
+            startedAt = snapshot.startedAt,
+            running = false,
+            stage = ApplicationGraphProgressStage.FAILED,
+            completed = snapshot.completed,
+            total = snapshot.total,
+            percent = snapshot.percent,
+            message = message.take(240),
+        )
+    }
+
+    private fun publishProgress(
+        runId: Long = graphProgress.get().runId,
+        startedAt: Long = graphProgress.get().startedAt,
+        running: Boolean = true,
+        stage: ApplicationGraphProgressStage,
+        completed: Int,
+        total: Int,
+        percent: Int,
+        message: String,
+    ) {
+        graphProgress.set(
+            GraphProgressSnapshot(
+                runId = runId,
+                running = running,
+                stage = stage,
+                completed = completed.coerceAtLeast(0),
+                total = total.coerceAtLeast(0),
+                percent = percent.coerceIn(0, 100),
+                message = message,
+                startedAt = startedAt,
+                elapsedMillis = if (running) 0 else elapsedMillis(startedAt),
+            ),
+        )
+    }
+
+    private fun publishIndexProgress(
+        stage: ApplicationGraphIndexProgressStage,
+        completed: Int,
+        total: Int,
+        message: String,
+    ) {
+        val (uiStage, range) = when (stage) {
+            ApplicationGraphIndexProgressStage.INDEXING_ARTIFACTS ->
+                ApplicationGraphProgressStage.INDEXING_ARTIFACTS to (45..70)
+            ApplicationGraphIndexProgressStage.LINKING_RELATIONSHIPS ->
+                ApplicationGraphProgressStage.LINKING_RELATIONSHIPS to (70..92)
+            ApplicationGraphIndexProgressStage.RESOLVING_RELATIONSHIPS ->
+                ApplicationGraphProgressStage.RESOLVING_RELATIONSHIPS to (92..98)
+        }
+        val fraction = if (total <= 0) 0.0 else completed.toDouble() / total.toDouble()
+        val percent = range.first + ((range.last - range.first) * fraction.coerceIn(0.0, 1.0)).toInt()
+        publishProgress(
+            stage = uiStage,
+            completed = completed,
+            total = total,
+            percent = percent,
+            message = message,
+        )
+    }
+
+    private fun buildGraph(forceRefresh: Boolean): ApplicationGraphResponse {
+        val startedAt = System.nanoTime()
+        val responseBeforeBuild = cached.get()?.response
+        val dirtySnapshot = dirtyFileVersions.toMap()
+        val observedFullRescanSequence = fullRescanSequence.get()
+        val previousInventory = cachedInventory.get()
+        val incrementalInventory = !forceRefresh &&
+            !fullRescanRequired.get() &&
+            previousInventory != null &&
+            dirtySnapshot.isNotEmpty()
+        var usedIncrementalInventory = false
+        val inventory = stableRead {
+            if (incrementalInventory) {
+                updateCandidateInventory(previousInventory, dirtySnapshot.keys)?.also {
+                    usedIncrementalInventory = true
+                } ?: collectCandidates()
+            } else {
+                collectCandidates()
+            }
+        }
+        publishProgress(
+            stage = ApplicationGraphProgressStage.READING_SOURCES,
+            completed = 0,
+            total = inventory.candidates.size,
+            percent = 10,
+            message = "Preparing ${inventory.totalCandidateFiles} candidate files from ${inventory.rootKeys.size} content roots",
+        )
         val previous = cached.get()
         if (!forceRefresh &&
             previous != null &&
@@ -79,6 +343,9 @@ class ApplicationGraphService(
             previous.rootKeys == inventory.rootKeys &&
             previous.sourceRootKeys == inventory.sourceRootKeys
         ) {
+            cachedInventory.set(inventory)
+            dirtySnapshot.forEach { (path, version) -> dirtyFileVersions.remove(path, version) }
+            clearCompletedFullRescan(observedFullRescanSequence)
             return previous.response.copy(
                 cacheHit = true,
                 reusedFiles = previous.response.scannedFiles,
@@ -96,8 +363,15 @@ class ApplicationGraphService(
         var syntaxErrorFiles = 0
         var parserUnavailableFiles = 0
         val syntaxDiagnostics = mutableListOf<DiscoveryDiagnostic>()
-        val sources = inventory.candidates.mapNotNull { candidate ->
+        val sources = inventory.candidates.mapIndexedNotNull { candidateIndex, candidate ->
             ProgressManager.checkCanceled()
+            publishProgress(
+                stage = ApplicationGraphProgressStage.READING_SOURCES,
+                completed = candidateIndex,
+                total = inventory.candidates.size,
+                percent = 10 + (candidateIndex * 35 / inventory.candidates.size.coerceAtLeast(1)),
+                message = "Reading ${candidate.stamp.relativePath}",
+            )
             previousSources[candidate.stamp.relativePath]
                 ?.takeIf { it.stamp == candidate.stamp }
                 ?.let { cachedSource ->
@@ -106,14 +380,14 @@ class ApplicationGraphService(
                         cachedSourceBytes += candidate.stamp.length
                     }
                     reusedFiles += 1
-                    return@mapNotNull cachedSource.source
+                    return@mapIndexedNotNull cachedSource.source
                 }
             val content = runCatching {
                 ProjectSourceText.read(candidate.file)
             }.getOrNull()
             if (content == null) {
                 unreadableFiles += 1
-                return@mapNotNull null
+                return@mapIndexedNotNull null
             }
             val fingerprint = CanonicalDiscoveryJson.sha256(content)
             var parserAvailable = true
@@ -133,7 +407,7 @@ class ApplicationGraphService(
                             column = inspection.column,
                         )
                     }
-                    return@mapNotNull null
+                    return@mapIndexedNotNull null
                 }
 
                 JvmSyntaxInspection.ParserUnavailable -> {
@@ -179,14 +453,51 @@ class ApplicationGraphService(
             source
         }
         cachedSources.set(nextSources)
+        publishProgress(
+            stage = ApplicationGraphProgressStage.READING_SOURCES,
+            completed = inventory.candidates.size,
+            total = inventory.candidates.size,
+            percent = 45,
+            message = "Source reading complete; starting semantic indexing",
+        )
 
-        val graph = ApplicationGraphIndexer().index(
+        val indexer = ApplicationGraphIndexer()
+        val previousContributions = cachedContributions.get()
+        val candidatesByPath = inventory.candidates.associateBy { it.stamp.relativePath }
+        val nextContributions = linkedMapOf<String, ApplicationGraphIndexer.FileContribution>()
+        sources.forEachIndexed { sourceIndex, source ->
+            ProgressManager.checkCanceled()
+            publishIndexProgress(
+                ApplicationGraphIndexProgressStage.INDEXING_ARTIFACTS,
+                sourceIndex,
+                sources.size,
+                "Indexing ${source.relativePath}",
+            )
+            val candidate = candidatesByPath[source.relativePath]
+            val contribution = previousContributions[source.relativePath]
+                ?.takeIf {
+                    candidate != null && previousSources[source.relativePath]?.stamp == candidate.stamp
+                }
+                ?: indexer.indexFile(source, MAX_FILE_BYTES)
+            nextContributions[source.relativePath] = contribution
+        }
+        publishIndexProgress(
+            ApplicationGraphIndexProgressStage.INDEXING_ARTIFACTS,
+            sources.size,
+            sources.size,
+            "Source artifact indexing complete",
+        )
+        cachedContributions.set(nextContributions)
+        val graph = indexer.assemble(
             ApplicationGraphIndexInput(
                 files = sources,
                 maxFiles = MAX_FILES,
                 maxFileBytes = MAX_FILE_BYTES,
                 maxArtifacts = MAX_ARTIFACTS,
+                progress = ::publishIndexProgress,
+                checkCancelled = ProgressManager::checkCanceled,
             ),
+            nextContributions,
         )
         val semanticallyUnparsedFiles = graph.diagnostics
             .asSequence()
@@ -203,6 +514,18 @@ class ApplicationGraphService(
         val limitReached = inventory.totalCandidateFiles > MAX_FILES ||
             inventory.sourceRootDiscoveryLimitReached ||
             graph.diagnostics.any { it.reasonCode == "P2_GRAPH_FILE_LIMIT" || it.reasonCode == "P2_GRAPH_ARTIFACT_LIMIT" }
+        publishProgress(
+            stage = ApplicationGraphProgressStage.FINALIZING,
+            completed = graph.artifacts.size,
+            total = graph.artifacts.size,
+            percent = 98,
+            message = "Finalizing module coverage and graph diagnostics",
+        )
+        val reportedChangedFiles = if (usedIncrementalInventory) {
+            maxOf(changedFiles, dirtySnapshot.size)
+        } else {
+            changedFiles
+        }
         val response = graph.toResponse(
             scannedFiles = sources.size,
             candidateFiles = inventory.totalCandidateFiles,
@@ -213,7 +536,7 @@ class ApplicationGraphService(
             parserUnavailableFiles = parserUnavailableFiles,
             hostDiagnostics = syntaxDiagnostics,
             reusedFiles = reusedFiles,
-            changedFiles = changedFiles,
+            changedFiles = reportedChangedFiles,
             cacheHit = false,
             durationMillis = elapsedMillis(startedAt),
             modules = moduleCoverage,
@@ -228,16 +551,35 @@ class ApplicationGraphService(
             moduleDependencies = inventory.moduleDependencies,
         )
         cached.set(CachedGraph(inventory.stamps, inventory.rootKeys, inventory.sourceRootKeys, response))
+        cachedInventory.set(inventory)
+        dirtySnapshot.forEach { (path, version) -> dirtyFileVersions.remove(path, version) }
+        clearCompletedFullRescan(observedFullRescanSequence)
+        if (responseBeforeBuild != null && responseBeforeBuild.snapshotDigest != response.snapshotDigest) {
+            val update = ApplicationGraphUpdate(
+                snapshotDigest = response.snapshotDigest,
+                changedFiles = reportedChangedFiles,
+                incremental = usedIncrementalInventory,
+            )
+            log.info(
+                "Application graph synchronized: changedFiles=${update.changedFiles}, " +
+                    "incremental=${update.incremental}, snapshot=${update.snapshotDigest.take(12)}",
+            )
+            updateListeners.forEach { listener -> runCatching { listener(update) } }
+        }
         return response
     }
 
     fun invalidate() {
-        cached.set(null)
+        scheduleIncrementalRefresh()
     }
 
     override fun dispose() {
         cached.set(null)
         cachedSources.set(emptyMap())
+        cachedContributions.set(emptyMap())
+        cachedInventory.set(null)
+        dirtyFileVersions.clear()
+        updateListeners.clear()
     }
 
     fun prepareNavigation(request: SourceNavigationRequest): PreparedSourceNavigation {
@@ -288,6 +630,114 @@ class ApplicationGraphService(
         )
     }
 
+    private fun scheduleIncrementalRefresh() {
+        if (!refreshScheduled.compareAndSet(false, true)) return
+        AppExecutorUtil.getAppScheduledExecutorService().schedule({
+            refreshScheduled.set(false)
+            if (project.isDisposed) return@schedule
+            if (dirtyFileVersions.isEmpty() && !fullRescanRequired.get()) return@schedule
+            val quietMillis = (System.nanoTime() - lastChangeNanos.get()) / 1_000_000
+            if (quietMillis < INCREMENTAL_REFRESH_DEBOUNCE_MILLIS) {
+                scheduleIncrementalRefresh()
+                return@schedule
+            }
+            try {
+                graph(forceRefresh = false)
+            } catch (cause: Throwable) {
+                if (cause !is com.intellij.openapi.progress.ProcessCanceledException) {
+                    log.warn("Automatic application graph refresh failed; the dirty files remain queued.", cause)
+                }
+            } finally {
+                if (dirtyFileVersions.isNotEmpty() || fullRescanRequired.get()) {
+                    scheduleIncrementalRefresh()
+                }
+            }
+        }, INCREMENTAL_REFRESH_DEBOUNCE_MILLIS, TimeUnit.MILLISECONDS)
+    }
+
+    private fun clearCompletedFullRescan(observedSequence: Long) {
+        if (fullRescanSequence.get() == observedSequence) {
+            fullRescanRequired.set(false)
+            if (fullRescanSequence.get() != observedSequence) {
+                fullRescanRequired.set(true)
+            }
+        }
+    }
+
+    private fun isEligibleIncrementalFile(file: VirtualFile): Boolean {
+        if (file.isDirectory || languageFor(file.extension) == null) return false
+        if (file.name.lowercase() in NON_APPLICATION_METADATA_FILE_NAMES || isCompiledBuildOutput(file.path)) {
+            return false
+        }
+        if (file.path.split('/').any(EXCLUDED_DIRECTORY_NAMES::contains)) return false
+        return ProjectFileResolver.getInstance(project).contains(file)
+    }
+
+    /**
+     * Updates the one-time project inventory from concrete VFS paths. Existing source roots and
+     * ownership stay authoritative; a new root or module deliberately falls back to discovery.
+     */
+    private fun updateCandidateInventory(
+        previous: CandidateInventory,
+        changedPaths: Set<String>,
+    ): CandidateInventory? {
+        val candidates = previous.candidates.associateByTo(linkedMapOf()) { it.stamp.relativePath }
+        val resolver = ProjectFileResolver.getInstance(project)
+        val documentManager = FileDocumentManager.getInstance()
+
+        changedPaths.sorted().forEach { changedPath ->
+            ProgressManager.checkCanceled()
+            val normalizedPath = changedPath.replace('\\', '/').trimEnd('/')
+            val affected = candidates.values.filter { candidate ->
+                candidate.file.path == normalizedPath || candidate.file.path.startsWith("$normalizedPath/")
+            }
+            affected.forEach { candidates.remove(it.stamp.relativePath) }
+
+            val file = LocalFileSystem.getInstance().findFileByPath(normalizedPath) ?: return@forEach
+            if (file.isDirectory) return@forEach
+            if (file.name.lowercase() in NON_APPLICATION_METADATA_FILE_NAMES || isCompiledBuildOutput(file.path)) {
+                return@forEach
+            }
+            if (file.path.split('/').any(EXCLUDED_DIRECTORY_NAMES::contains)) return@forEach
+            val language = languageFor(file.extension) ?: return@forEach
+            val template = affected.maxByOrNull { it.stamp.scanRootPath.length }
+                ?: previous.candidates
+                    .asSequence()
+                    .filter { candidate ->
+                        val scanRoot = candidate.stamp.scanRootPath.trimEnd('/')
+                        normalizedPath.startsWith("$scanRoot/")
+                    }
+                    .maxByOrNull { it.stamp.scanRootPath.length }
+                ?: return null
+            val cachedDocument = documentManager.getCachedDocument(file)
+            val unsavedDocument = cachedDocument?.takeIf(documentManager::isDocumentUnsaved)
+            val effectiveLength = unsavedDocument?.textLength?.toLong() ?: file.length
+            if (effectiveLength > MAX_FILE_BYTES) return@forEach
+            val relativePath = resolver.locatorPath(file) ?: return null
+            val refreshed = CandidateFile(
+                file = file,
+                stamp = template.stamp.copy(
+                    relativePath = relativePath,
+                    modificationStamp = file.modificationStamp,
+                    documentModificationStamp = unsavedDocument?.modificationStamp,
+                    length = effectiveLength,
+                    language = language,
+                ),
+            )
+            candidates[relativePath] = refreshed
+        }
+
+        val sorted = candidates.values.sortedBy { it.stamp.relativePath }.take(MAX_FILES)
+        return previous.copy(
+            candidates = sorted,
+            stamps = sorted.map(CandidateFile::stamp),
+            totalCandidateFiles = candidates.size,
+            candidateFilesByModule = candidates.values
+                .groupingBy { it.stamp.moduleId }
+                .eachCount(),
+        )
+    }
+
     private fun collectCandidates(): CandidateInventory {
         val fileIndex = ProjectFileIndex.getInstance(project)
         val resolver = ProjectFileResolver.getInstance(project)
@@ -321,7 +771,9 @@ class ApplicationGraphService(
         modules.forEach { module ->
             ProgressManager.checkCanceled()
             val rootManager = ModuleRootManager.getInstance(module)
-            val contentRoots = rootManager.contentRoots.sortedBy(VirtualFile::getPath)
+            val contentRoots = rootManager.contentRoots
+                .filterNot { root -> isCompiledBuildOutput(root.path) }
+                .sortedBy(VirtualFile::getPath)
             contentRoots.forEach { contentRoot ->
                 val relativeContentRoot = resolver.locatorPath(contentRoot, module)
                     ?: return@forEach
@@ -725,6 +1177,11 @@ class ApplicationGraphService(
             return
         }
 
+        if (file.name.lowercase() in NON_APPLICATION_METADATA_FILE_NAMES ||
+            isCompiledBuildOutput(file.path)
+        ) {
+            return
+        }
         val language = languageFor(file.extension) ?: return
         val documentManager = FileDocumentManager.getInstance()
         val cachedDocument = documentManager.getCachedDocument(file)
@@ -1357,6 +1814,11 @@ class ApplicationGraphService(
         nextStep = nextStep,
     )
 
+    private fun isCompiledBuildOutput(path: String): Boolean {
+        val normalized = path.replace('\\', '/').lowercase()
+        return COMPILED_BUILD_OUTPUT_SEGMENTS.any { segment -> segment in normalized }
+    }
+
     private fun languageFor(extension: String?): SourceLanguage? =
         when (extension?.lowercase()) {
             "java" -> SourceLanguage.JAVA
@@ -1752,16 +2214,16 @@ class ApplicationGraphService(
         ) {
             return JvmSyntaxInspection.NotApplicable
         }
-        return cancellableRead {
+        return stableRead {
             val psiFile = PsiManager.getInstance(project).findFile(file)
-                ?: return@cancellableRead JvmSyntaxInspection.ParserUnavailable
+                ?: return@stableRead JvmSyntaxInspection.ParserUnavailable
             val actualLanguage = psiFile.language.id.lowercase()
             val expectedLanguage = language.name.lowercase()
             if (actualLanguage != expectedLanguage) {
-                return@cancellableRead JvmSyntaxInspection.ParserUnavailable
+                return@stableRead JvmSyntaxInspection.ParserUnavailable
             }
             val syntax = PsiTreeUtil.findChildOfType(psiFile, PsiErrorElement::class.java)
-                ?: return@cancellableRead JvmSyntaxInspection.Valid
+                ?: return@stableRead JvmSyntaxInspection.Valid
             val document = psiFile.viewProvider.document
             val offset = syntax.textOffset.coerceAtLeast(0)
             val line = document?.getLineNumber(offset)?.plus(1)
@@ -1773,6 +2235,9 @@ class ApplicationGraphService(
             )
         }
     }
+    private fun <T> stableRead(computation: () -> T): T =
+        ReadAction.compute<T, RuntimeException> { computation() }
+
 
     private fun sourceDiagnostic(
         reasonCode: String,
@@ -1995,9 +2460,19 @@ class ApplicationGraphService(
         private const val MAX_PARSE_DIAGNOSTICS = 250
         private const val MAX_OWNERSHIP_DIAGNOSTICS = 50
         private const val MAX_SOURCE_ROOT_DISCOVERY_DIRECTORIES = 250_000
+        private const val INCREMENTAL_REFRESH_DEBOUNCE_MILLIS = 1_500L
         private const val MAX_DISCOVERED_SOURCE_ROOTS = 20_000
         private const val SOURCE_SET_CONTEXT_WINDOW = 4_096
         private const val RECOVERED_GRADLE_MODULE_PREFIX = "gradle:"
+        private val NON_APPLICATION_METADATA_FILE_NAMES = setOf(
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "npm-shrinkwrap.json",
+        )
+        private val COMPILED_BUILD_OUTPUT_SEGMENTS = setOf(
+            "/build/classes/",
+            "/build/resources/",
+        )
         private val RESOURCE_LANGUAGES = setOf(
             SourceLanguage.XML,
             SourceLanguage.PROPERTIES,
@@ -2075,6 +2550,63 @@ class ApplicationGraphService(
 
         fun getInstance(project: Project): ApplicationGraphService =
             project.getService(ApplicationGraphService::class.java)
+    }
+}
+
+data class ApplicationGraphUpdate(
+    val snapshotDigest: String,
+    val changedFiles: Int,
+    val incremental: Boolean,
+)
+
+enum class ApplicationGraphProgressStage {
+    IDLE,
+    DISCOVERING,
+    READING_SOURCES,
+    INDEXING_ARTIFACTS,
+    LINKING_RELATIONSHIPS,
+    RESOLVING_RELATIONSHIPS,
+    FINALIZING,
+    TRANSFERRING,
+    COMPLETE,
+    FAILED,
+}
+
+data class ApplicationGraphProgressResponse(
+    val runId: Long,
+    val running: Boolean,
+    val stage: ApplicationGraphProgressStage,
+    val completed: Int,
+    val total: Int,
+    val percent: Int,
+    val message: String,
+    val elapsedMillis: Long,
+)
+
+private data class GraphProgressSnapshot(
+    val runId: Long,
+    val running: Boolean,
+    val stage: ApplicationGraphProgressStage,
+    val completed: Int,
+    val total: Int,
+    val percent: Int,
+    val message: String,
+    val startedAt: Long,
+    val elapsedMillis: Long,
+) {
+    companion object {
+        fun idle(): GraphProgressSnapshot =
+            GraphProgressSnapshot(
+                runId = 0,
+                running = false,
+                stage = ApplicationGraphProgressStage.IDLE,
+                completed = 0,
+                total = 0,
+                percent = 0,
+                message = "Waiting to index the application graph",
+                startedAt = 0,
+                elapsedMillis = 0,
+            )
     }
 }
 

@@ -235,25 +235,38 @@ export default function SecurityWorkspace() {
   const relevantFindings = [...(workspace?.findings ?? []), ...runtimeFindings].filter((finding) => (
     !finding.roleId || selectedRoleIds.has(finding.roleId) || expandedRoleIds.has(finding.roleId)
   ))
-  const visibleSurfaces = workspace?.surfaces.filter((surface) => (
+  const visibleFindings = relevantFindings.slice(0, 500)
+  const workspaceSurfaces = useMemo(() => workspace?.surfaces ?? [], [workspace])
+  const journeys = useMemo(() => workspace?.journeys ?? [], [workspace])
+  const surfacesById = useMemo(
+    () => new Map(workspaceSurfaces.map((surface) => [surface.artifactId, surface])),
+    [workspaceSurfaces],
+  )
+  const matchingSurfaces = useMemo(() => workspaceSurfaces.filter((surface) => (
     surfaceFilter !== 'JOURNEY' &&
     surface.kind === surfaceFilter &&
     (!normalizedQuery || [
       surface.displayName, surface.semanticKey, surface.moduleId,
     ].some((value) => value.toLowerCase().includes(normalizedQuery)))
-  )) ?? []
+  )), [workspaceSurfaces, surfaceFilter, normalizedQuery])
+  const visibleSurfaces = matchingSurfaces.slice(0, 300)
   const selectedNames = [...selectedRoleIds].map((id) => rolesById.get(id)?.name).filter(Boolean)
   const selectedDirectRole = selectedRoleIds.size === 1
     ? rolesById.get([...selectedRoleIds][0]) ?? null
     : null
   const selectedDirectSourceRole = selectedDirectRole?.sourceRole ?? null
-  const workspaceSurfaces = workspace?.surfaces ?? []
-  const journeys = workspace?.journeys ?? []
-  const globallyCoveredSurfaceIds = new Set(
-    workspaceSurfaces
-      .filter((surface) => allPolicies.some((policy) => policyAppliesTo(policy, surface)))
-      .map((surface) => surface.artifactId),
-  )
+  const globallyCoveredSurfaceIds = useMemo(() => new Set(workspaceSurfaces
+    .filter((surface) => surface.grantingRoleIds.length > 0 || surface.restrictingRoleIds.length > 0)
+    .map((surface) => surface.artifactId)), [workspaceSurfaces])
+  const matchingJourneys = useMemo(() => journeys.filter((journey) => (
+    !normalizedQuery || [
+      ...journey.menuPathIds,
+      journey.viewId ?? '',
+      ...journey.entityArtifactIds.map((id) =>
+        surfacesById.get(id)?.displayName ?? ''),
+    ].some((value) => value.toLowerCase().includes(normalizedQuery))
+  )), [journeys, normalizedQuery, surfacesById])
+  const visibleJourneys = matchingJourneys.slice(0, 300)
   const uncoveredMenuCount = workspaceSurfaces.filter((surface) => (
     surface.kind === 'MENU' && !globallyCoveredSurfaceIds.has(surface.artifactId)
   )).length
@@ -576,26 +589,25 @@ export default function SecurityWorkspace() {
                   title="How to read this"
                   text="A usable menu journey needs both a MenuPolicy and permission to open the connected view. Row policies then filter the data loaded inside that view."
                 />
-                {journeys.filter((journey) => (
-                  !normalizedQuery || [
-                    ...journey.menuPathIds,
-                    journey.viewId ?? '',
-                    ...journey.entityArtifactIds.map((id) =>
-                      workspace.surfaces.find((surface) => surface.artifactId === id)?.displayName ?? ''),
-                  ].some((value) => value.toLowerCase().includes(normalizedQuery))
-                )).map((journey) => {
+                {matchingJourneys.length > visibleJourneys.length && (
+                  <Guidance
+                    title="Journey results bounded"
+                    text={`Showing the first ${visibleJourneys.length} of ${matchingJourneys.length} journeys. Refine the search to inspect a narrower set.`}
+                  />
+                )}
+                {visibleJourneys.map((journey) => {
                   const menuPath = journey.menuPathArtifactIds
-                    .map((id) => workspace.surfaces.find((surface) => surface.artifactId === id))
+                    .map((id) => surfacesById.get(id))
                     .filter((surface): surface is SecuritySurfaceSnapshot => Boolean(surface))
-                  const view = workspace.surfaces.find((surface) => surface.artifactId === journey.viewArtifactId)
+                  const view = journey.viewArtifactId ? surfacesById.get(journey.viewArtifactId) : undefined
                   const entitySurfaces = journey.entityArtifactIds
-                    .map((id) => workspace.surfaces.find((surface) => surface.artifactId === id))
+                    .map((id) => surfacesById.get(id))
                     .filter((surface): surface is SecuritySurfaceSnapshot => Boolean(surface))
                   const attributeSurfaces = journey.attributeArtifactIds
-                    .map((id) => workspace.surfaces.find((surface) => surface.artifactId === id))
+                    .map((id) => surfacesById.get(id))
                     .filter((surface): surface is SecuritySurfaceSnapshot => Boolean(surface))
                   const componentSurfaces = journey.componentArtifactIds
-                    .map((id) => workspace.surfaces.find((surface) => surface.artifactId === id))
+                    .map((id) => surfacesById.get(id))
                     .filter((surface): surface is SecuritySurfaceSnapshot => Boolean(surface))
                   const menuGranted = menuPath.length > 0 && menuPath.every(surfaceGranted)
                   const viewGranted = view ? surfaceGranted(view) : false
@@ -700,6 +712,11 @@ export default function SecurityWorkspace() {
               </div>
             ) : (
               <div className="grid grid-cols-1 gap-2 2xl:grid-cols-2">
+                {matchingSurfaces.length > visibleSurfaces.length && (
+                  <div className="col-span-full rounded border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[9px] text-amber-200/80">
+                    Showing the first {visibleSurfaces.length} of {matchingSurfaces.length} resources. Refine the search to inspect a narrower set.
+                  </div>
+                )}
                 {visibleSurfaces.map((surface) => {
                   const granted = surfaceGranted(surface)
                   const restricted = surfaceRestricted(surface)
@@ -758,7 +775,12 @@ export default function SecurityWorkspace() {
             subtitle={`${relevantFindings.length} finding(s) across source and imported runtime evidence`}
           />
           <div className="space-y-2 p-2">
-            {relevantFindings.map((finding, index) => (
+            {relevantFindings.length > visibleFindings.length && (
+              <div className="rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[9px] text-amber-200/80">
+                Showing the first {visibleFindings.length} of {relevantFindings.length} findings.
+              </div>
+            )}
+            {visibleFindings.map((finding, index) => (
               <button
                 type="button"
                 key={`${finding.code}:${finding.artifactId ?? ''}:${index}`}

@@ -334,7 +334,7 @@ export default function MenuDesigner() {
 
   useEffect(() => {
     let active = true
-    bridge.request<MenuWorkspaceResponse>('getMenuWorkspace', {})
+    bridge.getMenuWorkspace()
       .then((workspace) => {
         if (!active) return
         setMenuSources(workspace.sources)

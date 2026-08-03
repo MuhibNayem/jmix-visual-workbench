@@ -1,12 +1,21 @@
 package org.jmixworkbench.services
 
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.roots.ModuleRootEvent
+import com.intellij.openapi.roots.ModuleRootListener
+import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.openapi.vfs.newvfs.BulkFileListener
+import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.openapi.project.Project
 import org.jmixworkbench.model.DatabaseType
 import org.jmixworkbench.model.ProjectConfig
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 
 /**
  * Detects and manages Jmix project configuration.
@@ -14,22 +23,58 @@ import java.nio.file.Paths
  * source roots, and database type.
  */
 @Service(Service.Level.PROJECT)
-class JmixProjectService(private val project: Project) {
+class JmixProjectService(private val project: Project) : Disposable {
 
-    private var cachedConfig: ProjectConfig? = null
+    @Volatile private var cachedConfig: ProjectConfig? = null
+    @Volatile private var cachedBuildCandidates: List<BuildCandidate>? = null
+    @Volatile private var cachedJmixProject: Boolean? = null
+    init {
+        val connection = project.messageBus.connect(this)
+        connection.subscribe(
+            VirtualFileManager.VFS_CHANGES,
+            object : BulkFileListener {
+                override fun after(events: List<VFileEvent>) {
+                    if (events.any { event -> event.path.substringAfterLast('/') in DETECTION_FILE_NAMES }) {
+                        invalidateDetection()
+                    }
+                }
+            },
+        )
+        connection.subscribe(
+            ModuleRootListener.TOPIC,
+            object : ModuleRootListener {
+                override fun rootsChanged(event: ModuleRootEvent) {
+                    invalidateDetection()
+                }
+            },
+        )
+    }
 
+
+    @Synchronized
     fun getConfig(): ProjectConfig? {
         cachedConfig?.let { return it }
         return detectConfig()
     }
 
-    fun refresh() {
+    fun refresh() = invalidateDetection()
+
+    @Synchronized
+    fun isJmixProject(): Boolean =
+        cachedJmixProject ?: projectBuildFiles()
+            .any { isJmixBuild(it.content) }
+            .also { cachedJmixProject = it }
+    @Synchronized
+    private fun invalidateDetection() {
         cachedConfig = null
+        cachedBuildCandidates = null
+        cachedJmixProject = null
     }
 
-    fun isJmixProject(): Boolean {
-        return projectBuildFiles().any { isJmixBuild(it.content) }
+    override fun dispose() {
+        invalidateDetection()
     }
+
 
     /**
      * Resolves the project id that governs a selected generation module.
@@ -81,8 +126,10 @@ class JmixProjectService(private val project: Project) {
         return config
     }
 
+    @Synchronized
     private fun projectBuildFiles(): List<BuildCandidate> {
         val basePath = project.basePath?.let(Paths::get) ?: return emptyList()
+        cachedBuildCandidates?.let { return it }
         if (!Files.isDirectory(basePath)) return emptyList()
         val normalizedBasePath = basePath.toAbsolutePath().normalize()
         val candidatesByPath = linkedMapOf<Path, BuildCandidate>()
@@ -95,38 +142,59 @@ class JmixProjectService(private val project: Project) {
                 .forEach(::add)
         }
         seedRoots.flatMap(::discoverCompositeBuildRoots).distinct().forEach { buildRoot ->
-            runCatching {
-                Files.find(
-                    buildRoot,
-                    MAX_BUILD_SCAN_DEPTH,
-                    { path, attributes ->
-                        attributes.isRegularFile &&
-                            path.fileName.toString() in BUILD_FILE_NAMES &&
-                            path.none { part -> part.toString() in EXCLUDED_DIRECTORIES }
-                    },
-                ).use { paths ->
-                    paths.forEach { path ->
-                        val normalizedPath = path.toAbsolutePath().normalize()
-                        candidatesByPath.putIfAbsent(
-                            normalizedPath,
-                            BuildCandidate(
-                                modulePrefix = normalizedBasePath.relativize(normalizedPath.parent)
-                                    .toString()
-                                    .replace('\\', '/')
-                                    .removeSuffix("."),
-                                directory = normalizedPath.parent,
-                                content = runCatching { Files.readString(normalizedPath) }.getOrDefault(""),
-                            ),
-                        )
-                    }
-                }
+            discoverBuildFiles(buildRoot).forEach { path ->
+                val normalizedPath = path.toAbsolutePath().normalize()
+                candidatesByPath.putIfAbsent(
+                    normalizedPath,
+                    BuildCandidate(
+                        modulePrefix = normalizedBasePath.relativize(normalizedPath.parent)
+                            .toString()
+                            .replace('\\', '/')
+                            .removeSuffix("."),
+                        directory = normalizedPath.parent,
+                        content = runCatching { Files.readString(normalizedPath) }.getOrDefault(""),
+                    ),
+                )
             }
         }
         return candidatesByPath.values.sortedWith(
             compareBy<BuildCandidate> { it.modulePrefix.count { char -> char == '/' } }
                 .thenBy(BuildCandidate::modulePrefix),
-        )
+        ).also { cachedBuildCandidates = it }
     }
+    private fun discoverBuildFiles(buildRoot: Path): List<Path> {
+        val files = mutableListOf<Path>()
+        runCatching {
+            Files.walkFileTree(
+                buildRoot,
+                emptySet(),
+                MAX_BUILD_SCAN_DEPTH,
+                object : SimpleFileVisitor<Path>() {
+                    override fun preVisitDirectory(
+                        directory: Path,
+                        attributes: BasicFileAttributes,
+                    ): FileVisitResult =
+                        if (directory != buildRoot && directory.fileName.toString() in EXCLUDED_DIRECTORIES) {
+                            FileVisitResult.SKIP_SUBTREE
+                        } else {
+                            FileVisitResult.CONTINUE
+                        }
+
+                    override fun visitFile(
+                        file: Path,
+                        attributes: BasicFileAttributes,
+                    ): FileVisitResult {
+                        if (attributes.isRegularFile && file.fileName.toString() in BUILD_FILE_NAMES) {
+                            files.add(file)
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+                },
+            )
+        }
+        return files
+    }
+
 
     private fun discoverCompositeBuildRoots(projectRoot: Path): List<Path> {
         val pending = ArrayDeque<Path>()
@@ -279,6 +347,10 @@ class JmixProjectService(private val project: Project) {
         private const val MAX_COMPOSITE_BUILDS = 64
         private val BUILD_FILE_NAMES = setOf("build.gradle", "build.gradle.kts")
         private val SETTINGS_FILE_NAMES = setOf("settings.gradle", "settings.gradle.kts")
+        private val DETECTION_FILE_NAMES = BUILD_FILE_NAMES + SETTINGS_FILE_NAMES + setOf(
+            "gradle.properties",
+            "libs.versions.toml",
+        )
         private val SOURCE_EXTENSIONS = setOf("java", "kt")
         private val SOURCE_ROOT_MARKERS = setOf("/src/main/java/", "/src/main/kotlin/")
         private val EXCLUDED_DIRECTORIES = setOf(

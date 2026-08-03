@@ -19,6 +19,8 @@ import java.io.StringReader
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 import org.xml.sax.InputSource
+import org.xml.sax.SAXParseException
+import org.xml.sax.helpers.DefaultHandler
 
 /**
  * Pure, read-only semantic indexing for existing Jmix sources.
@@ -29,13 +31,84 @@ import org.xml.sax.InputSource
  */
 class ApplicationGraphIndexer {
     fun index(input: ApplicationGraphIndexInput): ApplicationGraphIndexResult {
-        val artifacts = linkedMapOf<String, DetectedArtifact>()
-        val pendingLinks = mutableListOf<PendingLink>()
-        val diagnostics = mutableListOf<DiscoveryDiagnostic>()
         val acceptedFiles = input.files
             .sortedBy(GraphSourceFile::relativePath)
             .take(input.maxFiles)
+        val contributions = linkedMapOf<String, FileContribution>()
 
+        input.progress(
+            ApplicationGraphIndexProgressStage.INDEXING_ARTIFACTS,
+            0,
+            acceptedFiles.size,
+            "Indexing source artifacts",
+        )
+        acceptedFiles.forEachIndexed { fileIndex, file ->
+            input.checkCancelled()
+            input.progress(
+                ApplicationGraphIndexProgressStage.INDEXING_ARTIFACTS,
+                fileIndex,
+                acceptedFiles.size,
+                "Indexing ${file.relativePath}",
+            )
+            contributions[file.relativePath] = indexFile(file, input.maxFileBytes)
+        }
+
+        input.progress(ApplicationGraphIndexProgressStage.INDEXING_ARTIFACTS, acceptedFiles.size, acceptedFiles.size, "Source artifact indexing complete")
+        return assemble(input, contributions)
+    }
+
+    internal fun indexFile(file: GraphSourceFile, maxFileBytes: Int): FileContribution {
+        val artifacts = linkedMapOf<String, DetectedArtifact>()
+        val pendingLinks = mutableListOf<PendingLink>()
+        val diagnostics = mutableListOf<DiscoveryDiagnostic>()
+        if (file.content.toByteArray(Charsets.UTF_8).size > maxFileBytes) {
+            diagnostics += diagnostic(
+                reasonCode = "P2_GRAPH_FILE_OVERSIZED",
+                message = "An oversized source file was excluded from semantic indexing.",
+                nextStep = "Open the file natively or raise the reviewed per-file limit.",
+                category = DiagnosticCategory.INDEX,
+                severity = DiagnosticSeverity.WARNING,
+                locator = file.locator(),
+            )
+            return FileContribution(emptyList(), emptyList(), diagnostics)
+        }
+
+        when (file.language) {
+            SourceLanguage.JAVA,
+            SourceLanguage.KOTLIN,
+            SourceLanguage.GROOVY,
+            -> indexJvm(
+                file.copy(
+                    content = maskJvmComments(file.content),
+                    fingerprint = file.fingerprint,
+                ),
+                artifacts,
+                pendingLinks,
+                diagnostics,
+            )
+
+            SourceLanguage.XML -> indexXml(file, artifacts, pendingLinks, diagnostics)
+            SourceLanguage.PROPERTIES -> indexProperties(file, artifacts, pendingLinks, diagnostics)
+            SourceLanguage.YAML -> indexYaml(file, artifacts, pendingLinks, diagnostics)
+            SourceLanguage.SQL -> indexSql(file, artifacts, pendingLinks, diagnostics)
+            SourceLanguage.MIXED,
+            SourceLanguage.UNKNOWN,
+            -> indexProjectAsset(file, artifacts)
+            else -> Unit
+        }
+        return FileContribution(artifacts.values.toList(), pendingLinks.toList(), diagnostics.toList())
+    }
+
+    internal fun assemble(
+        input: ApplicationGraphIndexInput,
+        contributions: Map<String, FileContribution>,
+    ): ApplicationGraphIndexResult {
+        val acceptedFiles = input.files
+            .sortedBy(GraphSourceFile::relativePath)
+            .take(input.maxFiles)
+        val artifacts = linkedMapOf<String, DetectedArtifact>()
+        val pendingLinks = mutableListOf<PendingLink>()
+        val diagnostics = mutableListOf<DiscoveryDiagnostic>()
         if (input.files.size > input.maxFiles) {
             diagnostics += diagnostic(
                 reasonCode = "P2_GRAPH_FILE_LIMIT",
@@ -45,44 +118,11 @@ class ApplicationGraphIndexer {
                 severity = DiagnosticSeverity.WARNING,
             )
         }
-
-        acceptedFiles.forEach { file ->
-            if (file.content.toByteArray(Charsets.UTF_8).size > input.maxFileBytes) {
-                diagnostics += diagnostic(
-                    reasonCode = "P2_GRAPH_FILE_OVERSIZED",
-                    message = "An oversized source file was excluded from semantic indexing.",
-                    nextStep = "Open the file natively or raise the reviewed per-file limit.",
-                    category = DiagnosticCategory.INDEX,
-                    severity = DiagnosticSeverity.WARNING,
-                    locator = file.locator(),
-                )
-                return@forEach
-            }
-
-            when (file.language) {
-                SourceLanguage.JAVA,
-                SourceLanguage.KOTLIN,
-                SourceLanguage.GROOVY,
-                -> indexJvm(
-                    file.copy(
-                        content = maskJvmComments(file.content),
-                        fingerprint = file.fingerprint,
-                    ),
-                    artifacts,
-                    pendingLinks,
-                    diagnostics,
-                )
-
-                SourceLanguage.XML -> indexXml(file, artifacts, pendingLinks, diagnostics)
-                SourceLanguage.PROPERTIES -> indexProperties(file, artifacts, pendingLinks, diagnostics)
-                SourceLanguage.YAML -> indexYaml(file, artifacts, pendingLinks, diagnostics)
-                SourceLanguage.SQL -> indexSql(file, artifacts, pendingLinks, diagnostics)
-                SourceLanguage.MIXED,
-                SourceLanguage.UNKNOWN,
-                -> indexProjectAsset(file, artifacts)
-                else -> Unit
-            }
-
+        for (file in acceptedFiles) {
+            val contribution = contributions[file.relativePath] ?: continue
+            contribution.artifacts.forEach { artifacts[it.id] = it }
+            pendingLinks += contribution.pendingLinks
+            diagnostics += contribution.diagnostics
             if (artifacts.size >= input.maxArtifacts) {
                 diagnostics += diagnostic(
                     reasonCode = "P2_GRAPH_ARTIFACT_LIMIT",
@@ -91,12 +131,27 @@ class ApplicationGraphIndexer {
                     category = DiagnosticCategory.INDEX,
                     severity = DiagnosticSeverity.WARNING,
                 )
-                return@forEach
+                break
             }
         }
 
-        addImplicitSourceRelationships(acceptedFiles, artifacts, pendingLinks)
-        val relationships = resolveLinks(artifacts, pendingLinks)
+        addImplicitSourceRelationships(
+            acceptedFiles,
+            artifacts,
+            pendingLinks,
+            progress = { completed, total, message ->
+                input.progress(ApplicationGraphIndexProgressStage.LINKING_RELATIONSHIPS, completed, total, message)
+            },
+            checkCancelled = input.checkCancelled,
+        )
+        val relationships = resolveLinks(
+            artifacts,
+            pendingLinks,
+            progress = { completed, total, message ->
+                input.progress(ApplicationGraphIndexProgressStage.RESOLVING_RELATIONSHIPS, completed, total, message)
+            },
+            checkCancelled = input.checkCancelled,
+        )
         val relationshipDiagnostics = relationships.mapNotNull(ArtifactRelationship::diagnostic)
 
         return ApplicationGraphIndexResult(
@@ -1023,19 +1078,25 @@ class ApplicationGraphIndexer {
         links: MutableList<PendingLink>,
         diagnostics: MutableList<DiscoveryDiagnostic>,
     ) {
-        val document = parseXml(file.content)
-        if (document == null) {
+        val parsed = parseXml(file.content)
+        if (parsed is XmlParseResult.Failure) {
             diagnostics += diagnostic(
                 reasonCode = "P2_XML_MALFORMED",
-                message = "Malformed XML was excluded from the application graph.",
-                nextStep = "Open the descriptor and correct XML syntax before using visual analysis.",
+                message = "Malformed XML was excluded from the application graph: ${parsed.description}",
+                nextStep = "Open the descriptor at ${parsed.line}:${parsed.column} and correct XML syntax before using visual analysis.",
                 category = DiagnosticCategory.SOURCE,
                 severity = DiagnosticSeverity.ERROR,
-                locator = file.locator(),
+                locator = SourceLocator(
+                    relativePath = file.relativePath,
+                    line = parsed.line,
+                    column = parsed.column,
+                    revisionFingerprint = file.fingerprint,
+                ),
             )
             return
         }
 
+        val document = (parsed as XmlParseResult.Success).document
         val root = document.documentElement ?: return
         when (root.localTag()) {
             "view", "fragment" -> indexViewXml(file, root, artifacts, links)
@@ -2095,6 +2156,7 @@ class ApplicationGraphIndexer {
     private fun parseYamlEntries(file: GraphSourceFile): ParsedYaml {
         val entries = mutableListOf<YamlEntry>()
         val stack = mutableListOf<Pair<Int, String>>()
+        val sequenceCounts = mutableMapOf<String, Int>()
         var unsupportedOffset: Int? = null
         var offset = 0
         var blockScalarIndent: Int? = null
@@ -2114,13 +2176,51 @@ class ApplicationGraphIndexer {
             }
             val content = stripYamlComment(rawLine.drop(indent)).trimEnd()
             if (content.isBlank() || content == "---" || content == "...") {
-                if (content == "---") stack.clear()
+                if (content == "---") {
+                    stack.clear()
+                    sequenceCounts.clear()
+                }
                 return@forEach
             }
-            if (content.startsWith("- ")) {
-                unsupportedOffset = unsupportedOffset ?: lineOffset + indent
+            while (stack.isNotEmpty() && stack.last().first >= indent) stack.removeLast()
+
+            if (content == "-" || content.startsWith("- ")) {
+                val parentPath = yamlPath(stack.map(Pair<Int, String>::second))
+                if (parentPath.isBlank()) {
+                    unsupportedOffset = unsupportedOffset ?: lineOffset + indent
+                    return@forEach
+                }
+                val itemIndex = sequenceCounts.getOrDefault(parentPath, 0)
+                sequenceCounts[parentPath] = itemIndex + 1
+                stack += indent to "[$itemIndex]"
+                val item = content.removePrefix("-").trim()
+                if (item.isBlank()) return@forEach
+
+                val itemSeparator = yamlSeparator(item)
+                if (itemSeparator > 0) {
+                    val rawKey = item.substring(0, itemSeparator).trim()
+                    val key = rawKey.trim('"', '\'')
+                    if (!isSafeYamlKey(rawKey, key)) {
+                        unsupportedOffset = unsupportedOffset ?: lineOffset + indent + 2
+                        return@forEach
+                    }
+                    val rawValue = item.substring(itemSeparator + 1).trim()
+                    val path = yamlPath(stack.map(Pair<Int, String>::second) + key)
+                    if (rawValue.isBlank()) {
+                        stack += (indent + 1) to key
+                    } else {
+                        entries += YamlEntry(path, yamlScalarValue(rawValue), lineOffset + indent)
+                    }
+                } else {
+                    entries += YamlEntry(
+                        key = yamlPath(stack.map(Pair<Int, String>::second)),
+                        value = yamlScalarValue(item),
+                        offset = lineOffset + indent,
+                    )
+                }
                 return@forEach
             }
+
             val separator = yamlSeparator(content)
             if (separator <= 0) {
                 unsupportedOffset = unsupportedOffset ?: lineOffset + indent
@@ -2128,18 +2228,17 @@ class ApplicationGraphIndexer {
             }
             val rawKey = content.substring(0, separator).trim()
             val key = rawKey.trim('"', '\'')
-            if (!YAML_KEY.matches(key)) {
+            if (!isSafeYamlKey(rawKey, key)) {
                 unsupportedOffset = unsupportedOffset ?: lineOffset + indent
                 return@forEach
             }
-            while (stack.isNotEmpty() && stack.last().first >= indent) stack.removeLast()
-            val path = (stack.map { it.second } + key).joinToString(".")
+            val path = yamlPath(stack.map(Pair<Int, String>::second) + key)
             val rawValue = content.substring(separator + 1).trim()
             if (rawValue.isBlank()) {
                 stack += indent to key
                 return@forEach
             }
-            if (rawValue == "|" || rawValue == ">" || rawValue.startsWith("|-") || rawValue.startsWith(">-")) {
+            if (YAML_BLOCK_SCALAR.matches(rawValue)) {
                 entries += YamlEntry(path, "<block scalar>", lineOffset + indent)
                 blockScalarIndent = indent
                 return@forEach
@@ -2152,12 +2251,36 @@ class ApplicationGraphIndexer {
             }
             entries += YamlEntry(
                 key = path,
-                value = rawValue.trim().trim('"', '\''),
+                value = yamlScalarValue(rawValue),
                 offset = lineOffset + indent,
             )
         }
         return ParsedYaml(entries, unsupportedOffset)
     }
+
+    private fun isSafeYamlKey(rawKey: String, key: String): Boolean =
+        key.isNotBlank() &&
+            key.length <= 512 &&
+            if ((rawKey.startsWith('"') && rawKey.endsWith('"')) ||
+                (rawKey.startsWith('\'') && rawKey.endsWith('\''))
+            ) {
+                key.none { it == '\n' || it == '\r' || it == '\u0000' }
+            } else {
+                YAML_KEY.matches(key)
+            }
+
+    private fun yamlPath(parts: List<String>): String = buildString {
+        parts.forEach { part ->
+            if (part.startsWith('[')) append(part)
+            else {
+                if (isNotEmpty()) append('.')
+                append(part)
+            }
+        }
+    }
+
+    private fun yamlScalarValue(value: String): String =
+        value.trim().trim('"', '\'')
 
     private fun stripYamlComment(value: String): String {
         var singleQuoted = false
@@ -2301,6 +2424,8 @@ class ApplicationGraphIndexer {
         files: List<GraphSourceFile>,
         artifacts: Map<String, DetectedArtifact>,
         links: MutableList<PendingLink>,
+        progress: (completed: Int, total: Int, message: String) -> Unit,
+        checkCancelled: () -> Unit,
     ) {
         val sourceArtifacts = artifacts.values
             .filter { it.snapshot.kind in IMPLICIT_RELATIONSHIP_SOURCE_KINDS }
@@ -2313,7 +2438,9 @@ class ApplicationGraphIndexer {
         }
         val workflows = artifacts.values.filter { it.snapshot.kind == ArtifactKind.WORKFLOW_PROCESS }
 
-        files.forEach { file ->
+        files.forEachIndexed { fileIndex, file ->
+            checkCancelled()
+            progress(fileIndex, files.size, "Linking references in ${file.relativePath}")
             val owners = sourceArtifacts[file.relativePath].orEmpty()
             owners.forEach { source ->
                 val evidenceText = source.analysisText ?: return@forEach
@@ -2365,7 +2492,9 @@ class ApplicationGraphIndexer {
                     }
                 }
             }
+            progress(fileIndex + 1, files.size, "Linked references in ${file.relativePath}")
         }
+        progress(files.size, files.size, "Implicit source relationships linked")
     }
 
     /**
@@ -2415,6 +2544,8 @@ class ApplicationGraphIndexer {
     private fun resolveLinks(
         artifacts: Map<String, DetectedArtifact>,
         pending: List<PendingLink>,
+        progress: (completed: Int, total: Int, message: String) -> Unit,
+        checkCancelled: () -> Unit,
     ): List<ArtifactRelationship> {
         val aliases = linkedMapOf<String, MutableList<DetectedArtifact>>()
         artifacts.values.forEach { artifact ->
@@ -2423,7 +2554,12 @@ class ApplicationGraphIndexer {
             }
         }
 
-        return pending.distinctBy { listOf(it.sourceId, it.targetRef, it.type.name, it.locator.relativePath) }.map { link ->
+        val distinctPending = pending.distinctBy {
+            listOf(it.sourceId, it.targetRef, it.type.name, it.locator.relativePath)
+        }
+        return distinctPending.mapIndexed { index, link ->
+            checkCancelled()
+            progress(index, distinctPending.size, "Resolving ${index + 1} of ${distinctPending.size} relationships")
             val candidates = aliases[normalizeAlias(link.targetRef)].orEmpty()
                 .filter { link.expectedKinds.isEmpty() || it.snapshot.kind in link.expectedKinds }
                 .distinctBy(DetectedArtifact::id)
@@ -2456,6 +2592,8 @@ class ApplicationGraphIndexer {
                 sourceLocator = link.locator,
                 diagnostic = linkDiagnostic,
             )
+        }.also {
+            progress(distinctPending.size, distinctPending.size, "Relationship resolution complete")
         }
     }
 
@@ -2553,8 +2691,8 @@ class ApplicationGraphIndexer {
         return "${kind.name.lowercase().replace('_', ' ')} from ${file.language.name.lowercase()} source"
     }
 
-    private fun parseXml(content: String): Document? =
-        runCatching {
+    private fun parseXml(content: String): XmlParseResult =
+        try {
             val factory = DocumentBuilderFactory.newInstance()
             factory.isNamespaceAware = true
             factory.isXIncludeAware = false
@@ -2564,10 +2702,33 @@ class ApplicationGraphIndexer {
             factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
             factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
             factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
-            factory.newDocumentBuilder().apply {
+            val document = factory.newDocumentBuilder().apply {
                 setEntityResolver { _, _ -> InputSource(StringReader("")) }
+                setErrorHandler(object : DefaultHandler() {
+                    override fun error(exception: SAXParseException) {
+                        throw exception
+                    }
+
+                    override fun fatalError(exception: SAXParseException) {
+                        throw exception
+                    }
+                })
             }.parse(InputSource(StringReader(content)))
-        }.getOrNull()
+            XmlParseResult.Success(document)
+        } catch (exception: SAXParseException) {
+            XmlParseResult.Failure(
+                description = exception.message.orEmpty().substringAfter(": ").take(240)
+                    .ifBlank { "XML syntax error" },
+                line = exception.lineNumber.coerceAtLeast(1),
+                column = exception.columnNumber.coerceAtLeast(1),
+            )
+        } catch (exception: Exception) {
+            XmlParseResult.Failure(
+                description = exception.message?.take(240) ?: "XML parser failure",
+                line = 1,
+                column = 1,
+            )
+        }
 
     private fun Element.attr(name: String): String = getAttribute(name).trim()
 
@@ -2706,13 +2867,36 @@ class ApplicationGraphIndexer {
     private fun containsSymbol(content: String, symbol: String): Boolean {
         val simple = symbol.substringAfterLast('.').substringAfterLast('#')
         if (simple.length < 3) return false
-        return Regex("(?<![A-Za-z0-9_])${Regex.escape(simple)}(?![A-Za-z0-9_])").containsMatchIn(content)
+        return containsDelimited(content, simple) { char -> char.isLetterOrDigit() || char == '_' }
     }
 
     private fun containsQualifiedSymbol(content: String, symbol: String): Boolean {
         if (!symbol.contains('.')) return false
-        return Regex("(?<![A-Za-z0-9_$.])${Regex.escape(symbol)}(?![A-Za-z0-9_$.])")
-            .containsMatchIn(content)
+        return containsDelimited(content, symbol) { char ->
+            char.isLetterOrDigit() || char == '_' || char == '$' || char == '.'
+        }
+    }
+
+    private fun containsDelimited(
+        content: String,
+        symbol: String,
+        isIdentifierPart: (Char) -> Boolean,
+    ): Boolean {
+        var fromIndex = 0
+        while (fromIndex <= content.length - symbol.length) {
+            val index = content.indexOf(symbol, fromIndex)
+            if (index < 0) return false
+            val before = content.getOrNull(index - 1)
+            val after = content.getOrNull(index + symbol.length)
+            if (
+                (before == null || !isIdentifierPart(before)) &&
+                (after == null || !isIdentifierPart(after))
+            ) {
+                return true
+            }
+            fromIndex = index + symbol.length
+        }
+        return false
     }
 
     private fun containsArtifactReference(content: String, artifact: DetectedArtifact): Boolean =
@@ -2829,7 +3013,7 @@ class ApplicationGraphIndexer {
         )
     }
 
-    private data class DetectedArtifact(
+    internal data class DetectedArtifact(
         val snapshot: ArtifactSnapshot,
         val semanticKey: String,
         val displayName: String,
@@ -2840,12 +3024,18 @@ class ApplicationGraphIndexer {
             get() = snapshot.id
     }
 
-    private data class PendingLink(
+    internal data class PendingLink(
         val sourceId: String,
         val targetRef: String,
         val type: RelationshipType,
         val expectedKinds: Set<ArtifactKind>,
         val locator: SourceLocator,
+    )
+
+    internal data class FileContribution(
+        val artifacts: List<DetectedArtifact>,
+        val pendingLinks: List<PendingLink>,
+        val diagnostics: List<DiscoveryDiagnostic>,
     )
 
     private data class MappedMethod(
@@ -2859,6 +3049,16 @@ class ApplicationGraphIndexer {
         val name: String,
         val type: String,
     )
+
+    private sealed interface XmlParseResult {
+        data class Success(val document: Document) : XmlParseResult
+
+        data class Failure(
+            val description: String,
+            val line: Int,
+            val column: Int,
+        ) : XmlParseResult
+    }
 
     private data class YamlEntry(
         val key: String,
@@ -2989,6 +3189,7 @@ class ApplicationGraphIndexer {
         val HTTP_TIMEOUT_CONFIGURATION = Regex("""(?i)\b(connectTimeout|readTimeout|responseTimeout|requestTimeout|callTimeout)\b""")
         val PROPERTY_ENTRY = Regex("""(?m)^\s*([^#!\s][^=:\s]*)\s*[:=]\s*(.*?)\s*$""")
         val YAML_KEY = Regex("""[A-Za-z0-9_.\-/]+""")
+        val YAML_BLOCK_SCALAR = Regex("""[|>][+-]?[1-9]?""")
         val LIQUIBASE_FORMATTED_SQL = Regex("""(?im)^\s*--\s*liquibase\s+formatted\s+sql\s*$""")
         val LIQUIBASE_SQL_CHANGESET = Regex(
             """(?im)^[ \t]*--[ \t]*changeset[ \t]+([A-Za-z0-9_.@-]+):([A-Za-z0-9_.-]+)(?:[ \t]+.*)?$""",
@@ -3098,12 +3299,20 @@ data class ApplicationGraphIndexInput(
     val maxFiles: Int = 20_000,
     val maxFileBytes: Int = 2 * 1024 * 1024,
     val maxArtifacts: Int = 100_000,
+    val progress: (stage: ApplicationGraphIndexProgressStage, completed: Int, total: Int, message: String) -> Unit = { _, _, _, _ -> },
+    val checkCancelled: () -> Unit = {},
 ) {
     init {
         require(maxFiles in 1..200_000)
         require(maxFileBytes in 1..16 * 1024 * 1024)
         require(maxArtifacts in 1..1_000_000)
     }
+}
+
+enum class ApplicationGraphIndexProgressStage {
+    INDEXING_ARTIFACTS,
+    LINKING_RELATIONSHIPS,
+    RESOLVING_RELATIONSHIPS,
 }
 
 data class ApplicationGraphIndexResult(

@@ -10,6 +10,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
@@ -27,8 +28,6 @@ import com.intellij.ui.jcef.JBCefJSQuery
 import org.jmixworkbench.generator.CrudOrchestrator
 import org.jmixworkbench.model.*
 import org.jmixworkbench.discovery.change.WorkspaceChangeSet
-import org.jmixworkbench.discovery.security.SecurityWorkspaceBuilder
-import org.jmixworkbench.discovery.security.SecurityWorkspaceInput
 import org.jmixworkbench.discovery.security.SecurityWorkspaceSnapshot
 import org.jmixworkbench.discovery.security.RuntimeSecurityEvidenceClearRequest
 import org.jmixworkbench.discovery.security.RuntimeSecurityEvidenceImportRequest
@@ -125,6 +124,7 @@ import org.jmixworkbench.services.SecurityRolePolicyReplacementApplyRequest
 import org.jmixworkbench.services.SecurityRolePolicyReplacementRequest
 import org.jmixworkbench.services.SecurityRolePolicyRemovalApplyRequest
 import org.jmixworkbench.services.SecurityRolePolicyRemovalRequest
+import org.jmixworkbench.services.SecurityWorkspaceService
 import org.jmixworkbench.services.RuntimeSecurityEvidenceService
 import org.jmixworkbench.services.RestApiInvocationRequest
 import org.jmixworkbench.services.RestApiInvocationResponse
@@ -186,6 +186,8 @@ import org.jmixworkbench.toolwindow.WorkbenchSurfaceOpenRequest
 import org.jmixworkbench.toolwindow.WorkbenchSurfaceOpenResponse
 import org.cef.browser.CefBrowser
 import org.cef.handler.CefLoadHandlerAdapter
+import java.util.Base64
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Bridge between the JCEF embedded browser (React UI) and the Java backend.
@@ -203,6 +205,15 @@ class JcefBridge(
     private val log = Logger.getInstance(JcefBridge::class.java)
     private val gson = Gson()
     private val jsQuery = JBCefJSQuery.create(browser as com.intellij.ui.jcef.JBCefBrowserBase)
+    private val responseTransferSequence = AtomicLong()
+    private val graphUpdateSubscription = ApplicationGraphService.getInstance(project).addUpdateListener { update ->
+        sendResponse("applicationGraphUpdated", null, gson.toJson(update))
+    }
+
+    private companion object {
+        const val DIRECT_RESPONSE_LIMIT_CHARS = 256 * 1024
+        const val RESPONSE_CHUNK_CHARS = 256 * 1024
+    }
     @Volatile
     private var launchContext: WorkbenchLaunchContext? = initialLaunchContext
 
@@ -267,8 +278,12 @@ class JcefBridge(
             requestId = json.get("requestId")?.takeUnless { it.isJsonNull }?.asString
             val payload = json.getAsJsonObject("payload")
 
-            log.info("Bridge request: $action")
+            if (action != "getApplicationGraphProgress") log.info("Bridge request: $action")
 
+            if (action == "getApplicationGraphProgress") {
+                sendResponse(action, requestId, gson.toJson(ApplicationGraphService.getInstance(project).progress()))
+                return
+            }
             if (action == "getApplicationGraph") {
                 handleGetApplicationGraph(action, requestId, payload)
                 return
@@ -855,30 +870,41 @@ class JcefBridge(
 
     private fun handleGetApplicationGraph(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<org.jmixworkbench.services.ApplicationGraphResponse> {
-            ApplicationGraphService.getInstance(project).graph(forceRefresh)
-        }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
+        AppExecutorUtil.getAppExecutorService().execute {
+            val graphService = ApplicationGraphService.getInstance(project)
+            val result = runCatching {
+                val graph = graphService.graph(forceRefresh)
+                graphService.beginTransfer()
+                gson.toJson(graph).also { json ->
+                    val sizeMiB = json.toByteArray(Charsets.UTF_8).size / (1024.0 * 1024.0)
+                    graphService.beginTransfer("Transferring %.1f MiB application graph to the workbench".format(sizeMiB))
+                }
             }
-            .submit(AppExecutorUtil.getAppExecutorService())
+            if (project.isDisposed) return@execute
+            result.fold(
+                onSuccess = { resultJson ->
+                    sendResponse(action, requestId, resultJson)
+                    graphService.completeTransfer()
+                },
+                onFailure = { cause ->
+                    val message = cause.message ?: "Application graph indexing failed."
+                    graphService.failTransfer(message)
+                    if (cause !is ProcessCanceledException && cause !is ReadAction.CannotReadException) {
+                        log.error("Application graph request failed", cause)
+                    }
+                    sendResponse(action, requestId, gson.toJson(mapOf("error" to message)))
+                },
+            )
+        }
     }
 
     private fun handleGetProjectPropertiesWorkspace(
         action: String,
         requestId: String?,
     ) {
-        ReadAction.nonBlocking<org.jmixworkbench.services.JmixProjectPropertiesWorkspace> {
+        submitReadResponse(action, requestId) {
             JmixProjectPropertiesService.getInstance(project).inspect()
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handlePreviewProjectProfileChange(
@@ -1075,15 +1101,9 @@ class JcefBridge(
         action: String,
         requestId: String?,
     ) {
-        ReadAction.nonBlocking<org.jmixworkbench.services.JmixEnvironmentWorkspace> {
+        submitReadResponse(action, requestId) {
             JmixEnvironmentConfigurationService.getInstance(project).inspect()
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handlePreviewEnvironmentChange(
@@ -1379,28 +1399,16 @@ class JcefBridge(
         action: String,
         requestId: String?,
     ) {
-        ReadAction.nonBlocking<org.jmixworkbench.services.MenuWorkspaceResponse> {
+        submitReadResponse(action, requestId) {
             MenuWorkspaceService.getInstance(project).load()
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handleGetScenarioWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<ScenarioWorkspaceResponse> {
+        submitReadResponse(action, requestId) {
             ScenarioWorkspaceService.getInstance(project).load(forceRefresh)
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handlePreviewScenarioTest(action: String, requestId: String?, payload: JsonObject) {
@@ -1418,15 +1426,9 @@ class JcefBridge(
 
     private fun handleGetVisualLogicWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<VisualLogicWorkspaceResponse> {
+        submitReadResponse(action, requestId) {
             VisualLogicWorkspaceService.getInstance(project).load(forceRefresh)
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handlePreviewVisualLogic(action: String, requestId: String?, payload: JsonObject) {
@@ -1444,15 +1446,9 @@ class JcefBridge(
 
     private fun handleGetIntegrationConnectorWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<IntegrationConnectorWorkspaceResponse> {
+        submitReadResponse(action, requestId) {
             IntegrationConnectorWorkspaceService.getInstance(project).load(forceRefresh)
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handleChooseOpenApiContract(action: String, requestId: String?) {
@@ -1760,15 +1756,9 @@ class JcefBridge(
 
     private fun handleGetVisualRuleWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<VisualRuleWorkspaceResponse> {
+        submitReadResponse(action, requestId) {
             VisualRuleWorkspaceService.getInstance(project).load(forceRefresh)
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handlePreviewVisualRule(action: String, requestId: String?, payload: JsonObject) {
@@ -1786,15 +1776,9 @@ class JcefBridge(
 
     private fun handleGetDmnDecisionWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<DmnDecisionWorkspaceResponse> {
+        submitReadResponse(action, requestId) {
             DmnDecisionWorkspaceService.getInstance(project).load(forceRefresh)
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handlePreviewDmnDecision(action: String, requestId: String?, payload: JsonObject) {
@@ -1818,40 +1802,22 @@ class JcefBridge(
 
     private fun handleGetSchemaWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<SchemaWorkspaceResponse> {
+        submitReadResponse(action, requestId) {
             SchemaWorkspaceService.getInstance(project).load(forceRefresh)
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handleGetDatabaseEntityImportProfiles(action: String, requestId: String?) {
-        ReadAction.nonBlocking<DatabaseEntityImportProfileWorkspaceResponse> {
+        submitReadResponse(action, requestId) {
             DatabaseEntityImportProfileService.getInstance(project).workspace()
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handleGetRestApiWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<RestApiWorkspaceResponse> {
+        submitBackgroundResponse(action, requestId) {
             RestApiWorkspaceService.getInstance(project).load(forceRefresh)
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handleInvokeRestApi(action: String, requestId: String?, payload: JsonObject) {
@@ -3412,26 +3378,9 @@ class JcefBridge(
 
     private fun handleGetSecurityWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
-        ReadAction.nonBlocking<SecurityWorkspaceSnapshot> {
-            val graph = ApplicationGraphService.getInstance(project).graph(forceRefresh)
-            val sourceWorkspace = SecurityWorkspaceBuilder.build(
-                SecurityWorkspaceInput(
-                    artifacts = graph.artifacts,
-                    relationships = graph.relationships,
-                    diagnostics = graph.diagnostics,
-                    graphDigest = graph.snapshotDigest,
-                ),
-            )
-            sourceWorkspace.copy(
-                runtime = RuntimeSecurityEvidenceService.getInstance(project).snapshot(sourceWorkspace),
-            )
+        submitBackgroundResponse(action, requestId) {
+            SecurityWorkspaceService.getInstance(project).load(forceRefresh)
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { result ->
-                sendResponse(action, requestId, gson.toJson(result))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handleImportRuntimeSecurityEvidence(action: String, requestId: String?, payload: JsonObject) {
@@ -4240,15 +4189,9 @@ class JcefBridge(
     }
 
     private fun handleGetSecurityRoleDestinations(action: String, requestId: String?) {
-        ReadAction.nonBlocking<org.jmixworkbench.services.SecurityRoleDestinationsResponse> {
+        submitReadResponse(action, requestId) {
             SecurityRoleChangeService.getInstance(project).destinations()
         }
-            .inSmartMode(project)
-            .expireWith(project)
-            .finishOnUiThread(ModalityState.any()) { response ->
-                sendResponse(action, requestId, gson.toJson(response))
-            }
-            .submit(AppExecutorUtil.getAppExecutorService())
     }
 
     private fun handleApplySecurityRoleCreate(action: String, requestId: String?, payload: JsonObject) {
@@ -4545,7 +4488,69 @@ class JcefBridge(
         )
     }
 
+    private fun <T> submitReadResponse(
+        action: String,
+        requestId: String?,
+        computation: () -> T,
+    ) {
+        ReadAction.nonBlocking<Result<T>> {
+            try {
+                Result.success(computation())
+            } catch (cause: Throwable) {
+                if (cause is ProcessCanceledException || cause is ReadAction.CannotReadException) throw cause
+                Result.failure(cause)
+            }
+        }
+            .inSmartMode(project)
+            .expireWith(project)
+            .finishOnUiThread(ModalityState.any()) { outcome ->
+                AppExecutorUtil.getAppExecutorService().execute {
+                    outcome.fold(
+                        onSuccess = { response -> sendResponse(action, requestId, gson.toJson(response)) },
+                        onFailure = { cause ->
+                            log.error("Bridge request $action failed", cause)
+                            sendResponse(
+                                action,
+                                requestId,
+                                gson.toJson(mapOf("error" to (cause.message ?: "$action failed."))),
+                            )
+                        },
+                    )
+                }
+            }
+            .submit(AppExecutorUtil.getAppExecutorService())
+    }
+
+    /** Runs graph-derived, immutable-model work without holding IntelliJ's global read lock. */
+    private fun <T> submitBackgroundResponse(
+        action: String,
+        requestId: String?,
+        computation: () -> T,
+    ) {
+        AppExecutorUtil.getAppExecutorService().execute {
+            runCatching(computation).fold(
+                onSuccess = { response -> sendResponse(action, requestId, gson.toJson(response)) },
+                onFailure = { cause ->
+                    log.error("Bridge request $action failed", cause)
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(mapOf("error" to (cause.message ?: "$action failed."))),
+                    )
+                },
+            )
+        }
+    }
+
     private fun sendResponse(action: String, requestId: String?, resultJson: String) {
+        if (resultJson.length <= DIRECT_RESPONSE_LIMIT_CHARS) {
+            sendDirectResponse(action, requestId, resultJson)
+            return
+        }
+        sendChunkedResponse(action, requestId, resultJson)
+    }
+
+    private fun sendDirectResponse(action: String, requestId: String?, resultJson: String) {
         val actionJson = gson.toJson(action)
         val requestIdJson = gson.toJson(requestId)
         val script = """
@@ -4556,6 +4561,69 @@ class JcefBridge(
         browser.cefBrowser.executeJavaScript(script, browser.cefBrowser.url, 0)
     }
 
+    private fun sendChunkedResponse(action: String, requestId: String?, resultJson: String) {
+        val transferId = "jvw-response-${responseTransferSequence.incrementAndGet()}"
+        val transferIdJson = gson.toJson(transferId)
+        val actionJson = gson.toJson(action)
+        val requestIdJson = gson.toJson(requestId)
+        val encoded = Base64.getEncoder().encodeToString(resultJson.toByteArray(Charsets.UTF_8))
+        val chunkCount = (encoded.length + RESPONSE_CHUNK_CHARS - 1) / RESPONSE_CHUNK_CHARS
+        val url = browser.cefBrowser.url
+
+        browser.cefBrowser.executeJavaScript(
+            """
+                window.__jmixWorkbenchResponseChunks = window.__jmixWorkbenchResponseChunks || Object.create(null);
+                window.__jmixWorkbenchResponseChunks[$transferIdJson] = new Array($chunkCount);
+            """.trimIndent(),
+            url,
+            0,
+        )
+        for (index in 0 until chunkCount) {
+            val start = index * RESPONSE_CHUNK_CHARS
+            val end = minOf(encoded.length, start + RESPONSE_CHUNK_CHARS)
+            val chunkJson = gson.toJson(encoded.substring(start, end))
+            browser.cefBrowser.executeJavaScript(
+                "window.__jmixWorkbenchResponseChunks[$transferIdJson][$index] = $chunkJson;",
+                url,
+                0,
+            )
+        }
+
+        val errorJson = gson.toJson(
+            mapOf("error" to "Application graph transfer failed in JCEF. Refresh the graph to retry."),
+        )
+        browser.cefBrowser.executeJavaScript(
+            """
+                (function () {
+                    var store = window.__jmixWorkbenchResponseChunks;
+                    var chunks = store && store[$transferIdJson];
+                    try {
+                        if (!chunks || chunks.length !== $chunkCount) {
+                            throw new Error('Application graph response chunks are incomplete.');
+                        }
+                        var binary = window.atob(chunks.join(''));
+                        var bytes = new Uint8Array(binary.length);
+                        for (var index = 0; index < binary.length; index += 1) {
+                            bytes[index] = binary.charCodeAt(index);
+                        }
+                        var result = JSON.parse(new TextDecoder('utf-8').decode(bytes));
+                        delete store[$transferIdJson];
+                        if (window.onBridgeResponse) {
+                            window.onBridgeResponse($actionJson, $requestIdJson, result);
+                        }
+                    } catch (error) {
+                        if (store) delete store[$transferIdJson];
+                        if (window.onBridgeResponse) {
+                            window.onBridgeResponse($actionJson, $requestIdJson, $errorJson);
+                        }
+                    }
+                }());
+            """.trimIndent(),
+            url,
+            0,
+        )
+    }
+
     private fun sendResponseOnUiThread(action: String, requestId: String?, resultJson: String) {
         ApplicationManager.getApplication().invokeLater({
             if (!project.isDisposed) sendResponse(action, requestId, resultJson)
@@ -4563,6 +4631,7 @@ class JcefBridge(
     }
 
     fun dispose() {
+        graphUpdateSubscription.close()
         jsQuery.dispose()
     }
 }
