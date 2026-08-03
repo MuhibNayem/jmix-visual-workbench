@@ -6,7 +6,7 @@ pluginManagement {
         mavenCentral()
     }
     plugins {
-        id("org.jetbrains.kotlin.jvm") version "2.4.0"
+        id("org.jetbrains.kotlin.jvm") version "2.4.10"
         id("org.jetbrains.intellij.platform") version "2.18.0"
     }
 }
