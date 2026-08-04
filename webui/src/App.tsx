@@ -57,15 +57,25 @@ const workspaces: { id: ActiveTab; label: string; icon: string }[] = [
 ]
 
 /**
- * Keeps a workspace mounted once it has been visited, hiding it with CSS when
- * inactive instead of unmounting it. Unmounting on every tab switch forced each
- * designer to re-run its mount effects and re-fetch its workspace, which made
- * rapid tab switching feel slow. Mounting once and toggling visibility keeps
- * local state warm and makes switching instant.
+ * Keeps a workspace mounted once it has been visited and switches tabs by
+ * toggling opacity instead of unmounting or using display:none.
+ *
+ * display:none forces the browser to re-run layout AND paint for the whole
+ * subtree the moment a tab becomes visible, which made rapid switching laggy
+ * and showed tabs only half-rendered. Here every visited pane stays absolutely
+ * positioned, laid out, and painted; switching just flips opacity (a cheap
+ * compositor operation), so the incoming tab appears instantly and complete.
+ * Inactive panes get pointer-events:none + aria-hidden so they are inert.
  */
 function TabPane({ active, children }: { active: boolean; children: ReactNode }) {
   return (
-    <div className={active ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : 'hidden'}>
+    <div
+      aria-hidden={!active}
+      className={
+        'absolute inset-0 flex min-h-0 flex-col overflow-hidden transition-opacity duration-100 ' +
+        (active ? 'z-10 opacity-100' : 'pointer-events-none opacity-0')
+      }
+    >
       {children}
     </div>
   )
@@ -294,7 +304,7 @@ export default function App() {
       </nav>
 
       {/* Main Content */}
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
         {visitedTabs.includes('projectProperties') && (
           <TabPane active={activeTab === 'projectProperties'}>
             <MemoProjectProperties />
