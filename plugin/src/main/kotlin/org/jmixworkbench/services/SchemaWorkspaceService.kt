@@ -1990,7 +1990,22 @@ class SchemaWorkspaceService(
         return JoinTableConfig(name, joinColumn, inverseColumn)
     }
 
-    private fun sourceFields(source: String): List<ParsedSourceField> = buildList {
+    /**
+     * Single-entry identity memo for the expensive full-source field scan.
+     * Per-attribute lookups for one entity reuse the same source string
+     * instance, so this collapses ~8-10 scans per attribute to one scan per
+     * entity source; worst case on cache churn is a re-scan, never wrong data.
+     */
+    private val parsedFieldMemo = AtomicReference<Pair<String, List<ParsedSourceField>>?>()
+
+    private fun sourceFields(source: String): List<ParsedSourceField> {
+        parsedFieldMemo.get()?.takeIf { it.first === source }?.let { return it.second }
+        val parsed = parseSourceFields(source)
+        parsedFieldMemo.set(source to parsed)
+        return parsed
+    }
+
+    private fun parseSourceFields(source: String): List<ParsedSourceField> = buildList {
         JAVA_FIELD_DECLARATION.findAll(source).forEach { match ->
             val declarationStart = annotationBlockStart(source, match.range.first)
             add(

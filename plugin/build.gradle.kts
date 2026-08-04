@@ -44,6 +44,7 @@ val phase2CoreSourceSet = sourceSets.create("phase2Core") {
         "org/jmixworkbench/discovery/security/**",
         "org/jmixworkbench/discovery/navigation/**",
         "org/jmixworkbench/discovery/compatibility/**",
+        "org/jmixworkbench/discovery/persistence/**",
         "org/jmixworkbench/discovery/semantic/**",
         "org/jmixworkbench/discovery/static/GradleConfigParser.kt",
     )
@@ -102,6 +103,7 @@ configurations.named(phase2CoreTestSourceSet.implementationConfigurationName) {
 }
 
 dependencies {
+    add(phase2CoreSourceSet.implementationConfigurationName, libs.gson)
     add(compatibilityGeneratorSourceSet.implementationConfigurationName, libs.gson)
     add(phase2CoreTestSourceSet.implementationConfigurationName, kotlin("test-junit5"))
     add(
@@ -729,6 +731,9 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
         val catalogAuthoringBoundary = setOf(
             "src/main/kotlin/org/jmixworkbench/project/JmixTemplateCatalogAuthoring.kt",
         )
+        val knowledgeCacheBoundary = setOf(
+            "src/main/kotlin/org/jmixworkbench/discovery/persistence/GraphCacheStore.kt",
+        )
         val allowedByMarker = linkedMapOf(
             "WriteCommandAction" to
                 sharedBoundary + "src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt",
@@ -742,16 +747,19 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
             ),
             ".delete(this)" to sharedBoundary,
             "Files.newOutputStream(" to projectTemplateBoundary + catalogCacheBoundary,
-            "Files.write(" to catalogAuthoringBoundary,
+            "Files.write(" to catalogAuthoringBoundary + knowledgeCacheBoundary,
             "Files.copy(" to catalogCacheBoundary,
             "Files.move(" to
-                projectTemplateBoundary + catalogCacheBoundary + catalogAuthoringBoundary,
+                projectTemplateBoundary + catalogCacheBoundary + catalogAuthoringBoundary +
+                    knowledgeCacheBoundary,
             "Files.createDirectory(" to projectTemplateBoundary,
-            "Files.createDirectories(" to projectTemplateBoundary + catalogCacheBoundary,
+            "Files.createDirectories(" to projectTemplateBoundary + catalogCacheBoundary +
+                knowledgeCacheBoundary,
             "Files.createTempDirectory(" to projectTemplateBoundary,
             "Files.createTempFile(" to catalogCacheBoundary,
             "Files.deleteIfExists(" to
-                projectTemplateBoundary + catalogCacheBoundary + catalogAuthoringBoundary,
+                projectTemplateBoundary + catalogCacheBoundary + catalogAuthoringBoundary +
+                    knowledgeCacheBoundary,
         )
         productionSources.files.sorted().forEach { source ->
             val relativePath = source.relativeTo(projectDirectoryRoot).invariantSeparatorsPath

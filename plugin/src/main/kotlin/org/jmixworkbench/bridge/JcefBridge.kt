@@ -749,21 +749,24 @@ class JcefBridge(
                 return
             }
 
-            val result = when (action) {
-                "generateEntity" -> handleGenerateEntity(payload)
-                "generateCrud" -> handleGenerateCrud(payload)
-                "generateView" -> handleGenerateView(payload)
-                "generateMigration" -> handleGenerateMigration(payload)
-                "generateRole" -> handleGenerateRole(payload)
-                "generateMenu" -> handleGenerateMenu(payload)
-                "generateBpm" -> handleGenerateBpm(payload)
-                "getProjectConfig" -> handleGetProjectConfig()
-                "getEntities" -> handleGetEntities()
-                "ping" -> """{"status":"ok"}"""
-                else -> """{"error":"Unknown action: $action"}"""
+            AppExecutorUtil.getAppExecutorService().execute {
+                val result = when (action) {
+                    "generateEntity" -> handleGenerateEntity(payload)
+                    "generateCrud" -> handleGenerateCrud(payload)
+                    "generateView" -> handleGenerateView(payload)
+                    "generateMigration" -> handleGenerateMigration(payload)
+                    "generateRole" -> handleGenerateRole(payload)
+                    "generateMenu" -> handleGenerateMenu(payload)
+                    "generateBpm" -> handleGenerateBpm(payload)
+                    "getProjectConfig" -> handleGetProjectConfig()
+                    "getEntities" -> handleGetEntities()
+                    "ping" -> """{"status":"ok"}"""
+                    else -> gson.toJson(mapOf("error" to "Unknown action: $action"))
+                }
+                if (!project.isDisposed) {
+                    sendResponse(action, requestId, result)
+                }
             }
-
-            sendResponse(action, requestId, result)
         } catch (e: Exception) {
             log.error("Bridge error", e)
             sendResponse(
@@ -1796,8 +1799,23 @@ class JcefBridge(
 
     private fun handleSimulateDmnDecision(action: String, requestId: String?, payload: JsonObject) {
         val request = gson.fromJson(payload, DmnSimulationRequest::class.java)
-        val result = DmnDecisionWorkspaceService.getInstance(project).simulate(request)
-        sendResponse(action, requestId, gson.toJson(result))
+        AppExecutorUtil.getAppExecutorService().execute {
+            val outcome = runCatching {
+                DmnDecisionWorkspaceService.getInstance(project).simulate(request)
+            }
+            if (project.isDisposed) return@execute
+            outcome.fold(
+                onSuccess = { simulation -> sendResponse(action, requestId, gson.toJson(simulation)) },
+                onFailure = { cause ->
+                    if (cause !is ProcessCanceledException) log.error("Bridge request $action failed", cause)
+                    sendResponse(
+                        action,
+                        requestId,
+                        gson.toJson(mapOf("error" to (cause.message ?: "$action failed."))),
+                    )
+                },
+            )
+        }
     }
 
     private fun handleGetSchemaWorkspace(action: String, requestId: String?, payload: JsonObject) {
@@ -4501,7 +4519,6 @@ class JcefBridge(
                 Result.failure(cause)
             }
         }
-            .inSmartMode(project)
             .expireWith(project)
             .finishOnUiThread(ModalityState.any()) { outcome ->
                 AppExecutorUtil.getAppExecutorService().execute {

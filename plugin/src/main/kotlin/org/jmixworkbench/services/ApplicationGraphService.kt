@@ -1,6 +1,7 @@
 package org.jmixworkbench.services
 
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
@@ -27,6 +28,8 @@ import com.intellij.psi.PsiErrorElement
 import com.intellij.psi.PsiManager
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.util.concurrency.AppExecutorUtil
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import org.jmixworkbench.discovery.model.ArtifactKind
 import org.jmixworkbench.discovery.model.ArtifactOrigin
 import org.jmixworkbench.discovery.model.ArtifactOwner
@@ -40,12 +43,15 @@ import org.jmixworkbench.discovery.model.SourceLanguage
 import org.jmixworkbench.discovery.model.SourceLocator
 import org.jmixworkbench.discovery.model.RelationshipType
 import org.jmixworkbench.discovery.navigation.SourceNavigationPolicy
+import org.jmixworkbench.discovery.persistence.GraphCacheBundle
+import org.jmixworkbench.discovery.persistence.GraphCacheStore
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexInput
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexResult
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexer
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexProgressStage
 import org.jmixworkbench.discovery.semantic.GraphSourceFile
 import org.jetbrains.jps.model.java.JavaResourceRootType
+import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
@@ -61,7 +67,7 @@ class ApplicationGraphService(
     private val log = Logger.getInstance(ApplicationGraphService::class.java)
     private val cached = AtomicReference<CachedGraph?>()
     private val cachedSources = AtomicReference<Map<String, CachedSource>>(emptyMap())
-    private val cachedContributions = AtomicReference<Map<String, ApplicationGraphIndexer.FileContribution>>(emptyMap())
+    private val cachedContributions = AtomicReference<Map<String, CachedContribution>>(emptyMap())
     private val cachedInventory = AtomicReference<CandidateInventory?>()
     private val dirtyFileVersions = ConcurrentHashMap<String, Long>()
     private val changeSequence = AtomicLong()
@@ -75,6 +81,10 @@ class ApplicationGraphService(
     private val completedBuildSequence = AtomicLong()
     private val runSequence = AtomicLong()
     private val graphProgress = AtomicReference(GraphProgressSnapshot.idle())
+    private val gson = Gson()
+    private val diskCacheSeeded = AtomicBoolean(false)
+    private val lastPersistedDigest = AtomicReference<String?>(null)
+    private val persistScheduled = AtomicBoolean(false)
     init {
         val connection = project.messageBus.connect(this)
         connection.subscribe(
@@ -123,6 +133,7 @@ class ApplicationGraphService(
 
     fun graph(forceRefresh: Boolean = false): ApplicationGraphResponse {
         val requestStartedAt = System.nanoTime()
+        seedFromDiskCacheIfPossible()
         if (!forceRefresh && !fullRescanRequired.get() && dirtyFileVersions.isEmpty()) {
             cached.get()?.let { previous ->
                 return previous.response.copy(
@@ -320,7 +331,7 @@ class ApplicationGraphService(
             previousInventory != null &&
             dirtySnapshot.isNotEmpty()
         var usedIncrementalInventory = false
-        val inventory = stableRead {
+        val inventory = cancellableReadWithRetry {
             if (incrementalInventory) {
                 updateCandidateInventory(previousInventory, dirtySnapshot.keys)?.also {
                     usedIncrementalInventory = true
@@ -355,6 +366,7 @@ class ApplicationGraphService(
         }
 
         val previousSources = cachedSources.get()
+        val previousContributions = cachedContributions.get()
         val nextSources = linkedMapOf<String, CachedSource>()
         var reusedFiles = 0
         var changedFiles = 0
@@ -390,8 +402,10 @@ class ApplicationGraphService(
                 return@mapIndexedNotNull null
             }
             val fingerprint = CanonicalDiscoveryJson.sha256(content)
+            val contributionReused = previousContributions[candidate.stamp.relativePath]
+                ?.takeIf { it.fingerprint == fingerprint } != null
             var parserAvailable = true
-            when (val inspection = inspectJvmSyntax(candidate.file, candidate.stamp.language)) {
+            if (!contributionReused) when (val inspection = inspectJvmSyntaxTolerant(candidate.file, candidate.stamp.language)) {
                 is JvmSyntaxInspection.Error -> {
                     syntaxErrorFiles += 1
                     changedFiles += 1
@@ -462,9 +476,7 @@ class ApplicationGraphService(
         )
 
         val indexer = ApplicationGraphIndexer()
-        val previousContributions = cachedContributions.get()
-        val candidatesByPath = inventory.candidates.associateBy { it.stamp.relativePath }
-        val nextContributions = linkedMapOf<String, ApplicationGraphIndexer.FileContribution>()
+        val nextContributions = linkedMapOf<String, CachedContribution>()
         sources.forEachIndexed { sourceIndex, source ->
             ProgressManager.checkCanceled()
             publishIndexProgress(
@@ -473,13 +485,11 @@ class ApplicationGraphService(
                 sources.size,
                 "Indexing ${source.relativePath}",
             )
-            val candidate = candidatesByPath[source.relativePath]
             val contribution = previousContributions[source.relativePath]
-                ?.takeIf {
-                    candidate != null && previousSources[source.relativePath]?.stamp == candidate.stamp
-                }
+                ?.takeIf { it.fingerprint == source.fingerprint }
+                ?.contribution
                 ?: indexer.indexFile(source, MAX_FILE_BYTES)
-            nextContributions[source.relativePath] = contribution
+            nextContributions[source.relativePath] = CachedContribution(source.fingerprint, contribution)
         }
         publishIndexProgress(
             ApplicationGraphIndexProgressStage.INDEXING_ARTIFACTS,
@@ -497,7 +507,7 @@ class ApplicationGraphService(
                 progress = ::publishIndexProgress,
                 checkCancelled = ProgressManager::checkCanceled,
             ),
-            nextContributions,
+            nextContributions.mapValues { (_, cached) -> cached.contribution },
         )
         val semanticallyUnparsedFiles = graph.diagnostics
             .asSequence()
@@ -554,6 +564,7 @@ class ApplicationGraphService(
         cachedInventory.set(inventory)
         dirtySnapshot.forEach { (path, version) -> dirtyFileVersions.remove(path, version) }
         clearCompletedFullRescan(observedFullRescanSequence)
+        scheduleDiskCachePersist()
         if (responseBeforeBuild != null && responseBeforeBuild.snapshotDigest != response.snapshotDigest) {
             val update = ApplicationGraphUpdate(
                 snapshotDigest = response.snapshotDigest,
@@ -571,6 +582,85 @@ class ApplicationGraphService(
 
     fun invalidate() {
         scheduleIncrementalRefresh()
+    }
+
+    /**
+     * Seeds the in-memory graph from the persisted `.jmix-workbench` knowledge
+     * cache on first use. The cache is accepted only when every recorded stamp
+     * still matches the VFS (length + timestamp); any mismatch, unreadable file,
+     * or schema difference falls back to a full rebuild. Changes made while the
+     * IDE was closed arrive through the startup VFS refresh and mark the cache
+     * dirty via the normal listeners.
+     */
+    private fun seedFromDiskCacheIfPossible() {
+        if (!diskCacheSeeded.compareAndSet(false, true)) return
+        if (cached.get() != null) return
+        val basePath = project.basePath ?: return
+        try {
+            val store = GraphCacheStore(Paths.get(basePath), GRAPH_CACHE_PLUGIN_VERSION)
+            val bundle = store.load() ?: return
+            val inventory = gson.fromJson(bundle.inventoryJson, DiskCacheInventory::class.java)
+                ?: return
+            if (inventory.stamps.isEmpty()) return
+            val resolver = ProjectFileResolver.getInstance(project)
+            val stampsValid = inventory.stamps.all { stamp ->
+                val file = resolver.resolveFile(stamp.relativePath)?.file ?: return@all false
+                !file.isDirectory && file.length == stamp.length && file.timeStamp == stamp.timeStamp
+            }
+            if (!stampsValid) return
+            val contributionType = object : TypeToken<Map<String, CachedContribution>>() {}.type
+            val contributions: Map<String, CachedContribution> =
+                gson.fromJson(bundle.contributionsJson, contributionType) ?: emptyMap()
+            val response = gson.fromJson(bundle.responseJson, ApplicationGraphResponse::class.java)
+                ?: return
+            cachedContributions.set(contributions)
+            cached.set(CachedGraph(inventory.stamps, inventory.rootKeys, inventory.sourceRootKeys, response))
+            lastPersistedDigest.set(response.snapshotDigest)
+            log.info(
+                "Application graph seeded from ${GraphCacheStore.DIR_NAME}: " +
+                    "${inventory.stamps.size} stamped file(s), ${contributions.size} cached contribution(s)",
+            )
+        } catch (cause: Throwable) {
+            if (cause is com.intellij.openapi.progress.ProcessCanceledException) throw cause
+            log.warn("Application graph cache seed failed; falling back to a full build", cause)
+        }
+    }
+
+    /**
+     * Debounced persistence of the current graph knowledge into the target
+     * project's `.jmix-workbench` directory. Best-effort: failures only cost a
+     * rebuild on the next start.
+     */
+    private fun scheduleDiskCachePersist() {
+        val current = cached.get() ?: return
+        if (lastPersistedDigest.get() == current.response.snapshotDigest) return
+        if (!persistScheduled.compareAndSet(false, true)) return
+        AppExecutorUtil.getAppScheduledExecutorService().schedule({
+            persistScheduled.set(false)
+            if (project.isDisposed) return@schedule
+            try {
+                val snapshot = cached.get() ?: return@schedule
+                if (lastPersistedDigest.get() == snapshot.response.snapshotDigest) return@schedule
+                val basePath = project.basePath ?: return@schedule
+                val contributions = cachedContributions.get()
+                val payload = GraphCacheBundle(
+                    inventoryJson = gson.toJson(
+                        DiskCacheInventory(snapshot.stamps, snapshot.rootKeys, snapshot.sourceRootKeys),
+                    ),
+                    contributionsJson = gson.toJson(contributions),
+                    responseJson = gson.toJson(snapshot.response),
+                    savedAtEpochMillis = System.currentTimeMillis(),
+                    pluginVersion = GRAPH_CACHE_PLUGIN_VERSION,
+                )
+                if (GraphCacheStore(Paths.get(basePath), GRAPH_CACHE_PLUGIN_VERSION).save(payload)) {
+                    lastPersistedDigest.set(snapshot.response.snapshotDigest)
+                    log.info("Application graph knowledge persisted to ${GraphCacheStore.DIR_NAME}")
+                }
+            } catch (cause: Throwable) {
+                if (cause is com.intellij.openapi.progress.ProcessCanceledException) throw cause
+                log.warn("Application graph cache persistence failed", cause)
+            }
+        }, DISK_CACHE_PERSIST_DEBOUNCE_MILLIS, TimeUnit.MILLISECONDS)
     }
 
     override fun dispose() {
@@ -721,6 +811,7 @@ class ApplicationGraphService(
                     modificationStamp = file.modificationStamp,
                     documentModificationStamp = unsavedDocument?.modificationStamp,
                     length = effectiveLength,
+                    timeStamp = file.timeStamp,
                     language = language,
                 ),
             )
@@ -1206,6 +1297,7 @@ class ApplicationGraphService(
             modificationStamp = file.modificationStamp,
             documentModificationStamp = unsavedDocument?.modificationStamp,
             length = effectiveLength,
+            timeStamp = file.timeStamp,
             buildId = buildId,
             moduleId = ownerModuleId,
             sourceSetId = sourceSet,
@@ -2204,6 +2296,18 @@ class ApplicationGraphService(
             ?: if (file.extension?.lowercase() in setOf("xml", "properties")) "resource" else "main"
     }
 
+    /**
+     * Syntax inspection that yields instead of aborting when a write action
+     * preempts the read. Skipped inspections only defer a diagnostic; the file
+     * is re-inspected the next time its content changes.
+     */
+    private fun inspectJvmSyntaxTolerant(file: VirtualFile, language: SourceLanguage): JvmSyntaxInspection =
+        try {
+            inspectJvmSyntax(file, language)
+        } catch (cancelled: ReadAction.CannotReadException) {
+            JvmSyntaxInspection.NotApplicable
+        }
+
     private fun inspectJvmSyntax(
         file: VirtualFile,
         language: SourceLanguage,
@@ -2235,8 +2339,45 @@ class ApplicationGraphService(
             )
         }
     }
+    /**
+     * Runs [computation] in a cancellable read action on background threads.
+     * Unlike a blocking `ReadAction.compute`, an incoming write action cancels
+     * the read promptly instead of queueing behind it, so indexing cannot
+     * starve the EDT. On the EDT itself (fixture tests) a plain blocking read
+     * is used because cancellable reads are a background-thread facility.
+     */
     private fun <T> stableRead(computation: () -> T): T =
-        ReadAction.compute<T, RuntimeException> { computation() }
+        if (ApplicationManager.getApplication().isDispatchThread) {
+            ReadAction.compute<T, RuntimeException>(computation)
+        } else {
+            ReadAction.computeCancellable<T, RuntimeException>(computation)
+        }
+
+    /**
+     * Retries a cancellable read across transient write-action interruptions.
+     * Long indexing passes yield to IDE writes and resume instead of holding the
+     * read lock, which keeps autosave and VFS refresh responsive.
+     */
+    private fun <T> cancellableReadWithRetry(computation: () -> T): T {
+        if (ApplicationManager.getApplication().isDispatchThread) {
+            return ReadAction.compute<T, RuntimeException>(computation)
+        }
+        var attempt = 0
+        while (true) {
+            ProgressManager.checkCanceled()
+            try {
+                return ReadAction.computeCancellable<T, RuntimeException>(computation)
+            } catch (cancelled: ReadAction.CannotReadException) {
+                attempt += 1
+                if (attempt >= MAX_READ_RETRY_ATTEMPTS) throw cancelled
+                try {
+                    Thread.sleep(READ_RETRY_PAUSE_MILLIS)
+                } catch (interrupted: InterruptedException) {
+                    throw cancelled
+                }
+            }
+        }
+    }
 
 
     private fun sourceDiagnostic(
@@ -2362,6 +2503,7 @@ class ApplicationGraphService(
         val modificationStamp: Long,
         val documentModificationStamp: Long?,
         val length: Long,
+        val timeStamp: Long,
         val buildId: String,
         val moduleId: String,
         val sourceSetId: String,
@@ -2452,6 +2594,26 @@ class ApplicationGraphService(
         val source: GraphSourceFile,
     )
 
+    /**
+     * Indexing output for one file, keyed by the content fingerprint that
+     * produced it. Fingerprints make the contribution reusable across builds,
+     * sessions, and the persisted knowledge cache without trusting stamps.
+     */
+    private data class CachedContribution(
+        val fingerprint: String,
+        val contribution: ApplicationGraphIndexer.FileContribution,
+    )
+
+    /**
+     * Serializable subset of the cached graph state persisted in the target
+     * project's `.jmix-workbench` knowledge cache.
+     */
+    private data class DiskCacheInventory(
+        val stamps: List<FileStamp>,
+        val rootKeys: List<String>,
+        val sourceRootKeys: List<String>,
+    )
+
     companion object {
         private const val MAX_FILES = 200_000
         private const val MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -2461,6 +2623,10 @@ class ApplicationGraphService(
         private const val MAX_OWNERSHIP_DIAGNOSTICS = 50
         private const val MAX_SOURCE_ROOT_DISCOVERY_DIRECTORIES = 250_000
         private const val INCREMENTAL_REFRESH_DEBOUNCE_MILLIS = 1_500L
+        private const val MAX_READ_RETRY_ATTEMPTS = 40
+        private const val READ_RETRY_PAUSE_MILLIS = 120L
+        private const val DISK_CACHE_PERSIST_DEBOUNCE_MILLIS = 4_000L
+        private const val GRAPH_CACHE_PLUGIN_VERSION = "1.0.0-jvw-graph-1"
         private const val MAX_DISCOVERED_SOURCE_ROOTS = 20_000
         private const val SOURCE_SET_CONTEXT_WINDOW = 4_096
         private const val RECOVERED_GRADLE_MODULE_PREFIX = "gradle:"
@@ -2546,6 +2712,7 @@ class ApplicationGraphService(
             "target",
             "node_modules",
             ".jmix",
+            ".jmix-workbench",
         )
 
         fun getInstance(project: Project): ApplicationGraphService =

@@ -255,7 +255,7 @@ export default function App() {
       </nav>
 
       {/* Main Content */}
-      <main key={workspaceRevision} className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {activeTab === 'projectProperties' && <ProjectProperties />}
         {activeTab === 'projectMap' && <ProjectMap />}
         {activeTab === 'entity' && <EntityDesigner key={entityDesignerKey} />}

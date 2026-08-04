@@ -2437,6 +2437,8 @@ class ApplicationGraphIndexer {
                 it.snapshot.kind == ArtifactKind.INTEGRATION_ENDPOINT
         }
         val workflows = artifacts.values.filter { it.snapshot.kind == ArtifactKind.WORKFLOW_PROCESS }
+        val entityGroups = entities.groupBy { normalizeAlias(it.displayName) }.values.toList()
+        val serviceGroups = services.groupBy { normalizeAlias(it.displayName) }.values.toList()
 
         files.forEachIndexed { fileIndex, file ->
             checkCancelled()
@@ -2444,7 +2446,8 @@ class ApplicationGraphIndexer {
             val owners = sourceArtifacts[file.relativePath].orEmpty()
             owners.forEach { source ->
                 val evidenceText = source.analysisText ?: return@forEach
-                referencedArtifacts(source, evidenceText, entities.filterNot { it.id == source.id }).forEach { entity ->
+                val tokens = implicitReferenceTokens(evidenceText)
+                referencedArtifacts(source, tokens, entityGroups).forEach { entity ->
                     if (entity != null) {
                         links += source.link(
                             entity,
@@ -2452,7 +2455,7 @@ class ApplicationGraphIndexer {
                             file.locator(entity.displayName, source.semanticKey),
                         )
                     } else {
-                        val reference = ambiguousReference(evidenceText, entities) ?: return@forEach
+                        val reference = ambiguousReference(tokens, entityGroups) ?: return@forEach
                         links += source.link(
                             reference,
                             RelationshipType.USES_ENTITY,
@@ -2461,7 +2464,7 @@ class ApplicationGraphIndexer {
                         )
                     }
                 }
-                referencedArtifacts(source, evidenceText, services.filterNot { it.id == source.id }).forEach { service ->
+                referencedArtifacts(source, tokens, serviceGroups).forEach { service ->
                     if (service != null) {
                         links += source.link(
                             service,
@@ -2469,7 +2472,7 @@ class ApplicationGraphIndexer {
                             file.locator(service.displayName, source.semanticKey),
                         )
                     } else {
-                        val reference = ambiguousReference(evidenceText, services) ?: return@forEach
+                        val reference = ambiguousReference(tokens, serviceGroups) ?: return@forEach
                         links += source.link(
                             reference,
                             RelationshipType.CALLS_SERVICE,
@@ -2483,7 +2486,7 @@ class ApplicationGraphIndexer {
                     }
                 }
                 workflows.forEach { workflow ->
-                    if (workflow.aliases.any { alias -> containsSymbol(evidenceText, alias) }) {
+                    if (workflow.aliases.any { alias -> containsSymbol(tokens, alias) }) {
                         links += source.link(
                             workflow,
                             RelationshipType.PARTICIPATES_IN_WORKFLOW,
@@ -2504,23 +2507,32 @@ class ApplicationGraphIndexer {
      * multiple bounded contexts. Fully-qualified references win. Otherwise the
      * source module/build is preferred, and an ambiguous global match stays
      * unresolved instead of creating false impact edges.
+     *
+     * Candidate groups are checked against a tokenized view of the evidence text
+     * (one tokenization per source) instead of rescanning the text per candidate.
      */
     private fun referencedArtifacts(
         source: DetectedArtifact,
-        evidenceText: String,
-        candidates: List<DetectedArtifact>,
+        tokens: ImplicitReferenceTokens,
+        candidateGroups: List<List<DetectedArtifact>>,
     ): List<DetectedArtifact?> {
         val result = mutableListOf<DetectedArtifact?>()
-        candidates.groupBy { normalizeAlias(it.displayName) }.values.forEach { sameSimpleName ->
+        candidateGroups.forEach { group ->
+            val sameSimpleName = if (group.any { it.id == source.id }) {
+                group.filterNot { it.id == source.id }
+            } else {
+                group
+            }
+            if (sameSimpleName.isEmpty()) return@forEach
             val qualified = sameSimpleName.filter { candidate ->
                 candidate.semanticKey.contains('.') &&
-                    containsQualifiedSymbol(evidenceText, candidate.semanticKey)
+                    containsQualifiedSymbol(tokens, candidate.semanticKey)
             }
             if (qualified.isNotEmpty()) {
                 result += qualified
                 return@forEach
             }
-            if (sameSimpleName.none { containsArtifactReference(evidenceText, it) }) return@forEach
+            if (sameSimpleName.none { containsArtifactReference(tokens, it) }) return@forEach
             val preferred = preferredCandidates(source, sameSimpleName)
             result += preferred.singleOrNull()
         }
@@ -2528,18 +2540,61 @@ class ApplicationGraphIndexer {
     }
 
     private fun ambiguousReference(
-        evidenceText: String,
-        candidates: List<DetectedArtifact>,
-    ): String? = candidates
-        .groupBy { normalizeAlias(it.displayName) }
-        .values
+        tokens: ImplicitReferenceTokens,
+        candidateGroups: List<List<DetectedArtifact>>,
+    ): String? = candidateGroups
         .firstOrNull { group ->
             group.size > 1 &&
-                group.any { containsArtifactReference(evidenceText, it) } &&
-                group.none { containsQualifiedSymbol(evidenceText, it.semanticKey) }
+                group.any { containsArtifactReference(tokens, it) } &&
+                group.none { containsQualifiedSymbol(tokens, it.semanticKey) }
         }
         ?.first()
         ?.displayName
+
+    /**
+     * Tokenized view of one source's evidence text for bounded-context reference checks.
+     *
+     * [simple] holds maximal runs of letters/digits/underscores; [qualified] holds maximal
+     * runs that additionally allow `$` and `.`. Membership in these sets is equivalent to
+     * the previous delimiter-aware substring scans but costs one pass per source instead of
+     * one scan per candidate artifact.
+     */
+    internal data class ImplicitReferenceTokens(
+        val simple: Set<String>,
+        val qualified: Set<String>,
+    )
+
+    internal fun implicitReferenceTokens(text: String): ImplicitReferenceTokens {
+        val simple = hashSetOf<String>()
+        val qualified = hashSetOf<String>()
+        var index = 0
+        val length = text.length
+        while (index < length) {
+            if (!isQualifiedIdentifierChar(text[index])) {
+                index += 1
+                continue
+            }
+            val runStart = index
+            while (index < length && isQualifiedIdentifierChar(text[index])) index += 1
+            qualified += text.substring(runStart, index)
+            var tokenScan = runStart
+            while (tokenScan < index) {
+                if (!isSimpleIdentifierChar(text[tokenScan])) {
+                    tokenScan += 1
+                    continue
+                }
+                val tokenStart = tokenScan
+                while (tokenScan < index && isSimpleIdentifierChar(text[tokenScan])) tokenScan += 1
+                simple += text.substring(tokenStart, tokenScan)
+            }
+        }
+        return ImplicitReferenceTokens(simple, qualified)
+    }
+
+    private fun isSimpleIdentifierChar(char: Char): Boolean = char.isLetterOrDigit() || char == '_'
+
+    private fun isQualifiedIdentifierChar(char: Char): Boolean =
+        char.isLetterOrDigit() || char == '_' || char == '$' || char == '.'
 
     private fun resolveLinks(
         artifacts: Map<String, DetectedArtifact>,
@@ -2864,43 +2919,19 @@ class ApplicationGraphIndexer {
     ): PendingLink =
         PendingLink(id, target, type, expectedKinds, locator)
 
-    private fun containsSymbol(content: String, symbol: String): Boolean {
+    private fun containsSymbol(tokens: ImplicitReferenceTokens, symbol: String): Boolean {
         val simple = symbol.substringAfterLast('.').substringAfterLast('#')
         if (simple.length < 3) return false
-        return containsDelimited(content, simple) { char -> char.isLetterOrDigit() || char == '_' }
+        return simple in tokens.simple
     }
 
-    private fun containsQualifiedSymbol(content: String, symbol: String): Boolean {
+    private fun containsQualifiedSymbol(tokens: ImplicitReferenceTokens, symbol: String): Boolean {
         if (!symbol.contains('.')) return false
-        return containsDelimited(content, symbol) { char ->
-            char.isLetterOrDigit() || char == '_' || char == '$' || char == '.'
-        }
+        return symbol in tokens.qualified
     }
 
-    private fun containsDelimited(
-        content: String,
-        symbol: String,
-        isIdentifierPart: (Char) -> Boolean,
-    ): Boolean {
-        var fromIndex = 0
-        while (fromIndex <= content.length - symbol.length) {
-            val index = content.indexOf(symbol, fromIndex)
-            if (index < 0) return false
-            val before = content.getOrNull(index - 1)
-            val after = content.getOrNull(index + symbol.length)
-            if (
-                (before == null || !isIdentifierPart(before)) &&
-                (after == null || !isIdentifierPart(after))
-            ) {
-                return true
-            }
-            fromIndex = index + symbol.length
-        }
-        return false
-    }
-
-    private fun containsArtifactReference(content: String, artifact: DetectedArtifact): Boolean =
-        artifact.aliases.any { alias -> containsSymbol(content, alias) }
+    private fun containsArtifactReference(tokens: ImplicitReferenceTokens, artifact: DetectedArtifact): Boolean =
+        artifact.aliases.any { alias -> containsSymbol(tokens, alias) }
 
     private fun normalizeAlias(value: String): String =
         value.trim().removeSuffix(".xml").replace('\\', '/').lowercase()

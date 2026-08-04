@@ -252,6 +252,13 @@ export default function ProjectMap() {
     void load()
   }, [])
   useEffect(() => {
+    const handleIndexUpdate = () => {
+      void load()
+    }
+    window.addEventListener('jmix-workbench-index-updated', handleIndexUpdate)
+    return () => window.removeEventListener('jmix-workbench-index-updated', handleIndexUpdate)
+  }, [])
+  useEffect(() => {
     if (!loading) return
 
     let cancelled = false
