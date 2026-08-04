@@ -348,6 +348,47 @@ export default function EntityDesigner({
     }))
   }
 
+  /**
+   * Manual reload of the schema workspace. This is the user-facing recovery
+   * path when the initial load timed out, returned empty, or the project
+   * changed on disk. It forces a backend refresh and re-syncs any entity that
+   * is currently open; a selection that no longer resolves is surfaced instead
+   * of being silently dropped.
+   */
+  const reloadSchemaWorkspace = async () => {
+    if (schemaLoading) return
+    setSchemaLoading(true)
+    try {
+      const refreshed = await bridge.getSchemaWorkspace(true)
+      setSchemaWorkspace(refreshed)
+      const graph = await bridge.getApplicationGraph().catch(() => applicationGraph)
+      if (graph) setApplicationGraph(graph)
+      if (existingEntity) {
+        const updated = refreshed.entities.find(
+          (candidate) => candidate.qualifiedName === existingEntity.qualifiedName,
+        )
+        if (updated) {
+          synchronizeExistingEntity(updated, refreshed)
+          addToast('Entity workspace refreshed.', 'info')
+        } else {
+          setExistingEntity(null)
+          setEntityRepositories([])
+          setSelectedRepositoryArtifactId('')
+          addToast(
+            'The previously open entity is no longer indexed. Pick an entity from the refreshed list.',
+            'info',
+          )
+        }
+      } else {
+        addToast('Entity workspace refreshed.', 'info')
+      }
+    } catch (error: any) {
+      addToast(`Cannot refresh entity workspace: ${error?.message ?? 'unknown error'}`, 'error')
+    } finally {
+      setSchemaLoading(false)
+    }
+  }
+
   useEffect(() => {
     const selected = selectedAttr === null ? undefined : entity.attributes[selectedAttr]
     const activeCutover = selected && typeCutoverSession?.attributeName === selected.name
@@ -393,6 +434,17 @@ export default function EntityDesigner({
   const moduleStores = useMemo(
     () => schemaWorkspace?.stores.filter((store) => store.moduleId === selectedModuleId) ?? [],
     [schemaWorkspace, selectedModuleId],
+  )
+  const storeCountByModule = useMemo(() => {
+    const counts = new Map<string, number>()
+    schemaWorkspace?.stores.forEach((store) => {
+      counts.set(store.moduleId, (counts.get(store.moduleId) ?? 0) + 1)
+    })
+    return counts
+  }, [schemaWorkspace])
+  const managedStoreModules = useMemo(
+    () => schemaWorkspace?.modules.filter((module) => (storeCountByModule.get(module.moduleId) ?? 0) > 0) ?? [],
+    [schemaWorkspace, storeCountByModule],
   )
   const selectedModule = schemaWorkspace?.modules.find(module => module.moduleId === selectedModuleId)
   const effectiveProjectId = selectedModule?.projectId ?? projectConfig?.projectId
@@ -1888,23 +1940,42 @@ export default function EntityDesigner({
         <div className={`entity-designer-config ${activePane === 'config' ? 'block' : 'hidden'} min-h-0 w-full flex-shrink-0 space-y-4 overflow-y-auto p-4`}>
           <Section title="Project Ownership">
             <Field label="Entity Source">
-              <select
-                value={existingEntity?.artifactId ?? 'new'}
-                disabled={editorSurface || schemaLoading}
-                onChange={(event) => selectExistingEntity(event.target.value)}
-                className="w-full"
-              >
-                <option value="new">Create a new entity</option>
-                {schemaWorkspace?.entities.length ? (
-                  <optgroup label="Edit an existing entity">
-                    {schemaWorkspace.entities.map((candidate) => (
-                      <option key={candidate.artifactId} value={candidate.artifactId}>
-                        {candidate.moduleId} · {candidate.qualifiedName} · {candidate.entityType}
-                      </option>
-                    ))}
-                  </optgroup>
-                ) : null}
-              </select>
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={existingEntity?.artifactId ?? 'new'}
+                  disabled={editorSurface || schemaLoading}
+                  onChange={(event) => selectExistingEntity(event.target.value)}
+                  className="w-full min-w-0 flex-1"
+                >
+                  <option value="new">Create a new entity</option>
+                  {schemaWorkspace?.entities.length ? (
+                    <optgroup label="Edit an existing entity">
+                      {schemaWorkspace.entities.map((candidate) => (
+                        <option key={candidate.artifactId} value={candidate.artifactId}>
+                          {candidate.moduleId} · {candidate.qualifiedName} · {candidate.entityType}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
+                </select>
+                <button
+                  type="button"
+                  onClick={reloadSchemaWorkspace}
+                  disabled={schemaLoading || editorSurface}
+                  title="Reload entities and modules from the project"
+                  aria-label="Reload entities from project"
+                  className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-surface-border bg-surface-light text-[12px] text-gray-300 transition-colors hover:bg-surface-lighter hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {schemaLoading ? '…' : '⟳'}
+                </button>
+              </div>
+              <p className="mt-1 text-[10px] text-gray-500">
+                {schemaLoading
+                  ? 'Loading indexed entities…'
+                  : schemaWorkspace?.entities.length
+                    ? `${schemaWorkspace.entities.length} indexed entit${schemaWorkspace.entities.length === 1 ? 'y' : 'ies'} across ${schemaWorkspace.modules.length} module${schemaWorkspace.modules.length === 1 ? '' : 's'}.`
+                    : 'No indexed entities found. Use ⟳ to re-scan once indexing completes.'}
+              </p>
             </Field>
             {existingEntity && (
               <div className="rounded border border-jmix-500/30 bg-jmix-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-jmix-100/80">
@@ -1936,11 +2007,15 @@ export default function EntityDesigner({
                 className="w-full"
               >
                 {!schemaWorkspace?.modules.length && <option value="">No modules detected</option>}
-                {schemaWorkspace?.modules.map((module) => (
-                  <option key={module.moduleId} value={module.moduleId}>
-                    {module.moduleId} · {module.entityCount} entities
-                  </option>
-                ))}
+                {schemaWorkspace?.modules.map((module) => {
+                  const stores = storeCountByModule.get(module.moduleId) ?? 0
+                  return (
+                    <option key={module.moduleId} value={module.moduleId}>
+                      {module.moduleId} · {module.entityCount} entities
+                      {stores > 0 ? ` · ${stores} managed store${stores === 1 ? '' : 's'}` : ' · no managed store'}
+                    </option>
+                  )
+                })}
               </select>
             </Field>
             <Field label="Data Store">
@@ -1982,9 +2057,24 @@ export default function EntityDesigner({
                 )}
               </div>
             ) : (
-              <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-[10px] text-amber-200/80">
-                This module has no managed Liquibase store. Source generation remains available; enable DDL only after
-                configuring a data store.
+              <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-amber-200/80">
+                This module has no managed Liquibase store, so DDL generation is disabled. Source generation
+                remains available.
+                {managedStoreModules.length > 0 ? (
+                  <span>
+                    {' '}To generate Liquibase changes, pick a module that owns a data store:{' '}
+                    <span className="text-amber-100">
+                      {managedStoreModules.slice(0, 4).map((module) => module.moduleId).join(', ')}
+                      {managedStoreModules.length > 4 ? `, … (${managedStoreModules.length} total)` : ''}
+                    </span>.
+                  </span>
+                ) : (
+                  <span>
+                    {' '}No module in this project exposes a managed store yet. Configure a data store
+                    (a <code>*.liquibase.change-log</code> / datasource property or an include-chain
+                    changelog) in the owning module, then reload with ⟳.
+                  </span>
+                )}
               </div>
             )}
           </Section>

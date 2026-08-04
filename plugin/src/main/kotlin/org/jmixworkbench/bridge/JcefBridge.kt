@@ -1821,7 +1821,16 @@ class JcefBridge(
     private fun handleGetSchemaWorkspace(action: String, requestId: String?, payload: JsonObject) {
         val forceRefresh = payload.get("forceRefresh")?.asBoolean ?: false
         submitReadResponse(action, requestId) {
-            SchemaWorkspaceService.getInstance(project).load(forceRefresh)
+            val startedAt = System.nanoTime()
+            val workspace = SchemaWorkspaceService.getInstance(project).load(forceRefresh)
+            val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+            log.info(
+                "Schema workspace loaded in ${elapsedMillis}ms: " +
+                    "entities=${workspace.entities.size} modules=${workspace.modules.size} " +
+                    "stores=${workspace.stores.size} repositories=${workspace.repositories.size} " +
+                    "forceRefresh=$forceRefresh",
+            )
+            workspace
         }
     }
 
@@ -4561,9 +4570,11 @@ class JcefBridge(
 
     private fun sendResponse(action: String, requestId: String?, resultJson: String) {
         if (resultJson.length <= DIRECT_RESPONSE_LIMIT_CHARS) {
+            log.info("Bridge response: $action requestId=$requestId chars=${resultJson.length} mode=direct")
             sendDirectResponse(action, requestId, resultJson)
             return
         }
+        log.info("Bridge response: $action requestId=$requestId chars=${resultJson.length} mode=chunked")
         sendChunkedResponse(action, requestId, resultJson)
     }
 

@@ -164,6 +164,13 @@ declare global {
   }
 }
 
+/**
+ * Budget for workspace/graph reads that legitimately take minutes on large
+ * multi-module projects (cold schema scans, full graph builds). Normal
+ * actions keep the shorter default so a genuinely hung request still surfaces.
+ */
+const HEAVY_READ_TIMEOUT_MS = 20 * 60 * 1000
+
 class Bridge {
   private listeners: BridgeCallback[] = []
   private launchContextListeners: ((context: WorkbenchLaunchContext | null) => void)[] = []
@@ -2760,13 +2767,13 @@ ${javaMethods}
     }
   }
 
-  async request<T = any>(action: string, payload: any = {}): Promise<T> {
+  async request<T = any>(action: string, payload: any = {}, timeoutMs: number = 120_000): Promise<T> {
     const requestId = this.nextRequestId()
     return new Promise((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         unsub()
-        reject(new Error(`${action} did not respond within 120 seconds.`))
-      }, 120_000)
+        reject(new Error(`${action} did not respond within ${Math.round(timeoutMs / 1000)} seconds.`))
+      }, timeoutMs)
       const unsub = this.onResponse((respAction, responseRequestId, result) => {
         if (responseRequestId === requestId && respAction === action) {
           window.clearTimeout(timeout)
@@ -2789,6 +2796,7 @@ ${javaMethods}
     action: string,
     payload: Record<string, unknown> = {},
     forceRefresh: boolean = false,
+    timeoutMs: number = 120_000,
   ): Promise<T> {
     if (!forceRefresh && this.workspaceCache.has(action)) {
       return Promise.resolve(this.workspaceCache.get(action) as T)
@@ -2797,7 +2805,7 @@ ${javaMethods}
     if (active) return active as Promise<T>
 
     const requestEpoch = this.workspaceEpoch
-    const request = this.request<T | { error: string }>(action, payload)
+    const request = this.request<T | { error: string }>(action, payload, timeoutMs)
       .then((result) => {
         if (result && typeof result === 'object' && 'error' in result) {
           throw new Error(String(result.error))
@@ -3075,6 +3083,7 @@ ${javaMethods}
       'getSchemaWorkspace',
       { forceRefresh },
       forceRefresh,
+      HEAVY_READ_TIMEOUT_MS,
     )
   }
 
@@ -3256,6 +3265,7 @@ ${javaMethods}
     const request = this.request<ApplicationGraphResponse | { error: string }>(
       'getApplicationGraph',
       { forceRefresh },
+      HEAVY_READ_TIMEOUT_MS,
     ).then((result) => {
       if ('error' in result) throw new Error(result.error)
       if (requestEpoch === this.workspaceEpoch) this.applicationGraphCache = result
