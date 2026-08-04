@@ -746,7 +746,8 @@ val verifyMutationArchitecture = tasks.register("verifyMutationArchitecture") {
                 "src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt",
             ),
             ".delete(this)" to sharedBoundary,
-            "Files.newOutputStream(" to projectTemplateBoundary + catalogCacheBoundary,
+            "Files.newOutputStream(" to projectTemplateBoundary + catalogCacheBoundary +
+                knowledgeCacheBoundary,
             "Files.write(" to catalogAuthoringBoundary + knowledgeCacheBoundary,
             "Files.copy(" to catalogCacheBoundary,
             "Files.move(" to

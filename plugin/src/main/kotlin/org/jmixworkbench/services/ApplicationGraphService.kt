@@ -43,7 +43,6 @@ import org.jmixworkbench.discovery.model.SourceLanguage
 import org.jmixworkbench.discovery.model.SourceLocator
 import org.jmixworkbench.discovery.model.RelationshipType
 import org.jmixworkbench.discovery.navigation.SourceNavigationPolicy
-import org.jmixworkbench.discovery.persistence.GraphCacheBundle
 import org.jmixworkbench.discovery.persistence.GraphCacheStore
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexInput
 import org.jmixworkbench.discovery.semantic.ApplicationGraphIndexResult
@@ -585,12 +584,14 @@ class ApplicationGraphService(
     }
 
     /**
-     * Seeds the in-memory graph from the persisted `.jmix-workbench` knowledge
+     * Seeds in-memory indexing knowledge from the persisted `.jmix-workbench`
      * cache on first use. The cache is accepted only when every recorded stamp
-     * still matches the VFS (length + timestamp); any mismatch, unreadable file,
-     * or schema difference falls back to a full rebuild. Changes made while the
-     * IDE was closed arrive through the startup VFS refresh and mark the cache
-     * dirty via the normal listeners.
+     * still matches the VFS (length + timestamp); any mismatch, unreadable
+     * file, or schema difference falls back to a full rebuild. Seeded
+     * contributions are reused by content fingerprint during the first build,
+     * which skips source parsing for every unchanged file. Changes made while
+     * the IDE was closed arrive through the startup VFS refresh and mark the
+     * cache dirty via the normal listeners.
      */
     private fun seedFromDiskCacheIfPossible() {
         if (!diskCacheSeeded.compareAndSet(false, true)) return
@@ -598,27 +599,37 @@ class ApplicationGraphService(
         val basePath = project.basePath ?: return
         try {
             val store = GraphCacheStore(Paths.get(basePath), GRAPH_CACHE_PLUGIN_VERSION)
-            val bundle = store.load() ?: return
-            val inventory = gson.fromJson(bundle.inventoryJson, DiskCacheInventory::class.java)
-                ?: return
-            if (inventory.stamps.isEmpty()) return
+            var inventory: DiskCacheInventory? = null
+            var contributions: Map<String, CachedContribution>? = null
+            val contributionType = object : TypeToken<Map<String, CachedContribution>>() {}.type
+            val envelopeValid = store.load { name, reader ->
+                when (name) {
+                    "inventory" -> {
+                        inventory = gson.fromJson(reader, DiskCacheInventory::class.java)
+                        true
+                    }
+                    "contributions" -> {
+                        contributions = gson.fromJson(reader, contributionType)
+                        true
+                    }
+                    else -> false
+                }
+            }
+            val loadedInventory = inventory
+            val loadedContributions = contributions
+            if (!envelopeValid || loadedInventory == null || loadedContributions == null) return
+            if (loadedInventory.stamps.isEmpty() || loadedContributions.isEmpty()) return
             val resolver = ProjectFileResolver.getInstance(project)
-            val stampsValid = inventory.stamps.all { stamp ->
+            val stampsValid = loadedInventory.stamps.all { stamp ->
                 val file = resolver.resolveFile(stamp.relativePath)?.file ?: return@all false
                 !file.isDirectory && file.length == stamp.length && file.timeStamp == stamp.timeStamp
             }
             if (!stampsValid) return
-            val contributionType = object : TypeToken<Map<String, CachedContribution>>() {}.type
-            val contributions: Map<String, CachedContribution> =
-                gson.fromJson(bundle.contributionsJson, contributionType) ?: emptyMap()
-            val response = gson.fromJson(bundle.responseJson, ApplicationGraphResponse::class.java)
-                ?: return
-            cachedContributions.set(contributions)
-            cached.set(CachedGraph(inventory.stamps, inventory.rootKeys, inventory.sourceRootKeys, response))
-            lastPersistedDigest.set(response.snapshotDigest)
+            cachedContributions.set(loadedContributions)
             log.info(
-                "Application graph seeded from ${GraphCacheStore.DIR_NAME}: " +
-                    "${inventory.stamps.size} stamped file(s), ${contributions.size} cached contribution(s)",
+                "Application graph knowledge seeded from ${GraphCacheStore.DIR_NAME}: " +
+                    "${loadedContributions.size} cached contribution(s) across " +
+                    "${loadedInventory.stamps.size} stamped file(s)",
             )
         } catch (cause: Throwable) {
             if (cause is com.intellij.openapi.progress.ProcessCanceledException) throw cause
@@ -627,9 +638,13 @@ class ApplicationGraphService(
     }
 
     /**
-     * Debounced persistence of the current graph knowledge into the target
-     * project's `.jmix-workbench` directory. Best-effort: failures only cost a
-     * rebuild on the next start.
+     * Debounced streaming persistence of the current indexing knowledge into
+     * the target project's `.jmix-workbench` directory. Inventory stamps plus
+     * fingerprinted contributions are enough to warm-restart indexing without
+     * re-parsing unchanged sources; the response itself is re-assembled on the
+     * first build. Payloads stream straight to disk because they are too large
+     * to materialize as one string. Best-effort: failures only cost a rebuild
+     * on the next start.
      */
     private fun scheduleDiskCachePersist() {
         val current = cached.get() ?: return
@@ -643,18 +658,22 @@ class ApplicationGraphService(
                 if (lastPersistedDigest.get() == snapshot.response.snapshotDigest) return@schedule
                 val basePath = project.basePath ?: return@schedule
                 val contributions = cachedContributions.get()
-                val payload = GraphCacheBundle(
-                    inventoryJson = gson.toJson(
-                        DiskCacheInventory(snapshot.stamps, snapshot.rootKeys, snapshot.sourceRootKeys),
-                    ),
-                    contributionsJson = gson.toJson(contributions),
-                    responseJson = gson.toJson(snapshot.response),
-                    savedAtEpochMillis = System.currentTimeMillis(),
-                    pluginVersion = GRAPH_CACHE_PLUGIN_VERSION,
-                )
-                if (GraphCacheStore(Paths.get(basePath), GRAPH_CACHE_PLUGIN_VERSION).save(payload)) {
+                val inventory = DiskCacheInventory(snapshot.stamps, snapshot.rootKeys, snapshot.sourceRootKeys)
+                val saved = GraphCacheStore(Paths.get(basePath), GRAPH_CACHE_PLUGIN_VERSION).save { json ->
+                    json.name("inventory")
+                    gson.toJson(inventory, DiskCacheInventory::class.java, json)
+                    json.name("contributions")
+                    gson.toJson(
+                        contributions,
+                        object : TypeToken<Map<String, CachedContribution>>() {}.type,
+                        json,
+                    )
+                }
+                if (saved) {
                     lastPersistedDigest.set(snapshot.response.snapshotDigest)
                     log.info("Application graph knowledge persisted to ${GraphCacheStore.DIR_NAME}")
+                } else {
+                    log.warn("Application graph cache persistence was refused by the store")
                 }
             } catch (cause: Throwable) {
                 if (cause is com.intellij.openapi.progress.ProcessCanceledException) throw cause
