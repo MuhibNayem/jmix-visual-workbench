@@ -188,7 +188,14 @@ class Bridge {
   constructor() {
     window.onBridgeResponse = (action: string, requestId: string | null, result: any) => {
       if (action === 'applicationGraphUpdated') {
-        this.invalidateWorkspaceCaches()
+        // Index refreshes change the graph snapshot, but they do NOT invalidate
+        // the derived workspaces (schema, security, menu, …). Those only change
+        // on real mutations, which already clear the cache via the apply/generate
+        // handlers. Wiping everything here used to force a full schema + graph
+        // re-fetch on every tab switch, which made the UI feel slow. Keep the
+        // workspaces, drop only the graph snapshot so Project Map re-loads it.
+        this.applicationGraphCache = null
+        if (this.applicationGraphRequest) this.applicationGraphRequest = null
         window.dispatchEvent(new CustomEvent('jmix-workbench-index-updated', { detail: result }))
         return
       }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useStore, type ActiveTab } from './store'
 import { bridge } from './bridge'
 import type { GraphSourceLocator } from './types'
@@ -36,6 +36,21 @@ const workspaces: { id: ActiveTab; label: string; icon: string }[] = [
   { id: 'migration', label: 'Migrations', icon: '🗄' },
 ]
 
+/**
+ * Keeps a workspace mounted once it has been visited, hiding it with CSS when
+ * inactive instead of unmounting it. Unmounting on every tab switch forced each
+ * designer to re-run its mount effects and re-fetch its workspace, which made
+ * rapid tab switching feel slow. Mounting once and toggling visibility keeps
+ * local state warm and makes switching instant.
+ */
+function TabPane({ active, children }: { active: boolean; children: ReactNode }) {
+  return (
+    <div className={active ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : 'hidden'}>
+      {children}
+    </div>
+  )
+}
+
 export default function App() {
   const {
     activeTab,
@@ -61,6 +76,10 @@ export default function App() {
   })
   const [entityDesignerKey, setEntityDesignerKey] = useState(0)
   const [workspaceRevision, setWorkspaceRevision] = useState(0)
+  const [visitedTabs, setVisitedTabs] = useState<ActiveTab[]>([activeTab])
+  useEffect(() => {
+    setVisitedTabs((tabs) => (tabs.includes(activeTab) ? tabs : [...tabs, activeTab]))
+  }, [activeTab])
   const developmentEditorWidthParameter = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get('editorWidth')
     : null
@@ -256,24 +275,78 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {activeTab === 'projectProperties' && <ProjectProperties />}
-        {activeTab === 'projectMap' && <ProjectMap />}
-        {activeTab === 'entity' && <EntityDesigner key={entityDesignerKey} />}
-        {activeTab === 'view' && <ViewDesigner />}
-        {activeTab === 'crud' && (
-          <CrudWizard
-            key={crudEntityLocator?.revisionFingerprint ?? 'new-entity'}
-          />
+        {visitedTabs.includes('projectProperties') && (
+          <TabPane active={activeTab === 'projectProperties'}>
+            <ProjectProperties />
+          </TabPane>
         )}
-        {activeTab === 'menu' && <MenuDesigner />}
-        {activeTab === 'role' && <RoleDesigner />}
-        {activeTab === 'api' && <ApiDesigner />}
-        {activeTab === 'integration' && <IntegrationDesigner />}
-        {activeTab === 'workflow' && <WorkflowDesigner />}
-        {activeTab === 'logic' && <LogicDesigner />}
-        {activeTab === 'rules' && <RuleDesigner />}
-        {activeTab === 'scenario' && <ScenarioDesigner />}
-        {activeTab === 'migration' && <MigrationPanel />}
+        {visitedTabs.includes('projectMap') && (
+          <TabPane active={activeTab === 'projectMap'}>
+            <ProjectMap />
+          </TabPane>
+        )}
+        {visitedTabs.includes('entity') && (
+          <TabPane active={activeTab === 'entity'}>
+            <EntityDesigner key={entityDesignerKey} />
+          </TabPane>
+        )}
+        {visitedTabs.includes('view') && (
+          <TabPane active={activeTab === 'view'}>
+            <ViewDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('crud') && (
+          <TabPane active={activeTab === 'crud'}>
+            <CrudWizard
+              key={crudEntityLocator?.revisionFingerprint ?? 'new-entity'}
+            />
+          </TabPane>
+        )}
+        {visitedTabs.includes('menu') && (
+          <TabPane active={activeTab === 'menu'}>
+            <MenuDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('role') && (
+          <TabPane active={activeTab === 'role'}>
+            <RoleDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('api') && (
+          <TabPane active={activeTab === 'api'}>
+            <ApiDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('integration') && (
+          <TabPane active={activeTab === 'integration'}>
+            <IntegrationDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('workflow') && (
+          <TabPane active={activeTab === 'workflow'}>
+            <WorkflowDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('logic') && (
+          <TabPane active={activeTab === 'logic'}>
+            <LogicDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('rules') && (
+          <TabPane active={activeTab === 'rules'}>
+            <RuleDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('scenario') && (
+          <TabPane active={activeTab === 'scenario'}>
+            <ScenarioDesigner />
+          </TabPane>
+        )}
+        {visitedTabs.includes('migration') && (
+          <TabPane active={activeTab === 'migration'}>
+            <MigrationPanel />
+          </TabPane>
+        )}
       </main>
 
       <Toast />
