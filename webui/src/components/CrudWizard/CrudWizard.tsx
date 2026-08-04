@@ -21,13 +21,13 @@ const defaultOptions: CrudOptions = {
 }
 
 export default function CrudWizard() {
-  const {
-    entity,
-    crudEntityLocator,
-    addToast,
-    isGenerating,
-    setIsGenerating,
-  } = useStore()
+  // Selective subscriptions avoid re-rendering on every store change (e.g.
+  // each tab switch); this component only depends on the slices below.
+  const entity = useStore((state) => state.entity)
+  const crudEntityLocator = useStore((state) => state.crudEntityLocator)
+  const addToast = useStore((state) => state.addToast)
+  const isGenerating = useStore((state) => state.isGenerating)
+  const setIsGenerating = useStore((state) => state.setIsGenerating)
   const existingEntityMode = crudEntityLocator !== null
   const [options, setOptions] = useState<CrudOptions>(() => ({
     ...defaultOptions,

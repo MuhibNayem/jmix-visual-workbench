@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useStore, type ActiveTab } from './store'
 import { bridge } from './bridge'
 import type { GraphSourceLocator } from './types'
@@ -18,6 +18,26 @@ import ScenarioDesigner from './components/ScenarioDesigner/ScenarioDesigner'
 import LogicDesigner from './components/LogicDesigner/LogicDesigner'
 import RuleDesigner from './components/RuleDesigner/RuleDesigner'
 import Toast from './components/shared/Toast'
+
+// Memoized so that switching tabs (which re-renders App to toggle the active
+// pane) does not cascade a re-render into every mounted designer. These are
+// large components; without memo, rapid tab switching re-rendered all of them
+// on each switch and caused visible hangs. Each still re-renders for its own
+// state and for store slices it explicitly subscribes to.
+const MemoProjectProperties = memo(ProjectProperties)
+const MemoProjectMap = memo(ProjectMap)
+const MemoEntityDesigner = memo(EntityDesigner)
+const MemoViewDesigner = memo(ViewDesigner)
+const MemoCrudWizard = memo(CrudWizard)
+const MemoMenuDesigner = memo(MenuDesigner)
+const MemoRoleDesigner = memo(RoleDesigner)
+const MemoApiDesigner = memo(ApiDesigner)
+const MemoIntegrationDesigner = memo(IntegrationDesigner)
+const MemoWorkflowDesigner = memo(WorkflowDesigner)
+const MemoLogicDesigner = memo(LogicDesigner)
+const MemoRuleDesigner = memo(RuleDesigner)
+const MemoScenarioDesigner = memo(ScenarioDesigner)
+const MemoMigrationPanel = memo(MigrationPanel)
 
 const workspaces: { id: ActiveTab; label: string; icon: string }[] = [
   { id: 'projectProperties', label: 'Project Configuration', icon: '⚙' },
@@ -277,74 +297,74 @@ export default function App() {
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {visitedTabs.includes('projectProperties') && (
           <TabPane active={activeTab === 'projectProperties'}>
-            <ProjectProperties />
+            <MemoProjectProperties />
           </TabPane>
         )}
         {visitedTabs.includes('projectMap') && (
           <TabPane active={activeTab === 'projectMap'}>
-            <ProjectMap />
+            <MemoProjectMap />
           </TabPane>
         )}
         {visitedTabs.includes('entity') && (
           <TabPane active={activeTab === 'entity'}>
-            <EntityDesigner key={entityDesignerKey} />
+            <MemoEntityDesigner key={entityDesignerKey} />
           </TabPane>
         )}
         {visitedTabs.includes('view') && (
           <TabPane active={activeTab === 'view'}>
-            <ViewDesigner />
+            <MemoViewDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('crud') && (
           <TabPane active={activeTab === 'crud'}>
-            <CrudWizard
+            <MemoCrudWizard
               key={crudEntityLocator?.revisionFingerprint ?? 'new-entity'}
             />
           </TabPane>
         )}
         {visitedTabs.includes('menu') && (
           <TabPane active={activeTab === 'menu'}>
-            <MenuDesigner />
+            <MemoMenuDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('role') && (
           <TabPane active={activeTab === 'role'}>
-            <RoleDesigner />
+            <MemoRoleDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('api') && (
           <TabPane active={activeTab === 'api'}>
-            <ApiDesigner />
+            <MemoApiDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('integration') && (
           <TabPane active={activeTab === 'integration'}>
-            <IntegrationDesigner />
+            <MemoIntegrationDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('workflow') && (
           <TabPane active={activeTab === 'workflow'}>
-            <WorkflowDesigner />
+            <MemoWorkflowDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('logic') && (
           <TabPane active={activeTab === 'logic'}>
-            <LogicDesigner />
+            <MemoLogicDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('rules') && (
           <TabPane active={activeTab === 'rules'}>
-            <RuleDesigner />
+            <MemoRuleDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('scenario') && (
           <TabPane active={activeTab === 'scenario'}>
-            <ScenarioDesigner />
+            <MemoScenarioDesigner />
           </TabPane>
         )}
         {visitedTabs.includes('migration') && (
           <TabPane active={activeTab === 'migration'}>
-            <MigrationPanel />
+            <MemoMigrationPanel />
           </TabPane>
         )}
       </main>

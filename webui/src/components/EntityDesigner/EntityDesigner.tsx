@@ -129,22 +129,24 @@ export default function EntityDesigner({
   editorSurface = false,
   sourceLocator,
 }: EntityDesignerProps = {}) {
-  const {
-    entity,
-    projectConfig,
-    setEntity,
-    addAttribute,
-    duplicateAttribute,
-    moveAttribute,
-    updateAttribute,
-    removeAttribute,
-    resetEntity,
-    addToast,
-    isGenerating,
-    setIsGenerating,
-    openCrudDesigner,
-    openFlowUiDesigner,
-  } = useStore()
+  // Selective subscriptions: subscribing to the whole store re-rendered this
+  // very large component on every store change (including each tab switch),
+  // which caused hangs during rapid tab switching. Only the slices below are
+  // actually used.
+  const entity = useStore((state) => state.entity)
+  const projectConfig = useStore((state) => state.projectConfig)
+  const setEntity = useStore((state) => state.setEntity)
+  const addAttribute = useStore((state) => state.addAttribute)
+  const duplicateAttribute = useStore((state) => state.duplicateAttribute)
+  const moveAttribute = useStore((state) => state.moveAttribute)
+  const updateAttribute = useStore((state) => state.updateAttribute)
+  const removeAttribute = useStore((state) => state.removeAttribute)
+  const resetEntity = useStore((state) => state.resetEntity)
+  const addToast = useStore((state) => state.addToast)
+  const isGenerating = useStore((state) => state.isGenerating)
+  const setIsGenerating = useStore((state) => state.setIsGenerating)
+  const openCrudDesigner = useStore((state) => state.openCrudDesigner)
+  const openFlowUiDesigner = useStore((state) => state.openFlowUiDesigner)
   const [selectedAttr, setSelectedAttr] = useState<number | null>(null)
   const [showPreview, setShowPreview] = useState(false)
   const [activePane, setActivePane] = useState<'config' | 'attributes' | 'preview'>('attributes')

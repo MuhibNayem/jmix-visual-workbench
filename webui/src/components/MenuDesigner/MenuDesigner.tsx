@@ -298,7 +298,12 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 export default function MenuDesigner() {
-  const { addToast, isGenerating, setIsGenerating, setLastResult } = useStore()
+  // Selective subscriptions avoid re-rendering this large component on every
+  // store change (e.g. each tab switch), which caused switching hangs.
+  const addToast = useStore((state) => state.addToast)
+  const isGenerating = useStore((state) => state.isGenerating)
+  const setIsGenerating = useStore((state) => state.setIsGenerating)
+  const setLastResult = useStore((state) => state.setLastResult)
   const [items, setItems] = useState<MenuNode[]>(STARTER_MENU)
   const [selectedId, setSelectedId] = useState<string | null>('operations')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())

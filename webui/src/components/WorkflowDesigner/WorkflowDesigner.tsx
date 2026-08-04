@@ -514,7 +514,12 @@ const primary =
 const input = 'w-full min-w-0 py-1.5 text-[11px]'
 
 export default function WorkflowDesigner() {
-  const { addToast, setIsGenerating, isGenerating } = useStore()
+  // Selective subscriptions: subscribing to the whole store would re-render
+  // this large component on every store change (including each tab switch),
+  // which caused hangs during rapid tab switching.
+  const addToast = useStore((state) => state.addToast)
+  const setIsGenerating = useStore((state) => state.setIsGenerating)
+  const isGenerating = useStore((state) => state.isGenerating)
   const [workflow, setWorkflow] = useState<WorkflowModel>(defaultWorkflow)
   const [graph, setGraph] = useState<ApplicationGraphResponse | null>(null)
   const [schema, setSchema] = useState<SchemaWorkspaceResponse | null>(null)

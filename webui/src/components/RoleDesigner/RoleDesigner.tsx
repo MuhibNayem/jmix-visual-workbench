@@ -74,7 +74,12 @@ function EmptyHint({ children }: { children: ReactNode }) {
 // ─── Main component ──────────────────────────────────────────────────────────
 
 function NewRoleDesigner() {
-  const { addToast, isGenerating, setIsGenerating, setLastResult } = useStore()
+  // Selective subscriptions avoid re-rendering this large component on every
+  // store change (e.g. each tab switch), which caused switching hangs.
+  const addToast = useStore((state) => state.addToast)
+  const isGenerating = useStore((state) => state.isGenerating)
+  const setIsGenerating = useStore((state) => state.setIsGenerating)
+  const setLastResult = useStore((state) => state.setLastResult)
 
   const [role, setRole] = useState<RoleModel>({
     className: '',

@@ -736,7 +736,13 @@ export default function ViewDesigner({ editorSurface = false }: { editorSurface?
 }
 
 function NewViewDesigner() {
-  const { projectConfig, addToast, isGenerating, setIsGenerating, setLastResult } = useStore()
+  // Selective subscriptions avoid re-rendering this large component on every
+  // store change (e.g. each tab switch), which caused switching hangs.
+  const projectConfig = useStore((state) => state.projectConfig)
+  const addToast = useStore((state) => state.addToast)
+  const isGenerating = useStore((state) => state.isGenerating)
+  const setIsGenerating = useStore((state) => state.setIsGenerating)
+  const setLastResult = useStore((state) => state.setLastResult)
 
   const [designer, dispatchDesigner] = useReducer(
     designerHistoryReducer,
