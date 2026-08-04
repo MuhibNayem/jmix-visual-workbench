@@ -446,6 +446,23 @@ export default function EntityDesigner({
     () => schemaWorkspace?.modules.filter((module) => (storeCountByModule.get(module.moduleId) ?? 0) > 0) ?? [],
     [schemaWorkspace, storeCountByModule],
   )
+  /**
+   * Every managed store in the project, ordered so the selected source
+   * module's own stores come first. Picking a store owned by a different
+   * module routes the generated Liquibase DDL to that module's changelog
+   * include-chain while the entity source stays in the source module
+   * (cross-module DDL routing).
+   */
+  const ddlStores = useMemo(() => {
+    const stores = schemaWorkspace?.stores ?? []
+    return [...stores].sort((a, b) => {
+      const aOwn = a.moduleId === selectedModuleId ? 0 : 1
+      const bOwn = b.moduleId === selectedModuleId ? 0 : 1
+      if (aOwn !== bOwn) return aOwn - bOwn
+      if (a.moduleId !== b.moduleId) return a.moduleId.localeCompare(b.moduleId)
+      return a.name.localeCompare(b.name)
+    })
+  }, [schemaWorkspace, selectedModuleId])
   const selectedModule = schemaWorkspace?.modules.find(module => module.moduleId === selectedModuleId)
   const effectiveProjectId = selectedModule?.projectId ?? projectConfig?.projectId
   const selectedStore = schemaWorkspace?.stores.find(
@@ -1993,9 +2010,13 @@ export default function EntityDesigner({
                 disabled={Boolean(existingEntity) || schemaLoading || !schemaWorkspace?.modules.length}
                 onChange={(event) => {
                   const moduleId = event.target.value
+                  // Prefer the source module's own store; when it has none, fall
+                  // back to the first managed store elsewhere in the project so
+                  // DDL stays routable (cross-module routing).
                   const defaultStore = schemaWorkspace?.stores.find(
                     (store) => store.moduleId === moduleId && store.name === 'main',
                   ) ?? schemaWorkspace?.stores.find((store) => store.moduleId === moduleId)
+                    ?? schemaWorkspace?.stores[0]
                   setEntity({
                     dataStore: defaultStore?.name ?? 'main',
                     generationTarget: {
@@ -2018,12 +2039,12 @@ export default function EntityDesigner({
                 })}
               </select>
             </Field>
-            <Field label="Data Store">
+            <Field label="Data Store (DDL target)">
               <select
                 value={entity.generationTarget?.storeId ?? ''}
-                disabled={Boolean(existingEntity) || schemaLoading || moduleStores.length === 0}
+                disabled={Boolean(existingEntity) || schemaLoading || ddlStores.length === 0}
                 onChange={(event) => {
-                  const store = moduleStores.find((candidate) => candidate.id === event.target.value)
+                  const store = ddlStores.find((candidate) => candidate.id === event.target.value)
                   setEntity({
                     dataStore: store?.name ?? 'main',
                     generationTarget: {
@@ -2034,10 +2055,12 @@ export default function EntityDesigner({
                 }}
                 className="w-full"
               >
-                {moduleStores.length === 0 && <option value="">No managed data store</option>}
-                {moduleStores.map((store) => (
+                {ddlStores.length === 0 && <option value="">No managed data store in this project</option>}
+                {ddlStores.map((store) => (
                   <option key={store.id} value={store.id}>
-                    {store.name} · {store.includeMode.replace(/_/g, ' ').toLowerCase()}
+                    {store.moduleId === selectedModuleId
+                      ? `${store.name} · ${store.includeMode.replace(/_/g, ' ').toLowerCase()}`
+                      : `${store.name} · ${store.moduleId} (cross-module) · ${store.includeMode.replace(/_/g, ' ').toLowerCase()}`}
                   </option>
                 ))}
               </select>
@@ -2045,11 +2068,17 @@ export default function EntityDesigner({
             {selectedStore ? (
               <div className="rounded border border-surface-border bg-surface px-2.5 py-2 text-[10px] leading-relaxed text-gray-500">
                 <div className="font-medium text-gray-300">
-                  {entity.sourceLanguage === 'kotlin' ? 'Kotlin' : 'Java'} → {selectedStore.moduleId}/src/main/{entity.sourceLanguage}
+                  {entity.sourceLanguage === 'kotlin' ? 'Kotlin' : 'Java'} → {selectedModuleId}/src/main/{entity.sourceLanguage}
                 </div>
                 <div className="mt-1 break-all">
                   Liquibase → {selectedStore.generatedDirectory ?? 'No writable include-chain destination'}
                 </div>
+                {selectedStore.moduleId !== selectedModuleId && (
+                  <div className="mt-1 text-jmix-300">
+                    Cross-module routing: source stays in {selectedModuleId}; DDL is written to the{' '}
+                    {selectedStore.name} store owned by {selectedStore.moduleId}.
+                  </div>
+                )}
                 {selectedStore.name !== 'main' && (
                   <div className="mt-1 text-jmix-300">
                     Generates @Store(name = &quot;{selectedStore.name}&quot;)
@@ -2058,15 +2087,20 @@ export default function EntityDesigner({
               </div>
             ) : (
               <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-amber-200/80">
-                This module has no managed Liquibase store, so DDL generation is disabled. Source generation
-                remains available.
-                {managedStoreModules.length > 0 ? (
+                No data store is selected, so DDL generation is disabled. Source generation remains
+                available.
+                {ddlStores.length > 0 ? (
                   <span>
-                    {' '}To generate Liquibase changes, pick a module that owns a data store:{' '}
+                    {' '}Pick a data store above to route Liquibase changes — including stores owned by
+                    another module (cross-module routing).
+                  </span>
+                ) : managedStoreModules.length > 0 ? (
+                  <span>
+                    {' '}Modules owning a data store:{' '}
                     <span className="text-amber-100">
                       {managedStoreModules.slice(0, 4).map((module) => module.moduleId).join(', ')}
                       {managedStoreModules.length > 4 ? `, … (${managedStoreModules.length} total)` : ''}
-                    </span>.
+                    </span>. Reload with ⟳ if a store was added recently.
                   </span>
                 ) : (
                   <span>
