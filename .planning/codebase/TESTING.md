@@ -1,170 +1,157 @@
 # Testing Patterns
 
-**Analysis Date:** 2026-07-27
+**Analysis Date:** 2026-08-04
 
 ## Test Framework
 
-**Runner:**
-- Not detected for Kotlin: `plugin/build.gradle.kts` applies the Java and Kotlin plugins but declares no JUnit, Kotest, or IntelliJ test-framework dependency.
-- Not detected for React/TypeScript: `webui/package.json` declares no Vitest, Jest, React Testing Library, or Playwright dependency and has no `test` script.
-- Gradle contributes a conventional `test` task through the Java plugin in `plugin/build.gradle.kts`, but there are no test sources or assertion dependencies for it to execute.
-- Config: no dedicated test configuration exists alongside `plugin/build.gradle.kts`, `webui/vite.config.ts`, or `webui/tsconfig.json`.
+**Runners (Kotlin plugin code):**
+- `kotlin.test` (`assertEquals`, `assertTrue`, `assertFailsWith`, `assertNull`, `assertSame`, `@Test`) is the assertion vocabulary for all Kotlin suites.
+- Shared host-lane suite (`plugin/src/test/kotlin/`): executed on the JUnit Platform via `useJUnitPlatform()` in both `plugin/hosts/idea253/build.gradle.kts` (line ~310) and `plugin/hosts/idea262/build.gradle.kts` (line ~312), with `kotlin("test")`, `junit:junit:4.13.2`, and `org.junit.vintage:junit-vintage-engine:5.10.1` so IntelliJ JUnit3-style fixture tests run.
+- IntelliJ Platform test framework: `testFramework(TestFrameworkType.Platform)` and `testFramework(TestFrameworkType.Plugin.Java)` (`plugin/hosts/idea253/build.gradle.kts` lines ~146–147).
+- Phase 2 discovery suite (`plugin/src/phase2CoreTest/kotlin/`): JUnit 5 via `kotlin("test-junit5")` + `junit-jupiter-engine:5.10.1` + `junit-platform-launcher:1.10.1`, wired in `plugin/build.gradle.kts` (lines ~106–114, `useJUnitPlatform()` at ~392).
+- buildSrc tasks (`plugin/buildSrc/`): Java + JUnit Jupiter 5.10.1 (`plugin/buildSrc/build.gradle.kts`).
 
-**Assertion Library:**
-- Not detected in `plugin/build.gradle.kts` or `webui/package.json`.
+**Assertion library:** `kotlin.test` (Kotlin), JUnit Jupiter `Assertions` (buildSrc Java tests).
 
-**Run Commands:**
+**Run commands** (from `plugin/`, always with the checked-in wrapper):
 ```bash
-cd webui && npm run build
-# Current frontend verification: strict TypeScript compilation followed by a Vite production build, from webui/package.json.
-
-cd plugin && gradle test
-# A Gradle task exists implicitly, but the checkout has no tests and the available Gradle 9.4.1 cannot apply org.jetbrains.intellij 1.17.4 from plugin/build.gradle.kts.
+./gradlew test --dependency-verification=strict # phase2CoreTest + verifyWebBundle, then both host test lanes via testShared
+./gradlew phase2CoreTest # platform-independent discovery contract tests only
+./gradlew phase2FastCheck # fast Phase 2 verification lanes
+./gradlew clean phase1Check --dependency-verification=strict # full gate: tests, smoke tests, plugin builds, verifier, zip checks
+./gradlew testShared # explicit: :idea253:test :idea262:test
 ```
-
-- No all-tests, watch-test, or coverage command is currently available in `webui/package.json`.
-- The README commands `cd plugin && ./gradlew buildPlugin` and `cd plugin && ./gradlew runIde` in `README.md` are not runnable from this checkout because `plugin/gradlew`, `plugin/gradlew.bat`, and `plugin/gradle/wrapper/gradle-wrapper.jar` are absent.
 
 ## Test File Organization
 
-**Location:**
-- No test directory exists under `plugin/src/`; all 22 Kotlin files are production sources under `plugin/src/main/kotlin/`.
-- No test directory or co-located test file exists under `webui/src/`; all 13 TypeScript/TSX files are production sources.
-- No repository-level E2E directory exists alongside `plugin/`, `webui/`, or `README.md`.
+**Locations and counts:**
+- `plugin/src/test/kotlin/org/jmixworkbench/` — 87 shared test classes compiled and executed by **both** host lanes. The host builds attach it directly: `kotlin.srcDir("../../src/test/kotlin")` in `plugin/hosts/idea253/build.gradle.kts` (line ~126) and the equivalent in `plugin/hosts/idea262/build.gradle.kts`. Main sources attach the same way (`kotlin.srcDir("../../src/main/kotlin")`).
+- `plugin/src/phase2CoreTest/kotlin/org/jmixworkbench/discovery/` — 12 platform-independent contract tests for the discovery layer, run by the aggregate `phase2CoreTest` task. The aggregate build's `main` and `test` source sets are intentionally empty (`plugin/build.gradle.kts` lines ~90–98) so a bare `./gradlew test` cannot compile IntelliJ-dependent code without an SDK.
+- `plugin/hosts/idea253/src/test/kotlin/org/jmixworkbench/host/idea253/Idea253DescriptorTest.kt` and `plugin/hosts/idea262/src/test/kotlin/org/jmixworkbench/host/idea262/Idea262DescriptorTest.kt` — lane-local descriptor checks.
+- `plugin/buildSrc/src/test/java/org/jmixworkbench/build/` — 2 task tests: `VerifyWebBundleTaskTest.java`, `VerifyPluginZipContentsTaskTest.java`.
+- `webui/` — **no tests and no test framework at all** (see Gaps).
 
-**Naming:**
-- No `*Test.kt`, `*Tests.kt`, `*.test.ts`, `*.test.tsx`, `*.spec.ts`, `*.spec.tsx`, or `*IT.kt` naming convention is established anywhere outside ignored dependency/build directories in `jmix-studio-clone/`.
+**Naming:** `<Subject>Test.kt` for unit/contract tests; `<Subject>IntegrationTest.kt` for tests needing a real project fixture or IDE (`JmixProjectServiceIntegrationTest.kt`, `ApplicationGraphServiceIntegrationTest.kt`, `WorkbenchToolWindowFactoryIntegrationTest.kt`); `*LiveMatrixTest.kt` for externally provisioned runs (`DatabaseReverseEngineeringLiveMatrixTest.kt`).
 
-**Structure:**
-```text
-plugin/src/main/kotlin/     # Production Kotlin only
-webui/src/                 # Production TypeScript/TSX only
-```
-
-- If Kotlin tests are introduced, the Gradle source-set convention implied by `plugin/build.gradle.kts` is `plugin/src/test/kotlin/`, but that directory is not currently present.
-- If frontend tests are introduced, select and configure a runner in `webui/package.json` before establishing either co-located or separate test placement; `webui/vite.config.ts` currently contains build and dev-server configuration only.
+**Structure:** tests mirror production packages: `plugin/src/test/kotlin/org/jmixworkbench/generator/EntityAndCrudGeneratorTest.kt` tests `plugin/src/main/kotlin/org/jmixworkbench/generator/EntityGenerator.kt`; `plugin/src/phase2CoreTest/kotlin/org/jmixworkbench/discovery/change/SourcePreservingMergeTest.kt` tests `plugin/src/main/kotlin/org/jmixworkbench/discovery/change/SourcePreservingMerge.kt`.
 
 ## Test Structure
 
-**Suite Organization:**
-- Not applicable: no automated test suite exists in `plugin/src/` or `webui/src/`.
-- Do not infer a `describe`/`it`, JUnit annotation, setup, or teardown convention from the production code in `plugin/src/main/kotlin/` or `webui/src/`.
+**Pure unit test (kotlin.test, backtick names):**
+```kotlin
+// plugin/src/test/kotlin/org/jmixworkbench/generator/MigrationGeneratorTest.kt
+class MigrationGeneratorTest {
+ @Test
+ fun `constraints rollback and portable attributes are emitted as valid Liquibase XML`() {
+ ...
+ }
+}
+```
 
-**Patterns:**
-- Setup pattern: Not detected in `plugin/src/` or `webui/src/`.
-- Teardown pattern: Not detected in `plugin/src/` or `webui/src/`.
-- Assertion pattern: Not detected in `plugin/src/` or `webui/src/`.
-- The only repeatable automated frontend check is the `tsc && vite build` script in `webui/package.json`; it checks type/build validity, not behavior.
+**IntelliJ fixture test (JUnit3-style `test*` methods):**
+```kotlin
+// plugin/src/test/kotlin/org/jmixworkbench/ide/JmixNativeDomainAssistanceTest.kt
+class JmixNativeDomainAssistanceTest : LightJavaCodeInsightFixtureTestCase() {
+ fun testUnresolvedEntityPropertyIsHighlightedAndFixed() {
+ myFixture.addClass(""" ... """)
+ myFixture.enableInspections(JmixDomainXmlReferenceInspection())
+ myFixture.configureByText("menu.xml", """ ... """)
+ val problem = myFixture.doHighlighting()
+ ...
+ }
+}
+```
+Use `LightJavaCodeInsightFixtureTestCase` for Java PSI assistance/inspection tests and `BasePlatformTestCase` for platform-service/workspace tests (e.g. `plugin/src/test/kotlin/org/jmixworkbench/services/JmixProjectPropertiesIntegrationTest.kt`).
+
+**IDE-launch smoke test:** `plugin/src/test/kotlin/org/jmixworkbench/toolwindow/WorkbenchToolWindowFactoryIntegrationTest.kt` is a plain kotlin.test class but is **excluded from the lane `test` task** (`excludeTestsMatching(...)` in `plugin/hosts/idea253/build.gradle.kts` line ~319) and **only included in `hostSmokeTest`** — an `intellijPlatformTesting.testIde` task (line ~323) that boots a real sandboxed IDE per lane.
 
 ## Mocking
 
-**Framework:** Not detected in `plugin/build.gradle.kts` or `webui/package.json`.
+**Framework:** None (no MockK/Mockito anywhere). Test doubles are hand-written:
+- `fun interface` seams in production code exist specifically for this: `WorkspaceMutationProbe`, `JmixProjectResourceLoader`, `JmixProjectInstallProbe` (`plugin/src/main/kotlin/org/jmixworkbench/project/JmixProjectInstaller.kt`), `WorkbenchProjectBridge`/`WorkbenchFileEditorRuntime`.
+- JDK dynamic proxies stand in for IDE interfaces where needed: `java.lang.reflect.Proxy` in `plugin/src/test/kotlin/org/jmixworkbench/toolwindow/WorkbenchToolWindowFactoryIntegrationTest.kt`.
+- Virtual project fixtures are created through the platform fixture API (`myFixture.addClass`, `myFixture.addFileToProject`, `myFixture.configureByText`) instead of filesystem mocks.
 
-**Patterns:**
-- No mocking pattern exists in `plugin/src/` or `webui/src/`.
-- The development-only bridge simulation in `webui/src/bridge/index.ts` is runtime fallback behavior, not a test mock: it logs the action, waits 300 ms, and resolves a fabricated successful `GenerationResult`.
-
-**What to Mock:**
-- No project-wide rule is established in `plugin/src/` or `webui/src/`.
-- IntelliJ `Project`, VFS, `WriteCommandAction`, and JCEF dependencies are the natural external boundaries around `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`, and `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- The browser bridge is the natural frontend boundary because feature components import the singleton from `webui/src/bridge/index.ts`.
-
-**What NOT to Mock:**
-- No project-wide rule is established in `plugin/src/` or `webui/src/`.
-- Pure source transformations in `plugin/src/main/kotlin/com/jmixstudio/generator/EntityGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/MigrationGenerator.kt`, and `plugin/src/main/kotlin/com/jmixstudio/generator/ViewXmlGenerator.kt` have no external dependency to mock.
-- Immutable state transformations in `webui/src/store/index.ts` and pure tree helpers in `webui/src/components/ViewDesigner/ViewDesigner.tsx` can be exercised directly once a frontend runner exists.
+**What to mock:** IDE/runtime interfaces at the edge (browsers, loaders, probes). **What NOT to mock:** generators, parsers, and models — assert on their real string/JSON output; `JVW-*` diagnostic codes are asserted verbatim.
 
 ## Fixtures and Factories
 
-**Test Data:**
-- No test fixtures or factories exist under `plugin/src/` or `webui/src/`.
-- Production defaults currently act as UI seed data: `defaultEntity()` and `defaultAttribute()` in `webui/src/store/index.ts`, `defaultOptions` in `webui/src/components/CrudWizard/CrudWizard.tsx`, and initial menu nodes in `webui/src/components/MenuDesigner/MenuDesigner.tsx`.
-- Kotlin data classes provide default values that make model fixtures straightforward to construct, especially `EntityModel` in `plugin/src/main/kotlin/com/jmixstudio/model/EntityModel.kt`, `ProjectConfig` in `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt`, and `CrudOptions` in `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`.
-
-**Location:**
-- Not detected; no fixture directory exists under `plugin/src/` or `webui/src/`.
+- Fixtures are inline Kotlin/Java source strings inside test methods (`myFixture.addClass("""...""")` in `plugin/src/test/kotlin/org/jmixworkbench/ide/JmixNativeDomainAssistanceTest.kt`) and inline XML/JSON payloads for parser tests (`plugin/src/test/kotlin/org/jmixworkbench/services/WorkflowXmlParserTest.kt`, `plugin/src/test/kotlin/org/jmixworkbench/services/MigrationJsonParserTest.kt`).
+- There are no test resource directories: `plugin/src/test/resources/` and `plugin/src/phase2CoreTest/resources/` do not exist on disk. New fixture data should be inline unless a test genuinely needs a binary/resource file.
+- Generated compatibility fixtures are produced by `generateCompatibilityFixtures` from `plugin/src/compatibilityGenerator/kotlin/org/jmixworkbench/certification/CompatibilityFixtureGenerator.kt` into `plugin/build/compatibility/generated-sources` — build-owned, never checked in.
 
 ## Coverage
 
-**Requirements:** None enforced in `plugin/build.gradle.kts`, `webui/package.json`, or any CI configuration under `jmix-studio-clone/`.
+**Requirements:** None enforced. No JaCoCo, Kover, or Istanbul tooling exists; the word "coverage" in the repo is a domain term (`SchemaMigrationCoverage`, `ApplicationGraphModuleCoverage`), not test coverage.
 
-**View Coverage:**
-```bash
-# Not available: no JaCoCo, Kover, Istanbul/c8, or Vitest/Jest coverage configuration exists.
-```
-
-- No coverage threshold, report task, badge, or committed coverage artifact is referenced by `README.md`, `plugin/build.gradle.kts`, or `webui/package.json`.
-- Current effective automated behavioral coverage is zero because no test files exist under `plugin/src/` or `webui/src/`.
+**Substitutes that ARE enforced:** see "Quality gates" below — architectural verification tasks, compatibility compilation cells, Plugin Verifier, and zip-content verification carry the load that coverage gates usually carry.
 
 ## Test Types
 
-**Unit Tests:**
-- Not used: there are no unit tests for the fluent builders in `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt` and `plugin/src/main/kotlin/com/jmixstudio/generator/XmlBuilder.kt`.
-- Not used: there are no golden/snapshot tests for generated Java, XML, Liquibase, BPMN, or CRUD output from `plugin/src/main/kotlin/com/jmixstudio/generator/`.
-- Not used: there are no store or pure-helper tests for `webui/src/store/index.ts` or `webui/src/components/ViewDesigner/ViewDesigner.tsx`.
+**Unit tests:** generator/parser/model contract tests in `plugin/src/test/kotlin/org/jmixworkbench/generator/`, `.../services/` (parser-flavored), and all of `plugin/src/phase2CoreTest/`. Platform-independent phase2 tests run without any IntelliJ SDK — the `phase2Core` source set compiles only `org/jmixworkbench/discovery/**` plus `discovery/static/GradleConfigParser.kt` (`plugin/build.gradle.kts` lines ~37–53).
 
-**Integration Tests:**
-- Not used: bridge action routing, Gson model conversion, and error serialization in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` are untested.
-- Not used: project detection and build-file parsing in `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt` are untested.
-- Not used: real file generation, append behavior, IntelliJ write actions, and VFS refresh in `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt` are untested.
-- Not used: React feature components do not have integration tests against the bridge singleton in `webui/src/bridge/index.ts`.
+**Integration tests (platform fixtures):** `BasePlatformTestCase`/`LightJavaCodeInsightFixtureTestCase` suites under `plugin/src/test/kotlin/org/jmixworkbench/ide/`, `.../editor/`, `.../services/`, `.../project/`, `.../actions/` — run on both host lanes.
 
-**E2E Tests:**
-- Not used: there is no Playwright, Cypress, Selenium, IntelliJ UI test, or Robot Framework dependency in `webui/package.json` or `plugin/build.gradle.kts`.
-- No automated workflow launches the JCEF tool window registered in `plugin/src/main/resources/META-INF/plugin.xml`, exercises the React UI in `webui/src/App.tsx`, and verifies generated project files.
+**IDE smoke tests:** `hostSmokeTest` per lane (real IDE startup, tool-window factory attach).
+
+**Live/opt-in tests:** skipped unless enabled via system properties forwarded by `tasks.withType<Test>` in both host builds (`plugin/hosts/idea253/build.gradle.kts` lines ~152–176): `jvw.live.db.enabled/url/username/password/driver/driverClasspath/hostLane/evidenceFile` (used by `plugin/src/test/kotlin/org/jmixworkbench/services/DatabaseReverseEngineeringLiveMatrixTest.kt`), `jvw.project.template.runtime.*`, `jvw.project.template.java17Home|java21Home|java25Home`. CI never sets these.
+
+**E2E (UI):** Not present — `webui/` has no test runner.
+
+**Runtime certification harnesses (outside the main build):** `certification/database-runtime/` (Docker Compose matrix, `./run-matrix.sh`, machine-readable evidence per cell into `evidence/current`) and `certification/integration-runtime/`, documented in `docs/DATABASE-RUNTIME-CERTIFICATION.md`. These produce certification evidence, not regression tests, and are not invoked by `phase1Check`.
+
+## Quality Gates That DO Exist
+
+**CI (`.github/workflows/ci.yml`):** one job, `phase1` on `ubuntu-24.04` (push to `main` + PRs): validates the checked-in wrapper jar SHA-256 and `distributionSha256Sum`, installs Temurin 21, then runs:
+```bash
+cd plugin && ./gradlew clean phase1Check --dependency-verification=strict --no-daemon --no-configuration-cache --stacktrace
+```
+Artifacts uploaded: both lane plugin ZIPs (`jmix-visual-workbench-1.0.0-idea253.zip`, `-idea262.zip`) and all test/Plugin Verifier reports. Actions pinned by commit SHA. Dependabot (`.github/dependabot.yml`) opens review-only PRs for gradle/npm/github-actions ecosystems.
+
+**`phase1Check` chain (`plugin/build.gradle.kts`):** `phase1Check` → `verifyPluginZipContents` → `phase1Idea262Gate` → `phase1Idea253Gate` → `phase1RootGate`. Each gate re-invokes the wrapper with `--dependency-verification=strict --no-daemon --stacktrace`.
+- Root gate runs `phase1FastCheck`, which depends on: `certifyGeneratedCodeCompatibility`, `phase2CoreTest`, `verifyWebBundle`, `verifyHostBuildDefinitions`, `verifyHostToolchains`, `verifyNativeIndexArchitecture`, `verifyMutationArchitecture`, `verifyDependencyIntegrity` (lines ~1120–1131).
+- Each host gate runs `:clean :compileKotlin :test :hostSmokeTest :buildPlugin :verifyPlugin :verifyNoBundledKotlinRuntime` for that lane (lines ~1110–1117).
+
+**Architecture verification tasks (build-time static checks on source text):**
+- `verifyNativeIndexArchitecture` (~line 602): rejects broad index scopes, global PSI cache keys, and extension-wide scans in `plugin/src/main/kotlin/org/jmixworkbench/ide/`.
+- `verifyMutationArchitecture` (~line 703): rejects project-write primitives (`WriteCommandAction`, etc.) outside the certified mutation boundary files (`WorkspaceChangeService.kt`, `WorkspaceHistoryService.kt`, `JmixProjectInstaller.kt`, `JmixOrganizationTemplateCatalog.kt`, `JmixTemplateCatalogAuthoring.kt`, `InjectJmixRepositoryAction.kt`, `ProjectSourceText.kt`), requires `internal fun interface WorkspaceMutationProbe` to exist, and forbids the bridge from referencing it.
+- `verifyHostBuildDefinitions` (~line 533): asserts immutable host-lane contracts (toolchain versions, `sinceBuild`/`untilBuild`, descriptor `<depends>` entries) by string-checking `plugin/hosts/idea*/build.gradle.kts` and `plugin.xml`.
+- `verifyHostToolchains` (~line 510): proves idea253 compiles with Java 21 and idea262 with Java 25 via toolchain metadata.
+
+**Dependency integrity:**
+- `plugin/gradle/verification-metadata.xml`: SHA-256 verification with `<verify-metadata>true</verify-metadata>`; CI always passes `--dependency-verification=strict`; `--write-verification-metadata`/`--write-locks` are never used in CI (policy in `docs/BUILDING.md` and `plugin/gradle/dependency-locks/README.md`).
+- Strict per-lane dependency locking: `plugin/hosts/idea253/gradle/dependency-locks/gradle.lockfile` and `plugin/hosts/idea262/gradle/dependency-locks/gradle.lockfile` (`LockMode.STRICT`, only `runtimeClasspath` + `testRuntimeClasspath`), guarded by `snapshotLockHashes` → `verifyLockedConfigurations` → `compareLockHashes` → `verifyDependencyIntegrity` (`plugin/build.gradle.kts` lines ~832–881).
+- npm drift check: `snapshotNpmLockHash` captures `webui/package-lock.json` before `npmCi`, and the integrity task fails if `npm ci` changed the lockfile (lines ~455–466, ~922–925). Lockfile must stay version 3.
+
+**Artifact verification:** `VerifyPluginZipContentsTask` and `VerifyWebBundleTask` in `plugin/buildSrc/src/main/java/org/jmixworkbench/build/` (both have their own JUnit tests) reject missing/stale web bundles, forbidden Node/cache payloads, and wrong provenance inside the lane ZIPs.
+
+**Compatibility certification:** `certifyGeneratedCodeCompatibility` (~line 253) compiles the generated source corpus against exact cells — Jmix 2.8.2 on JDK 17/21 and 3.0.0 on JDK 21/25 (`targetCompatibilityCells`, lines ~142–147) — and writes evidence to `plugin/build/reports/compatibility/generated-code-certification.json`.
+
+**Plugin Verifier:** `pluginVerifier()` + `:verifyPlugin` run per lane as part of every host gate.
 
 ## Common Patterns
 
-**Async Testing:**
-- No async test pattern exists in `webui/src/` or `plugin/src/`.
-- Async production behavior that requires future coverage includes response subscription and unsubscription in `webui/src/bridge/index.ts`, the 300 ms development timer in `webui/src/bridge/index.ts`, the 5-second toast timer in `webui/src/store/index.ts`, and loading cleanup in `webui/src/components/EntityDesigner/EntityDesigner.tsx`.
+**Assertion style:**
+```kotlin
+// plugin/src/phase2CoreTest/kotlin/org/jmixworkbench/discovery/model/DiscoveryModelTest.kt
+assertEquals(expected, actual)
+assertFailsWith<IllegalArgumentException> { ... }
+assertTrue("2.4.0" !in rendered)
+```
 
-**Error Testing:**
-- No error-test pattern exists in `webui/src/` or `plugin/src/`.
-- Error paths that currently have no regression coverage include malformed JSON and unknown actions in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, generator/file failures converted to `GenerationResult` in `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, and failed result toasts in `webui/src/components/CrudWizard/CrudWizard.tsx`.
+**Async testing:** Not applicable to the Kotlin suites; the React UI has no tests. Bridge behavior is exercised indirectly through the IDE smoke test.
 
-## Testability Map
+**Error testing:** assert on `JVW-*` diagnostic codes and on `GenerationResult.success == false` with expected `errors` entries; use `assertFailsWith<...>` for model validation.
 
-**Highly Testable Pure Kotlin:**
-- `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt` and `plugin/src/main/kotlin/com/jmixstudio/generator/XmlBuilder.kt` are deterministic builders with string outputs and no IntelliJ dependencies.
-- Generator singleton objects under `plugin/src/main/kotlin/com/jmixstudio/generator/` accept model objects and return strings; `EntityGenerator.generate`, `MigrationGenerator.generate`, `RoleGenerator.generate`, and `BpmGenerator.generate` can be covered with table-driven or golden-output tests.
-- `CrudOrchestrator.generate` in `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt` composes pure generators into a structured list of relative paths and contents without writing files.
-- Path conversion helpers and derived properties in `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt` and `plugin/src/main/kotlin/com/jmixstudio/model/EntityModel.kt` are deterministic.
+## Gaps
 
-**Frontend Pure Logic:**
-- Default-model and immutable state logic lives in `webui/src/store/index.ts`, but the store is created and exported as a singleton at module load.
-- Recursive tree transformations in `webui/src/components/ViewDesigner/ViewDesigner.tsx` are pure but module-private, so direct unit testing requires either testing through the component or extracting/exporting the helpers.
-- Expected CRUD file calculation in `webui/src/components/CrudWizard/CrudWizard.tsx` is deterministic but kept in the feature component module.
-
-**IntelliJ-Coupled Kotlin:**
-- `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt` directly obtains IntelliJ services and performs private `java.io.File` writes inside `WriteCommandAction`, so isolated tests need an IntelliJ test fixture or an extracted file-writing port.
-- `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt` reads `Project.baseDir` and `VirtualFile` contents directly and caches the result, so tests need synthetic IntelliJ projects/VFS fixtures.
-- `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` creates `JBCefJSQuery` and registers handlers in its constructor, coupling routing tests to JCEF unless message parsing/routing is extracted.
-- `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt` loads either a development URL or bundled JCEF content and therefore requires an IntelliJ/JCEF integration environment.
-
-**Frontend Coupling:**
-- `webui/src/bridge/index.ts` exports an eagerly constructed singleton that mutates global `window` callbacks during module evaluation; tests need DOM globals and careful module isolation.
-- Feature components such as `webui/src/components/EntityDesigner/EntityDesigner.tsx` and `webui/src/components/MigrationPanel/MigrationPanel.tsx` import the bridge and Zustand store directly, with no dependency-injection seam.
-- Large render-and-state modules—especially `webui/src/components/ViewDesigner/ViewDesigner.tsx`, `webui/src/components/MigrationPanel/MigrationPanel.tsx`, and `webui/src/components/EntityDesigner/EntityDesigner.tsx`—combine validation, model mutation, bridge calls, and presentation, which pushes most behavioral checks toward component integration tests.
-
-## Build and CI Verification
-
-**Frontend Build:**
-- `npm run build` from `webui/package.json` completed successfully on 2026-07-27: TypeScript compiled, Vite transformed 1,587 modules, and output was written under ignored `webui/dist/`.
-- This build verifies compilation and bundling only; no tests or lint checks run before `vite build` in `webui/package.json`.
-- The README instruction to build the UI with `cd webui && npm run build` in `README.md` matches the actual script and succeeds with the installed dependencies recorded by `webui/package-lock.json`.
-
-**Plugin Build:**
-- `plugin/gradle/wrapper/gradle-wrapper.properties` pins Gradle 8.7, but the wrapper scripts and wrapper JAR are missing, so the `./gradlew` commands documented in `README.md` cannot start.
-- Running the implicit `test` task with the available system Gradle 9.4.1 fails while applying `org.jetbrains.intellij` 1.17.4 from `plugin/build.gradle.kts` because Gradle's `DefaultArtifactPublicationSet` type is unavailable; plugin compilation and the empty test task are therefore not verified.
-- `plugin/build.gradle.kts` makes `processResources` depend on `copyWebUi`, which copies existing `webui/dist/` into plugin resources but does not invoke npm; the sequential UI-then-plugin order documented in `README.md` is required by the current build.
-- JDK 17 is enforced through `jvmToolchain(17)` in `plugin/build.gradle.kts`, matching the JDK prerequisite in `README.md`.
-- Node.js 18 is stated in `README.md` but is not enforced through an `engines` field in `webui/package.json`, an `.nvmrc`, or another version-manager file under `webui/`.
-
-**CI Pipeline:**
-- Not detected: no GitHub Actions, GitLab CI, Jenkins, CircleCI, or Azure Pipelines definition exists alongside `README.md`.
-- No automated gate currently runs `npm run build`, a Gradle task, behavioral tests, linting, or coverage for changes to `webui/` or `plugin/`.
+- **`webui/` is completely untested.** `webui/package.json` has only `dev`/`build`/`preview` scripts and no test dependency; the sole frontend gate is `tsc && vite build`. Any UI logic change ships unverified beyond type checking.
+- **No coverage measurement anywhere** (no JaCoCo/Kover/Istanbul); there is no quantitative evidence of which generator/parser paths are exercised.
+- **`plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt` (the ~4500-line dispatcher) has no dedicated unit test file** in `plugin/src/test/kotlin/`; its behavior is covered only indirectly via service-level and smoke tests.
+- **Live matrix tests never run in CI** (`jvw.live.db.*` and template-runtime properties are unset in `.github/workflows/ci.yml`); database/runtime evidence depends on manual `certification/database-runtime/run-matrix.sh` runs.
+- **The `compatibilityGenerator` source set** (`plugin/src/compatibilityGenerator/kotlin/`) has no tests of its own; correctness is inferred from the downstream compatibility compilation cells.
+- **No frontend integration test for the JCEF bridge protocol** — request/response matching, timeouts, and the pending queue in `webui/src/bridge/index.ts` rely on the smoke test and manual verification.
 
 ---
 
-*Testing analysis: 2026-07-27*
+*Testing analysis: 2026-08-04*

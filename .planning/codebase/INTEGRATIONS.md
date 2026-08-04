@@ -1,119 +1,126 @@
 # External Integrations
 
-**Analysis Date:** 2026-07-27
+**Analysis Date:** 2026-08-04
 
 ## APIs & External Services
 
-**IntelliJ Platform:**
-- IntelliJ IDEA Community Platform 2024.1 - host application and API surface for the plugin.
-  - SDK/Client: `org.jetbrains.intellij` Gradle plugin 1.17.4 in `plugin/build.gradle.kts`; compile target `IC` 2024.1 in `plugin/gradle.properties`.
-  - Auth: None. The plugin runs inside the user's IDE process and uses declared module dependencies from `plugin/src/main/resources/META-INF/plugin.xml`.
-  - Touchpoints: tool-window and action registrations in `plugin/src/main/resources/META-INF/plugin.xml`; implementations in `plugin/src/main/kotlin/com/jmixstudio/toolwindow/`, `plugin/src/main/kotlin/com/jmixstudio/actions/`, and `plugin/src/main/kotlin/com/jmixstudio/services/`.
+**Build-time artifact sources:**
+- Maven Central + Gradle Plugin Portal - JVM dependencies and Gradle plugins (`plugin/settings.gradle.kts`, `plugin/build.gradle.kts`, `plugin/buildSrc/build.gradle.kts`).
+- JetBrains IntelliJ Platform repositories - IntelliJ IDEA Ultimate 2025.3 / 2026.2 platform distributions, bundled modules/plugins, and Plugin Verifier inputs, resolved by the IntelliJ Platform Gradle Plugin 2.18.0 (`plugin/hosts/idea253/build.gradle.kts`, `plugin/hosts/idea262/build.gradle.kts`).
+- Jmix public Maven repository `https://global.repo.jmix.io/repository/public` - compatibility certification fixtures only; content-filtered to `io.jmix.*` groups (`plugin/build.gradle.kts`).
+- Node.js distribution download - Node 24.18.0 fetched into `plugin/build/nodejs` by com.github.node-gradle.node 7.1.0 (`plugin/build.gradle.kts`).
+- Foojay API - Eclipse Temurin toolchain provisioning via `org.gradle.toolchains.foojay-resolver-convention` 1.0.0 (`plugin/settings.gradle.kts`).
 
-**Embedded Browser / JCEF:**
-- IntelliJ JCEF - hosts the React designer and transports commands between TypeScript and Kotlin.
-  - SDK/Client: IntelliJ `JBCefBrowser`, `JBCefJSQuery`, and CEF handlers in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-  - Auth: None; communication is an in-process bridge injected into the embedded page.
-  - Protocol: TypeScript calls `window.javaBridge.send(action, payload)` from `webui/src/bridge/index.ts`; Kotlin receives JSON, dispatches generation actions, and executes `window.onBridgeResponse(...)` in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-  - Serialization: Gson 2.11.0, declared in `plugin/build.gradle.kts` and used by `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
+**Runtime network calls (user-initiated features only):**
+- Organization template catalog downloads - `java.net.http.HttpClient` with redirects disabled (`HttpClient.Redirect.NEVER`); every bundle is Ed25519-verified before installation (`plugin/src/main/kotlin/org/jmixworkbench/project/JmixOrganizationTemplateCatalog.kt`).
+- Loopback REST contract probes - `plugin/src/main/kotlin/org/jmixworkbench/services/RestApiWorkspaceService.kt` fetches live contracts only from validated loopback targets (`validatedLoopbackTarget`) of the user's running application.
+- Runtime preview health probe - `HttpURLConnection` against the target app's loopback address and resolved `server.port` (default 8080) (`plugin/src/main/kotlin/org/jmixworkbench/services/JmixRuntimeService.kt`).
 
-**Jmix Project Integration:**
-- Open Jmix project - detection, configuration inference, and generated-code target.
-  - SDK/Client: IntelliJ `Project`/`VirtualFile` APIs in `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`.
-  - Auth: None.
-  - Detection: reads root `build.gradle` or `build.gradle.kts` and recognizes `io.jmix` or `jmix-gradle-plugin` in `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`.
-  - Generated APIs: Jmix Core, Flow UI, Security, Jakarta Persistence, Spring Data, and Spring imports are emitted by generators under `plugin/src/main/kotlin/com/jmixstudio/generator/`; those libraries must exist in the target Jmix application and are not dependencies of this plugin.
+## Embedded Runtime (JCEF)
 
-**Schema and Workflow Formats:**
-- Liquibase XML - migrations are generated against the official dbchangelog namespace and latest schema URL in `plugin/src/main/kotlin/com/jmixstudio/generator/MigrationGenerator.kt`.
-  - SDK/Client: No Liquibase library. XML is built by the custom `XmlBuilder` in `plugin/src/main/kotlin/com/jmixstudio/generator/XmlBuilder.kt`.
-  - Runtime access: No database connection or Liquibase process is opened by the plugin.
-- BPMN 2.0 / Flowable / Jmix BPM - process definitions are generated with BPMN, Flowable, and Jmix namespaces in `plugin/src/main/kotlin/com/jmixstudio/generator/BpmGenerator.kt`.
-  - SDK/Client: No BPM engine library. The plugin writes `.bpmn20.xml` files through `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`.
-- Jmix Flow UI/menu/fetch-plan XML - namespace-compatible files are produced by `plugin/src/main/kotlin/com/jmixstudio/generator/ViewXmlGenerator.kt`, `MenuGenerator.kt`, and `CrudOrchestrator.kt`.
+**Browser hosting:**
+- JCEF is supplied by the IntelliJ runtime; support is checked with `JBCefApp.isSupported()` before browser creation (`plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixWorkbenchToolWindowFactory.kt`).
+- Surfaces: `Jmix Visual Workbench` tool window, `Jmix Runtime Preview` tool window, and file editor providers `JmixFlowUiFileEditorProvider` / `JmixEntityFileEditorProvider` (registered in `plugin/src/main/resources/META-INF/plugin.xml`; implementations in `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/` and `plugin/src/main/kotlin/org/jmixworkbench/editor/`).
+- Production UI is served from a private origin `https://jmix-workbench.invalid` through a custom `CefResourceHandler` backed by plugin classpath resources; entry URLs `/index.html`, `/flowui-editor.html`, `/entity-editor.html` (the editor URLs map back to `index.html`); responses set `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Resource-Policy: same-origin` (`plugin/src/main/kotlin/org/jmixworkbench/toolwindow/PackagedWorkbenchResourceHandler.kt`). Non private-origin requests pass through the normal browser pipeline.
 
-**Development and Dependency Services:**
-- Vite development server - optional local UI endpoint.
-  - SDK/Client: `JBCefBrowser.loadURL` in `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`.
-  - Configuration: JVM system property `jmixstudio.dev.url`; `webui/vite.config.ts` fixes the server to port 5173 with `strictPort: true`.
-  - Auth: None in repository configuration.
-- Maven Central - Gradle artifact repository for Gson and other declared runtime dependencies, configured in `plugin/build.gradle.kts`.
-- Gradle Plugin Portal - implicit plugin-resolution source for the Kotlin and JetBrains IntelliJ Gradle plugins because `plugin/settings.gradle.kts` declares no custom `pluginManagement` repositories.
-- npm registry - source of the locked frontend packages recorded in `webui/package-lock.json`.
-- Gradle distribution service - Gradle 8.7 distribution URL is recorded in `plugin/gradle/wrapper/gradle-wrapper.properties`, although the wrapper launcher and JAR are not present.
+**JS bridge protocol:**
+- Kotlin side: `JBCefJSQuery` dispatcher in `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt` injects `window.javaBridge.send(action, payload, requestId)` and answers via `window.onBridgeResponse(action, requestId, result)`; readiness via `window.onBridgeReady`. Injection is gated to packaged-workbench origin URLs only.
+- TypeScript side: `webui/src/bridge/index.ts` - pending queue, per-request-id promise routing, `window.jmixWorkbenchLaunchContext` / `window.onWorkbenchLaunchContext` handshake, dev simulation (`webui/src/bridge/devMocks.ts`).
+- The bridge action surface includes `get*Workspace` reads and `preview*`/`apply*` change pairs for entities, CRUD, FlowUI XML/controllers, schema migrations, security roles/policies, menus, scenario tests, visual logic, visual rules, DMN decisions, integration connectors, REST API contracts, environment configuration, project profiles, database entity import, plus runtime preview and navigation actions (`plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`).
 
-**Remote Application APIs:**
-- Not detected. Source under `plugin/src/` and `webui/src/` contains no HTTP client, `fetch`, Axios, WebSocket, GraphQL, or SaaS SDK integration. Namespace URLs in `plugin/src/main/kotlin/com/jmixstudio/generator/` are emitted XML identifiers/schema references, not application API calls.
+## Target Jmix Project Integration
+
+**Project discovery and indexing:**
+- Jmix/Gradle detection and config parsing: `plugin/src/main/kotlin/org/jmixworkbench/services/JmixProjectService.kt`, `plugin/src/main/kotlin/org/jmixworkbench/discovery/static/GradleConfigParser.kt`.
+- Semantic application graph: `plugin/src/main/kotlin/org/jmixworkbench/discovery/semantic/ApplicationGraphIndexer.kt`, `plugin/src/main/kotlin/org/jmixworkbench/services/ApplicationGraphService.kt`, with file-based indexes registered in `plugin/src/main/resources/META-INF/plugin.xml`.
+- Compatibility classification for Jmix 2.8 and 3.0 lines: `plugin/src/main/resources/compatibility/phase2-registry.json`, `plugin/src/main/kotlin/org/jmixworkbench/discovery/compatibility/CompatibilityRegistry.kt`.
+
+**Generated-code contracts (what generators emit into the user's project):**
+- Jmix Core/Data/FlowUI/Email APIs (`io.jmix.core.*`, `io.jmix.data.*`, `io.jmix.flowui.*`, `io.jmix.email.*`) emitted by generators under `plugin/src/main/kotlin/org/jmixworkbench/generator/` (e.g. `EntityGenerator.kt`, `ViewControllerGenerator.kt`, `AggregateUpdateServiceGenerator.kt`, `IntegrationConnectorGenerator.kt`).
+- Jakarta Persistence entities, Spring stereotype/event listeners, Liquibase changelog XML, BPMN, and DMN artifacts: `EntityGenerator.kt`, `EventListenerGenerator.kt`, `MigrationGenerator.kt`, `BpmGenerator.kt`, `DmnDecisionGenerator.kt`.
+- Integration connector generation targets spring-kafka, spring-rabbit, spring-integration-sftp, JDK `HttpClient`/Spring HTTP client settings (`HttpClientSettings` for Boot 4), `javax.sql.DataSource`, and Jmix `FileStorage`/`Emailer` (`plugin/src/main/kotlin/org/jmixworkbench/generator/IntegrationConnectorGenerator.kt`).
+- Certification proof: generated sources are compiled against exact Jmix 2.8.2 (JDK 17/21) and 3.0.0 (JDK 21/25) cells with spring-kafka/rabbit/sftp/web/boot, spring-security-oauth2-client, resilience4j-spring-boot3/4 2.4.0, spring-jdbc, and micrometer (`plugin/build.gradle.kts`).
+
+**New project generation:**
+- New-project wizard and template generators emit complete Jmix projects (Gradle wrapper files from plugin classpath resources, HSQLDB file datasource defaults): `plugin/src/main/kotlin/org/jmixworkbench/project/JmixNewProjectWizard.kt`, `JmixProjectTemplateGenerator.kt`, `JmixFlowUiProjectTemplate.kt`, `JmixProjectInstaller.kt`.
 
 ## Data Storage
 
-**Databases:**
-- No application database is connected by the plugin.
-  - Connection: Not applicable; no datasource URL, credential, JDBC client, or environment variable exists in `plugin/build.gradle.kts`, `plugin/src/`, or `webui/src/`.
-  - Client: None.
-  - Database awareness: `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt` infers PostgreSQL, MySQL/MariaDB, SQL Server, Oracle, or HSQLDB from target build text; `plugin/src/main/kotlin/com/jmixstudio/generator/MigrationGenerator.kt` uses the selected `DatabaseType` only to emit migration XML.
+**Databases (plugin itself):**
+- None. The plugin keeps no database of its own; state lives in IntelliJ project/application services and in the opened project's files.
+
+**Databases (features touching user databases):**
+- Live database reverse engineering over plain JDBC: user-supplied driver jars are loaded via a `URLClassLoader`, metadata read through `java.sql.DatabaseMetaData`; recognized URL prefixes `jdbc:postgresql:`, `jdbc:mysql:`/`jdbc:mariadb:`, `jdbc:sqlserver:`, `jdbc:oracle:`, `jdbc:db2:` (plus HSQLDB), driver-class inference (e.g. `org.postgresql.Driver`), and environment-variable substitution inside JDBC URLs (`plugin/src/main/kotlin/org/jmixworkbench/services/DatabaseReverseEngineeringService.kt`); entity import planning in `plugin/src/main/kotlin/org/jmixworkbench/services/DatabaseEntityImportPlanner.kt`.
+- Live DB evidence lanes for host tests are configured via `jvw.live.db.*` system properties (`plugin/hosts/idea253/build.gradle.kts`, `plugin/hosts/idea262/build.gradle.kts`).
+- Certification evidence runtimes (separate Gradle projects with Docker): `certification/database-runtime/` (runtime app + Liquibase against postgres:16.9, mysql:8.4.6, mariadb:11.4.8, mcr.microsoft.com/mssql/server:2022-CU20-ubuntu-22.04, gvenzl/oracle-free:23.7-slim-faststart in `certification/database-runtime/docker-compose.yml`; harness `certification/database-runtime/run-matrix.sh`) and `certification/integration-runtime/`.
 
 **File Storage:**
-- Local host-project filesystem only.
-  - Generated Java/XML/properties/BPMN files are written with `java.io.File` inside IntelliJ write commands by `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`.
-  - IntelliJ's local VFS is recursively refreshed after generation by `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`.
-  - Default destinations (`src/main/java`, `src/main/resources`, `db/changelog`, `processes`) come from `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt` and `CodeGenerationService.kt`.
-  - The React UI does not persist designer data to browser storage; `webui/src/store/index.ts` keeps it in memory.
+- Local filesystem only. Generated artifacts are written into the opened IntelliJ project; the web bundle is staged at `plugin/build/generated-resources/webui/` and packaged into each host plugin ZIP (`plugin/build.gradle.kts`, `plugin/hosts/idea253/build.gradle.kts`).
 
 **Caching:**
-- Per-project in-memory configuration cache only. `cachedConfig` is held and explicitly reset by `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`.
-- UI state is process-local Zustand state in `webui/src/store/index.ts`; there is no Redis, browser `localStorage`, IndexedDB, or filesystem cache integration under `webui/src/`.
+- No external cache service. In-memory caches exist inside IDE services (e.g. cached workspace snapshots in `plugin/src/main/kotlin/org/jmixworkbench/services/RestApiWorkspaceService.kt`).
 
 ## Authentication & Identity
 
-**Auth Provider:**
-- None.
-  - Implementation: The IntelliJ plugin and embedded UI have no login, token, OAuth, session, role check, or identity-provider SDK in `plugin/src/`, `webui/src/`, `plugin/build.gradle.kts`, or `webui/package.json`.
-  - Host boundary: File writes run with the permissions of the IntelliJ process through `WriteCommandAction` in `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`.
-  - Generated security roles are source artifacts for the target Jmix application, produced by `plugin/src/main/kotlin/com/jmixstudio/generator/RoleGenerator.kt`; they do not authenticate this plugin.
+**Auth provider:**
+- None. The workbench has no login, no third-party identity provider, and stores no credentials of its own.
+
+**Secrets handling:**
+- Target-project `.env` / `.env.properties` management in `plugin/src/main/kotlin/org/jmixworkbench/services/JmixEnvironmentConfigurationService.kt`: secret-named values are redacted (`SECRET_REDACTION`) before reaching the JCEF UI, pending secret changes are held only inside the service, and `javax.crypto` (`SecretKeySpec`) is used internally.
+- Live database credentials are supplied by the user at runtime and forwarded only as test/system properties in evidence lanes (`jvw.live.db.username` / `jvw.live.db.password`, host build files).
+
+**Generated security artifacts:**
+- Jmix resource/row-level security roles are generated into target projects (`plugin/src/main/kotlin/org/jmixworkbench/generator/RoleGenerator.kt`); compatibility cells compile against spring-security-oauth2-client (`plugin/build.gradle.kts`).
 
 ## Monitoring & Observability
 
 **Error Tracking:**
-- None. No Sentry, telemetry, analytics, or remote error-reporting dependency is declared in `plugin/build.gradle.kts` or `webui/package.json`.
+- None (no Sentry/crash-reporting integration).
 
 **Logs:**
-- IntelliJ `Logger` records bridge actions, bridge failures, generation failures, and generated relative paths in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` and `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`.
-- Development bridge simulation logs to the embedded browser console in `webui/src/bridge/index.ts`.
-- Generation errors also return through the JCEF JSON response as `GenerationResult.errors` from `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`.
+- IntelliJ platform `Logger` only, inside plugin services and the bridge (e.g. `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`). No telemetry, analytics, or remote reporting exists anywhere in `plugin/src/main/kotlin/` or `webui/src/`.
 
 ## CI/CD & Deployment
 
 **Hosting:**
-- IntelliJ plugin package. Production UI assets are copied from `webui/dist/` to `plugin/build/resources/main/webui/` by `copyWebUi` in `plugin/build.gradle.kts` and loaded as `/webui/index.html` by `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`.
-- Optional development hosting uses Vite on local port 5173 according to `webui/vite.config.ts`; the plugin uses it only when `jmixstudio.dev.url` is supplied.
-- There is no standalone web hosting target in `webui/vite.config.ts` or repository deployment configuration.
+- None - the product ships as IntelliJ plugin ZIPs.
 
 **CI Pipeline:**
-- None detected. The repository contains no GitHub Actions, GitLab CI, Jenkins, CircleCI, Azure Pipelines, or equivalent workflow configuration alongside `plugin/build.gradle.kts` and `webui/package.json`.
-- No IntelliJ Marketplace publishing/signing task is configured in `plugin/build.gradle.kts`.
+- GitHub Actions `Phase 1 CI` (`.github/workflows/ci.yml`): triggers on pull requests and pushes to `main`; `permissions: contents: read`; concurrency group with cancel-in-progress; runs on `ubuntu-24.04` (120-minute timeout) with Temurin 21; verifies the checked-in wrapper jar sha256 and distribution sha256; runs `cd plugin && ./gradlew clean phase1Check --dependency-verification=strict --no-daemon --no-configuration-cache --stacktrace`; uploads both host plugin ZIPs as `jmix-visual-workbench-plugin-zips` and test/Plugin Verifier reports as `phase1-verification-reports` (7-day retention). Actions pinned by commit SHA: `actions/checkout` v4.2.2, `actions/setup-java` v4.7.1, `actions/upload-artifact` v4.6.2.
+- Dependabot (`.github/dependabot.yml`): weekly review-only PRs for gradle (`/plugin`), npm (`/webui`), and github-actions (`/`); no auto-merge.
+- No release, signing, or Marketplace publishing pipeline (`docs/BUILDING.md`, `docs/RELEASE-INTEGRITY.md`).
 
 ## Environment Configuration
 
 **Required env vars:**
-- None. No environment-variable access occurs under `plugin/src/` or `webui/src/`, and no `.env` file is present.
-- Optional non-environment setting: `-Djmixstudio.dev.url=http://localhost:5173`, consumed by `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`.
-- Target configuration is inferred from the open project's root build file by `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`; no value is read from this repository's environment.
+- None for build or runtime; the build is fully wrapper-bootstrapped.
+
+**Recognized system/Gradle properties (development and evidence seams):**
+- `jmixworkbench.dev.enabled`, `jmixworkbench.dev.url` - load the UI from the Vite dev server instead of the packaged bundle (`plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixWorkbenchToolWindowFactory.kt`).
+- `jvw.live.db.*`, `jvw.project.template.*` - forwarded to host-lane tests for live-database evidence and project-template runtime certification (`plugin/hosts/idea253/build.gradle.kts`, `plugin/hosts/idea262/build.gradle.kts`).
+- `-PlocalIdea253Path`, `-PlocalIdea262Path`, `-PlocalIdeaPath` - local IDE SDK overrides validated against `Resources/build.txt` (`plugin/hosts/idea253/build.gradle.kts`, `docs/BUILDING.md`).
 
 **Secrets location:**
-- Not applicable. No repository-managed secret file, secret-variable convention, credential loader, or token consumer is present in `plugin/src/`, `webui/src/`, `plugin/build.gradle.kts`, or `webui/package.json`.
+- No secrets exist in the repository (no `.env*` files are present). Secret values only appear transiently as user-supplied inputs for live database features or as redacted entries read from the target project's own `.env` files.
 
 ## Webhooks & Callbacks
 
 **Incoming:**
-- No network webhooks.
-- In-process JavaScript callbacks are installed as `window.onBridgeReady` and `window.onBridgeResponse` in `webui/src/bridge/index.ts`, then invoked by `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Supported bridge commands in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` are `generateEntity`, `generateCrud`, `generateView`, `generateMigration`, `generateRole`, `generateBpm`, `getProjectConfig`, `getEntities`, and `ping`.
+- None.
 
 **Outgoing:**
-- No network callbacks or webhook deliveries.
-- UI-to-plugin messages use `window.javaBridge.send` from `webui/src/bridge/index.ts`; the injected implementation forwards JSON through `JBCefJSQuery` in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
+- None.
+
+## Certification Evidence Runtimes (Docker Middleware)
+
+**database-runtime** (`certification/database-runtime/docker-compose.yml`):
+- postgres:16.9, mysql:8.4.6, mariadb:11.4.8, mssql 2022-CU20-ubuntu-22.04, oracle-free 23.7-slim-faststart; harness `certification/database-runtime/run-matrix.sh`; runtime app under `certification/database-runtime/src/main/` (entities, Liquibase changelogs, `persistence.xml`).
+
+**integration-runtime** (`certification/integration-runtime/docker-compose.yml`):
+- postgres:16.9, apache/kafka:4.0.0, rabbitmq:4.1.2-management-alpine, atmoz/sftp:alpine, ghcr.io/shopify/toxiproxy:2.12.0, wiremock/wiremock:3.13.2-2; harness `certification/integration-runtime/run-matrix.sh`; runtime app under `certification/integration-runtime/src/main/`.
+
+These projects are evidence harnesses only; they are not part of the shipped plugin.
 
 ---
 
-*Integration audit: 2026-07-27*
+*Integration audit: 2026-08-04*

@@ -1,319 +1,176 @@
 # Codebase Concerns
 
-**Analysis Date:** 2026-07-27
+**Analysis Date:** 2026-08-04
+
+Scope note: findings are audited against the current `org.jmixworkbench` implementation (dual host lanes idea253/idea262), not against the older `com.jmixstudio` state still embedded in `AGENTS.md`. Each finding states **Confirmed** (verified in code) or **Risk** (plausible, not fully provable from static evidence), with severity and evidence.
+
+## Charter Context (what the project demands)
+
+The charter (root `AGENTS.md`, `CLEAN_ROOM.md`, `SECURITY.md`) demands:
+- Data integrity: no silent source corruption; previewable, atomic, undoable changes.
+- JCEF security: UI content is untrusted; bridge commands allowlisted and validated independently of the UI.
+- Version-aware adapters with certified read/write support declared per Jmix line.
+- Automated safety, parser, generator, integration, and failure-rollback coverage.
+
+The current implementation satisfies much of this (see "Implemented Safeguards" at the bottom). The concerns below are the residual gaps.
 
 ## Tech Debt
 
-**The Kotlin plugin is not buildable from the checked-in source:**
-- Issue: `ViewXmlGenerator.generateComponentTree()` calls `generateDataGridContent(...)`, but the only declared function is `generateDataGridContents(...)`. The declared function also calls `child(...)` without using its `parent` receiver, producing additional unresolved references.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/generator/ViewXmlGenerator.kt`
-- Impact: The plugin cannot compile, so none of the installed-plugin workflows described in `README.md` are currently deliverable. A direct JDK 17 `kotlinc` compilation of `plugin/src/main/kotlin/com/jmixstudio/model/*.kt` and `plugin/src/main/kotlin/com/jmixstudio/generator/*.kt` fails at these references.
-- Fix approach: Rename the call or declaration consistently, wrap the column generation in `parent.child(...)`, then make `compileKotlin` a required CI check before addressing downstream generator defects.
+**Dual mutation protocols: legacy direct-apply actions coexist with preview/apply workspace flow** — Severity: Medium — Confirmed
+- Issue: Two generations of bridge protocol are live. The new protocol is preview → digest-bound apply through `WorkspaceChangeService` with undo. Legacy `generateX` actions skip the preview UX and apply directly.
+- Files: `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt` (legacy dispatch at lines 753–766: `generateEntity`, `generateCrud`, `generateView`, `generateMigration`, `generateRole`, `generateMenu`, `generateBpm`, `getEntities`, `ping`), `plugin/src/main/kotlin/org/jmixworkbench/services/CodeGenerationService.kt` (legacy `generateEntity` line 47 … `generateBpmProcess` line 234, all funneling through `applyGeneratedPlan` line 1098).
+- UI callers still on the legacy path:
+ - `webui/src/components/ViewDesigner/ViewDesigner.tsx:943` — `await bridge.generateView(view)` (direct apply, no source preview).
+ - `webui/src/components/MenuDesigner/MenuDesigner.tsx:509` — raw `bridge.request<GenerationResult>('generateMenu', …)` (direct apply; backend only has a staleness guard `JVW-MENU-SOURCE-STALE` in `plugin/src/main/kotlin/org/jmixworkbench/services/CodeGenerationService.kt:1282`).
+- Dead client-side legacy methods no component calls anymore: `generateEntity`, `generateCrud`, `generateMigration`, `generateRole`, `generateBpm` in `webui/src/bridge/index.ts` (lines 2834–3138) — still shipped and maintained.
+- Impact: charter requires "previewable change plans"; FlowUI view creation and standalone menu edits apply without a reviewable diff. Two code paths double the maintenance surface.
+- Fix approach: migrate ViewDesigner and MenuDesigner to the preview/apply protocol (backend already exposes `WorkspaceChangeService.preview/prepareApply` plumbing via `CodeGenerationService.previewGeneratedPlan`/`prepareGeneratedPlan`, lines 1106–1124); delete unused legacy bridge actions and client methods.
 
-**The generic Java source builder accepts syntax fragments as import names:**
-- Issue: `extends_()` and `implements_()` always add their argument to the import set, even when the argument is a simple name or a parameterized type such as `StandardListView<Customer>` or `JpaRepository<Customer, UUID>`. It also defines `typeImport` and `returnTypeImport` without consuming them and does not collect imports from parameter annotations.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/ViewControllerGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/DataRepositoryGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/EventListenerGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/EntityGenerator.kt`
-- Impact: Multiple generators emit illegal imports such as `import StandardListView<Customer>;`, `import JpaRepository<Customer, UUID>;`, or `import StandardEntity;`. Other generated code omits required component and parameter-annotation imports.
-- Fix approach: Represent Java types structurally, keep fully qualified raw import names separate from rendered generic type expressions, reject imports without a package, and compile every generated Java fixture in tests.
+**God-file dispatcher and oversized components** — Severity: Medium — Confirmed
+- Issue: `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt` is ~4,600 lines (observed content through line 4628) containing ~100 action branches, response-transfer machinery, and per-feature request parsing in one class.
+- Other oversized files (observed minimum line counts): `webui/src/bridge/index.ts` (~3,600 lines), `webui/src/components/ViewDesigner/ExistingFlowUiDesigner.tsx` (≥2,350), `webui/src/components/LogicDesigner/LogicDesigner.tsx` (≥1,670), `webui/src/components/WorkflowDesigner/WorkflowDesigner.tsx` (≥1,600), `plugin/src/main/kotlin/org/jmixworkbench/services/CodeGenerationService.kt` (≥1,500).
+- Impact: every new feature edits the same dispatcher file; merge churn and review blind spots concentrate in security-critical code.
+- Fix approach: split `JcefBridge.kt` into per-domain handler objects sharing one dispatcher; extract bridge client per-feature modules in `webui/src/bridge/`.
 
-**Frontend/backend protocol types are duplicated manually:**
-- Issue: TypeScript string unions mirror Kotlin enums, but several Kotlin enums have no `@SerializedName` mapping and the CRUD option values use different casing/naming from Kotlin constants.
-- Files: `webui/src/types/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/model/ViewModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`, `plugin/src/main/kotlin/com/jmixstudio/model/MigrationModel.kt`
-- Impact: The TypeScript build passes while valid UI payloads deserialize to null Kotlin enum values or cannot deserialize at all. Compile-time checking does not cross the JCEF boundary.
-- Fix approach: Define one versioned wire schema, generate TypeScript/Kotlin DTOs from it, add explicit discriminator fields and enum mappings, and validate payloads before invoking generators.
+**Stale planning/assessment documents describe a codebase that no longer exists** — Severity: Medium — Confirmed
+- Issue: `AGENTS.md` embedded STACK/ARCHITECTURE/CONVENTIONS sections reference `plugin/src/main/kotlin/com/jmixstudio/…` paths, IntelliJ 2024.1, a missing Gradle wrapper, six tabs, `getEntities` stubbed to `{"entities":[]}`, and "no generateMenu dispatch branch". All of that is obsolete: current tree is `org/jmixworkbench`, hosts are idea253/idea262 (`plugin/hosts/idea253/build.gradle.kts`, `plugin/hosts/idea262/build.gradle.kts`), `plugin/gradlew` exists, `generateMenu` is implemented (`plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt:758,822`), and `getEntities` reads the live application graph (`JcefBridge.kt:860–868`).
+- `JMIX_STUDIO_ASSESSMENT.md` (dated 2026-07-27) still lists P0 gaps that the current code has closed: "`getEntities` bridge action is a TODO" (line 124) and "Menu Designer … `generateMenu` … not implemented in the bridge" (lines 128–130, 288), plus "targets obsolete Gradle IntelliJ plugin 1.17.4 and IntelliJ 2024.1" (line 105).
+- Impact: GSD planning phases that load these documents will plan against a phantom codebase and may "fix" things that are already fixed or miss things that moved.
+- Fix approach: regenerate `AGENTS.md` codebase sections and mark `JMIX_STUDIO_ASSESSMENT.md` as a historical baseline with a status column.
 
-**Large monolithic modules concentrate unrelated behavior:**
-- Issue: Designer state, recursive tree algorithms, validation, bridge calls, and rendering are combined in single components; generator files similarly combine model translation, syntax decisions, and output assembly.
-- Files: `webui/src/components/ViewDesigner/ViewDesigner.tsx` (1,022 lines), `webui/src/components/MigrationPanel/MigrationPanel.tsx` (716 lines), `webui/src/components/EntityDesigner/EntityDesigner.tsx` (619 lines), `plugin/src/main/kotlin/com/jmixstudio/generator/EntityGenerator.kt` (774 lines), `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt` (578 lines)
-- Impact: Protocol and generator changes require editing broad files with no focused tests, increasing regression risk and making review difficult.
-- Fix approach: Extract wire DTO adapters, validators, pure tree reducers, per-artifact generators, and reusable editor controls into independently tested modules.
-
-**The repository does not contain a usable Gradle wrapper:**
-- Issue: `plugin/gradle/wrapper/gradle-wrapper.properties` exists, but `plugin/gradlew`, `plugin/gradlew.bat`, and `plugin/gradle/wrapper/gradle-wrapper.jar` are absent.
-- Files: `plugin/gradle/wrapper/gradle-wrapper.properties`, `README.md`, `plugin/build.gradle.kts`
-- Impact: The documented `./gradlew buildPlugin` and `./gradlew runIde` commands fail immediately. Builds depend on an externally installed Gradle version and machine state.
-- Fix approach: Generate and commit a complete wrapper using the version declared by `plugin/gradle/wrapper/gradle-wrapper.properties`, then verify the exact README commands in CI.
-
-**Generated artifacts and local dependency trees are present in the working tree:**
-- Issue: `webui/node_modules/`, `webui/dist/`, `plugin/.gradle/`, and `plugin/build/` exist locally while `.gitignore` excludes them.
-- Files: `.gitignore`, `webui/dist/index.html`, `plugin/build/reports/problems/problems-report.html`
-- Impact: Local artifacts can conceal missing clean-build steps or stale bundled UI behavior. The current plugin build directory contains reports but no compiled classes or distribution ZIP.
-- Fix approach: Validate from a clean checkout in CI and package only from freshly built inputs; do not treat existing `webui/dist/` or `plugin/build/` contents as release evidence.
+**No frontend lint/format/test tooling** — Severity: Medium — Confirmed
+- Issue: `webui/package.json` has only `dev`, `build` (`tsc && vite build`), and `preview` scripts. No test runner, no ESLint, no Prettier/Biome; no `.eslintrc*`/`.editorconfig` files exist under `webui/`. The only static gate is the TypeScript compiler.
+- Impact: 36 TS/TSX source files — including the ~3,600-line bridge client that frames every backend command — are gated by type checks alone. Style drift and dead code accumulate (legacy methods above are an example).
+- Fix approach: add ESLint (typescript-eslint) + a formatter, and a test runner (Vitest fits the Vite 8 toolchain pinned in `webui/package.json`).
 
 ## Known Bugs
 
-**View generation payloads cannot be deserialized reliably:**
-- Symptoms: The UI sends component values such as `vbox`, `textField`, `instance`, and facet/action wire names. `ComponentType`, `DataContainerType`, `FacetType`, and `ActionType` use uppercase Kotlin constant names and have no `@SerializedName` annotations.
-- Files: `webui/src/components/ViewDesigner/ViewDesigner.tsx`, `webui/src/types/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/model/ViewModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-- Trigger: Click “Generate View” with the default `vbox` root or any normal component/data container.
-- Workaround: None in the UI. Add explicit wire mappings or a custom adapter before generation.
+**Bridge error body built by string interpolation is embedded unescaped into page JavaScript** — Severity: Low — Confirmed
+- Symptoms: an unknown action returns `else -> """{"error":"Unknown action: $action"}"""` at `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt:763`. The small-payload response path embeds that string verbatim into executed script: `window.onBridgeResponse($actionJson, $requestIdJson, $resultJson);` (`JcefBridge.kt:4545–4558`). Every other handler builds `resultJson` via `gson.toJson(...)`; this one interpolates the caller-controlled `action` value into JSON/JS without escaping, so a crafted action name can break out of the object literal.
+- Trigger: any page controlling the workbench origin can send an arbitrary action string (the page is the caller; in packaged mode the page is the immutable first-party bundle served from classpath at the private origin enforced by `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/PackagedWorkbenchResourceHandler.kt:57–60`).
+- Workaround/mitigation today: exploitation requires an already-compromised or dev-mode (`http://127.0.0.1:5173`) page, so practical impact is limited; `actionJson`/`requestIdJson` themselves are safely serialized (`JcefBridge.kt:4554–4555`).
+- Fix approach: build the unknown-action error with `gson.toJson(mapOf("error" to "Unknown action: $action"))` like all other handlers; add a unit test asserting every `sendResponse` payload is Gson-produced.
 
-**CRUD generation receives null enum options from the default UI:**
-- Symptoms: The UI sends `dataGrid`, `form`, and `postgres`, while Kotlin expects `DATA_GRID`, `FORM`, and `POSTGRES` and provides no serialized aliases on these enums.
-- Files: `webui/src/components/CrudWizard/CrudWizard.tsx`, `webui/src/types/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-- Trigger: Generate a CRUD stack with the default wizard options.
-- Workaround: None exposed. Map the wire strings explicitly before constructing `CrudOptions`.
-
-**Manual migration generation cannot deserialize its change list:**
-- Symptoms: The UI sends objects with a `changeType` discriminator and shapes such as `{columnName, columnType}`, but Kotlin declares `MutableList<DbChange>` where `DbChange` is an abstract sealed class and registers no Gson polymorphic type adapter. Several field shapes also differ (`addForeignKey` versus `AddForeignKeyConstraint`, string columns versus `ColumnValueDef` lists).
-- Files: `webui/src/components/MigrationPanel/MigrationPanel.tsx`, `webui/src/types/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/model/MigrationModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-- Trigger: Add any migration change and click “Generate Migration.”
-- Workaround: None. Introduce a discriminator-aware adapter and wire DTO-to-domain conversion.
-
-**Menu Designer invokes an action the backend does not implement:**
-- Symptoms: The UI requests `generateMenu`; the bridge returns `{"error":"Unknown action: generateMenu"}` because the action is absent from its dispatch table.
-- Files: `webui/src/components/MenuDesigner/MenuDesigner.tsx`, `webui/src/bridge/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/MenuGenerator.kt`
-- Trigger: Click “Generate Menu.”
-- Workaround: Generate a menu indirectly through CRUD, which has separate destructive behavior described below.
-
-**Generated view XML contains invalid namespace declarations:**
-- Symptoms: `ViewXmlGenerator` calls both `ns("", ...)` and `attr("xmlns", ...)`; `XmlBuilder` renders an empty prefix as `xmlns:=...`. The data namespace is also emitted twice.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/generator/ViewXmlGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/XmlBuilder.kt`
-- Trigger: Generate any view or fragment after fixing the current Kotlin compile blocker.
-- Workaround: None. Make the namespace builder render the default namespace as `xmlns`, deduplicate namespace declarations, and parse generated XML in tests.
-
-**Generated view controllers contain invalid imports and missing component imports:**
-- Symptoms: Base classes are passed to `extends_()` as simple or generic strings, producing illegal imports. Resolved component types such as `DataGrid`, `TypedTextField`, and `JmixButton` are emitted without importing their packages.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/generator/ViewControllerGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt`
-- Trigger: Generate a standard, list, or detail view containing normal UI components.
-- Workaround: Manual correction of every generated controller.
-
-**Generated role source is not valid for its destination:**
-- Symptoms: `RoleGenerator` explicitly sets an empty package while `CodeGenerationService` writes the file under `<basePackage>.security`. Role policy methods are emitted as interface methods with bodies but without `default`, `static`, or `private`. The UI treats the human-readable role name as the Java filename/class name, so names such as “Order Manager” produce invalid identifiers and filenames.
-- Files: `webui/src/components/RoleDesigner/RoleDesigner.tsx`, `plugin/src/main/kotlin/com/jmixstudio/generator/RoleGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt`
-- Trigger: Generate a resource or row-level role, especially with the UI placeholder-style name.
-- Workaround: Manually add the package, normalize the class identifier, and rewrite policy methods as valid abstract annotation methods.
-
-**Default entity generation produces invalid trait imports and incomplete trait contracts:**
-- Symptoms: The UI defaults to `standardEntity`. The generator calls `implements_("StandardEntity")`, which creates `import StandardEntity;`. Composite `STANDARD_ENTITY` and `AUDITABLE` branches do not generate the audit fields/accessors their own model declares.
-- Files: `webui/src/store/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/model/EntityModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/EntityGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt`
-- Trigger: Generate an entity without changing the default trait selection.
-- Workaround: Remove the trait and manually add supported Jmix interfaces/fields, or correct trait type metadata and composite expansion.
-
-**Collection associations are generated as scalar Java fields:**
-- Symptoms: `AttributeModel.javaType` always returns the related entity type for associations. `ONE_TO_MANY` and `MANY_TO_MANY` annotations are therefore applied to a scalar rather than `List<T>`/`Set<T>`. A missing `mappedBy` defaults to the literal `"id"`.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/model/EntityModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/EntityGenerator.kt`
-- Trigger: Generate an entity with a one-to-many or many-to-many attribute.
-- Workaround: Manually change field/accessor types, imports, initialization, and ownership metadata.
-
-**Embedded IDs are placeholders rather than generated composite IDs:**
-- Symptoms: The entity field type is the literal `EmbeddedId`, while its accessors use `Object`; `IdConfig.embeddedAttributes` are never used to generate an embeddable ID class. Migration generation collapses the ID to one `VARCHAR(255)` column.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/model/EntityModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/EntityGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/MigrationGenerator.kt`
-- Trigger: Select the advertised Embedded/Composite ID strategy.
-- Workaround: Hand-write the ID class, accessors, and matching multi-column migration.
-
-**View menu integration creates malformed or incomplete menu files:**
-- Symptoms: View generation appends a standalone `<item/>` after an existing XML document, yielding multiple root elements. If no file exists, it writes only `<item/>` rather than `<menu-config>`.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/MenuGenerator.kt`
-- Trigger: Generate a view that includes `menuEntry`.
-- Workaround: Manually merge the entry inside the existing `<menu-config>` root.
-
-**BPM approval output uses an undeclared XML prefix:**
-- Symptoms: Conditional sequence flows emit `xsi:type="tFormalExpression"`, but the BPMN root does not declare `xmlns:xsi`.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/generator/BpmGenerator.kt`
-- Trigger: Invoke `generateBpm`; the generated approval template always contains conditional flows.
-- Workaround: Add the XML Schema Instance namespace manually.
-
-**Bridge requests can hang forever or resolve the wrong operation:**
-- Symptoms: `request()` has no timeout or rejection path and correlates responses only by action name. In production, a missing bridge queues the request indefinitely; concurrent requests with the same action can consume each other’s response.
-- Files: `webui/src/bridge/index.ts`, `webui/src/store/index.ts`
-- Trigger: Use the UI outside JCEF, encounter failed bridge injection, or issue overlapping requests for the same action.
-- Workaround: Reload the UI. The protocol needs unique request IDs, timeouts, cancellation, and error rejection.
-
-**Generation result reporting is incomplete:**
-- Symptoms: Entity generation writes an entity, migration, optional repository, and messages but returns only the entity path. View generation omits the menu path from `filesWritten`.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `webui/src/components/EntityDesigner/EntityDesigner.tsx`, `webui/src/components/ViewDesigner/ViewDesigner.tsx`
-- Trigger: Generate an entity with DDL/repository enabled or a view with a menu entry.
-- Workaround: Inspect the filesystem; do not rely on the success toast’s file count.
+**No other reproducible defects were confirmed.** Legacy "broken" behaviors described in `JMIX_STUDIO_ASSESSMENT.md` (empty `getEntities`, missing `generateMenu`) are fixed in current code (see evidence above).
 
 ## Security Considerations
 
-**User-controlled paths are not confined to the project root:**
-- Risk: Class names, package names, role names, changelog IDs, and BPM process IDs flow into `File(projectRoot, relativePath)` without identifier validation, normalization, or a canonical-path containment check. Slash and `..` segments can traverse directories; absolute path behavior is also not rejected.
-- Files: `webui/src/components/EntityDesigner/EntityDesigner.tsx`, `webui/src/components/ViewDesigner/ViewDesigner.tsx`, `webui/src/components/RoleDesigner/RoleDesigner.tsx`, `webui/src/components/MigrationPanel/MigrationPanel.tsx`, `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt`
-- Current mitigation: The normal UI offers conventional placeholder values, but most fields are free-form and the bridge accepts direct JSON requests.
-- Recommendations: Validate Java identifiers/package names and safe filenames, resolve against the canonical project root, reject any result outside that root, and test traversal/absolute/symlink cases.
+**JCEF trust boundary is well-engineered; one defense-in-depth gap** — Severity: Low overall — Confirmed (strengths) + Confirmed (gap)
+- Strengths (verified):
+ - Packaged UI is served only from classpath resources under a private origin `https://jmix-workbench.invalid` with every request intercepted and no fall-through to DNS/filesystem/network: `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/PackagedWorkbenchResourceHandler.kt:57–60, 201–246`; security headers including same-origin CORP at line 184; 32 MiB resource cap at line 24.
+ - Development URL requires `-Djmixworkbench.dev.enabled=true` and must be exactly a credential-free loopback HTTP origin on port 5173 or it is rejected: `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixWorkbenchToolWindowFactory.kt:23, 37–65, 196–199, 236–238`.
+ - Bridge dispatch is effectively an allowlist: unknown actions return an error (`JcefBridge.kt:763`); malformed input is caught at the boundary (`JcefBridge.kt:767–772`). A build guard explicitly forbids exposing mutation fault injection through the bridge (`plugin/build.gradle.kts:774`).
+ - Path traversal defense: locator paths reject blank segments, `.`, `..`, and backslashes; no absolute path crosses the bridge: `plugin/src/main/kotlin/org/jmixworkbench/services/ProjectFileResolver.kt:82–100`.
+ - REST invocation from the workbench is loopback-only, credential-free, redirect-free, timeout-bounded, and header-restricted: `plugin/src/main/kotlin/org/jmixworkbench/services/RestApiWorkspaceService.kt:96–198`.
+ - Live database inspection keeps secrets backend-side ("Connection secrets are resolved only inside the backend and never cross the JCEF bridge"), read-only, with connect/network timeouts: `plugin/src/main/kotlin/org/jmixworkbench/services/DatabaseReverseEngineeringService.kt:26–29, 157–158`.
+ - Organization template catalogs require Ed25519 signatures verified against a trusted-key policy with sha256 payload inventory and atomic install: `plugin/src/main/kotlin/org/jmixworkbench/project/JmixOrganizationTemplateCatalog.kt:371–424, 873–909, 1312`.
+ - Secret editing policy denies literal passwords/placeholder defaults for secret keys: `docs/PROJECT-PROPERTIES-PARITY.md:40, 73–80` and `plugin/src/test/kotlin/org/jmixworkbench/services/JmixProjectPropertiesServiceTest.kt:44–45`.
+ - Runtime hot-deploy only activates when the target project itself enables `jmix.core.unsafe-runtime-features-enabled`, `jmix.core.hot-deploy-enabled`, and `jmix.core.trigger-files-enabled`: `plugin/src/main/kotlin/org/jmixworkbench/services/JmixRuntimeService.kt:313–330`; loopback-only runtime probing with containment/symlink checks at lines 260, 561, 653–660.
+- Gap: the unescaped unknown-action error body (see Known Bugs) violates the letter of "bridge commands must be validated independently of the UI".
 
-**The JCEF bridge grants write capabilities without origin or navigation checks:**
-- Risk: The bridge is injected after every main-frame load and dispatches file-generating actions without checking the page origin. A configured development URL—or any future navigation to untrusted content—receives project mutation capabilities.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`
-- Current mitigation: Production intends to load bundled UI resources, and the development URL requires a system property.
-- Recommendations: Allowlist the bundled origin and loopback development origins, block external navigation, expose only capability-scoped commands, and disable writes until project trust is established.
-
-**Bridge responses interpolate unescaped values into executable JavaScript:**
-- Risk: `action` is placed inside a single-quoted JavaScript literal and exception text is manually inserted into JSON. Crafted action names or exception messages can break out of the intended syntax or make the response unparsable.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-- Current mitigation: The bundled React UI uses fixed action strings, but the bridge itself does not enforce them before constructing responses.
-- Recommendations: Serialize the complete callback arguments with Gson, never concatenate into JavaScript source, and reject unknown actions before reflecting input.
-
-**Generated Java accepts raw code-bearing user strings:**
-- Risk: Class names, custom annotation names/parameters, instance-name expressions, validation regex/messages, role descriptions, queries, and method bodies are inserted into Java source without consistent escaping or syntactic validation.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/EntityGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/RoleGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/DataRepositoryGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/ViewControllerGenerator.kt`
-- Current mitigation: XML values are escaped by `XmlBuilder`, but Java generation has no equivalent literal/identifier encoder.
-- Recommendations: Separate identifiers, literals, types, and raw code in the AST; escape each context; reserve raw source injection for an explicit advanced mode with preview.
-
-**No payload size or complexity limits exist:**
-- Risk: Deep component/menu trees or very large source/SQL strings can consume memory, recursion depth, generation time, and disk space through the bridge.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, `webui/src/components/ViewDesigner/ViewDesigner.tsx`, `webui/src/components/MenuDesigner/MenuDesigner.tsx`, `webui/src/components/MigrationPanel/MigrationPanel.tsx`
-- Current mitigation: None detected.
-- Recommendations: Bound request bytes, tree depth/node count, generated file size, and operation count; fail with structured validation errors.
+**Certification harness ships dev-only default credentials** — Severity: Low — Confirmed
+- Risk: `certification/database-runtime/docker-compose.yml` and `certification/integration-runtime/docker-compose.yml` use env-overridable default passwords (e.g. `POSTGRES_PASSWORD: ${CERT_POSTGRES_PASSWORD:-jmixcert-postgres}` line 9; MSSQL SA default line 60) bound to `127.0.0.1` only (line 11).
+- Current mitigation: loopback binding, local-only test databases, override variables provided.
+- Recommendations: keep defaults clearly documented as dev-only; never reuse these credentials in shared environments.
 
 ## Performance Bottlenecks
 
-**Every successful operation schedules a recursive refresh of the entire project:**
-- Problem: A generation request refreshes `projectRoot` with `refresh(true, true)`, even when only one or a handful of files changed.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`
-- Cause: The service bypasses VFS-aware file APIs and compensates with a full recursive refresh.
-- Improvement path: Use VFS/PSI write APIs for exact files and refresh only created/changed paths once per batch.
+**Legacy `generateX` bridge handlers run synchronously on the bridge callback thread** — Severity: Medium — Confirmed
+- Problem: the legacy dispatch block (`plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt:753–766`) calls `CodeGenerationService.generateEntity/generateCrud/generateView/generateMigration/generateRole/generateMenu/generateBpmProcess` inline (e.g. `handleGenerateEntity` lines 777–783), with no `ReadAction.nonBlocking`/executor handoff.
+- Cause: all newer handlers deliberately schedule work off-thread — `ReadAction.nonBlocking { … }.submit(AppExecutorUtil.getAppExecutorService())` (e.g. lines 947–1005), `submitReadResponse` (lines 905, 1104, 1402, 1759…), `submitBackgroundResponse` (line 1818), plain executor tasks (lines 873, 1839). The legacy path predates this pattern and performs PSI reads plus a `WriteCommandAction` apply (`plugin/src/main/kotlin/org/jmixworkbench/services/WorkspaceChangeService.kt:103`) synchronously.
+- Impact: UI freezes on the active ViewDesigner/MenuDesigner apply paths for the full duration of generation and file writes.
+- Improvement path: route legacy handlers through the same non-blocking submit helpers, or delete them once UI callers migrate to preview/apply.
 
-**CRUD writes are synchronous, sequential, and individually wrapped:**
-- Problem: Up to eleven files are written one at a time, each through a separate write command, before a full-project refresh.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`
-- Cause: The service has no staged output or batch write abstraction.
-- Improvement path: Generate and validate all content off the UI path, then apply one atomic write command with a single targeted refresh.
-
-**Recursive editor updates clone and rerender broad trees:**
-- Problem: View and menu edits recursively traverse and reconstruct full trees for find/update/remove/insert/move operations; `ViewDesigner` recursively renders every node with no memoized subtree boundary.
-- Files: `webui/src/components/ViewDesigner/ViewDesigner.tsx`, `webui/src/components/MenuDesigner/MenuDesigner.tsx`
-- Cause: Tree state is stored as nested React objects and manipulated with full recursive copies.
-- Improvement path: Normalize nodes by ID, memoize rows/subtrees, measure large-tree behavior, and virtualize palettes/lists when node counts grow.
+**Whole-project application graph indexing** — Severity: Low–Medium — Risk (mitigated by design, needs scale proof)
+- Problem: `getApplicationGraph` builds/serializes the full project graph; transfer size is explicitly measured in MiB (`JcefBridge.kt:879`) and large payloads move via Base64 chunked transfer (`JcefBridge.kt:4569–4617`).
+- Current mitigation: progress reporting (`getApplicationGraphProgress`, `JcefBridge.kt:283–284`), incremental update listeners (`JcefBridge.kt:209–210`), file-based candidate indexes (`plugin/src/main/resources/META-INF/plugin.xml` registers ten `fileBasedIndex` extensions), and index-scale tests (`plugin/src/test/kotlin/org/jmixworkbench/ide/JmixNativeIndexScaleTest.kt`).
+- Improvement path: `docs/ENTERPRISE-PARITY-AUDIT.md:127` itself lists outstanding proof work: dumb-mode, cold-index, completion/navigation latency, memory and leak budgets on representative customer repositories. Schedule that validation before GA claims on 3,000+ file repos.
 
 ## Fragile Areas
 
-**File generation is destructive and non-transactional:**
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`
-- Why fragile: `writeText()` overwrites existing files without existence checks, diffs, confirmation, backups, or merge logic. CRUD writes files sequentially; an exception after earlier writes leaves a partial stack. Re-running CRUD replaces the application’s entire `menu.xml` and `messages.properties`.
-- Safe modification: Stage outputs, validate/compile/parse them, show a conflict-aware diff, merge structured XML/properties, and commit all accepted writes in one IDE undoable transaction.
-- Test coverage: No overwrite, rollback, conflict, merge, or IDE undo tests exist.
+**Source-preserving mutation of existing user files** — Why fragile: modifying handwritten Java/Kotlin/XML by construction is the highest-corruption-risk surface; correctness depends on exact-fingerprint preflights and PSI validation.
+- Files: `plugin/src/main/kotlin/org/jmixworkbench/discovery/change/SourcePreservingMerge.kt`, `plugin/src/main/kotlin/org/jmixworkbench/discovery/change/WorkspaceChangePlanner.kt`, `plugin/src/main/kotlin/org/jmixworkbench/generator/MenuSourcePatcher.kt`, `plugin/src/main/kotlin/org/jmixworkbench/generator/RestApiSourcePatcher.kt`, `plugin/src/main/kotlin/org/jmixworkbench/services/FlowUiControllerChangeService.kt`, `plugin/src/main/kotlin/org/jmixworkbench/services/EntityAttributeRefactorService.kt`, `plugin/src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt` (exact-rollback proof at lines 335–338, 528–537).
+- Safe modification: always go through `WorkspaceChangeService.preview → prepareApply → applyPrepared`; never write documents directly. Staleness guards must stay (e.g. `JVW-MENU-SOURCE-STALE` in `CodeGenerationService.kt:1282`, `JVW-WORKFLOW-SOURCE-STALE` at line 275).
+- Test coverage: present and targeted — `plugin/src/phase2CoreTest/kotlin/org/jmixworkbench/discovery/change/SourcePreservingMergeTest.kt`, `WorkspaceChangePlannerTest.kt`, `plugin/src/test/kotlin/org/jmixworkbench/generator/MenuSourcePatcherTest.kt`, `RestApiSourcePatcherTest.kt`, `plugin/src/test/kotlin/org/jmixworkbench/services/WorkspaceMutationFailureSafetyTest.kt`, `WorkspaceDocumentRoundTripTest.kt`, `WorkspaceHistoryServiceTest.kt`.
 
-**Migration filenames are collision-prone:**
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/MigrationGenerator.kt`
-- Why fragile: Entity/CRUD migrations use fixed `001-<table>.xml`; manual migrations use the unchecked user changelog ID. Existing files are silently replaced, and no master changelog include is updated.
-- Safe modification: Allocate unique ordered IDs after scanning existing changelogs, reject collisions, and update the root changelog structurally.
-- Test coverage: No repeated-generation, collision, include-chain, or database validation tests exist.
+**Cross-host JCEF API drift handled by runtime reflection** — Why fragile: `CefResourceHandler` method sets differ between IDEA 2025.3 and 2026.2; the packaged-UI handler is a dynamic proxy implementing whichever methods the host declares.
+- Files: `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/PackagedWorkbenchResourceHandler.kt:251–270` (proxy), host descriptors `plugin/hosts/idea253/src/main/resources/META-INF/plugin.xml` (no `com.intellij.modules.jcef` dependency, runtime `JBCefApp.isSupported()` check) vs `plugin/hosts/idea262/src/main/resources/META-INF/plugin.xml` (explicit `com.intellij.modules.jcef` dependency, asserted by `plugin/build.gradle.kts:573, 591`).
+- Safe modification: never link new JCEF callback types directly in shared code; extend the proxy and both descriptor tests.
+- Test coverage: `plugin/src/test/kotlin/org/jmixworkbench/toolwindow/PackagedWorkbenchResourceHandlerTest.kt`, `WorkbenchToolWindowFactoryIntegrationTest.kt`, host descriptor tests `plugin/hosts/idea253/src/test/kotlin/org/jmixworkbench/host/idea253/Idea253DescriptorTest.kt` and `plugin/hosts/idea262/src/test/kotlin/org/jmixworkbench/host/idea262/Idea262DescriptorTest.kt`.
 
-**Project detection assumes one root Java Gradle module:**
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`, `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt`
-- Why fragile: Detection checks only root `build.gradle`/`build.gradle.kts`, scans only `src/main/java`, hardcodes source/resource roots, chooses a package only along single-child directory chains, infers the database from build text, and defaults ambiguous projects to PostgreSQL/Jmix 2.4.
-- Safe modification: Use IntelliJ module/source-root models, Gradle project data, Kotlin source roots, and explicit user selection when detection is ambiguous.
-- Test coverage: No Kotlin-only, multi-module, custom-source-set, Maven, multiple-database, or version-catalog fixtures exist.
-
-**The frontend bridge has no lifecycle state machine:**
-- Files: `webui/src/bridge/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`
-- Why fragile: Ready state, pending requests, navigation/reload, disposal, response errors, and duplicate actions are handled by mutable arrays and global callbacks.
-- Safe modification: Define connection states, request IDs, typed success/error envelopes, cancellation, timeout, and reload/dispose semantics.
-- Test coverage: No bridge contract or reload/concurrency tests exist.
-
-**Production JCEF resource loading is unverified:**
-- Files: `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`, `plugin/build.gradle.kts`, `webui/vite.config.ts`
-- Why fragile: The tool window passes `getResource("/webui/index.html").toExternalForm()` directly to JCEF. Packaged resources commonly use a `jar:` URL, but there is no custom scheme/resource handler, extraction path, packaged-plugin smoke test, or visible fallback error when loading resolves to `about:blank`.
-- Safe modification: Add a supported classpath-resource handler or extract assets to a controlled local directory, surface load failures, and smoke-test the installed ZIP.
-- Test coverage: No packaged JCEF launch test exists.
+**String-built Java/Kotlin/XML generators** — Why fragile: generators emit source text via fluent builders; runtime correctness of emitted code is not validated inside the IDE at generation time.
+- Files: `plugin/src/main/kotlin/org/jmixworkbench/generator/JavaClassBuilder.kt`, `XmlBuilder.kt`, and all `*Generator.kt` siblings.
+- Safe modification: keep generators pure string producers; all writes go through `WorkspaceChangeService`.
+- Test coverage: strong offline gate — the build compiles a generated corpus against exact Jmix artifacts per cell (`certifyGeneratedCodeCompatibility`, `plugin/build.gradle.kts:253–258`; fixture generator `plugin/src/compatibilityGenerator/kotlin/org/jmixworkbench/certification/CompatibilityFixtureGenerator.kt`), plus per-generator unit tests under `plugin/src/test/kotlin/org/jmixworkbench/generator/`.
 
 ## Scaling Limits
 
-**Large IDE projects:**
-- Current capacity: No measured limit; every generation triggers a recursive refresh from the project root.
-- Limit: Refresh cost grows with all project files, not the number of generated files.
-- Scaling path: Refresh exact VFS nodes and benchmark representative multi-module repositories.
+**Graph payload transfer**: large application graphs serialize to JSON in-memory and move through Base64 chunking (`plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt:879, 4569–4617`); very large monorepos will pressure IDE heap (`plugin/gradle.properties` sets `-Xmx2g` for the build only; runtime heap is the IDE's). Capacity is project-size-dependent; no hard cap was found — monitoring (MiB logging) exists instead. Scaling path: paginate/artifact-slice graph responses before raising heap requirements.
 
-**Designer model size:**
-- Current capacity: No enforced node/change limit and no performance benchmark.
-- Limit: Nested immutable updates and full recursive rendering scale with total tree size and depth; deep trees also risk call-stack exhaustion.
-- Scaling path: Normalize/virtualize state, add depth/node limits, and benchmark 100/1,000/10,000-node models.
+**Packaged UI resource cap**: 32 MiB per resource (`plugin/src/main/kotlin/org/jmixworkbench/toolwindow/PackagedWorkbenchResourceHandler.kt:24`) — bundle growth beyond this fails closed; not a near-term limit.
 
-**Bridge concurrency:**
-- Current capacity: One action-name-based listener match; no request IDs or backpressure.
-- Limit: Multiple simultaneous calls with the same action are ambiguous, and unbounded pending requests/listeners can accumulate.
-- Scaling path: Add unique correlation IDs, bounded queues, cancellation, and per-request timeouts.
+**Certification matrix breadth**: only four generated-code cells exist today (see Missing Critical Features); each new Jmix/JDK cell adds a compile lane in `plugin/build.gradle.kts:137–250`.
 
 ## Dependencies at Risk
 
-**IntelliJ compatibility is narrow and not continuously verified:**
-- Risk: Plugin metadata declares support from build 241 through `251.*`; newer IDE builds are rejected. The plugin depends on JCEF and Java modules but has no compatibility matrix.
-- Impact: Installation or runtime can fail outside the declared range, including IDEs without supported JCEF.
-- Migration plan: Add Plugin Verifier runs for every supported IntelliJ release, test JCEF/no-JCEF paths, and update `plugin/build.gradle.kts` plus `plugin/src/main/resources/META-INF/plugin.xml` together.
+**IntelliJ Platform API drift between the two host lanes** — Risk: Low (mitigated)
+- Risk: same sources compile against IDEA Ultimate 2025.3 (Java 21, Kotlin 2.2) and IDEA Ultimate 2026.2 (Java 25, Kotlin 2.4) — `plugin/build.gradle.kts:559–584`. Platform or JCEF API changes can break one lane silently.
+- Impact: tool window/bridge failure on one IDE family.
+- Migration plan/mitigation: exact-version lanes with dependency lockfiles (`plugin/hosts/idea253/gradle/dependency-locks/gradle.lockfile`, `plugin/hosts/idea262/gradle/dependency-locks/gradle.lockfile`), immutable-lane contract checks (`verifyHostBuildDefinitions`, `plugin/build.gradle.kts:533–595`), Plugin Verifier evidence for both lanes (`docs/COMPATIBILITY.md:11–12`; `pluginVerifier()` in `plugin/hosts/idea253/build.gradle.kts:148`), and per-lane descriptor/smoke tests.
 
-**Legacy IntelliJ Gradle plugin and incomplete wrapper reduce reproducibility:**
-- Risk: `org.jetbrains.intellij` 1.17.4 is used with local build reports already showing Gradle deprecation warnings, while the wrapper executable/JAR is missing.
-- Impact: Future Gradle versions can turn current deprecations into failures, and contributors cannot run the pinned build.
-- Migration plan: Restore the Gradle wrapper first, pin CI, then migrate to the current IntelliJ Platform Gradle plugin with build/verification parity.
-
-**Bundled UI freshness depends on a local ignored directory:**
-- Risk: `copyWebUi` packages `../webui/dist`, which is ignored and may be stale or absent if `npm run build` was not run first; the Gradle task does not depend on an npm build task.
-- Impact: A plugin build can package an old UI or no UI while Kotlin compilation succeeds.
-- Migration plan: Make a reproducible frontend build an explicit Gradle input/dependency and verify hashed assets in the plugin ZIP.
+**Frontend toolchain freshness** — Risk: Low
+- `webui/package.json` pins Node engine `24.18.0` and Vite `8.1.5` exactly; the Gradle build pins the Node distribution with sha256 (`plugin/build.gradle.kts:940`) and enforces npm lockfile v3 plus lock-hash drift checks (`plugin/build.gradle.kts:920–925`). Dependabot is configured (`.github/dependabot.yml`). Main risk is the lack of frontend tests (see Test Coverage Gaps), not the dependencies themselves.
 
 ## Missing Critical Features
 
-**Existing entity discovery is a stub:**
-- Problem: `getEntities` always returns an empty list and contains an explicit TODO instead of scanning `@JmixEntity` source.
-- Blocks: The README claim of one-click CRUD “from any entity” is not implemented; the wizard only reuses the current in-memory Entity Designer model.
-- Files: `README.md`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, `webui/src/components/CrudWizard/CrudWizard.tsx`
+**No certified write-support declarations; compatibility registry certifies read-only discovery only** — Severity: Medium–High — Confirmed
+- Problem: `plugin/src/main/resources/compatibility/phase2-registry.json` contains only `discovery.*` operations, all in state `CERTIFIED_READ_ONLY` (e.g. lines 5–16). The generated-code matrix certifies compilation of generated artifacts against Jmix 2.8.2 (JDK 17/21) and 3.0.0 (JDK 21/25) only (`docs/COMPATIBILITY.md:58–63`); Jmix 1.x, CUBA, and other 2.x minors are explicitly uncertified (`docs/COMPATIBILITY.md:97–98`).
+- No version gate found in generators: `detectJmixVersion` exists (`plugin/src/main/kotlin/org/jmixworkbench/services/JmixProjectService.kt:337`) but no `jmixVersion` branch exists anywhere under `plugin/src/main/kotlin/org/jmixworkbench/generator/`, so generation proceeds best-effort on uncertified targets.
+- Blocks: the charter's "certified read/write support must be declared per adapter and fixture matrix" is only half-met (read side declared; write side undeclared and ungated).
+- Fix approach: extend the registry with write-operation cells per Jmix line and fail closed (or warn explicitly) when `ProjectConfig.jmixVersion` falls outside certified cells.
 
-**IDE “New” actions do not route to their advertised designers:**
-- Problem: New Entity, New View, and New CRUD actions only show the tool window. The Entity action contains a comment where tab selection should occur; the other actions do not signal React at all.
-- Blocks: Context menu actions cannot open the intended workflow directly.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/actions/Actions.kt`, `plugin/src/main/resources/META-INF/plugin.xml`, `webui/src/App.tsx`
+**Previewable diff missing for view creation and standalone menu editing** — Severity: Medium — Confirmed
+- Problem: charter requires every substantial change to "show the intended diff". Entity, CRUD, migration, role, and most existing-artifact flows have preview/apply UX (e.g. `webui/src/components/MigrationPanel/MigrationPanel.tsx:472–490`, `webui/src/components/RoleDesigner/RoleDesigner.tsx:191–221`, `webui/src/components/CrudWizard/CrudWizard.tsx:54`), but `ViewDesigner.tsx:943` and `MenuDesigner.tsx:509` apply directly.
+- Blocks: enterprise release claim of universal preview-before-write.
 
-**BPM generation has no visible designer or tab:**
-- Problem: Backend generation and a bridge action exist, but `App.tsx` exposes only entity, view, CRUD, menu, role, and migration tabs.
-- Blocks: The README’s BPM Generator feature is inaccessible through the shipped UI.
-- Files: `README.md`, `plugin/src/main/kotlin/com/jmixstudio/generator/BpmGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, `webui/src/App.tsx`
+**No release signing/publishing pipeline** — Severity: Low (pre-GA expected) — Confirmed
+- Problem: no `signPlugin`/`publishPlugin`/Marketplace channel configuration in `plugin/hosts/idea253/build.gradle.kts` or `plugin/hosts/idea262/build.gradle.kts`; descriptor self-describes as "Early, non-certified clean-room visual workbench prototype" (`plugin/hosts/idea253/src/main/resources/META-INF/plugin.xml:9`).
+- Blocks: signed distribution; release-integrity expectations in `docs/RELEASE-INTEGRITY.md` are not yet wired to tasks.
 
-**The manual Migration Builder exposes only seven change types:**
-- Problem: The README and Kotlin model advertise 25+ Liquibase operations, while the UI supports only create table, add/drop column, add foreign key, create index, insert data, and raw SQL—and those payloads are currently incompatible with Gson deserialization.
-- Blocks: Most advertised migration operations cannot be authored visually.
-- Files: `README.md`, `webui/src/components/MigrationPanel/MigrationPanel.tsx`, `plugin/src/main/kotlin/com/jmixstudio/model/MigrationModel.kt`
-
-**No designer persistence/import workflow exists:**
-- Problem: Entity state is Zustand memory and other designer state is local React state; there is no save/open/import/scan round trip.
-- Blocks: Reloading the JCEF page loses designs, and existing project artifacts cannot be edited visually.
-- Files: `webui/src/store/index.ts`, `webui/src/components/ViewDesigner/ViewDesigner.tsx`, `webui/src/components/MenuDesigner/MenuDesigner.tsx`, `webui/src/components/RoleDesigner/RoleDesigner.tsx`, `webui/src/components/MigrationPanel/MigrationPanel.tsx`
-
-**README “fully functional” status is not supported by implementation:**
-- Problem: The README states the plugin is fully functional and documents installation/build output, but the Kotlin sources do not compile, the Gradle wrapper command is absent, Menu/Migration/View/CRUD flows have protocol blockers, entity discovery is stubbed, and BPM is not exposed.
-- Blocks: Users cannot rely on the feature list as a release-readiness contract.
-- Files: `README.md`, `plugin/src/main/kotlin/com/jmixstudio/generator/ViewXmlGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, `plugin/gradle/wrapper/gradle-wrapper.properties`, `webui/src/App.tsx`
+**Intermediate IDE versions unsupported by design** — Severity: Low — Confirmed
+- Problem: lanes pin `sinceBuild/untilBuild` to `253`/`253.*` and `262`/`262.*` (`plugin/build.gradle.kts:567–568, 583–584`); IDE builds between lanes (e.g. 2026.1) have no artifact and are declared unsupported (`docs/COMPATIBILITY.md:14–16`). Users on those builds get nothing.
+- Fix approach: document the gap in-product or add a lane when an intermediate IDE reaches adoption.
 
 ## Test Coverage Gaps
 
-**Entire plugin and generator layer:**
-- What's not tested: No test source files or test dependencies are present for models, builders, generators, services, bridge behavior, or IDE integration.
-- Files: `plugin/build.gradle.kts`, `plugin/src/main/kotlin/com/jmixstudio/`
-- Risk: Kotlin compile failures, invalid Java imports, invalid XML, path traversal, overwrite behavior, and model drift remain undetected.
-- Priority: High
+**Zero automated tests for the entire React/TypeScript UI** — Priority: High — Confirmed
+- What's not tested: bridge client protocol (queueing, request-id correlation, dev fallback guards in `webui/src/bridge/index.ts:203–240`), all 15+ designer components under `webui/src/components/`, validation guards before apply.
+- Files: `webui/` (no `*.test.*`/`*.spec.*` anywhere; no test script in `webui/package.json`).
+- Risk: the UI frames every mutation request; a client-side regression (wrong payload shape, missing digest, swallowed error) can reach backend apply paths. Backend defenses (fingerprints, snapshots, restore) mitigate corruption but not usability regressions.
+- Fix: introduce Vitest + Testing Library; start with `webui/src/bridge/index.ts` protocol tests and per-designer apply-guard tests.
 
-**Frontend designers and bridge:**
-- What's not tested: `webui/package.json` defines only dev/build/preview scripts; there is no unit, component, or end-to-end test runner.
-- Files: `webui/package.json`, `webui/src/bridge/index.ts`, `webui/src/components/`
-- Risk: User flows can type-check and bundle successfully while every generation request fails at runtime.
-- Priority: High
+**No unit tests for the JCEF bridge dispatcher itself** — Priority: Medium — Confirmed
+- What's not tested: action allowlist behavior, unknown-action handling, malformed-JSON boundaries, response serialization safety in `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`. There is no `plugin/src/test/kotlin/org/jmixworkbench/bridge/` directory.
+- Risk: the security-critical dispatch layer changes without a regression net (the line-763 interpolation bug is exactly the class of bug a dispatcher test would catch).
+- Fix: extract dispatch + response-building into testable units; add tests for unknown/malformed actions and for "every response body is Gson-serialized".
 
-**Generated artifact validity:**
-- What's not tested: There are no golden fixtures, XML schema parses, Java compilation checks, Liquibase update/rollback checks, BPMN parses, or target Jmix application builds.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/generator/`
-- Risk: Generators report success after writing syntactically or semantically invalid artifacts.
-- Priority: High
+**Legacy synchronous generation path lacks a threading assertion** — Priority: Medium — Risk
+- What's not tested: that `generateView`/`generateMenu` applies do not freeze the EDT; no test asserts off-thread scheduling for bridge handlers (contrast: failure-safety is certified by `plugin/src/test/kotlin/org/jmixworkbench/services/WorkspaceMutationFailureSafetyTest.kt`).
+- Fix: migrate handlers to the executor pattern and cover with a test asserting the callback thread returns before apply completes.
 
-**Data-loss and security boundaries:**
-- What's not tested: Existing-file conflicts, partial-write rollback, undo behavior, canonical path containment, symlink traversal, origin checks, malformed JSON, payload limits, and JavaScript escaping.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-- Risk: Project files or files outside the project can be overwritten without warning, and the embedded browser boundary is not hardened.
-- Priority: High
+**Certification matrices are manual/scripted, not CI-resident** — Priority: Low — Confirmed
+- What's not tested automatically: database-runtime and integration-runtime matrices require Docker and credentials (`certification/database-runtime/run-matrix.sh`, `certification/integration-runtime/run-matrix.sh`, compose files); CI (`.github/workflows/ci.yml`) runs only the wrapper-only dual-lane gate `./gradlew clean phase1Check --dependency-verification=strict` on ubuntu-24.04 (lines 40–42).
+- Risk: runtime DB/integration certification evidence can lag code changes between manual runs.
+- Fix: schedule matrix runs as a gated CI job with ephemeral containers and no default credentials.
 
-**Project compatibility matrix:**
-- What's not tested: Kotlin Jmix apps, multi-module Gradle builds, custom source sets, supported IntelliJ builds, JCEF-unavailable IDEs, and installed-plugin resource loading.
-- Files: `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`, `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`, `plugin/build.gradle.kts`
-- Risk: Detection defaults to incorrect paths/database/package or the packaged UI fails to load.
-- Priority: High
+## Implemented Safeguards (verified — do not regress)
 
-**Observed build baseline:**
-- What's not tested: `npm run build` succeeds for the current UI (TypeScript and Vite, 1,587 modules), but there is no clean end-to-end plugin build. The documented `./gradlew` entry point is absent, and isolated JDK 17 Kotlin compilation exposes source errors.
-- Files: `webui/package.json`, `README.md`, `plugin/src/main/kotlin/com/jmixstudio/generator/ViewXmlGenerator.kt`, `plugin/gradle/wrapper/gradle-wrapper.properties`
-- Risk: A green frontend build can be mistaken for a working product.
-- Priority: High
+- Atomic multi-file apply with pre-captured snapshots and failure restore inside one `WriteCommandAction`: `plugin/src/main/kotlin/org/jmixworkbench/services/WorkspaceChangeService.kt:103–173` (snapshots 237–244, restore 289–311), revision fingerprint preflights at lines 449–475.
+- Undo/redo with post-edit conflict detection and rollback-of-rollback handling: `plugin/src/main/kotlin/org/jmixworkbench/services/WorkspaceHistoryService.kt:61–228, 399, 449–483`; exposed via `undoWorkspaceChange` (`JcefBridge.kt:623–628`).
+- Failure-safety certification probe kept internal and bridge-invisible: `plugin/src/main/kotlin/org/jmixworkbench/services/WorkspaceMutationProbe.kt:3–13`; enforced by `plugin/src/test/kotlin/org/jmixworkbench/services/WorkspaceMutationFailureSafetyTest.kt` and build guard `plugin/build.gradle.kts:774`.
+- Dependency integrity: npm lock hash pinning, Gradle lock hash comparison, wrapper sha256 pin requirement, lockfile-version checks (`plugin/build.gradle.kts:415–417, 832–925`), strict dependency verification in CI.
+- 99 Kotlin test files under `plugin/src/test/` plus the `phase2CoreTest` source set (`plugin/src/phase2CoreTest/`) covering discovery, parsers, generators, services, and tool-window boundaries.
 
 ---
 
-*Concerns audit: 2026-07-27*
+*Concerns audit: 2026-08-04*

@@ -1,321 +1,269 @@
 # Architecture
 
-**Analysis Date:** 2026-07-27
+**Analysis Date:** 2026-08-04
 
 ## Pattern Overview
 
-**Overall:** Embedded web application inside an IntelliJ Platform plugin, connected to a Kotlin code-generation backend through an in-process JSON command bridge.
+**Overall:** IntelliJ Platform plugin (Kotlin) hosting an embedded React/TypeScript workbench in JCEF, with an action-oriented JSON bridge, an evidence-based semantic project index, digest-bound preview/apply change planning, and dual IDE host build lanes.
 
 **Key Characteristics:**
-- The IDE host is the outer runtime: `plugin/src/main/resources/META-INF/plugin.xml` registers the tool window, project services, and IDE actions.
-- The visual designer is a client-side React application: `webui/src/main.tsx` mounts `webui/src/App.tsx`, which conditionally renders the six designer components under `webui/src/components/`.
-- The runtime boundary is action-oriented rather than REST-oriented: `webui/src/bridge/index.ts` sends `{ action, payload }` messages and `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` dispatches those actions.
-- Kotlin model objects are the backend generation contract: `plugin/src/main/kotlin/com/jmixstudio/model/` is deserialized from TypeScript-shaped payloads declared in `webui/src/types/index.ts`.
-- Generators are mostly stateless transformations from model objects to source strings: `plugin/src/main/kotlin/com/jmixstudio/generator/` contains singleton generator objects and the reusable `JavaClassBuilder` and `XmlBuilder`.
-- Project mutation is centralized in one IntelliJ project service: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt` writes generated files and refreshes the IDE virtual file system.
-- Documentation claims are not runtime evidence: `README.md` describes intended breadth, while the implemented command set and reachable UI are defined by `webui/src/App.tsx`, `webui/src/bridge/index.ts`, and `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-
-## Runtime Topology
-
-```text
-`plugin/src/main/resources/META-INF/plugin.xml`
-        |
-        v
-`plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`
-        |
-        +--> JCEF loads `webui/dist/index.html` or the Vite dev URL
-        |
-        v
-`webui/src/App.tsx` + `webui/src/components/**`
-        |
-        v
-`webui/src/bridge/index.ts` -- JSON action/payload -->
-`plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-        |
-        +--> `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`
-        +--> `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`
-                    |
-                    v
-        `plugin/src/main/kotlin/com/jmixstudio/generator/**`
-                    |
-                    v
-        generated files in the open Jmix project
-```
+- One shared Kotlin source tree (`plugin/src/main/kotlin/org/jmixworkbench/`) is compiled by two isolated IntelliJ host builds: `plugin/hosts/idea253` (IDEA Ultimate 2025.3, JDK 21) and `plugin/hosts/idea262` (IDEA Ultimate 2026.2, JDK 25). Host descriptors live at `plugin/hosts/idea253/src/main/resources/META-INF/plugin.xml` and `plugin/hosts/idea262/src/main/resources/META-INF/plugin.xml`; the aggregate `plugin/` build keeps its `main`/`test` source sets empty so no SDK-less compilation can happen (`plugin/build.gradle.kts`).
+- The React UI is bundled by Vite, packaged into plugin resources, and served inside JCEF from a virtual origin `https://jmix-workbench.invalid` by `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/PackagedWorkbenchResourceHandler.kt`. Browser content is treated as untrusted: the bridge is only injected for packaged-origin pages and every capability is server-side validated.
+- All mutation follows a fixed pipeline: preview (with plan digest) → explicit apply referencing that digest → plan via `WorkspaceChangePlanner` → atomic `WriteCommandAction` write with exact byte-level rollback on failure → history record for undo/redo → application-graph invalidation (`plugin/src/main/kotlin/org/jmixworkbench/services/WorkspaceChangeService.kt`).
+- Project understanding comes from an evidence-based discovery model (`plugin/src/main/kotlin/org/jmixworkbench/discovery/model/DiscoveryModel.kt`) and a pure semantic indexer (`plugin/src/main/kotlin/org/jmixworkbench/discovery/semantic/ApplicationGraphIndexer.kt`) that produces artifacts/relationships without executing Gradle.
+- Compatibility is fail-closed: `plugin/src/main/kotlin/org/jmixworkbench/discovery/compatibility/CompatibilityRegistry.kt` loads `plugin/src/main/resources/compatibility/phase2-registry.json` and only certifies read-only cells for exact Jmix 2.8 / 3.0 profiles.
+- Generators (`plugin/src/main/kotlin/org/jmixworkbench/generator/`) are stateless string producers; only the services layer writes to the user's project.
 
 ## Layers
 
-**IntelliJ Extension Registration:**
-- Purpose: Declare plugin identity, compatibility, tool-window factory, project services, and IDE actions.
-- Location: `plugin/src/main/resources/META-INF/plugin.xml`
-- Contains: One `toolWindow` extension, two `projectService` extensions, and four action registrations.
-- Depends on: IntelliJ Platform extension points configured by `plugin/build.gradle.kts`.
-- Used by: IntelliJ startup and action-system discovery before any Kotlin entry point runs.
+**Plugin Registration (descriptors):**
+- Purpose: Declare plugin id `org.jmixworkbench`, platform dependencies, tool windows, services, editors, indexes, inspections, and actions.
+- Location: `plugin/src/main/resources/META-INF/plugin.xml` (shared descriptor), `plugin/hosts/idea253/src/main/resources/META-INF/plugin.xml`, `plugin/hosts/idea262/src/main/resources/META-INF/plugin.xml` (host-specific descriptors that win packaging), `plugin/src/main/resources/META-INF/jmix-kotlin.xml` (optional Kotlin depends config — currently an empty `<idea-plugin/>` stub).
+- Contains: `<depends>` on `com.intellij.modules.platform|java|xml`, `com.intellij.properties`, `com.intellij.gradle`, optional `org.jetbrains.kotlin`; one custom extension point `templateCatalogSigningProvider` (`org.jmixworkbench.project.JmixTemplateCatalogSigningProvider`); two tool windows; ~20 project services; two file editor providers; 11 file-based indexes; 7 reference contributors; 2 rename processors; 2 line markers; 14 local inspections (group `Jmix`, level `ERROR`, all `enabledByDefault`).
+- Depends on: IntelliJ Platform extension points supplied by the host builds.
+- Used by: IntelliJ at plugin load; the host `processResources` merge excludes the shared `META-INF/plugin.xml` so the host descriptor is authoritative in packaged artifacts (`plugin/hosts/idea253/build.gradle.kts`).
+- Boundary note: the shared descriptor registers `referencesSearch` (`org.jmixworkbench.ide.JmixJpaMappedByReferenceSearchExecutor`) which is not present in the idea253 host descriptor; registration changes may need to be applied to all three descriptors.
 
-**IDE Entry and Host UI:**
-- Purpose: Create the embedded browser, resolve the web UI URL, attach the bridge, and expose the designer as a tool window.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`
-- Contains: JCEF support detection, `JBCefBrowser` creation, development/production/fallback URL resolution, content disposal, and unconditional tool-window availability.
-- Depends on: `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, JCEF APIs, and the bundled `webui/dist` artifact copied by `plugin/build.gradle.kts`.
-- Used by: The `Jmix Studio` tool-window extension in `plugin/src/main/resources/META-INF/plugin.xml`.
+**Tool Window Shell & Navigation:**
+- Purpose: Create the JCEF browser, resolve the UI location (dev URL vs packaged bundle), attach the bridge, and route navigation requests into the embedded UI.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixWorkbenchToolWindowFactory.kt`, `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/WorkbenchLaunchContext.kt`, `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/WorkbenchNavigationService.kt`, `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/PackagedWorkbenchResourceHandler.kt`, `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixRuntimePreviewToolWindow.kt`.
+- Contains: `WorkbenchToolWindowStartup.plan(...)` producing `JcefUnavailable | WebBundleMissing | DevelopmentUrlRejected | Browser`; dev mode gated by `-Djmixworkbench.dev.enabled=true` plus a credential-free loopback `-Djmixworkbench.dev.url` (`WorkbenchBridgeAccess.NONE` in dev); packaged entry `/webui/index.html` served as `https://jmix-workbench.invalid/index.html`; `/flowui-editor.html` and `/entity-editor.html` mapped to `index.html`; `WorkbenchSurface` enum (`TOOL_WINDOW`, `FLOW_UI_EDITOR`, `ENTITY_EDITOR`, `ENTITY_DESIGNER`, `VIEW_DESIGNER`, `CRUD_DESIGNER`, `PROJECT_PROPERTIES`); `WorkbenchSurfaceOpenPolicy` restricts browser-requested surface opens to indexed evidence; second tool window `Jmix Runtime Preview` (bottom, closeable contents).
+- Depends on: `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`, JCEF APIs, the packaged web bundle produced by the build.
+- Used by: `plugin/src/main/resources/META-INF/plugin.xml` tool window registrations; `plugin/src/main/kotlin/org/jmixworkbench/actions/Actions.kt` via `WorkbenchNavigationService.request(...)`.
+
+**Native File Editors:**
+- Purpose: Open Jmix FlowUI descriptors and entity sources in JCEF-backed file editors that reuse the same web bundle.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/editor/JmixFlowUiFileEditor.kt`, `plugin/src/main/kotlin/org/jmixworkbench/editor/JmixEntityFileEditor.kt`.
+- Contains: `JmixFlowUiFileEditorProvider`/`JmixEntityFileEditorProvider` (`FileEditorProvider`, `acceptRequiresReadAction`), eligibility checks (`FlowUiFileEditorEligibility`), per-editor `JBCefBrowser` loading the packaged entry URL with an editor launch context.
+- Depends on: `PackagedWorkbenchResourceHandler` infrastructure, `WorkbenchLaunchContext`, bridge.
+- Used by: `fileEditorProvider` registrations in the plugin descriptors.
 
 **IDE Actions:**
-- Purpose: Expose the designer through the Tools menu and New menu for recognized Jmix projects.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/actions/Actions.kt`
-- Contains: `OpenDesignerAction`, `NewEntityAction`, `NewViewAction`, and `NewCrudAction`.
-- Depends on: `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt` for action visibility and IntelliJ `ToolWindowManager` for activation.
-- Used by: Action declarations in `plugin/src/main/resources/META-INF/plugin.xml`.
-- Implemented boundary: The three “New” actions only show the tool window; `plugin/src/main/kotlin/com/jmixstudio/actions/Actions.kt` contains no call that selects the matching tab in `webui/src/store/index.ts`.
+- Purpose: Entry points from the IDE menus into workbench surfaces, gated to detected Jmix projects.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/actions/Actions.kt`, `plugin/src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt`.
+- Contains: `JmixProjectAction` base (visibility via `JmixProjectService.isJmixProject()`); `OpenDesignerAction` (`TOOL_WINDOW`), `OpenProjectPropertiesAction` (`PROJECT_PROPERTIES`), `NewEntityAction` (`ENTITY_DESIGNER`), `NewViewAction` (`VIEW_DESIGNER`), `NewCrudAction` (`CRUD_DESIGNER`) — all call `WorkbenchNavigationService.getInstance(project).request(WorkbenchLaunchContext(surface))`; `InjectJmixRepositoryAction` (Generate menu) injects the Jmix Maven repository into build files with a confirmation dialog.
+- Depends on: `plugin/src/main/kotlin/org/jmixworkbench/services/JmixProjectService.kt`, `WorkbenchNavigationService`.
+- Used by: `<actions>` registrations (`JmixWorkbench.NewMenu` group in NewGroup; ToolsMenu; GenerateGroup).
 
-**React Application Shell:**
-- Purpose: Mount the designer application, request project configuration, own tab navigation, and render global notifications.
-- Location: `webui/src/main.tsx`, `webui/src/App.tsx`, `webui/src/index.css`
-- Contains: React root creation, six tab definitions, conditional designer mounting, sidebar layout, and the shared `Toast`.
-- Depends on: `webui/src/store/index.ts`, `webui/src/bridge/index.ts`, and all component entry files under `webui/src/components/`.
-- Used by: `webui/index.html`, built by `webui/vite.config.ts` into `webui/dist/`.
+**Native IDE Intelligence (`ide/`):**
+- Purpose: Jmix-aware editor assistance in plain source files: references, completions, inspections, rename, line markers.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/ide/` (29 files), e.g. `JmixSymbolFileIndexes.kt`, `JmixReferenceResolution.kt`, `JmixFlowUiMetadata.kt`, `JmixSpringBeanSymbols.kt`, `JmixUiSecuritySymbols.kt`, `Jmix*ReferenceContributor.kt`, `Jmix*Inspection.kt`, `JmixSpringBeanRenameProcessor.kt`, `JmixMessageBundleRenameProcessor.kt`, `JmixViewDescriptorLineMarkerProvider.kt`.
+- Contains: 4 symbol services (`JmixDomainSymbolService`, `JmixUiSecuritySymbolService`, `JmixSpringBeanSymbolService`, `JmixRestConfigurationSymbolService`), 11 candidate `fileBasedIndex` implementations (entity, view controller, specific policy, Spring bean, Spring stereotype usage, menu, fetch plan, FlowUI descriptor, REST descriptor, message bundle, Studio metadata), reference contributors for XML/JAVA/kotlin/Properties, fail-closed inspections.
+- Depends on: IntelliJ PSI/index APIs; discovery evidence for candidate scoping.
+- Used by: descriptor registrations; tests under `plugin/src/test/kotlin/org/jmixworkbench/ide/`.
 
-**Designer Features:**
-- Purpose: Gather generation inputs and submit typed models to the backend.
-- Location: `webui/src/components/EntityDesigner/EntityDesigner.tsx`, `webui/src/components/ViewDesigner/ViewDesigner.tsx`, `webui/src/components/CrudWizard/CrudWizard.tsx`, `webui/src/components/MenuDesigner/MenuDesigner.tsx`, `webui/src/components/RoleDesigner/RoleDesigner.tsx`, `webui/src/components/MigrationPanel/MigrationPanel.tsx`
-- Contains: Entity form and preview, drag-and-drop view component tree, CRUD wizard, menu tree editor, role policy editor, and a seven-change-type migration editor.
-- Depends on: Shared Zustand state from `webui/src/store/index.ts`, request helpers from `webui/src/bridge/index.ts`, and payload contracts from `webui/src/types/index.ts`.
-- Used by: Conditional rendering in `webui/src/App.tsx`.
-- Implemented boundary: `webui/src/components/MenuDesigner/MenuDesigner.tsx` submits `generateMenu`, but `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` has no `generateMenu` dispatch branch.
+**JCEF Bridge (backend dispatcher):**
+- Purpose: Inject the JS bridge, parse/validate incoming JSON, dispatch 114 actions to services, marshal responses back to the browser.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt` (~4,600 lines).
+- Contains: protocol JS→Java `window.cefQuery({ request: JSON.stringify({ action, payload, requestId }) })`, Java→JS `window.onBridgeResponse(action, requestId, json)`; injection of `window.javaBridge.send(action, payload, requestId)`, `window.onBridgeReady()`, `window.onWorkbenchLaunchContext(...)`; push event `applicationGraphUpdated`; an `if (action == ...)` dispatch chain; per-handler `runCatching` payload parsing; background execution via `Task.Backgroundable` + `AppExecutorUtil.getAppExecutorService()` with `.finishOnUiThread(ModalityState.any())`; `invokeLater` for UI interactions; unknown actions return `{"error":"Unknown action: ..."}`; exceptions are logged (`log.error("Bridge error", e)`) and returned as error responses; injection guarded by `isPackagedWorkbenchOriginUrl(...)`.
+- Depends on: services layer, discovery layer, models, Gson.
+- Used by: `JmixWorkbenchToolWindowFactory` and the native file editors.
 
-**Client State:**
-- Purpose: Share the active tab, detected project configuration, the entity under design, generation status/results, and toast notifications.
-- Location: `webui/src/store/index.ts`
-- Contains: A single Zustand store with immutable update functions and default entity/attribute factories.
-- Depends on: Model interfaces from `webui/src/types/index.ts`.
-- Used by: `webui/src/App.tsx` and all files under `webui/src/components/`.
-- State boundary: Entity and CRUD state is shared through `webui/src/store/index.ts`; view, menu, role, and migration editor data is local React state in their respective files under `webui/src/components/`.
+**Web UI Application:**
+- Purpose: Render the visual workbench; collect inputs; call the bridge; show toasts.
+- Location: `webui/index.html`, `webui/src/main.tsx`, `webui/src/App.tsx`, `webui/src/store/index.ts`, `webui/src/bridge/index.ts`, `webui/src/bridge/devMocks.ts`, `webui/src/types/index.ts`, `webui/src/components/**`.
+- Contains: 14 workspace tabs in `webui/src/App.tsx` (`projectProperties`, `projectMap`, `entity`, `view`, `crud`, `menu`, `role`, `api`, `integration`, `workflow`, `logic`, `rules`, `scenario`, `migration`); native-editor mode detection via `window.location.pathname` (`/flowui-editor.html`, `/entity-editor.html`); launch-context handling (`FLOW_UI_EDITOR`, `ENTITY_EDITOR`, `ENTITY_DESIGNER`, `VIEW_DESIGNER`, `CRUD_DESIGNER`); Zustand store (default tab `projectMap`, project config, shared entity model, `flowUiLocator`, `crudEntityLocator`, toasts); `Bridge` class with pending queue until `onBridgeReady`, requestId-matched promises, workspace/graph caches, and a development simulation (backed by `webui/src/bridge/devMocks.ts`) that mirrors the digest-bound preview/apply protocol when `window.javaBridge` is absent; DOM event `jmix-workbench-index-updated` fired from `applicationGraphUpdated`.
+- Depends on: bridge protocol; Tailwind styling (`webui/src/index.css`, `webui/tailwind.config.js`).
+- Used by: `webui/index.html` (Vite); packaged into plugin resources by the build.
 
-**Client Bridge Adapter:**
-- Purpose: Queue commands until JCEF injects the bridge, route responses to promises, and simulate generation responses during Vite development.
-- Location: `webui/src/bridge/index.ts`
-- Contains: Global `window.javaBridge`, `window.onBridgeReady`, and `window.onBridgeResponse` contracts; pending command queue; listener registry; request helpers for entity, CRUD, view, migration, role, BPM, and project configuration.
-- Depends on: JCEF-injected functions created by `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Used by: `webui/src/App.tsx` and the designer components under `webui/src/components/`.
-- Protocol boundary: Requests carry an action name but no request ID in `webui/src/bridge/index.ts`; promise resolution is matched by action name.
+**Workspace Services (`services/`):**
+- Purpose: Load per-domain workspace state, plan/validate/apply source-safe changes, and provide refactor/import workflows.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/services/` (~52 files).
+- Contains, by role:
+ - Core indexing/detection: `ApplicationGraphService.kt` (`graph(forceRefresh)`, `progress()`, incremental document listener, `invalidate()`), `JmixProjectService.kt` (Jmix detection, base package/version/database heuristics, cached config), `ProjectFileResolver.kt` (registered-root resolution; rejects `\`, `..`, blank segments), `IntellijReadActions.kt` (`cancellableRead` helper), `ProjectSourceDestinationService.kt`, `ProjectSourceText.kt`.
+ - Change engine: `WorkspaceChangeService.kt` (`preview`, `prepareApply`, `applyPrepared` in `WriteCommandAction`, exact rollback with byte verification, `JVW-CHANGE-ROLLBACK-FAILED`), `WorkspaceHistoryService.kt` (undo/redo with `WorkspaceMutationPhase` checkpoints), `WorkspaceMutationProbe.kt`.
+ - Generation orchestration: `CodeGenerationService.kt` (`preview*/prepare*/generate*` for entity, CRUD, view, migration, role, menu, BPM/workflow, database import; applies plans through `WorkspaceChangeService`).
+ - Domain workspaces: `FlowUiWorkspaceService.kt`, `MenuWorkspaceService.kt`, `SecurityWorkspaceService.kt`, `SchemaWorkspaceService.kt`, `RestApiWorkspaceService.kt`, `ScenarioWorkspaceService.kt`, `VisualLogicWorkspaceService.kt`, `VisualRuleWorkspaceService.kt`, `DmnDecisionWorkspaceService.kt`, `IntegrationConnectorWorkspaceService.kt`, `WorkflowWorkspaceService.kt`, `JmixProjectPropertiesService.kt`, `JmixEnvironmentConfigurationService.kt`.
+ - Source change services: `FlowUiControllerChangeService.kt`, `FlowUiControllerPsiReader.kt`, `AggregateUpdateServiceChangeService.kt`, `DataRepositoryChangeService.kt`, `SecurityRoleChangeService.kt`, `RestApiChangeService.kt`, `ExistingEntityChangeService.kt`, `EntityEventListenerService.kt`, `EntityAttributePropagationService.kt`, `EntityAttributeRefactorService.kt`, `EntityAttributeTypeExpansionService.kt`, `EntityAttributeTypeCutoverService.kt`, `RepositoryMethodRefactorService.kt`.
+ - Reverse engineering / contracts: `DatabaseReverseEngineeringService.kt`, `DatabaseEntityImportPlanner.kt`, `DatabaseEntityImportProfileService.kt`, `OpenApiContractService.kt`, `OpenApiDocumentBundler.kt`, `OpenApiContractEvolutionAnalyzer.kt`, `OpenApiEvolutionApprovalService.kt`, `OpenApiJmixEvolutionRemapPlanner.kt`.
+ - Parsers/runtime: `MigrationJsonParser.kt`, `DmnDecisionParser.kt`, `WorkflowXmlParser.kt`, `RepositorySourceParser.kt`, `RepositorySemanticAnalyzer.kt`, `JmixRuntimeService.kt` (runtime inspection + FlowUI hot deploy proposals), `RuntimeSecurityEvidenceService.kt`.
+- Depends on: discovery layer, generator layer, IntelliJ VFS/PSI/write-command APIs.
+- Used by: `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt` (all handlers); registered as project services in the descriptors.
 
-**Server Bridge Adapter:**
-- Purpose: Inject the JavaScript bridge into JCEF, parse incoming JSON, dispatch backend operations, and execute response callbacks in the browser.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-- Contains: `JBCefJSQuery` lifecycle, Gson deserialization, action routing, service calls, logging, and JavaScript response execution.
-- Depends on: Models in `plugin/src/main/kotlin/com/jmixstudio/model/`, generators in `plugin/src/main/kotlin/com/jmixstudio/generator/`, and services in `plugin/src/main/kotlin/com/jmixstudio/services/`.
-- Used by: `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`.
-- Implemented commands: `generateEntity`, `generateCrud`, `generateView`, `generateMigration`, `generateRole`, `generateBpm`, `getProjectConfig`, `getEntities`, and `ping` are enumerated in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
+**Discovery & Indexing (`discovery/`):**
+- Purpose: IDE-independent evidence model, semantic indexing, change planning, compatibility gating, and format parsers.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/discovery/`.
+- Contains:
+ - `model/DiscoveryModel.kt`: `Evidence<T>`, `EvidenceConfidence` (`EXACT|STRONG|WEAK|CONFLICTING`), `EvidenceSourceKind`, `TrustState`, `ImportState`, `BuildKind`, `ModuleRole`, `SourceRootKind`, ~60-value `ArtifactKind`, `ArtifactOrigin`, `RelationshipType`, `DiagnosticSeverity/Category`, `CompatibilityState`, `DiscoverySnapshot`, `BuildSnapshot`, `ModuleSnapshot`, `SourceRootSnapshot`, `DependencyFact`, `JmixProfile` (includes `CUBA`/`FUTURE`/`NOT_DETECTED` classifications), `ArtifactSnapshot`, `ArtifactRelationship`, `DiscoveryDiagnostic`, `SourceLocator`, `CompatibilityDecision`.
+ - `model/CanonicalDiscoveryJson.kt`: deterministic canonical JSON writer for evidence.
+ - `semantic/ApplicationGraphIndexer.kt`: pure indexer (`GraphSourceFile` input) covering JVM sources, view/menu/fetch-plan/REST/Liquibase/workflow/DMN XML, properties/YAML/SQL, report templates, integration properties.
+ - `change/WorkspaceChangePlanner.kt`: `WorkspaceChangeSet` → `WorkspaceChangePlan` (`PlannedWorkspaceFile`, create/modify/delete planning); `change/SourcePreservingMerge.kt`: merge logic that preserves manual source.
+ - `compatibility/CompatibilityRegistry.kt`: loads `compatibility/phase2-registry.json`, enforces `CERTIFIED_READ_ONLY` cells for exact Jmix 2.8/3.0 with `P2_CERTIFIED_READ_ONLY` reason codes; future/unknown versions are uncertified.
+ - `flowui/FlowUiDescriptorParser.kt`, `navigation/SourceNavigationPolicy.kt`, `runtime/JmixRuntimeConfiguration.kt` (`JmixRuntimeConfigurationParser`), `security/SecurityWorkspaceBuilder.kt` + `security/RuntimeSecurityEvidenceModel.kt`, `static/GradleConfigParser.kt` (token-based; explicitly no Gradle/Groovy/process/network integration).
+- Depends on: JDK/Gson only (kept platform-independent; covered by the `phase2Core` source set).
+- Used by: services layer; tested by `plugin/src/phase2CoreTest/kotlin/`.
 
-**Project Discovery and Configuration:**
-- Purpose: Decide whether the open project is a Jmix project and infer generation roots, base package, Jmix version, and database type.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`, `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt`
-- Contains: Root Gradle file lookup, marker-string detection, group/package inference, dependency-string database detection, version inference, cached configuration, and output-path helpers.
-- Depends on: IntelliJ `Project` and `VirtualFile` APIs.
-- Used by: `plugin/src/main/kotlin/com/jmixstudio/actions/Actions.kt` and every backend handler in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Scope boundary: Only root `build.gradle` or `build.gradle.kts` is inspected by `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`; multi-module discovery is not implemented there.
+**Generators (`generator/`):**
+- Purpose: Deterministic rendering/patching of target-project artifacts from models.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/generator/` (25 files).
+- Contains: builders `JavaClassBuilder.kt`, `XmlBuilder.kt`; `EntityGenerator.kt` + `KotlinEntityGenerator.kt`; `DataRepositoryGenerator.kt` + `KotlinDataRepositoryGenerator.kt`; `ViewXmlGenerator.kt`, `ViewControllerGenerator.kt`, `CrudOrchestrator.kt` (`generate(entity, config, options)` composing multi-file CRUD output); `MigrationGenerator.kt`; `MenuGenerator.kt` + `MenuSourcePatcher.kt`; `RoleGenerator.kt`; `ScenarioTestGenerator.kt`; `BpmGenerator.kt`; `DmnDecisionGenerator.kt`; `VisualLogicGenerator.kt`; `VisualRuleGenerator.kt`; `IntegrationConnectorGenerator.kt`; `OpenApiJmixLayerGenerator.kt`; `RestApiSourcePatcher.kt`; `EventListenerGenerator.kt`; `AggregateUpdateServiceGenerator.kt`.
+- Depends on: `model/`, builders, JDK only.
+- Used by: `services/CodeGenerationService.kt`, `services/*WorkspaceService.kt`, `services/*ChangeService.kt`. Generators never write files.
 
-**Shared Domain Models:**
-- Purpose: Represent entities, views, migrations, roles, and target-project configuration independent of code rendering.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/model/EntityModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/model/ViewModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/model/MigrationModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/model/RoleModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt`
-- Contains: Kotlin data classes, sealed migration changes, enums with Gson serialized names, computed names, and path helpers.
-- Depends on: Gson annotations from the dependency declared in `plugin/build.gradle.kts`.
-- Used by: `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`, `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, and all generator files under `plugin/src/main/kotlin/com/jmixstudio/generator/`.
-- Cross-language contract: Equivalent but not identical payload interfaces are maintained manually in `webui/src/types/index.ts`.
+**Bridge Models (`model/`):**
+- Purpose: Closed Kotlin payload contracts deserialized from TypeScript-shaped JSON.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/model/` — `EntityModel.kt`, `ViewModel.kt`, `MigrationModel.kt`, `RoleModel.kt`, `ProjectConfig.kt`, `ScenarioModel.kt`, `VisualLogicModel.kt`, `VisualRuleModel.kt`, `WorkflowModel.kt`, `DmnDecisionModel.kt`, `IntegrationConnectorModel.kt`.
+- Depends on: Gson annotations.
+- Used by: bridge handlers, services, generators. Mirrored manually in `webui/src/types/index.ts`.
 
-**Generation Orchestration:**
-- Purpose: Convert one entity definition into a coordinated entity/migration/view/menu/role/messages/repository/fetch-plan output set.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`
-- Contains: `CrudOptions`, generated-file metadata, view-model construction, generator composition, and path selection.
-- Depends on: Every primary model and most generators under `plugin/src/main/kotlin/com/jmixstudio/generator/`.
-- Used by: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt` through the `generateCrud` bridge action.
-- Write behavior: The orchestrator only returns strings and paths; `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt` performs the actual writes.
+**Project Creation (`project/`):**
+- Purpose: New-project wizard, template generation/installation, signed organization template and connector catalogs.
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/project/` — `JmixNewProjectWizard.kt` (`GeneratorNewProjectWizard`), `JmixProjectTemplateGenerator.kt` (object with `GeneratedJmixProject`, validation exception), `JmixProjectInstaller.kt`, `JmixFlowUiProjectTemplate.kt`, `JmixOrganizationTemplateCatalog.kt`, `JmixTemplateCatalogSettings.kt`, `JmixTemplateCatalogConfigurable.kt`, `JmixTemplateCatalogAuthoring.kt`, `JmixTemplateCatalogAuthoringDialog.kt`, `JmixTemplateCatalogSigningProvider.kt` (custom extension point interface), `JmixTemplateOverlayPlanner.kt`, `JmixConnectorCatalogAuthoringDialog.kt`.
+- Depends on: IntelliJ wizard/configurable APIs; packaged `project-template/` resources (Gradle wrapper jar and template files merged by host `processResources`).
+- Used by: `newProjectWizard.generator` and `applicationConfigurable` registrations.
 
-**Specialized Generators:**
-- Purpose: Render specific Jmix artifacts from backend models.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/generator/EntityGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/ViewXmlGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/ViewControllerGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/MigrationGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/MenuGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/RoleGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/DataRepositoryGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/EventListenerGenerator.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/BpmGenerator.kt`
-- Contains: Kotlin singleton objects with `generate` functions that return Java, XML, or BPMN text.
-- Depends on: Models in `plugin/src/main/kotlin/com/jmixstudio/model/` and builders in `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt` and `plugin/src/main/kotlin/com/jmixstudio/generator/XmlBuilder.kt`.
-- Used by: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`, or other specialized generators.
-- Reachability boundary: `plugin/src/main/kotlin/com/jmixstudio/generator/EventListenerGenerator.kt` is not referenced by the bridge, service, or CRUD orchestrator; `plugin/src/main/kotlin/com/jmixstudio/generator/BpmGenerator.kt` is backend-reachable but has no tab in `webui/src/App.tsx`.
+**Build & Host Lanes:**
+- Purpose: Compile the shared sources against two IntelliJ versions, package the web bundle, and verify integrity.
+- Location: `plugin/build.gradle.kts` (aggregate), `plugin/settings.gradle.kts`, `plugin/gradle/libs.versions.toml`, `plugin/gradle/verification-metadata.xml`, `plugin/buildSrc/src/main/java/org/jmixworkbench/build/` (`AssembleWebBundleTask`, `VerifyWebBundleTask`, `VerifyPluginZipContentsTask`, `SnapshotFileHashTask`, `WebBundleFingerprint`), `plugin/hosts/idea253/build.gradle.kts`, `plugin/hosts/idea262/build.gradle.kts`.
+- Contains: included builds `idea253`/`idea262`; source sets `phase2Core`, `phase2CoreTest`, `compatibilityGenerator`; compatibility compile cells `jmix28Jdk17`/`jmix28Jdk21` (Jmix 2.8.2) and `jmix30Jdk21`/`jmix30Jdk25` (Jmix 3.0.0) against `io.jmix.bom`; npm pipeline tasks `snapshotNpmLockHash` → `npmCi` → `compileWebUi` → `buildWebUi` → `verifyWebBundle`; `verifyHostToolchains` (idea253 must be Java 21, idea262 Java 25) and `verifyHostBuildDefinitions` (immutable host contracts, e.g. `intellijIdeaUltimate("2025.3")`, `sinceBuild 253/262`); strict dependency locking per host (`plugin/hosts/*/gradle/dependency-locks/gradle.lockfile`).
+- Depends on: Gradle wrapper 9.5.1 (`plugin/gradle/wrapper/gradle-wrapper.properties`), Node Gradle plugin 7.1.0 with pinned Node runtime 24.18.0, IntelliJ Platform Gradle plugin 2.18.0.
+- Used by: `./gradlew` commands from `plugin/` (`README.md` documents `./gradlew test --dependency-verification=strict`).
 
-**Source Builders:**
-- Purpose: Provide reusable fluent construction and formatting for generated Java and XML.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/XmlBuilder.kt`
-- Contains: Package/import/class/member rendering in `JavaClassBuilder` and namespace/attribute/element/text rendering in `XmlBuilder`.
-- Depends on: Kotlin/JDK standard library only within those two files.
-- Used by: Specialized generators under `plugin/src/main/kotlin/com/jmixstudio/generator/`.
-
-**Generation Application Service:**
-- Purpose: Choose output paths, invoke generators, mutate the open project, package success/error results, and refresh IntelliJ VFS state.
-- Location: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`
-- Contains: Per-artifact workflows, `GenerationResult`, `writeFile`, `appendFile`, message rendering, and VFS refresh.
-- Depends on: Models in `plugin/src/main/kotlin/com/jmixstudio/model/`, generators in `plugin/src/main/kotlin/com/jmixstudio/generator/`, Java `File`, and IntelliJ write-command/VFS APIs.
-- Used by: `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Mutation boundary: This is the only implemented layer that writes to the user’s Jmix project; generator files under `plugin/src/main/kotlin/com/jmixstudio/generator/` remain pure string producers.
+**Certification Harnesses:**
+- Purpose: Out-of-IDE runtime evidence for generated code.
+- Location: `certification/database-runtime/` (same Jmix domain model against five real databases via Docker Compose; `run-matrix.sh`; fixture credentials supplied via `CERT_*` env vars), `certification/integration-runtime/` (executes production-generated connector sources; `run-matrix.sh`).
+- Contains: standalone Gradle builds with committed wrappers, Spring Boot applications (`RuntimeCertificationApplication.java`, `IntegrationRuntimeCertificationApplication.java`), Liquibase changelogs.
+- Used by: manual/CI certification runs; referenced by `docs/DATABASE-RUNTIME-CERTIFICATION.md` and `docs/PROJECT-TEMPLATE-CERTIFICATION.md`.
 
 ## Data Flow
 
-**Plugin and UI Startup:**
+**Tool window boot:**
+1. IntelliJ instantiates `JmixWorkbenchToolWindowFactory` (`plugin/src/main/resources/META-INF/plugin.xml` tool window `Jmix Visual Workbench`, anchor right).
+2. `WorkbenchToolWindowStartup.plan(...)` checks `JBCefApp.isSupported()`, dev-mode system properties, then packaged resource `/webui/index.html`.
+3. For packaged mode the browser installs `PackagedWorkbenchRequestHandler` and loads `https://jmix-workbench.invalid/index.html`; the handler serves bundle files from plugin resources.
+4. On load end `JcefBridge` injects `window.javaBridge`, publishes `window.jmixWorkbenchLaunchContext`, and fires `window.onBridgeReady()`.
+5. `webui/src/App.tsx` mounts, calls `bridge.getProjectConfig()`, subscribes to `jmix-workbench-index-updated`, and renders the active workspace.
+6. Failure modes render labeled errors with codes `JVW-JCEF-UNAVAILABLE`, `JVW-WEB-BUNDLE-MISSING`, or `JVW-DEV-URL-REJECTED` (`plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixWorkbenchToolWindowFactory.kt`).
 
-1. IntelliJ reads `plugin/src/main/resources/META-INF/plugin.xml` and instantiates `JmixStudioToolWindowFactory`.
-2. `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt` creates a `JBCefBrowser` and a `JcefBridge`.
-3. `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt` loads the `jmixstudio.dev.url` system property, bundled `/webui/index.html`, local `webui/dist/index.html`, or `about:blank` in that order.
-4. `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` injects `window.javaBridge.send` after the main JCEF frame finishes loading.
-5. `webui/src/bridge/index.ts` marks itself ready, drains queued actions, and forwards responses to registered listeners.
-6. `webui/src/App.tsx` requests `getProjectConfig` and stores the result in `webui/src/store/index.ts`.
+**Navigation / launch context:**
+1. IDE action (or bridge action `openWorkbenchSurface`) calls `WorkbenchNavigationService.request(WorkbenchLaunchContext(surface, sourceLocator))`.
+2. The tool window bridge publishes the context via `window.onWorkbenchLaunchContext(...)`.
+3. `webui/src/App.tsx` switches `activeTab` / opens the FlowUI or entity designer for the locator.
+4. Browser-requested surface opens (`openWorkbenchSurface`) pass `WorkbenchSurfaceOpenPolicy.prepare(...)` which accepts only indexed evidence (`CRUD_DESIGNER` requires an indexed entity locator; `FLOW_UI_EDITOR` requires an indexed `VIEW_DESCRIPTOR`); denials return `JVW-WORKBENCH-*` codes.
 
-**Single-Artifact Generation:**
+**Preview → apply mutation cycle:**
+1. UI calls a `preview*` bridge action; the handler parses the payload (`runCatching`) and asks a service for a `WorkspaceChangeSet`.
+2. `WorkspaceChangePlanner.plan(...)` produces a `WorkspaceChangePlan`; `WorkspaceChangeService.preview(...)` returns `WorkspaceChangePreviewResponse` with `changeSetId` and `planDigest`.
+3. UI shows the diff; user approval calls the matching `apply*` action including `expectedPlanDigest`.
+4. The backend re-prepares (`prepareApply`), verifies the digest, then `applyPrepared` runs inside `WriteCommandAction.runWriteCommandAction`; any failure triggers exact byte-level rollback (`JVW-CHANGE-ROLLBACK-FAILED` if rollback itself fails).
+5. On success `WorkspaceHistoryService.record(...)` stores the entry for undo/redo and `ApplicationGraphService.invalidate()` refreshes the index.
 
-1. A designer under `webui/src/components/` validates local/shared form state and calls a helper in `webui/src/bridge/index.ts`.
-2. `webui/src/bridge/index.ts` serializes an action/payload through the JCEF-injected `window.javaBridge.send`.
-3. `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` parses the request, deserializes the payload into a model from `plugin/src/main/kotlin/com/jmixstudio/model/`, and resolves project configuration.
-4. `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt` invokes a generator under `plugin/src/main/kotlin/com/jmixstudio/generator/`.
-5. `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt` writes or appends target-project files inside an IntelliJ write command and schedules a recursive VFS refresh.
-6. `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` calls `window.onBridgeResponse(action, result)`; `webui/src/bridge/index.ts` resolves the matching request; the originating designer updates `webui/src/store/index.ts` toasts/results.
-
-**Full CRUD Generation:**
-
-1. `webui/src/components/EntityDesigner/EntityDesigner.tsx` edits the shared `EntityModel` in `webui/src/store/index.ts`.
-2. `webui/src/components/CrudWizard/CrudWizard.tsx` reads the same entity, combines it with local `CrudOptions`, and sends `generateCrud` through `webui/src/bridge/index.ts`.
-3. `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` deserializes the nested entity/options payload and calls `CodeGenerationService.generateCrud`.
-4. `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt` creates entity, migration, list/detail view, menu, role, messages, optional repository, and optional fetch-plan outputs.
-5. `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt` writes each selected `GeneratedFile` and returns every written relative path.
-
-**Development-Mode Flow:**
-
-1. `webui/vite.config.ts` serves the UI on port 5173.
-2. `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt` uses the `jmixstudio.dev.url` system property when supplied.
-3. If no injected Java bridge is available, `webui/src/bridge/index.ts` logs requests and emits simulated successful generation responses after 300 ms.
-4. Simulated development responses in `webui/src/bridge/index.ts` do not execute Kotlin models, generators, project detection, or file writes.
+**Index lifecycle:**
+1. `ApplicationGraphService.graph()` builds the snapshot via `ApplicationGraphIndexer` over files resolved by `ProjectFileResolver`, with `progress()` polled by `getApplicationGraphProgress`.
+2. A document listener re-indexes changed files incrementally; updates are pushed to the UI as `applicationGraphUpdated`, surfaced as the `jmix-workbench-index-updated` CustomEvent (`webui/src/bridge/index.ts`, `webui/src/App.tsx`).
+3. Mutations invalidate the graph so subsequent reads re-index.
 
 **State Management:**
-- Global UI state uses one Zustand store in `webui/src/store/index.ts`.
-- The active tab, project configuration, shared entity, generation status/result, and toasts live in `webui/src/store/index.ts`.
-- View/menu/role/migration drafts live in local component state in their corresponding files under `webui/src/components/`.
-- Backend project configuration is cached per IntelliJ project by `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`.
-- The code generation backend keeps no generated-domain state between requests in `plugin/src/main/kotlin/com/jmixstudio/generator/`.
+- UI-global state: single Zustand store `webui/src/store/index.ts` (active tab, project config, shared entity, designer locators, toasts). Per-designer drafts live in component-local state.
+- Backend per-project state: IntelliJ project services (detection cache in `JmixProjectService`, graph cache in `ApplicationGraphService`, history in `WorkspaceHistoryService`).
+- Client caches: workspace and application-graph caches inside the `Bridge` class (`webui/src/bridge/index.ts`).
+- Generators and the discovery layer are stateless.
 
 ## Key Abstractions
 
-**`EntityModel`:**
-- Purpose: Canonical backend input for entity, migration-from-entity, repository, and CRUD generation.
-- Examples: `plugin/src/main/kotlin/com/jmixstudio/model/EntityModel.kt`, `webui/src/types/index.ts`
-- Pattern: Rich data class with computed fully qualified class and table names in `plugin/src/main/kotlin/com/jmixstudio/model/EntityModel.kt`.
+**Evidence / DiscoverySnapshot / SourceLocator:**
+- Purpose: Every project fact carries confidence, source kind, and trust state; locators are project-relative and revision-checked.
+- Examples: `plugin/src/main/kotlin/org/jmixworkbench/discovery/model/DiscoveryModel.kt`
+- Pattern: Immutable data classes + enums; only locators cross the JCEF boundary (`plugin/src/main/kotlin/org/jmixworkbench/toolwindow/WorkbenchLaunchContext.kt`).
 
-**`ViewModel` and `ComponentModel`:**
-- Purpose: Intermediate representation shared by the visual view designer and CRUD scaffolder before XML/controller rendering.
-- Examples: `plugin/src/main/kotlin/com/jmixstudio/model/ViewModel.kt`, `webui/src/types/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`
-- Pattern: Recursive component tree plus data containers, facets, actions, and controller metadata in `plugin/src/main/kotlin/com/jmixstudio/model/ViewModel.kt`.
+**WorkspaceChangeSet / WorkspaceChangePlan:**
+- Purpose: Declarative description of intended file creates/modifies/deletes, planned into exact bytes before any write.
+- Examples: `plugin/src/main/kotlin/org/jmixworkbench/discovery/change/WorkspaceChangePlanner.kt`, `plugin/src/main/kotlin/org/jmixworkbench/discovery/change/SourcePreservingMerge.kt`
+- Pattern: Pure planning objects consumed by `WorkspaceChangeService`.
 
-**`MigrationModel` and `DbChange`:**
-- Purpose: Represent Liquibase changelogs and supported database changes before XML rendering.
-- Examples: `plugin/src/main/kotlin/com/jmixstudio/model/MigrationModel.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/MigrationGenerator.kt`, `webui/src/components/MigrationPanel/MigrationPanel.tsx`
-- Pattern: Kotlin sealed change hierarchy on the backend and a smaller discriminated UI union in `webui/src/components/MigrationPanel/MigrationPanel.tsx`.
+**Digest-bound previews (planDigest / expectedPlanDigest):**
+- Purpose: Prevent stale-preview application; apply is rejected unless it references the exact digest of the approved preview.
+- Examples: preview/apply handler pairs in `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`; mirrored in the dev simulation in `webui/src/bridge/index.ts`.
+- Pattern: Preview returns `changeSetId` + `planDigest`; apply requires `expectedPlanDigest`.
 
-**`RoleModel`:**
-- Purpose: Represent resource and row-level Jmix security roles.
-- Examples: `plugin/src/main/kotlin/com/jmixstudio/model/RoleModel.kt`, `webui/src/types/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/generator/RoleGenerator.kt`
-- Pattern: One top-level role model with policy collections and a scope-based generator branch in `plugin/src/main/kotlin/com/jmixstudio/generator/RoleGenerator.kt`.
+**WorkbenchLaunchContext / WorkbenchSurface:**
+- Purpose: Trusted JVM-to-web navigation contract; the web UI cannot choose or elevate its own native editor surface.
+- Examples: `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/WorkbenchLaunchContext.kt`
+- Pattern: Enum surfaces + optional `SourceLocator`, validated by `WorkbenchSurfaceOpenPolicy`.
 
-**`ProjectConfig`:**
-- Purpose: Carry detected target-project metadata and centralize default source/resource/changelog paths.
-- Examples: `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt`, `plugin/src/main/kotlin/com/jmixstudio/services/JmixProjectService.kt`
-- Pattern: Immutable configuration data with computed path helpers in `plugin/src/main/kotlin/com/jmixstudio/model/ProjectConfig.kt`.
+**CompatibilityRegistry / CompatibilityProfile:**
+- Purpose: Per-profile, per-operation compatibility decisions; fail-closed for uncertified versions.
+- Examples: `plugin/src/main/kotlin/org/jmixworkbench/discovery/compatibility/CompatibilityRegistry.kt`, `plugin/src/main/resources/compatibility/phase2-registry.json`
+- Pattern: JSON registry loaded with strict validation (`CERTIFIED_READ_ONLY` only in Phase 2).
 
-**`GenerationResult`:**
-- Purpose: Return a uniform success flag, written-file list, and error list across bridge operations.
-- Examples: `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`, `webui/src/types/index.ts`
-- Pattern: Backend data class mirrored by a TypeScript interface and serialized by Gson in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
+**GenerationResult:**
+- Purpose: Uniform success flag, written-file list, and error list across generation workflows.
+- Examples: `plugin/src/main/kotlin/org/jmixworkbench/services/CodeGenerationService.kt`, mirrored in `webui/src/types/index.ts`.
+- Pattern: Data class serialized by Gson.
 
-**`CrudOutput` and `GeneratedFile`:**
-- Purpose: Keep multi-file generation pure until the application service chooses what to write.
-- Examples: `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`, `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`
-- Pattern: Value objects containing relative path, rendered content, and description in `plugin/src/main/kotlin/com/jmixstudio/generator/CrudOrchestrator.kt`.
+**Bridge client / dispatcher pair:**
+- Purpose: Hide global JCEF callbacks behind promise-based typed methods.
+- Examples: `webui/src/bridge/index.ts` (singleton `bridge`), `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`.
+- Pattern: requestId-matched promises over `window.javaBridge`/`window.onBridgeResponse`.
 
-**`Bridge`:**
-- Purpose: Hide global browser callbacks and expose promise-based feature methods to React components.
-- Examples: `webui/src/bridge/index.ts`, `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-- Pattern: Singleton client adapter paired with one Kotlin dispatcher per tool-window browser.
-
-**`JavaClassBuilder` and `XmlBuilder`:**
-- Purpose: Standardize source formatting and nested document construction across generators.
-- Examples: `plugin/src/main/kotlin/com/jmixstudio/generator/JavaClassBuilder.kt`, `plugin/src/main/kotlin/com/jmixstudio/generator/XmlBuilder.kt`
-- Pattern: Mutable fluent builders used only during synchronous generator calls.
+**JavaClassBuilder / XmlBuilder:**
+- Purpose: Shared fluent rendering for generated Java and XML.
+- Examples: `plugin/src/main/kotlin/org/jmixworkbench/generator/JavaClassBuilder.kt`, `plugin/src/main/kotlin/org/jmixworkbench/generator/XmlBuilder.kt`.
+- Pattern: Mutable builders used only during synchronous generator calls.
 
 ## Entry Points
 
-**Plugin Metadata Entry:**
-- Location: `plugin/src/main/resources/META-INF/plugin.xml`
+**Plugin descriptor:**
+- Location: `plugin/src/main/resources/META-INF/plugin.xml` (+ host copies under `plugin/hosts/*/src/main/resources/META-INF/plugin.xml`)
 - Triggers: IntelliJ plugin loading.
-- Responsibilities: Register tool window, services, compatibility, and IDE actions.
+- Responsibilities: Register tool windows, editors, services, indexes, inspections, actions, extension point.
 
-**Tool Window Entry:**
-- Location: `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`
-- Triggers: IntelliJ creates the `Jmix Studio` tool-window content.
-- Responsibilities: Check JCEF support, create browser/bridge, load UI, and dispose the bridge with the content.
+**Tool window factory:**
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixWorkbenchToolWindowFactory.kt`
+- Triggers: Opening the `Jmix Visual Workbench` tool window.
+- Responsibilities: Startup plan, browser creation, bridge attachment, navigation subscription, disposal.
 
-**IDE Action Entry:**
-- Location: `plugin/src/main/kotlin/com/jmixstudio/actions/Actions.kt`
-- Triggers: Tools menu or New menu actions registered in `plugin/src/main/resources/META-INF/plugin.xml`.
-- Responsibilities: Gate actions to detected Jmix projects and show the tool window.
+**IDE actions:**
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/actions/Actions.kt`, `plugin/src/main/kotlin/org/jmixworkbench/actions/InjectJmixRepositoryAction.kt`
+- Triggers: New menu group `Jmix Visual Workbench`, Tools menu, Generate menu.
+- Responsibilities: Gate on Jmix detection, open workbench surfaces, inject repository.
 
-**Web Entry:**
-- Location: `webui/index.html`, `webui/src/main.tsx`
-- Triggers: JCEF or Vite loads the web application.
-- Responsibilities: Provide the root DOM node, import global styling, and mount `App`.
+**Web UI boot:**
+- Location: `webui/index.html`, `webui/src/main.tsx`, `webui/src/App.tsx`
+- Triggers: JCEF load of packaged `/index.html` (or `/flowui-editor.html` / `/entity-editor.html` aliases) or Vite dev server in dev mode.
+- Responsibilities: Mount React app, fetch project config, apply launch context, render the active workspace.
 
-**Application Entry:**
-- Location: `webui/src/App.tsx`
-- Triggers: React root render from `webui/src/main.tsx`.
-- Responsibilities: Fetch project configuration and route tab state to designer components.
+**Bridge dispatcher:**
+- Location: `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`
+- Triggers: `window.javaBridge.send` calls.
+- Responsibilities: Parse, validate, dispatch 114 actions, return JSON responses.
 
-**Backend Command Entry:**
-- Location: `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`
-- Triggers: `window.javaBridge.send` calls emitted by `webui/src/bridge/index.ts`.
-- Responsibilities: Parse, dispatch, generate, and return JSON-compatible results.
+**Build entry points:**
+- Location: `plugin/build.gradle.kts`, `plugin/settings.gradle.kts`, `plugin/hosts/idea253/build.gradle.kts`, `plugin/hosts/idea262/build.gradle.kts`, `webui/package.json`
+- Triggers: `cd plugin && ./gradlew test --dependency-verification=strict` (README-documented), host `buildPlugin`/`runIde` tasks, `npm run dev|build` in `webui/`.
+- Responsibilities: Web bundle assembly, host compilation, plugin zip packaging and verification.
 
-**Build Entry:**
-- Location: `plugin/build.gradle.kts`, `webui/package.json`, `webui/vite.config.ts`
-- Triggers: Gradle plugin tasks or npm scripts.
-- Responsibilities: Build the React bundle, copy `webui/dist` into plugin resources, compile Kotlin, and package the IntelliJ plugin.
+**Certification entry points:**
+- Location: `certification/database-runtime/run-matrix.sh`, `certification/integration-runtime/run-matrix.sh`
+- Triggers: manual/CI certification.
+- Responsibilities: Run runtime evidence matrices.
 
 ## Error Handling
 
-**Strategy:** Validate essential UI fields before sending, convert backend exceptions into `GenerationResult` or bridge-level JSON errors, display user-facing failures as toasts, and log backend exceptions through IntelliJ logging.
+**Strategy:** Structured, code-bearing errors at every boundary; fail-closed compatibility; exact rollback for failed writes.
 
 **Patterns:**
-- Designer-level validation and toast feedback live in each file under `webui/src/components/`.
-- Bridge promise callers use `try/catch/finally` to reset shared `isGenerating` state from `webui/src/store/index.ts`.
-- Unknown actions return an error JSON object from `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Request parsing/dispatch exceptions are logged and returned through the `error` response action in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Per-generation exceptions are caught, logged, and converted to `GenerationResult(false, errors=...)` in `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`.
-- Missing Jmix project configuration produces an explicit error object from handlers in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Unsupported JCEF renders an in-tool-window error label from `plugin/src/main/kotlin/com/jmixstudio/toolwindow/JmixStudioToolWindowFactory.kt`.
-- There is no rollback or transactional multi-file write in `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`; files already written remain if a later write throws.
+- Error codes use the `JVW-` prefix: tool window (`JVW-JCEF-UNAVAILABLE`, `JVW-WEB-BUNDLE-MISSING`, `JVW-DEV-URL-REJECTED` in `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/JmixWorkbenchToolWindowFactory.kt`), surface policy (`JVW-WORKBENCH-SURFACE-SOURCE-REQUIRED`, `JVW-WORKBENCH-ENTITY-SOURCE-STALE`, `JVW-WORKBENCH-VIEW-SOURCE-STALE`, `JVW-WORKBENCH-SURFACE-DENIED` in `plugin/src/main/kotlin/org/jmixworkbench/toolwindow/WorkbenchLaunchContext.kt`), mutation (`JVW-CHANGE-ROLLBACK-FAILED` in `plugin/src/main/kotlin/org/jmixworkbench/services/WorkspaceChangeService.kt`), generator-level (`error("LOGIC_ENTRY_POINT_REQUIRED", ...)` in `plugin/src/main/kotlin/org/jmixworkbench/generator/VisualLogicGenerator.kt`).
+- Bridge dispatch wraps parsing and handling in `catch (e: Exception)` → `log.error("Bridge error", e)` and returns an error response; unknown actions return `{"error":"Unknown action: ..."}` (`plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`).
+- Handlers parse payloads with `runCatching { gson.fromJson(...) }.getOrElse { error -> ... }` and return structured error objects instead of throwing.
+- Apply failures trigger byte-exact rollback; rollback verification failures aggregate suppressed errors (`WorkspaceRollbackFailure`).
+- UI surfaces errors via toasts (`webui/src/store/index.ts`) and by inspecting `error` fields on responses (`webui/src/App.tsx`, designer components).
+- Dev simulation reproduces stale-preview rejection (`JVW-PROJECT-PROPERTIES-DEVELOPMENT-REQUEST-INVALID` etc.) in `webui/src/bridge/index.ts`.
 
 ## Cross-Cutting Concerns
 
-**Logging:** IntelliJ `Logger` records bridge actions/errors in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` and generated paths/errors in `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`; Vite-only bridge simulation uses `console.log` in `webui/src/bridge/index.ts`.
+**Security (untrusted JCEF content):** Bridge injection only for packaged-origin pages (`isPackagedWorkbenchOriginUrl` checks in `plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`); action allowlisting via the dispatch chain; browser surface opens validated against indexed evidence; path traversal rejected in `plugin/src/main/kotlin/org/jmixworkbench/services/ProjectFileResolver.kt`; dev URLs restricted to credential-free loopback; containerized certification uses fixture credentials only (`certification/database-runtime/README.md`).
 
-**Validation:** Required-field checks are local to files under `webui/src/components/`; Kotlin model constructors and generators under `plugin/src/main/kotlin/com/jmixstudio/model/` and `plugin/src/main/kotlin/com/jmixstudio/generator/` do not expose a shared validation layer.
+**Threading:** Reads use `cancellableRead` (`plugin/src/main/kotlin/org/jmixworkbench/services/IntellijReadActions.kt`); heavy bridge handlers run as background tasks on `AppExecutorUtil` and finish on the UI thread; writes run in `WriteCommandAction`; JS responses execute via `executeJavaScript`.
 
-**Authentication:** Not applicable to the plugin itself; `plugin/src/main/resources/META-INF/plugin.xml` declares local IntelliJ platform dependencies, and `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` accepts commands only through the embedded JCEF query.
+**Logging:** `Logger.getInstance(...)` per integration-facing class; bridge logs each request action except polling (`plugin/src/main/kotlin/org/jmixworkbench/bridge/JcefBridge.kt`).
 
-**Serialization:** Gson in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt` maps TypeScript payloads from `webui/src/types/index.ts` to Kotlin models under `plugin/src/main/kotlin/com/jmixstudio/model/`.
+**Compatibility gating:** `CompatibilityRegistry` decisions feed discovery diagnostics; build-level compile cells certify generated code against Jmix 2.8.2/3.0.0 BOMs (`plugin/build.gradle.kts`).
 
-**Threading and IDE Safety:** File writes run inside `WriteCommandAction` and VFS refresh is scheduled with `ApplicationManager.invokeLater` in `plugin/src/main/kotlin/com/jmixstudio/services/CodeGenerationService.kt`.
+**Determinism & integrity:** Canonical JSON (`plugin/src/main/kotlin/org/jmixworkbench/discovery/model/CanonicalDiscoveryJson.kt`); web bundle fingerprinting and verification (`plugin/buildSrc/src/main/java/org/jmixworkbench/build/WebBundleFingerprint.java`, `VerifyWebBundleTask`); npm lock hash snapshots (`SnapshotFileHashTask`); plugin zip content verification (`VerifyPluginZipContentsTask`); strict dependency verification (`plugin/gradle/verification-metadata.xml`) and per-host strict lockfiles.
 
-**Build Coupling:** `plugin/build.gradle.kts` makes resource processing depend on `copyWebUi`, which copies the prebuilt `webui/dist` output; it does not invoke the npm build declared in `webui/package.json`.
-
-**Implemented Boundaries:**
-- Entity, CRUD, view, role, migration, and BPM backend commands are dispatched in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Entity, CRUD, view, role, and migration commands have visible UI callers under `webui/src/components/`.
-- Standalone menu editing is visible in `webui/src/components/MenuDesigner/MenuDesigner.tsx` but its `generateMenu` action is absent from `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- Entity discovery is explicitly stubbed to `{"entities":[]}` in `plugin/src/main/kotlin/com/jmixstudio/bridge/JcefBridge.kt`.
-- BPM generation is callable through `webui/src/bridge/index.ts` and implemented in Kotlin, but `webui/src/App.tsx` has no BPM tab or component.
-- Event-listener generation exists in `plugin/src/main/kotlin/com/jmixstudio/generator/EventListenerGenerator.kt` but has no service, bridge, or UI call site.
-- IDE “New Entity/View/CRUD” actions show the same tool window without selecting a designer in `plugin/src/main/kotlin/com/jmixstudio/actions/Actions.kt`.
-- `README.md` describes the intended feature set and architecture; use the executable paths above as the source of truth for reachable behavior.
+**Implemented-vs-stubbed boundaries:** `plugin/src/main/resources/META-INF/jmix-kotlin.xml` is an empty `<idea-plugin/>` stub (Kotlin-language extensions are registered directly in the main descriptors with `language="kotlin"`); generators are reachable only through services/bridge — no generator writes files directly; the aggregate build's `main`/`test` source sets are intentionally empty; `README.md` claims remain bounded by `docs/ENTERPRISE-PARITY-AUDIT.md`.
 
 ---
 
-*Architecture analysis: 2026-07-27*
+*Architecture analysis: 2026-08-04*
